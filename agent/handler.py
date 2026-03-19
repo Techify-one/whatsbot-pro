@@ -8,13 +8,52 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 
+SAVE_CONTACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "save_contact_info",
+        "description": (
+            "Salva informações pessoais do contato quando ele mencionar dados como "
+            "nome, email, profissão, empresa, ou qualquer observação importante. "
+            "Chame esta função SEMPRE que o usuário revelar dados pessoais na conversa."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Nome completo do contato",
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Email do contato",
+                },
+                "profession": {
+                    "type": "string",
+                    "description": "Profissão ou cargo do contato",
+                },
+                "company": {
+                    "type": "string",
+                    "description": "Empresa onde trabalha",
+                },
+                "observation": {
+                    "type": "string",
+                    "description": "Qualquer outra informação relevante sobre o contato",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
 class ContactMemory:
     """Persistent per-contact memory stored as a JSON file.
 
     File structure:
     {
         "phone": "5511999999999",
-        "notes": "Informações pessoais do contato...",
+        "info": {"name": "", "email": "", "profession": "", "company": "", "observations": []},
         "messages": [{"role": "user"|"assistant", "content": "...", "ts": 1234567890}, ...],
         "created_at": 1234567890,
         "updated_at": 1234567890
@@ -24,7 +63,7 @@ class ContactMemory:
     def __init__(self, phone: str, memory_dir: Path):
         self.phone = phone
         self.file_path = memory_dir / f"{phone}.json"
-        self.notes: str = ""
+        self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
         self.messages: list[dict] = []
         self.created_at: float = time.time()
         self.updated_at: float = time.time()
@@ -35,7 +74,12 @@ class ContactMemory:
             try:
                 with open(self.file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.notes = data.get("notes", "")
+                # Migrate old "notes" format to structured "info"
+                old_notes = data.get("notes", "")
+                default_info = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
+                self.info = data.get("info", default_info)
+                if old_notes and not any(self.info.values()):
+                    self.info["observations"] = [old_notes]
                 self.messages = data.get("messages", [])
                 self.created_at = data.get("created_at", time.time())
                 self.updated_at = data.get("updated_at", time.time())
@@ -46,7 +90,7 @@ class ContactMemory:
         self.updated_at = time.time()
         data = {
             "phone": self.phone,
-            "notes": self.notes,
+            "info": self.info,
             "messages": self.messages,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -69,6 +113,32 @@ class ContactMemory:
         """Return the last N messages formatted for the LLM (without ts)."""
         recent = self.messages[-limit:] if len(self.messages) > limit else self.messages
         return [{"role": m["role"], "content": m["content"]} for m in recent]
+
+    def update_info(self, **kwargs):
+        """Update contact info fields. Only overwrites non-empty values."""
+        for key in ("name", "email", "profession", "company"):
+            val = kwargs.get(key, "")
+            if val:
+                self.info[key] = val
+        observation = kwargs.get("observation", "")
+        if observation and observation not in self.info.get("observations", []):
+            self.info.setdefault("observations", []).append(observation)
+        self.save()
+
+    def get_info_summary(self) -> str:
+        """Format contact info for injection into system prompt."""
+        parts = []
+        if self.info.get("name"):
+            parts.append(f"Nome: {self.info['name']}")
+        if self.info.get("email"):
+            parts.append(f"Email: {self.info['email']}")
+        if self.info.get("profession"):
+            parts.append(f"Profissão: {self.info['profession']}")
+        if self.info.get("company"):
+            parts.append(f"Empresa: {self.info['company']}")
+        for obs in self.info.get("observations", []):
+            parts.append(f"Obs: {obs}")
+        return "\n".join(parts)
 
 
 class AgentHandler:
@@ -127,12 +197,13 @@ class AgentHandler:
         return self._contacts[phone]
 
     def _build_system_prompt(self, contact: ContactMemory) -> str:
-        """Build system prompt with contact notes injected."""
+        """Build system prompt with contact info injected."""
         prompt = self.system_prompt
-        if contact.notes:
+        info_summary = contact.get_info_summary()
+        if info_summary:
             prompt += (
                 f"\n\n--- Informações sobre este contato ({contact.phone}) ---\n"
-                f"{contact.notes}\n"
+                f"{info_summary}\n"
                 "--- Fim das informações ---"
             )
         return prompt
@@ -157,9 +228,44 @@ class AgentHandler:
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
+                tools=[SAVE_CONTACT_TOOL],
+                tool_choice="auto",
                 max_tokens=1024,
             )
-            reply = response.choices[0].message.content.strip()
+
+            msg = response.choices[0].message
+
+            # Handle tool calls (save contact info)
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.function.name == "save_contact_info":
+                        try:
+                            args = json.loads(tc.function.arguments)
+                            contact.update_info(**args)
+                            logger.info("Saved contact info for %s: %s", sender, args)
+                        except (json.JSONDecodeError, Exception) as e:
+                            logger.warning("Failed to parse tool call for %s: %s", sender, e)
+
+                # If model only called tools without text, do a follow-up call
+                if not msg.content:
+                    messages.append(msg.model_dump())
+                    for tc in msg.tool_calls:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": "Informações salvas com sucesso.",
+                        })
+                    follow_up = client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=1024,
+                    )
+                    reply = follow_up.choices[0].message.content.strip()
+                else:
+                    reply = msg.content.strip()
+            else:
+                reply = msg.content.strip()
+
             contact.add_message("assistant", reply)
             logger.info("Processed message from %s", sender)
             return reply
