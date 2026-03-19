@@ -1,0 +1,28 @@
+# Dados sensíveis / sessão WhatsApp
+storages/
+contacts/
+statics/qrcode/
+
+# Logs
+logs/
+
+# Ambiente virtual
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# Config local com API keys (salvo em %APPDATA%, mas por segurança)
+config.json
+
+# Build artifacts
+dist/
+build/
+*.exe
+!bin/gowa.exe

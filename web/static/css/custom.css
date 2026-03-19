@@ -1,0 +1,20 @@
+/* WhatsBot custom styles */
+
+/* Smooth transitions for status indicators */
+.status-dot {
+  transition: background-color 0.3s ease;
+}
+
+/* QR code image styling */
+.qr-image {
+  image-rendering: pixelated;
+}
+
+/* Pulse animation for loading states */
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse-slow {
+  animation: pulse-slow 2s ease-in-out infinite;
+}

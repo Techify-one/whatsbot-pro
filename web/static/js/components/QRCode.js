@@ -1,0 +1,71 @@
+import { h } from 'preact';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import htm from 'htm';
+import { getQrUrl, reconnect, logout } from '../services/api.js';
+
+const html = htm.bind(h);
+
+export function QRCode({ connected, qrAvailable, qrVersion }) {
+  const [imgSrc, setImgSrc] = useState(null);
+  const [imgError, setImgError] = useState(false);
+
+  // Update QR image only when version changes (backend cached, ~20s per QR)
+  useEffect(() => {
+    if (!connected && qrAvailable && qrVersion) {
+      setImgSrc(getQrUrl());
+      setImgError(false);
+    } else if (connected) {
+      setImgSrc(null);
+    }
+  }, [connected, qrAvailable, qrVersion]);
+
+  return html`
+    <div class="bg-gray-800 rounded-xl p-5 flex flex-col items-center min-w-[260px]">
+      <h2 class="text-sm font-semibold text-gray-300 mb-3">WhatsApp QR Code</h2>
+
+      <div class="w-[220px] h-[220px] flex items-center justify-center bg-gray-700 rounded-lg mb-3 overflow-hidden">
+        ${connected ? html`
+          <div class="text-center">
+            <div class="text-4xl mb-2">\u2713</div>
+            <span class="text-green-400 font-medium">Conectado!</span>
+          </div>
+        ` : qrAvailable && imgSrc && !imgError ? html`
+          <img
+            src=${imgSrc}
+            alt="QR Code"
+            class="qr-image w-full h-full object-contain"
+            onError=${() => setImgError(true)}
+          />
+        ` : html`
+          <div class="text-center text-gray-400">
+            <div class="animate-pulse-slow text-lg mb-1">...</div>
+            <span class="text-sm">Aguardando QR Code...</span>
+          </div>
+        `}
+      </div>
+
+      ${connected ? html`
+        <span class="text-green-400 text-sm font-medium mb-3">Conectado ao WhatsApp</span>
+      ` : qrAvailable ? html`
+        <span class="text-yellow-400 text-sm mb-3">Escaneie o QR Code com seu celular</span>
+      ` : html`
+        <span class="text-red-400 text-sm mb-3">Desconectado</span>
+      `}
+
+      <div class="flex gap-2 w-full">
+        <button
+          onClick=${() => reconnect()}
+          class="flex-1 py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors"
+        >
+          Reconectar
+        </button>
+        <button
+          onClick=${() => logout()}
+          class="flex-1 py-2 px-3 bg-red-600 hover:bg-red-500 text-white text-sm rounded-lg transition-colors"
+        >
+          Desconectar
+        </button>
+      </div>
+    </div>
+  `;
+}

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsBot</title>
+  <script src="/static/vendor/tailwind.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            whatsapp: '#25D366',
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="/static/css/custom.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "preact": "/static/vendor/preact.min.js",
+      "preact/hooks": "/static/vendor/preact-hooks.min.js",
+      "htm": "/static/vendor/htm.min.js"
+    }
+  }
+  </script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+  <div id="app"></div>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
