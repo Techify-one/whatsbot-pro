@@ -218,7 +218,8 @@ def create_app(
                     await ws_manager.broadcast("qr_update", {"available": False})
             except Exception as e:
                 logger.error("QR poll error: %s", e)
-            await asyncio.sleep(5)
+            # Poll faster when we don't have a QR yet (waiting for first one)
+            await asyncio.sleep(2 if state.qr_data is None and not state.connected else 5)
 
     # ── Lifespan ──────────────────────────────────────────────────────
 
@@ -305,6 +306,17 @@ def create_app(
         if not api_key:
             return _err("Insira uma API key primeiro.")
         ok, msg = await asyncio.to_thread(agent_handler.test_api_key, api_key)
+        # Auto-save valid key
+        if ok:
+            settings["openrouter_api_key"] = api_key
+            settings.save()
+            agent_handler.update_config(
+                api_key=api_key,
+                system_prompt=settings.get("system_prompt", ""),
+                model=settings.get("model", "openai/gpt-4o-mini"),
+                max_context_messages=settings.get("max_context_messages", 10),
+            )
+            logger.info("API key tested and auto-saved.")
         return _ok({"valid": ok, "message": msg})
 
     @app.get("/api/status")
@@ -522,6 +534,16 @@ def create_app(
             await websocket.send_text(json.dumps({"event": "gowa_status", "data": {
                 "message": state.notification,
             }}))
+            # Send current QR state so page refreshes show QR immediately
+            if not state.connected and state.qr_data:
+                await websocket.send_text(json.dumps({"event": "qr_update", "data": {
+                    "available": True,
+                    "version": state.qr_version,
+                }}))
+            else:
+                await websocket.send_text(json.dumps({"event": "qr_update", "data": {
+                    "available": False,
+                }}))
         except Exception:
             pass
         # Keep alive

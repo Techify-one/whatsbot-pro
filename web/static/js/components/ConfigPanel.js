@@ -47,6 +47,10 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       if (res.ok) {
         setTestResult({ ok: res.data.valid, message: res.data.message });
         onNotify(res.data.message);
+        // Auto-save when key is valid
+        if (res.data.valid) {
+          await onSave({ openrouter_api_key: key });
+        }
       } else {
         setTestResult({ ok: false, message: res.error || 'Erro ao testar.' });
         onNotify(res.error || 'Erro ao testar.');
