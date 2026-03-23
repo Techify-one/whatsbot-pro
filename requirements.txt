@@ -2,5 +2,6 @@ agno
 openai
 httpx
 fastapi
+python-multipart
 uvicorn[standard]
 pyinstaller

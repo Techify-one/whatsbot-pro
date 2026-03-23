@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -127,7 +127,8 @@ class AppState:
         self.qr_fetched_at: float = 0.0
         self.qr_version: int = 0  # bumped when QR changes
         # Message batching — accumulate messages per contact before responding
-        self.pending_messages: dict[str, list[str]] = {}  # phone -> [text, ...]
+        # Each item: {"text": str, "image_path": str|None, "audio_path": str|None}
+        self.pending_messages: dict[str, list[dict]] = {}  # phone -> [msg_dict, ...]
         self.batch_tasks: dict[str, asyncio.Task] = {}  # phone -> scheduled task
 
 
@@ -250,10 +251,18 @@ def create_app(
 
     app = FastAPI(title="WhatsBot", lifespan=lifespan)
 
-    # Mount static files
+    # Mount static files (frontend assets)
     static_dir = web_dir / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
+    statics_dir = settings.data_dir / "statics"
+    statics_media_dir = statics_dir / "media"
+    statics_senditems_dir = statics_dir / "senditems"
+    statics_media_dir.mkdir(parents=True, exist_ok=True)
+    statics_senditems_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")
 
     # ── Routes ────────────────────────────────────────────────────────
 
@@ -362,54 +371,94 @@ def create_app(
 
     # ── Message Batch Processing ────────────────────────────────────
 
+    async def _send_reply(phone: str, reply: str):
+        """Send a text reply and broadcast to frontend."""
+        delay_min = settings.get("response_delay_min", 1.0)
+        delay_max = settings.get("response_delay_max", 3.0)
+        await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+        await asyncio.to_thread(gowa_client.send_message, phone, reply)
+        state.msg_count += 1
+        logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
+
+        await ws_manager.broadcast("new_message", {
+            "phone": phone,
+            "message": {"role": "assistant", "content": reply, "ts": time.time()},
+        })
+        await ws_manager.broadcast("status", {
+            "connected": state.connected,
+            "msg_count": state.msg_count,
+            "auto_reply_running": state.auto_reply_running,
+        })
+
     async def _process_batch(phone: str, delay: float):
-        """Wait for batch delay, then process all accumulated messages as one."""
+        """Wait for batch delay, then process all accumulated messages."""
         await asyncio.sleep(delay)
 
-        messages = state.pending_messages.pop(phone, [])
+        items = state.pending_messages.pop(phone, [])
         state.batch_tasks.pop(phone, None)
 
-        if not messages:
+        if not items:
             return
 
-        combined = "\n".join(messages)
-        logger.info("[Batch] Processing %d messages from %s: %s",
-                    len(messages), phone, combined[:80])
-
-        # Always save the user message to disk, regardless of AI status
         contact = agent_handler._get_contact(phone)
-        contact.add_message("user", combined)
 
-        if not contact.ai_enabled:
-            logger.info("[Batch] AI disabled for %s, skipping LLM", phone)
-            return
+        # Separate plain text items from media items
+        text_parts: list[str] = []
+        media_items: list[dict] = []
+        for item in items:
+            if item.get("image_path") or item.get("audio_path"):
+                media_items.append(item)
+            else:
+                text_parts.append(item.get("text", ""))
 
-        try:
-            reply = await asyncio.to_thread(agent_handler.process_message, phone, combined, False)
-        except Exception as e:
-            logger.error("[Batch] Agent error for %s: %s", phone, e)
-            return
+        # Process combined text messages first
+        if text_parts:
+            combined = "\n".join(t for t in text_parts if t)
+            if combined:
+                logger.info("[Batch] Processing %d text messages from %s: %s",
+                            len(text_parts), phone, combined[:80])
+                contact.add_message("user", combined)
+                if contact.ai_enabled:
+                    try:
+                        reply = await asyncio.to_thread(
+                            agent_handler.process_message, phone, combined,
+                            save_user_message=False)
+                        if reply:
+                            await _send_reply(phone, reply)
+                    except Exception as e:
+                        logger.error("[Batch] Agent error for %s: %s", phone, e)
 
-        if reply:
-            delay_min = settings.get("response_delay_min", 1.0)
-            delay_max = settings.get("response_delay_max", 3.0)
-            await asyncio.sleep(random.uniform(delay_min, delay_max))
+        # Process each media item individually
+        for item in media_items:
+            text = item.get("text", "")
+            image_path = item.get("image_path")
+            audio_path = item.get("audio_path")
 
-            await asyncio.to_thread(gowa_client.send_message, phone, reply)
-            state.msg_count += 1
-            logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
+            media_label = "image" if image_path else "audio"
+            logger.info("[Batch] Processing %s from %s", media_label, phone)
 
-            # Broadcast bot reply to frontend in real-time
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {"role": "assistant", "content": reply, "ts": time.time()},
-            })
+            # Save message to contact memory
+            contact.add_message(
+                "user", text or (f"[Áudio recebido]" if audio_path else ""),
+                media_type="image" if image_path else "audio",
+                media_path=image_path or audio_path,
+            )
 
-            await ws_manager.broadcast("status", {
-                "connected": state.connected,
-                "msg_count": state.msg_count,
-                "auto_reply_running": state.auto_reply_running,
-            })
+            if not contact.ai_enabled:
+                continue
+
+            try:
+                reply = await asyncio.to_thread(
+                    agent_handler.process_message, phone,
+                    text or ("[Áudio recebido]" if audio_path else ""),
+                    save_user_message=False,
+                    image_path=image_path,
+                )
+                if reply:
+                    await _send_reply(phone, reply)
+            except Exception as e:
+                logger.error("[Batch] Agent error for %s (%s): %s", phone, media_label, e)
 
     # ── Webhook (real-time messages from GOWA) ──────────────────────
 
@@ -420,7 +469,7 @@ def create_app(
         # GOWA wraps message data inside "payload"
         data = body.get("payload", body.get("data", body))
 
-        # Only process incoming text messages
+        # Only process incoming messages
         if event and event not in ("message", "message:received", ""):
             return _ok({"status": "ignored"})
 
@@ -444,6 +493,38 @@ def create_app(
                 or data.get("message", "")
                 or data.get("text", "")).strip()
 
+        # Extract media paths from GOWA payload
+        image_path: str | None = None
+        audio_path: str | None = None
+
+        raw_image = data.get("image")
+        if raw_image:
+            if isinstance(raw_image, str):
+                image_path = raw_image
+            elif isinstance(raw_image, dict):
+                image_path = raw_image.get("path", "")
+                if not text:
+                    text = (raw_image.get("caption", "") or "").strip()
+
+        raw_audio = data.get("audio")
+        if raw_audio:
+            if isinstance(raw_audio, str):
+                audio_path = raw_audio
+            elif isinstance(raw_audio, dict):
+                audio_path = raw_audio.get("path", "")
+
+        # Video notes (voice messages) are treated as audio
+        raw_vn = data.get("video_note")
+        if raw_vn and not audio_path:
+            if isinstance(raw_vn, str):
+                audio_path = raw_vn
+            elif isinstance(raw_vn, dict):
+                audio_path = raw_vn.get("path", "")
+
+        # For audio without text, set a placeholder
+        if audio_path and not text:
+            text = "[Áudio recebido]"
+
         # Extract sender
         sender = (data.get("sender_jid", "")
                   or data.get("chat_jid", "")
@@ -451,28 +532,50 @@ def create_app(
                   or data.get("from", "")
                   or data.get("sender", ""))
 
-        if not text or not sender:
-            logger.info("[Webhook] Skipping: text=%r sender=%r", text[:50] if text else "", sender)
+        if not sender or (not text and not image_path and not audio_path):
+            logger.info("[Webhook] Skipping: text=%r sender=%r media=%s",
+                        text[:50] if text else "", sender,
+                        "image" if image_path else ("audio" if audio_path else "none"))
             return _ok({"status": "ignored"})
 
         state.processed_messages.add(msg_id)
         phone = sender.split("@")[0] if "@" in sender else sender
 
-        logger.info("[Webhook] Message from %s: %s", phone, text[:80])
+        # Determine media metadata for broadcast
+        media_type: str | None = None
+        media_path: str | None = None
+        if image_path:
+            media_type = "image"
+            media_path = image_path
+        elif audio_path:
+            media_type = "audio"
+            media_path = audio_path
+
+        logger.info("[Webhook] %s from %s: %s",
+                    media_type.capitalize() if media_type else "Message",
+                    phone, text[:80] if text else f"[{media_type}]")
 
         # Increment unread count for incoming user messages
         await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread())
 
         # Broadcast incoming message to frontend in real-time
+        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time()}
+        if media_type:
+            broadcast_msg["media_type"] = media_type
+            broadcast_msg["media_path"] = media_path
         await ws_manager.broadcast("new_message", {
             "phone": phone,
-            "message": {"role": "user", "content": text, "ts": time.time()},
+            "message": broadcast_msg,
         })
 
         # Batch messages — accumulate and wait before responding
         if phone not in state.pending_messages:
             state.pending_messages[phone] = []
-        state.pending_messages[phone].append(text)
+        state.pending_messages[phone].append({
+            "text": text,
+            "image_path": image_path,
+            "audio_path": audio_path,
+        })
 
         # Cancel existing batch timer for this contact
         if phone in state.batch_tasks:
@@ -547,10 +650,20 @@ def create_app(
                     info = data.get("info", {})
                     msgs = data.get("messages", [])
                     last = msgs[-1] if msgs else None
+                    # Build last message preview with media indicator
+                    last_content = ""
+                    if last:
+                        lmt = last.get("media_type")
+                        if lmt == "image":
+                            last_content = last.get("content", "")[:80] or "📷 Imagem"
+                        elif lmt == "audio":
+                            last_content = "🎤 Áudio"
+                        else:
+                            last_content = (last.get("content") or "")[:80]
                     results.append({
                         "phone": phone,
                         "name": info.get("name", ""),
-                        "last_message": last["content"][:80] if last else "",
+                        "last_message": last_content,
                         "last_message_role": last["role"] if last else "",
                         "last_message_ts": last.get("ts", 0) if last else 0,
                         "msg_count": len(msgs),
@@ -617,6 +730,72 @@ def create_app(
         })
 
         return _ok({"message": "Mensagem enviada."})
+
+    @app.post("/api/contacts/{phone}/send-image")
+    async def send_image_to_contact(
+        phone: str,
+        image: UploadFile = File(...),
+        caption: str = Form(""),
+    ):
+        """Send an image to a contact (operator-initiated)."""
+        suffix = Path(image.filename or "img.png").suffix or ".png"
+        dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
+        content = await image.read()
+        dest.write_bytes(content)
+
+        try:
+            await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
+        except Exception as e:
+            logger.error("[Send] Failed to send image to %s: %s", phone, e)
+            return _err(f"Erro ao enviar imagem: {e}", status=500)
+
+        # Relative path for storage and frontend
+        rel_path = f"statics/senditems/{dest.name}"
+        msg_data = {
+            "role": "assistant",
+            "content": caption,
+            "ts": time.time(),
+            "media_type": "image",
+            "media_path": rel_path,
+        }
+        contact = agent_handler._get_contact(phone)
+        contact.add_message("assistant", caption, media_type="image", media_path=rel_path)
+
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        logger.info("[Send] Image sent to %s", phone)
+        return _ok({"message": "Imagem enviada."})
+
+    @app.post("/api/contacts/{phone}/send-audio")
+    async def send_audio_to_contact(
+        phone: str,
+        audio: UploadFile = File(...),
+    ):
+        """Send an audio file to a contact (operator-initiated)."""
+        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
+        dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
+        content = await audio.read()
+        dest.write_bytes(content)
+
+        try:
+            await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
+        except Exception as e:
+            logger.error("[Send] Failed to send audio to %s: %s", phone, e)
+            return _err(f"Erro ao enviar áudio: {e}", status=500)
+
+        rel_path = f"statics/senditems/{dest.name}"
+        msg_data = {
+            "role": "assistant",
+            "content": "[Áudio]",
+            "ts": time.time(),
+            "media_type": "audio",
+            "media_path": rel_path,
+        }
+        contact = agent_handler._get_contact(phone)
+        contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path)
+
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        logger.info("[Send] Audio sent to %s", phone)
+        return _ok({"message": "Áudio enviado."})
 
     @app.post("/api/contacts/{phone}/read")
     async def mark_contact_read(phone: str):

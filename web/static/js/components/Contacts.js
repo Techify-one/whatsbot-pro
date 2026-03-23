@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, sendMessage, markAsRead, updateContactInfo, toggleContactAI } from '../services/api.js';
+import { getContacts, getContact, sendMessage, sendImage, sendAudio, markAsRead, updateContactInfo, toggleContactAI } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -397,10 +397,23 @@ function ContactInfoPanel({ phone, info, onClose, onSave }) {
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
+function StopIcon() {
+  return html`
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="#ef4444" class="shrink-0">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  `;
+}
+
 function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordDuration, setRecordDuration] = useState(0);
   const chatRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const recordTimerRef = useRef(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -422,6 +435,74 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
       console.error('Send error:', err);
     }
     setSending(false);
+  }
+
+  function handleAttachClick() {
+    if (fileInputRef.current) fileInputRef.current.click();
+  }
+
+  async function handleFileSelected(e) {
+    const file = e.target.files[0];
+    if (!file || sending) return;
+    setSending(true);
+    try {
+      const res = await sendImage(phone, file);
+      if (!res.ok) console.error('Send image failed:', res.error);
+    } catch (err) {
+      console.error('Send image error:', err);
+    }
+    setSending(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  async function handleMicClick() {
+    if (recording) {
+      // Stop recording
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      return;
+    }
+
+    // Start recording
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        setRecording(false);
+        clearInterval(recordTimerRef.current);
+        setRecordDuration(0);
+
+        if (chunks.length === 0) return;
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        setSending(true);
+        try {
+          const res = await sendAudio(phone, blob);
+          if (!res.ok) console.error('Send audio failed:', res.error);
+        } catch (err) {
+          console.error('Send audio error:', err);
+        }
+        setSending(false);
+      };
+
+      recorder.start();
+      setRecording(true);
+      setRecordDuration(0);
+      recordTimerRef.current = setInterval(() => setRecordDuration(d => d + 1), 1000);
+    } catch (err) {
+      console.error('Microphone access error:', err);
+    }
+  }
+
+  function formatRecordTime(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
   // Empty state — no contact selected
@@ -480,7 +561,27 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
                       ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
                       : `bg-wa-outgoing text-wa-text ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
                   }">
-                    <span>${m.content}</span>
+                    ${m.media_type === 'image' ? html`
+                      <img
+                        src="/${m.media_path}"
+                        alt="Imagem"
+                        class="rounded-[4px] max-w-full max-h-[300px] mb-1 cursor-pointer"
+                        style="min-width:120px"
+                        onClick=${() => window.open('/' + m.media_path, '_blank')}
+                        loading="lazy"
+                      />
+                      ${m.content && m.content !== '[Imagem enviada pelo contato]'
+                        ? html`<span>${m.content}</span>`
+                        : null}
+                    ` : m.media_type === 'audio' ? html`
+                      <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
+                        <source src="/${m.media_path}" type="audio/ogg" />
+                        <source src="/${m.media_path}" type="audio/mpeg" />
+                      </audio>
+                      ${m.content && m.content !== '[Áudio recebido]' && m.content !== '[Áudio]'
+                        ? html`<span class="block text-[12px] text-wa-secondary italic">${m.content}</span>`
+                        : null}
+                    ` : html`<span>${m.content}</span>`}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
                       ${!isUser ? html`<${DoubleCheckIcon} />` : ''}${formatBubbleTime(m.ts)}
                     </span>
@@ -491,38 +592,64 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
         }
       </div>
 
+      <!-- Hidden file input for image upload -->
+      <input
+        ref=${fileInputRef}
+        type="file"
+        accept="image/*"
+        class="hidden"
+        onChange=${handleFileSelected}
+      />
+
       <!-- Input area -->
-      <form onSubmit=${handleSend} class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
-        <button type="button" class="p-[8px] shrink-0" tabindex="-1">
-          <${EmojiIcon} />
-        </button>
-        <button type="button" class="p-[8px] shrink-0" tabindex="-1">
-          <${AttachIcon} />
-        </button>
-        <div class="flex-1 mx-[5px]">
-          <input
-            type="text"
-            value=${input}
-            onInput=${(e) => setInput(e.target.value)}
-            placeholder="Digite uma mensagem"
-            disabled=${sending}
-            class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary disabled:opacity-50"
-          />
-        </div>
-        ${hasText ? html`
+      ${recording ? html`
+        <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
+          <div class="flex-1 flex items-center gap-3 mx-[5px]">
+            <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>
+            <span class="text-red-500 text-[15px] font-medium">${formatRecordTime(recordDuration)}</span>
+            <span class="text-wa-secondary text-[14px]">Gravando...</span>
+          </div>
           <button
-            type="submit"
-            disabled=${sending}
-            class="p-[8px] shrink-0 text-wa-iconActive transition-colors disabled:opacity-50"
+            type="button"
+            onClick=${handleMicClick}
+            class="p-[8px] shrink-0"
           >
-            <${SendIcon} />
+            <${StopIcon} />
           </button>
-        ` : html`
-          <button type="button" class="p-[8px] shrink-0 text-wa-icon" tabindex="-1">
-            <${MicIcon} />
+        </div>
+      ` : html`
+        <form onSubmit=${handleSend} class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
+          <button type="button" class="p-[8px] shrink-0" tabindex="-1">
+            <${EmojiIcon} />
           </button>
-        `}
-      </form>
+          <button type="button" class="p-[8px] shrink-0" tabindex="-1" onClick=${handleAttachClick}>
+            <${AttachIcon} />
+          </button>
+          <div class="flex-1 mx-[5px]">
+            <input
+              type="text"
+              value=${input}
+              onInput=${(e) => setInput(e.target.value)}
+              placeholder="Digite uma mensagem"
+              disabled=${sending}
+              class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary disabled:opacity-50"
+            />
+          </div>
+          ${hasText ? html`
+            <button
+              type="submit"
+              disabled=${sending}
+              class="p-[8px] shrink-0 text-wa-iconActive transition-colors disabled:opacity-50"
+            >
+              <${SendIcon} />
+            </button>
+          ` : html`
+            <button type="button" class="p-[8px] shrink-0 text-wa-icon" tabindex="-1" onClick=${handleMicClick}>
+              <${MicIcon} />
+            </button>
+          `}
+        </form>
+      `}
     </div>
   `;
 }
@@ -606,9 +733,12 @@ export function Contacts({ newMessage }) {
         const updated = [...prev];
         const isUserMsg = message.role === 'user';
         const isViewing = phone === selected;
+        let lastPreview = (message.content || '').substring(0, 80);
+        if (message.media_type === 'image') lastPreview = message.content || '📷 Imagem';
+        if (message.media_type === 'audio') lastPreview = '🎤 Áudio';
         updated[idx] = {
           ...updated[idx],
-          last_message: message.content.substring(0, 80),
+          last_message: lastPreview,
           last_message_role: message.role,
           last_message_ts: message.ts,
           msg_count: updated[idx].msg_count + 1,

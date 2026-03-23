@@ -79,6 +79,27 @@ export async function toggleContactAI(phone, enabled) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, { enabled });
 }
 
+export async function sendImage(phone, file, caption = '') {
+  const form = new FormData();
+  form.append('image', file);
+  form.append('caption', caption);
+  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
+    method: 'POST',
+    body: form,
+  });
+  return res.json();
+}
+
+export async function sendAudio(phone, blob) {
+  const form = new FormData();
+  form.append('audio', blob, 'voice.ogg');
+  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
+    method: 'POST',
+    body: form,
+  });
+  return res.json();
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {

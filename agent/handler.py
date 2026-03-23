@@ -1,5 +1,7 @@
+import base64
 import json
 import logging
+import mimetypes
 import time
 from pathlib import Path
 
@@ -107,12 +109,14 @@ class ContactMemory:
         except OSError as e:
             logger.error("Failed to save memory for %s: %s", self.phone, e)
 
-    def add_message(self, role: str, content: str):
-        self.messages.append({
-            "role": role,
-            "content": content,
-            "ts": time.time(),
-        })
+    def add_message(self, role: str, content: str, *,
+                    media_type: str | None = None, media_path: str | None = None):
+        entry: dict = {"role": role, "content": content, "ts": time.time()}
+        if media_type:
+            entry["media_type"] = media_type
+        if media_path:
+            entry["media_path"] = media_path
+        self.messages.append(entry)
         self.save()
 
     def increment_unread(self):
@@ -129,9 +133,34 @@ class ContactMemory:
         self.save()
 
     def get_context_messages(self, limit: int) -> list[dict]:
-        """Return the last N messages formatted for the LLM (without ts)."""
+        """Return the last N messages formatted for the LLM (without ts).
+
+        For the most recent image message from the user, include a base64 data
+        URI so the vision model can see it.  Older images are replaced with a
+        placeholder to keep token usage reasonable.
+        """
         recent = self.messages[-limit:] if len(self.messages) > limit else self.messages
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        # Find the index of the last user image message (within *recent*)
+        last_image_idx = -1
+        for i in range(len(recent) - 1, -1, -1):
+            if recent[i].get("media_type") == "image" and recent[i]["role"] == "user":
+                last_image_idx = i
+                break
+
+        result: list[dict] = []
+        for i, m in enumerate(recent):
+            mt = m.get("media_type")
+            if mt == "image" and m["role"] == "user":
+                if i == last_image_idx:
+                    # Build vision content array with base64
+                    content = _build_image_content(m.get("media_path", ""), m.get("content", ""))
+                else:
+                    content = m.get("content") or "[Imagem enviada pelo contato]"
+                result.append({"role": m["role"], "content": content})
+            else:
+                result.append({"role": m["role"], "content": m.get("content", "")})
+        return result
 
     def update_info(self, **kwargs):
         """Update contact info fields. Only overwrites non-empty values."""
@@ -158,6 +187,33 @@ class ContactMemory:
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
         return "\n".join(parts)
+
+
+def _build_image_content(media_path: str, caption: str = "") -> list[dict] | str:
+    """Build an OpenAI vision content array from a local image file.
+
+    Returns a plain placeholder string if the file cannot be read.
+    """
+    try:
+        p = Path(media_path)
+        if not p.is_absolute():
+            # Resolve relative to project root
+            p = Path(__file__).resolve().parent.parent / p
+        if not p.exists():
+            return caption or "[Imagem enviada pelo contato]"
+        data = p.read_bytes()
+        mime = mimetypes.guess_type(str(p))[0] or "image/png"
+        b64 = base64.b64encode(data).decode()
+        parts: list[dict] = [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ]
+        if caption:
+            parts.append({"type": "text", "text": caption})
+        else:
+            parts.append({"type": "text", "text": "O contato enviou esta imagem."})
+        return parts
+    except Exception:
+        return caption or "[Imagem enviada pelo contato]"
 
 
 class AgentHandler:
@@ -227,14 +283,33 @@ class AgentHandler:
             )
         return prompt
 
-    def process_message(self, sender: str, text: str, save_user_message: bool = True) -> str:
-        """Process an incoming message and return the AI response."""
+    def process_message(self, sender: str, text: str, *,
+                        save_user_message: bool = True,
+                        image_path: str | None = None,
+                        audio_path: str | None = None) -> str:
+        """Process an incoming message and return the AI response.
+
+        If *image_path* is provided the image is sent to a vision-capable model.
+        If *audio_path* is provided the text should already contain a placeholder
+        like ``[Áudio recebido]`` — the LLM will see that label.
+        """
         if not self.api_key:
             return "[WhatsBot] API key não configurada."
 
         contact = self._get_contact(sender)
+
+        # Determine media metadata for storage
+        media_type: str | None = None
+        media_path: str | None = None
+        if image_path:
+            media_type = "image"
+            media_path = image_path
+        elif audio_path:
+            media_type = "audio"
+            media_path = audio_path
+
         if save_user_message:
-            contact.add_message("user", text)
+            contact.add_message("user", text or "", media_type=media_type, media_path=media_path)
 
         context_messages = contact.get_context_messages(self.max_context_messages)
 

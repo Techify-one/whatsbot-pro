@@ -1,5 +1,7 @@
 import logging
+import mimetypes
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -154,14 +156,52 @@ class GOWAClient:
 
     # ── Messages ─────────────────────────────────────────────────────
 
+    def _clean_phone(self, phone: str) -> str:
+        return phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+
     def send_message(self, phone: str, text: str) -> dict | None:
         """Send a text message to a phone number."""
-        phone = phone.strip().replace("+", "").replace(" ", "").replace("-", "")
         payload = {
-            "phone": phone,
+            "phone": self._clean_phone(phone),
             "message": text,
         }
         return self._request("POST", "/send/message", json=payload)
+
+    def send_image(self, phone: str, image_path: str, caption: str = "") -> dict | None:
+        """Send an image to a phone number via multipart/form-data."""
+        phone = self._clean_phone(phone)
+        url = f"{self.base_url}/send/image"
+        mime = mimetypes.guess_type(image_path)[0] or "image/png"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                with open(image_path, "rb") as f:
+                    files = {"image": (Path(image_path).name, f, mime)}
+                    data = {"phone": phone}
+                    if caption:
+                        data["caption"] = caption
+                    resp = client.post(url, headers=self._headers, data=data, files=files)
+                    resp.raise_for_status()
+                    return resp.json() if resp.text else {}
+        except Exception as e:
+            logger.error("GOWA send_image error: %s", e)
+            return None
+
+    def send_audio(self, phone: str, audio_path: str) -> dict | None:
+        """Send an audio file to a phone number via multipart/form-data."""
+        phone = self._clean_phone(phone)
+        url = f"{self.base_url}/send/audio"
+        mime = mimetypes.guess_type(audio_path)[0] or "audio/ogg"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                with open(audio_path, "rb") as f:
+                    files = {"audio": (Path(audio_path).name, f, mime)}
+                    data = {"phone": phone}
+                    resp = client.post(url, headers=self._headers, data=data, files=files)
+                    resp.raise_for_status()
+                    return resp.json() if resp.text else {}
+        except Exception as e:
+            logger.error("GOWA send_audio error: %s", e)
+            return None
 
     def get_chats(self, limit: int = 20) -> list[dict]:
         """Get list of chats."""
