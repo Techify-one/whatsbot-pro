@@ -389,6 +389,12 @@ def create_app(
             state.msg_count += 1
             logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
 
+            # Broadcast bot reply to frontend in real-time
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {"role": "assistant", "content": reply, "ts": time.time()},
+            })
+
             await ws_manager.broadcast("status", {
                 "connected": state.connected,
                 "msg_count": state.msg_count,
@@ -443,6 +449,12 @@ def create_app(
         phone = sender.split("@")[0] if "@" in sender else sender
 
         logger.info("[Webhook] Message from %s: %s", phone, text[:80])
+
+        # Broadcast incoming message to frontend in real-time
+        await ws_manager.broadcast("new_message", {
+            "phone": phone,
+            "message": {"role": "user", "content": text, "ts": time.time()},
+        })
 
         # Batch messages — accumulate and wait before responding
         if phone not in state.pending_messages:
@@ -552,6 +564,37 @@ def create_app(
         if data is None:
             return _err("Contato não encontrado.", status=404)
         return _ok(data)
+
+    @app.post("/api/contacts/{phone}/send")
+    async def send_to_contact(phone: str, body: dict):
+        """Send a manual message to a contact (operator-initiated, no LLM)."""
+        message = (body.get("message") or "").strip()
+        if not message:
+            return _err("Campo 'message' é obrigatório.")
+
+        # Save to contact memory
+        try:
+            msg_data = await asyncio.to_thread(agent_handler.save_operator_message, phone, message)
+        except Exception as e:
+            logger.error("[Send] Failed to save message for %s: %s", phone, e)
+            return _err(f"Erro ao salvar mensagem: {e}", status=500)
+
+        # Send via GOWA
+        try:
+            await asyncio.to_thread(gowa_client.send_message, phone, message)
+        except Exception as e:
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            return _err(f"Erro ao enviar mensagem: {e}", status=500)
+
+        logger.info("[Send] Manual message to %s: %s", phone, message[:80])
+
+        # Broadcast to all WS clients
+        await ws_manager.broadcast("new_message", {
+            "phone": phone,
+            "message": msg_data,
+        })
+
+        return _ok({"message": "Mensagem enviada."})
 
     # ── Logs ───────────────────────────────────────────────────────────
 

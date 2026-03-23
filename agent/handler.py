@@ -295,6 +295,12 @@ class AgentHandler:
         except Exception as e:
             return False, f"Erro: {e}"
 
+    def save_operator_message(self, phone: str, text: str) -> dict:
+        """Save a manually sent message (from the operator) without LLM processing."""
+        contact = self._get_contact(phone)
+        contact.add_message("assistant", text)
+        return contact.messages[-1]
+
     def clear_conversation(self, sender: str):
         contact = self._get_contact(sender)
         contact.messages.clear()

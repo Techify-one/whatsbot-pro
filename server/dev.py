@@ -5,10 +5,7 @@ recreating the app with fresh settings.
 """
 
 import logging
-import os
 import sys
-import threading
-import webbrowser
 
 # Configure logging BEFORE importing server.app (which adds MemoryLogHandler)
 logging.basicConfig(
@@ -48,8 +45,3 @@ app = create_app(
         memory_dir=settings.data_dir / "contacts",
     ),
 )
-
-# Open browser once (only in the main reloader process, not in the worker)
-if not os.environ.get("_WHATSBOT_BROWSER_OPENED"):
-    os.environ["_WHATSBOT_BROWSER_OPENED"] = "1"
-    threading.Timer(2.0, lambda: webbrowser.open(f"http://127.0.0.1:{web_port}")).start()
