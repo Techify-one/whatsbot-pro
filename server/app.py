@@ -618,6 +618,28 @@ def create_app(
         await asyncio.to_thread(_mark)
         return _ok({"message": "Marcado como lido."})
 
+    @app.put("/api/contacts/{phone}/info")
+    async def update_contact_info(phone: str, body: dict):
+        """Update contact info fields (name, email, profession, company, observations)."""
+        def _update():
+            contact = agent_handler._get_contact(phone)
+            # Update scalar fields via update_info
+            contact.update_info(
+                name=body.get("name", ""),
+                email=body.get("email", ""),
+                profession=body.get("profession", ""),
+                company=body.get("company", ""),
+            )
+            # Observations: replace entire list (update_info only appends)
+            if "observations" in body:
+                contact.info["observations"] = [
+                    o for o in body["observations"] if isinstance(o, str) and o.strip()
+                ]
+                contact.save()
+            return contact.info
+        info = await asyncio.to_thread(_update)
+        return _ok(info)
+
     # ── Logs ───────────────────────────────────────────────────────────
 
     @app.get("/api/logs")

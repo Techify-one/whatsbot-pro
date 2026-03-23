@@ -87,3 +87,12 @@
   background-color: #f0f2f5;
   border-left: 1px solid #e9edef;
 }
+
+/* Slide-in from right animation for contact info panel */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.animate-slide-in-right {
+  animation: slide-in-right 0.25s ease-out;
+}

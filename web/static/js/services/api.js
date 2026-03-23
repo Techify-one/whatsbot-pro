@@ -71,6 +71,10 @@ export async function markAsRead(phone) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/read`);
 }
 
+export async function updateContactInfo(phone, info) {
+  return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/info`, info);
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {
