@@ -100,6 +100,12 @@ export async function sendAudio(phone, blob) {
   return res.json();
 }
 
+// ── Models ──────────────────────────────────────────────────────────
+
+export async function getModels() {
+  return request('GET', '/api/models');
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {

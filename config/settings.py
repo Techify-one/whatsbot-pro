@@ -19,6 +19,8 @@ def get_data_dir() -> Path:
 DEFAULT_CONFIG = {
     "openrouter_api_key": "",
     "model": "openai/gpt-4o-mini",
+    "audio_model": "google/gemini-2.0-flash-001",
+    "image_model": "google/gemini-2.0-flash-001",
     "system_prompt": (
         "Você é um assistente útil e amigável. Responda de forma clara e concisa. "
         "Use português brasileiro."

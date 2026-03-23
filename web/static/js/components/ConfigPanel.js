@@ -2,12 +2,15 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { testApiKey } from '../services/api.js';
+import { ModelSelect } from './ModelSelect.js';
 
 const html = htm.bind(h);
 
 export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
+  const [audioModel, setAudioModel] = useState('');
+  const [imageModel, setImageModel] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [autoReply, setAutoReply] = useState(true);
   const [replyAll, setReplyAll] = useState(true);
@@ -23,6 +26,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     if (config) {
       setApiKey(''); // Don't show masked key in input
       setModel(config.model || '');
+      setAudioModel(config.audio_model || '');
+      setImageModel(config.image_model || '');
       setSystemPrompt(config.system_prompt || '');
       setAutoReply(config.auto_reply ?? true);
       setReplyAll(config.reply_to_all ?? true);
@@ -65,6 +70,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   async function handleSave() {
     const data = {
       model: model.trim() || 'openai/gpt-4o-mini',
+      audio_model: audioModel.trim() || 'google/gemini-2.0-flash-001',
+      image_model: imageModel.trim() || 'google/gemini-2.0-flash-001',
       system_prompt: systemPrompt,
       auto_reply: autoReply,
       reply_to_all: replyAll,
@@ -120,14 +127,36 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
 
       <!-- Model -->
       <div>
-        <label class="block text-sm font-semibold text-wa-text mb-1">Modelo LLM</label>
-        <input
-          type="text"
+        <label class="block text-sm font-semibold text-wa-text mb-1">Modelo de IA (chat)</label>
+        <${ModelSelect}
           value=${model}
-          onInput=${(e) => setModel(e.target.value)}
+          onChange=${setModel}
           placeholder="openai/gpt-4o-mini"
-          class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
         />
+      </div>
+
+      <!-- Audio & Image models -->
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Modelo transcrição áudio</label>
+          <${ModelSelect}
+            value=${audioModel}
+            onChange=${setAudioModel}
+            filterModality="audio"
+            placeholder="google/gemini-2.0-flash-001"
+          />
+          <span class="text-xs text-wa-secondary">Modelo com suporte a áudio</span>
+        </div>
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Modelo descrição imagem</label>
+          <${ModelSelect}
+            value=${imageModel}
+            onChange=${setImageModel}
+            filterModality="image"
+            placeholder="google/gemini-2.0-flash-001"
+          />
+          <span class="text-xs text-wa-secondary">Modelo com suporte a visão</span>
+        </div>
       </div>
 
       <!-- System Prompt -->

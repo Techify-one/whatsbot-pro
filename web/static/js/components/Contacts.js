@@ -553,7 +553,27 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
             </div>`
           : messages.map((m, i) => {
               const isUser = m.role === 'user';
+              const isTranscription = m.role === 'transcription';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
+
+              if (isTranscription) {
+                return html`
+                  <div key=${i} class="flex justify-center mt-[4px]">
+                    <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
+                         style="background: #2d1b4e; color: #d4bfff; border: 1px solid #4a2d7a;">
+                      <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
+                        Transcrição privada
+                      </span>
+                      <span>${m.content}</span>
+                      <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
+                        ${formatBubbleTime(m.ts)}
+                      </span>
+                    </div>
+                  </div>
+                `;
+              }
+
               return html`
                 <div key=${i} class="flex ${isUser ? 'justify-start' : 'justify-end'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
                   <div class="wa-bubble max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
@@ -726,7 +746,9 @@ export function Contacts({ newMessage }) {
       if (message.role === 'user') markAsRead(phone);
     }
 
-    // Update contact list preview
+    // Skip contact list preview update for transcription messages
+    if (message.role === 'transcription') return;
+
     setContacts(prev => {
       const idx = prev.findIndex(c => c.phone === phone);
       if (idx >= 0) {

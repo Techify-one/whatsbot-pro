@@ -138,8 +138,11 @@ class ContactMemory:
         For the most recent image message from the user, include a base64 data
         URI so the vision model can see it.  Older images are replaced with a
         placeholder to keep token usage reasonable.
+        Transcription messages (role="transcription") are excluded from LLM context.
         """
-        recent = self.messages[-limit:] if len(self.messages) > limit else self.messages
+        # Filter out transcription-only messages before slicing
+        eligible = [m for m in self.messages if m.get("role") != "transcription"]
+        recent = eligible[-limit:] if len(eligible) > limit else eligible
 
         # Find the index of the last user image message (within *recent*)
         last_image_idx = -1
@@ -226,6 +229,8 @@ class AgentHandler:
         max_context_messages: int = 10,
         inactivity_timeout_min: int = 30,
         model: str = "openai/gpt-4o-mini",
+        audio_model: str = "google/gemini-2.0-flash-001",
+        image_model: str = "google/gemini-2.0-flash-001",
         memory_dir: Path | None = None,
     ):
         self.api_key = api_key
@@ -233,6 +238,8 @@ class AgentHandler:
         self.max_context_messages = max_context_messages
         self.inactivity_timeout = inactivity_timeout_min * 60
         self.model = model
+        self.audio_model = audio_model
+        self.image_model = image_model
         self.memory_dir = memory_dir or Path.home() / ".config" / "WhatsBot" / "contacts"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._contacts: dict[str, ContactMemory] = {}
@@ -253,6 +260,8 @@ class AgentHandler:
         max_context_messages: int | None = None,
         inactivity_timeout_min: int | None = None,
         model: str | None = None,
+        audio_model: str | None = None,
+        image_model: str | None = None,
     ):
         if api_key is not None:
             self.api_key = api_key
@@ -265,6 +274,99 @@ class AgentHandler:
             self.inactivity_timeout = inactivity_timeout_min * 60
         if model is not None:
             self.model = model
+        if audio_model is not None:
+            self.audio_model = audio_model
+        if image_model is not None:
+            self.image_model = image_model
+
+    def transcribe_audio(self, audio_path: str) -> str:
+        """Transcribe an audio file using the configured audio model."""
+        if not self.api_key:
+            return ""
+        try:
+            p = Path(audio_path)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parent.parent / p
+            if not p.exists():
+                logger.warning("Audio file not found for transcription: %s", audio_path)
+                return ""
+            data = p.read_bytes()
+            b64 = base64.b64encode(data).decode()
+            # Determine format from extension
+            ext = p.suffix.lower().lstrip(".")
+            if ext in ("oga", "ogg", "opus"):
+                fmt = "ogg"
+            elif ext == "mp3":
+                fmt = "mp3"
+            elif ext == "wav":
+                fmt = "wav"
+            else:
+                fmt = "ogg"
+
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.audio_model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": b64, "format": fmt},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcreva este áudio fielmente em português. Retorne apenas a transcrição, sem comentários adicionais.",
+                        },
+                    ],
+                }],
+                max_tokens=2048,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("Audio transcribed (%d chars): %s", len(result), result[:80])
+            return result
+        except Exception as e:
+            logger.error("Audio transcription failed: %s", e)
+            return ""
+
+    def describe_image(self, image_path: str) -> str:
+        """Describe an image using the configured image model."""
+        if not self.api_key:
+            return ""
+        try:
+            p = Path(image_path)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parent.parent / p
+            if not p.exists():
+                logger.warning("Image file not found for description: %s", image_path)
+                return ""
+            data = p.read_bytes()
+            mime = mimetypes.guess_type(str(p))[0] or "image/png"
+            b64 = base64.b64encode(data).decode()
+
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.image_model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Descreva detalhadamente o conteúdo desta imagem em português.",
+                        },
+                    ],
+                }],
+                max_tokens=1024,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("Image described (%d chars): %s", len(result), result[:80])
+            return result
+        except Exception as e:
+            logger.error("Image description failed: %s", e)
+            return ""
 
     def _get_contact(self, phone: str) -> ContactMemory:
         if phone not in self._contacts:

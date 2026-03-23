@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -280,6 +282,8 @@ def create_app(
         return _ok({
             "openrouter_api_key": _mask_key(settings.get("openrouter_api_key", "")),
             "model": settings.get("model", "openai/gpt-4o-mini"),
+            "audio_model": settings.get("audio_model", "google/gemini-2.0-flash-001"),
+            "image_model": settings.get("image_model", "google/gemini-2.0-flash-001"),
             "system_prompt": settings.get("system_prompt", ""),
             "auto_reply": settings.get("auto_reply", True),
             "reply_to_all": settings.get("reply_to_all", True),
@@ -291,8 +295,8 @@ def create_app(
     @app.put("/api/config")
     async def save_config(body: dict):
         allowed_keys = {
-            "openrouter_api_key", "model", "system_prompt",
-            "auto_reply", "reply_to_all", "only_saved_contacts",
+            "openrouter_api_key", "model", "audio_model", "image_model",
+            "system_prompt", "auto_reply", "reply_to_all", "only_saved_contacts",
             "max_context_messages", "message_batch_delay",
         }
         for key, value in body.items():
@@ -304,6 +308,8 @@ def create_app(
             api_key=settings.get("openrouter_api_key", ""),
             system_prompt=settings.get("system_prompt", ""),
             model=settings.get("model", "openai/gpt-4o-mini"),
+            audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
+            image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
             max_context_messages=settings.get("max_context_messages", 10),
         )
 
@@ -325,10 +331,45 @@ def create_app(
                 api_key=api_key,
                 system_prompt=settings.get("system_prompt", ""),
                 model=settings.get("model", "openai/gpt-4o-mini"),
+                audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
+                image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
                 max_context_messages=settings.get("max_context_messages", 10),
             )
             logger.info("API key tested and auto-saved.")
         return _ok({"valid": ok, "message": msg})
+
+    # ── Models cache ──────────────────────────────────────────────
+    _models_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
+    _MODELS_CACHE_TTL = 600  # 10 minutes
+
+    @app.get("/api/models")
+    async def list_models():
+        """Return OpenRouter model list (cached for 10 min)."""
+        now = time.time()
+        if _models_cache["data"] and now - _models_cache["fetched_at"] < _MODELS_CACHE_TTL:
+            return _ok(_models_cache["data"])
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get("https://openrouter.ai/api/v1/models")
+                resp.raise_for_status()
+                raw = resp.json()
+            models = []
+            for m in raw.get("data", []):
+                arch = m.get("architecture", {})
+                models.append({
+                    "id": m.get("id", ""),
+                    "name": m.get("name", ""),
+                    "input_modalities": arch.get("input_modalities", ["text"]),
+                })
+            models.sort(key=lambda x: x["name"].lower())
+            _models_cache["data"] = models
+            _models_cache["fetched_at"] = now
+            return _ok(models)
+        except Exception as e:
+            logger.error("Failed to fetch OpenRouter models: %s", e)
+            if _models_cache["data"]:
+                return _ok(_models_cache["data"])
+            return _err(f"Erro ao buscar modelos: {e}", status=502)
 
     @app.get("/api/status")
     async def get_status():
@@ -440,20 +481,55 @@ def create_app(
 
             # Save message to contact memory
             contact.add_message(
-                "user", text or (f"[Áudio recebido]" if audio_path else ""),
+                "user", text or ("[Áudio recebido]" if audio_path else ""),
                 media_type="image" if image_path else "audio",
                 media_path=image_path or audio_path,
             )
 
+            # Transcribe audio / describe image
+            transcription = ""
+            try:
+                if audio_path:
+                    transcription = await asyncio.to_thread(
+                        agent_handler.transcribe_audio, audio_path)
+                elif image_path:
+                    transcription = await asyncio.to_thread(
+                        agent_handler.describe_image, image_path)
+            except Exception as e:
+                logger.error("[Batch] Transcription error for %s: %s", phone, e)
+
+            # Save transcription as private message and broadcast
+            if transcription:
+                contact.add_message("transcription", transcription)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "message": {
+                        "role": "transcription",
+                        "content": transcription,
+                        "ts": time.time(),
+                    },
+                })
+
             if not contact.ai_enabled:
                 continue
+
+            # Build text for LLM: use transcription if available
+            llm_text = text or ""
+            if audio_path:
+                if transcription:
+                    llm_text = f"[Transcrição do áudio]: {transcription}"
+                else:
+                    llm_text = llm_text or "[Áudio recebido]"
+            elif image_path and transcription:
+                prefix = f"[Descrição da imagem]: {transcription}"
+                llm_text = f"{prefix}\n{text}" if text else prefix
 
             try:
                 reply = await asyncio.to_thread(
                     agent_handler.process_message, phone,
-                    text or ("[Áudio recebido]" if audio_path else ""),
+                    llm_text,
                     save_user_message=False,
-                    image_path=image_path,
+                    image_path=image_path if not transcription else None,
                 )
                 if reply:
                     await _send_reply(phone, reply)
@@ -649,7 +725,9 @@ def create_app(
                     phone = data.get("phone", f.stem)
                     info = data.get("info", {})
                     msgs = data.get("messages", [])
-                    last = msgs[-1] if msgs else None
+                    # Skip transcription messages for preview
+                    visible = [m for m in msgs if m.get("role") != "transcription"]
+                    last = visible[-1] if visible else None
                     # Build last message preview with media indicator
                     last_content = ""
                     if last:
