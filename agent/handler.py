@@ -5,12 +5,7 @@ import mimetypes
 import time
 from pathlib import Path
 
-from typing import TYPE_CHECKING
-
 from openai import OpenAI
-
-if TYPE_CHECKING:
-    from usage.tracker import UsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +67,7 @@ class ContactMemory:
         self.file_path = memory_dir / f"{phone}.json"
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
         self.messages: list[dict] = []
+        self.usage: list[dict] = []
         self.ai_enabled: bool = True
         self.unread_count: int = 0
         self.created_at: float = time.time()
@@ -90,6 +86,7 @@ class ContactMemory:
                 if old_notes and not any(self.info.values()):
                     self.info["observations"] = [old_notes]
                 self.messages = data.get("messages", [])
+                self.usage = data.get("usage", [])
                 self.ai_enabled = data.get("ai_enabled", True)
                 self.unread_count = data.get("unread_count", 0)
                 self.created_at = data.get("created_at", time.time())
@@ -103,6 +100,7 @@ class ContactMemory:
             "phone": self.phone,
             "info": self.info,
             "messages": self.messages,
+            "usage": self.usage,
             "ai_enabled": self.ai_enabled,
             "unread_count": self.unread_count,
             "created_at": self.created_at,
@@ -181,6 +179,49 @@ class ContactMemory:
             self.info.setdefault("observations", []).append(observation)
         self.save()
 
+    def add_usage(self, call_type: str, model: str,
+                  prompt_tokens: int, completion_tokens: int,
+                  total_tokens: int, cost_usd: float) -> None:
+        self.usage.append({
+            "call_type": call_type,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": cost_usd,
+            "ts": time.time(),
+        })
+        self.save()
+
+    def get_usage_summary(self, start_ts: float | None = None,
+                          end_ts: float | None = None) -> dict:
+        """Return aggregated usage stats for this contact."""
+        filtered = self.usage
+        if start_ts is not None:
+            filtered = [u for u in filtered if u.get("ts", 0) >= start_ts]
+        if end_ts is not None:
+            filtered = [u for u in filtered if u.get("ts", 0) <= end_ts]
+
+        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                  "cost_usd": 0.0, "call_count": 0, "by_type": {}}
+        for u in filtered:
+            totals["prompt_tokens"] += u.get("prompt_tokens", 0)
+            totals["completion_tokens"] += u.get("completion_tokens", 0)
+            totals["total_tokens"] += u.get("total_tokens", 0)
+            totals["cost_usd"] += u.get("cost_usd", 0.0)
+            totals["call_count"] += 1
+            ct = u.get("call_type", "text")
+            bt = totals["by_type"].setdefault(ct, {
+                "cost_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "call_count": 0,
+            })
+            bt["cost_usd"] += u.get("cost_usd", 0.0)
+            bt["prompt_tokens"] += u.get("prompt_tokens", 0)
+            bt["completion_tokens"] += u.get("completion_tokens", 0)
+            bt["total_tokens"] += u.get("total_tokens", 0)
+            bt["call_count"] += 1
+        return totals
+
     def get_info_summary(self) -> str:
         """Format contact info for injection into system prompt."""
         parts = []
@@ -237,7 +278,6 @@ class AgentHandler:
         audio_model: str = "google/gemini-2.0-flash-001",
         image_model: str = "google/gemini-2.0-flash-001",
         memory_dir: Path | None = None,
-        usage_tracker: "UsageTracker | None" = None,
         pricing_fn=None,
     ):
         self.api_key = api_key
@@ -251,13 +291,10 @@ class AgentHandler:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
-        self.usage_tracker = usage_tracker
         self.pricing_fn = pricing_fn
 
     def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
         """Extract usage from an OpenAI-compatible response and record it."""
-        if not self.usage_tracker:
-            return
         try:
             usage = getattr(response, "usage", None)
             if not usage:
@@ -269,15 +306,10 @@ class AgentHandler:
             if self.pricing_fn:
                 prompt_price, completion_price = self.pricing_fn(model)
                 cost_usd = (prompt_tokens * prompt_price) + (completion_tokens * completion_price)
-            self.usage_tracker.record(
-                phone=phone,
-                call_type=call_type,
-                model=model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                cost_usd=cost_usd,
-            )
+            contact = self._get_contact(phone)
+            contact.add_usage(call_type, model, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+            logger.debug("Usage recorded for %s: %s %s tokens=%d cost=%.6f",
+                         phone, call_type, model, total_tokens, cost_usd)
         except Exception as e:
             logger.warning("Failed to record usage: %s", e)
 

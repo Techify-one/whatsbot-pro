@@ -31,7 +31,6 @@ def main():
     from gowa.manager import GOWAManager
     from gowa.client import GOWAClient
     from agent.handler import AgentHandler
-    from usage.tracker import UsageTracker
     from server.app import create_app
 
     port = settings.get("gowa_port", 3000)
@@ -40,7 +39,6 @@ def main():
     webhook_url = f"http://127.0.0.1:{web_port}/api/webhook"
     gowa_manager = GOWAManager(port=port, data_dir=settings.data_dir, webhook_url=webhook_url)
     gowa_client = GOWAClient(port=port)
-    usage_tracker = UsageTracker(settings.data_dir)
 
     agent_handler = AgentHandler(
         api_key=settings.get("openrouter_api_key", ""),
@@ -51,7 +49,6 @@ def main():
         audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
         image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
         memory_dir=settings.data_dir / "contacts",
-        usage_tracker=usage_tracker,
     )
 
     app = create_app(
@@ -59,7 +56,6 @@ def main():
         gowa_manager=gowa_manager,
         gowa_client=gowa_client,
         agent_handler=agent_handler,
-        usage_tracker=usage_tracker,
     )
 
     # Open browser after server has time to start

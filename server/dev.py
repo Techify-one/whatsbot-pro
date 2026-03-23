@@ -25,7 +25,6 @@ from config.settings import Settings
 from gowa.manager import GOWAManager
 from gowa.client import GOWAClient
 from agent.handler import AgentHandler
-from usage.tracker import UsageTracker
 from server.app import create_app
 
 settings = Settings()
@@ -33,7 +32,6 @@ port = settings.get("gowa_port", 3000)
 web_port = settings.get("web_port", 8080)
 
 webhook_url = f"http://127.0.0.1:{web_port}/api/webhook"
-usage_tracker = UsageTracker(settings.data_dir)
 app = create_app(
     settings=settings,
     gowa_manager=GOWAManager(port=port, data_dir=settings.data_dir, webhook_url=webhook_url),
@@ -47,7 +45,5 @@ app = create_app(
         audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
         image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
         memory_dir=settings.data_dir / "contacts",
-        usage_tracker=usage_tracker,
     ),
-    usage_tracker=usage_tracker,
 )
