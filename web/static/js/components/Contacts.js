@@ -686,7 +686,11 @@ export function Contacts({ newMessage }) {
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
-  const pendingWsMessages = useRef([]);
+  const pendingWsMessages = useRef({});
+  const selectedRef = useRef(null);
+
+  // Keep ref in sync — avoids stale closure in newMessage effect
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
 
   const handleToggleAI = useCallback(async (phone, enabled) => {
     const res = await toggleContactAI(phone, enabled);
@@ -722,7 +726,10 @@ export function Contacts({ newMessage }) {
     if (!selected) { setContactData(null); return; }
     setShowInfoPanel(false);
     setLoadingDetail(true);
-    pendingWsMessages.current = [];
+    // Preserve any messages already buffered for this contact (arrived before selection)
+    // but reset the accumulator for new messages arriving during fetch
+    const preFetchBuffer = pendingWsMessages.current[selected] || [];
+    pendingWsMessages.current[selected] = [];
     // Clear unread badge immediately in local state
     setContacts(prev => prev.map(c =>
       c.phone === selected ? { ...c, unread_count: 0 } : c
@@ -730,16 +737,17 @@ export function Contacts({ newMessage }) {
     getContact(selected).then(res => {
       if (res.ok) {
         const data = res.data;
-        // Merge any WebSocket messages that arrived during loading
-        const pending = pendingWsMessages.current;
+        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch (arrived during loading)
+        const duringFetch = pendingWsMessages.current[selected] || [];
+        const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
-          const existingTs = new Set((data.messages || []).map(m => m.ts));
-          const newMsgs = pending.filter(m => !existingTs.has(m.ts));
+          const existingKeys = new Set((data.messages || []).map(m => `${m.ts}:${m.role}`));
+          const newMsgs = pending.filter(m => !existingKeys.has(`${m.ts}:${m.role}`));
           if (newMsgs.length > 0) {
             data.messages = [...(data.messages || []), ...newMsgs];
           }
         }
-        pendingWsMessages.current = [];
+        pendingWsMessages.current[selected] = [];
         setContactData(data);
       }
       setLoadingDetail(false);
@@ -752,18 +760,36 @@ export function Contacts({ newMessage }) {
     const { phone, message } = newMessage;
 
     // Update detail view if this contact is selected
-    if (phone === selected) {
-      if (contactData) {
-        setContactData(prev => ({
+    // Use selectedRef to avoid stale closure
+    if (phone === selectedRef.current) {
+      // Use functional updater — prev is always the latest contactData
+      setContactData(prev => {
+        if (!prev) {
+          // Contact data still loading — buffer in per-phone map
+          const buf = pendingWsMessages.current[phone] || [];
+          const key = `${message.ts}:${message.role}`;
+          if (!buf.some(m => `${m.ts}:${m.role}` === key)) {
+            pendingWsMessages.current[phone] = [...buf, message];
+          }
+          return prev;
+        }
+        // Deduplicate by ts + role
+        if (prev.messages && prev.messages.some(m => m.ts === message.ts && m.role === message.role)) {
+          return prev;
+        }
+        return {
           ...prev,
           messages: [...(prev.messages || []), message],
           updated_at: message.ts,
-        }));
-        // Persist read state since user is viewing this contact
-        if (message.role === 'user') markAsRead(phone);
-      } else {
-        // Contact is loading — buffer message to merge after fetch completes
-        pendingWsMessages.current.push(message);
+        };
+      });
+      if (message.role === 'user') markAsRead(phone);
+    } else {
+      // Contact NOT selected — buffer for when it's opened
+      const buf = pendingWsMessages.current[phone] || [];
+      const key = `${message.ts}:${message.role}`;
+      if (!buf.some(m => `${m.ts}:${m.role}` === key)) {
+        pendingWsMessages.current[phone] = [...buf, message];
       }
     }
 
@@ -775,7 +801,7 @@ export function Contacts({ newMessage }) {
       if (idx >= 0) {
         const updated = [...prev];
         const isUserMsg = message.role === 'user';
-        const isViewing = phone === selected;
+        const isViewing = phone === selectedRef.current;
         let lastPreview = (message.content || '').substring(0, 80);
         if (message.media_type === 'image') lastPreview = message.content || '📷 Imagem';
         if (message.media_type === 'audio') lastPreview = '🎤 Áudio';
