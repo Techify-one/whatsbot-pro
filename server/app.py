@@ -132,6 +132,8 @@ class AppState:
         # Each item: {"text": str, "image_path": str|None, "audio_path": str|None}
         self.pending_messages: dict[str, list[dict]] = {}  # phone -> [msg_dict, ...]
         self.batch_tasks: dict[str, asyncio.Task] = {}  # phone -> scheduled task
+        # Track recently sent replies to filter GOWA webhook echo-backs
+        self.recently_sent: dict[str, float] = {}  # "phone:content_hash" -> timestamp
 
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -421,6 +423,10 @@ def create_app(
         delay_max = settings.get("response_delay_max", 3.0)
         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
+        # Track sent reply so webhook can filter GOWA echo-backs
+        sent_key = f"{phone}:{reply[:120]}"
+        state.recently_sent[sent_key] = time.time()
+
         await asyncio.to_thread(gowa_client.send_message, phone, reply)
         state.msg_count += 1
         logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
@@ -632,6 +638,14 @@ def create_app(
         state.processed_messages.add(msg_id)
         phone = sender.split("@")[0] if "@" in sender else sender
 
+        # Filter GOWA echo-backs: ignore messages we recently sent
+        if text:
+            sent_key = f"{phone}:{text[:120]}"
+            sent_at = state.recently_sent.pop(sent_key, None)
+            if sent_at and (time.time() - sent_at) < 30:
+                logger.info("[Webhook] Ignoring echo-back for %s", phone)
+                return _ok({"status": "echo"})
+
         # Determine media metadata for broadcast
         media_type: str | None = None
         media_path: str | None = None
@@ -683,6 +697,12 @@ def create_app(
             oldest = list(state.processed_messages)[:2500]
             for item in oldest:
                 state.processed_messages.discard(item)
+
+        # Prune stale recently_sent entries (older than 60s)
+        now = time.time()
+        stale = [k for k, v in state.recently_sent.items() if now - v > 60]
+        for k in stale:
+            del state.recently_sent[k]
 
         return _ok({"status": "batched"})
 
@@ -806,6 +826,9 @@ def create_app(
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
             return _err(f"Erro ao salvar mensagem: {e}", status=500)
+
+        # Track sent message to filter GOWA echo-backs
+        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
 
         # Send via GOWA
         try:

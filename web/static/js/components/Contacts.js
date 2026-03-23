@@ -741,8 +741,13 @@ export function Contacts({ newMessage }) {
         const duringFetch = pendingWsMessages.current[selected] || [];
         const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
-          const existingKeys = new Set((data.messages || []).map(m => `${m.ts}:${m.role}`));
-          const newMsgs = pending.filter(m => !existingKeys.has(`${m.ts}:${m.role}`));
+          const existing = data.messages || [];
+          const newMsgs = pending.filter(m =>
+            !existing.some(e =>
+              (e.ts === m.ts && e.role === m.role) ||
+              (e.role === m.role && e.content === m.content && Math.abs(e.ts - m.ts) < 30)
+            )
+          );
           if (newMsgs.length > 0) {
             data.messages = [...(data.messages || []), ...newMsgs];
           }
@@ -767,14 +772,19 @@ export function Contacts({ newMessage }) {
         if (!prev) {
           // Contact data still loading — buffer in per-phone map
           const buf = pendingWsMessages.current[phone] || [];
-          const key = `${message.ts}:${message.role}`;
-          if (!buf.some(m => `${m.ts}:${m.role}` === key)) {
+          if (!buf.some(m =>
+            (m.ts === message.ts && m.role === message.role) ||
+            (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
+          )) {
             pendingWsMessages.current[phone] = [...buf, message];
           }
           return prev;
         }
-        // Deduplicate by ts + role
-        if (prev.messages && prev.messages.some(m => m.ts === message.ts && m.role === message.role)) {
+        // Deduplicate by ts + role, or by content + role (within 30s window)
+        if (prev.messages && prev.messages.some(m =>
+          (m.ts === message.ts && m.role === message.role) ||
+          (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
+        )) {
           return prev;
         }
         return {
@@ -787,8 +797,10 @@ export function Contacts({ newMessage }) {
     } else {
       // Contact NOT selected — buffer for when it's opened
       const buf = pendingWsMessages.current[phone] || [];
-      const key = `${message.ts}:${message.role}`;
-      if (!buf.some(m => `${m.ts}:${m.role}` === key)) {
+      if (!buf.some(m =>
+        (m.ts === message.ts && m.role === message.role) ||
+        (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
+      )) {
         pendingWsMessages.current[phone] = [...buf, message];
       }
     }
