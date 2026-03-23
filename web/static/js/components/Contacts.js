@@ -684,7 +684,9 @@ export function Contacts({ newMessage }) {
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
+  const pendingWsMessages = useRef([]);
 
   const handleToggleAI = useCallback(async (phone, enabled) => {
     const res = await toggleContactAI(phone, enabled);
@@ -720,12 +722,26 @@ export function Contacts({ newMessage }) {
     if (!selected) { setContactData(null); return; }
     setShowInfoPanel(false);
     setLoadingDetail(true);
+    pendingWsMessages.current = [];
     // Clear unread badge immediately in local state
     setContacts(prev => prev.map(c =>
       c.phone === selected ? { ...c, unread_count: 0 } : c
     ));
     getContact(selected).then(res => {
-      if (res.ok) setContactData(res.data);
+      if (res.ok) {
+        const data = res.data;
+        // Merge any WebSocket messages that arrived during loading
+        const pending = pendingWsMessages.current;
+        if (pending.length > 0) {
+          const existingTs = new Set((data.messages || []).map(m => m.ts));
+          const newMsgs = pending.filter(m => !existingTs.has(m.ts));
+          if (newMsgs.length > 0) {
+            data.messages = [...(data.messages || []), ...newMsgs];
+          }
+        }
+        pendingWsMessages.current = [];
+        setContactData(data);
+      }
       setLoadingDetail(false);
     });
   }, [selected]);
@@ -736,14 +752,19 @@ export function Contacts({ newMessage }) {
     const { phone, message } = newMessage;
 
     // Update detail view if this contact is selected
-    if (phone === selected && contactData) {
-      setContactData(prev => ({
-        ...prev,
-        messages: [...(prev.messages || []), message],
-        updated_at: message.ts,
-      }));
-      // Persist read state since user is viewing this contact
-      if (message.role === 'user') markAsRead(phone);
+    if (phone === selected) {
+      if (contactData) {
+        setContactData(prev => ({
+          ...prev,
+          messages: [...(prev.messages || []), message],
+          updated_at: message.ts,
+        }));
+        // Persist read state since user is viewing this contact
+        if (message.role === 'user') markAsRead(phone);
+      } else {
+        // Contact is loading — buffer message to merge after fetch completes
+        pendingWsMessages.current.push(message);
+      }
     }
 
     // Skip contact list preview update for transcription messages
@@ -783,7 +804,7 @@ export function Contacts({ newMessage }) {
   return html`
     <div class="flex flex-col lg:flex-row h-full">
       <!-- Sidebar -->
-      <div class="w-full lg:w-[400px] shrink-0 border-r border-wa-border ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col'}">
+      <div class="shrink-0 border-r border-wa-border transition-all duration-300 overflow-hidden ${sidebarHidden ? 'lg:w-0 lg:border-r-0' : 'lg:w-[400px]'} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}">
         <${ContactList}
           contacts=${contacts}
           loading=${loading}
@@ -794,6 +815,14 @@ export function Contacts({ newMessage }) {
           onContextMenu=${setCtxMenu}
         />
       </div>
+      <!-- Toggle sidebar button (desktop only) -->
+      <button
+        class="hidden lg:flex items-center justify-center w-[14px] shrink-0 bg-wa-panel hover:bg-wa-hover border-r border-wa-border cursor-pointer transition-colors"
+        onClick=${() => setSidebarHidden(h => !h)}
+        title=${sidebarHidden ? 'Mostrar contatos' : 'Esconder contatos'}
+      >
+        <span class="text-wa-secondary text-[11px] select-none">${sidebarHidden ? '›' : '‹'}</span>
+      </button>
       <!-- Chat panel -->
       <div class="flex-1 min-w-0 ${!selected ? 'hidden lg:flex' : 'flex'} relative">
         <div class="w-full flex flex-col">

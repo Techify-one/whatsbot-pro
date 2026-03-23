@@ -2,6 +2,7 @@
 storages/
 contacts/
 statics/qrcode/
+statics/media/
 
 # Logs
 logs/
