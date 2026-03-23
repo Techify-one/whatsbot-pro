@@ -85,78 +85,78 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   }
 
   if (!config) {
-    return html`<div class="bg-gray-800 rounded-xl p-5 animate-pulse-slow">Carregando...</div>`;
+    return html`<div class="bg-white rounded-xl p-5 animate-pulse-slow text-wa-secondary border border-wa-border">Carregando...</div>`;
   }
 
   return html`
-    <div class="bg-gray-800 rounded-xl p-5 flex flex-col gap-4 flex-1">
+    <div class="bg-white rounded-xl p-5 flex flex-col gap-4 flex-1 border border-wa-border shadow-sm">
       <!-- API Key -->
       <div>
-        <label class="block text-sm font-semibold text-gray-300 mb-1">API Key OpenRouter</label>
+        <label class="block text-sm font-semibold text-wa-text mb-1">API Key OpenRouter</label>
         <div class="flex gap-2">
           <input
             type="password"
             value=${apiKey}
             onInput=${(e) => setApiKey(e.target.value)}
             placeholder=${config.openrouter_api_key || 'sk-or-...'}
-            class="flex-1 bg-gray-700 text-white px-3 py-2 rounded-lg text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+            class="flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
           />
           <button
             onClick=${handleTestKey}
             disabled=${testing}
-            class="px-4 py-2 bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors whitespace-nowrap"
+            class="px-4 py-2 bg-wa-panel hover:bg-wa-hover disabled:opacity-50 text-wa-text text-sm rounded-lg transition-colors whitespace-nowrap border border-wa-border"
           >
             ${testing ? '...' : 'Testar'}
           </button>
         </div>
         ${testResult ? html`
-          <p class="text-xs mt-1 ${testResult.ok ? 'text-green-400' : 'text-red-400'}">
+          <p class="text-xs mt-1 ${testResult.ok ? 'text-green-600' : 'text-red-500'}">
             ${testResult.ok ? '\u2713' : '\u2717'} ${testResult.message}
           </p>
         ` : config.openrouter_api_key ? html`
-          <p class="text-xs mt-1 text-gray-500">Chave salva: ${config.openrouter_api_key}</p>
+          <p class="text-xs mt-1 text-wa-secondary">Chave salva: ${config.openrouter_api_key}</p>
         ` : null}
       </div>
 
       <!-- Model -->
       <div>
-        <label class="block text-sm font-semibold text-gray-300 mb-1">Modelo LLM</label>
+        <label class="block text-sm font-semibold text-wa-text mb-1">Modelo LLM</label>
         <input
           type="text"
           value=${model}
           onInput=${(e) => setModel(e.target.value)}
           placeholder="openai/gpt-4o-mini"
-          class="w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+          class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
         />
       </div>
 
       <!-- System Prompt -->
       <div class="flex-1 flex flex-col">
-        <label class="block text-sm font-semibold text-gray-300 mb-1">System Prompt</label>
+        <label class="block text-sm font-semibold text-wa-text mb-1">System Prompt</label>
         <textarea
           value=${systemPrompt}
           onInput=${(e) => setSystemPrompt(e.target.value)}
           rows="4"
-          class="w-full flex-1 bg-gray-700 text-white px-3 py-2 rounded-lg text-sm border border-gray-600 focus:border-blue-500 focus:outline-none resize-none"
+          class="w-full flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
         ></textarea>
       </div>
 
       <!-- Context & Batch Settings -->
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="block text-sm font-semibold text-gray-300 mb-1">Mensagens de contexto</label>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Mensagens de contexto</label>
           <input
             type="number"
             min="2"
             max="100"
             value=${maxContext}
             onInput=${(e) => setMaxContext(e.target.value)}
-            class="w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
           />
-          <span class="text-xs text-gray-500">Qtd de msgs enviadas ao LLM</span>
+          <span class="text-xs text-wa-secondary">Qtd de msgs enviadas ao LLM</span>
         </div>
         <div>
-          <label class="block text-sm font-semibold text-gray-300 mb-1">Agrupar mensagens (s)</label>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Agrupar mensagens (s)</label>
           <input
             type="number"
             min="0"
@@ -164,38 +164,38 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             step="0.5"
             value=${batchDelay}
             onInput=${(e) => setBatchDelay(e.target.value)}
-            class="w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
           />
-          <span class="text-xs text-gray-500">Espera antes de responder</span>
+          <span class="text-xs text-wa-secondary">Espera antes de responder</span>
         </div>
       </div>
 
       <!-- Checkboxes -->
       <div class="flex flex-col gap-2">
-        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
           <input
             type="checkbox"
             checked=${autoReply}
             onChange=${(e) => setAutoReply(e.target.checked)}
-            class="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500 accent-blue-500"
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
           />
           Auto-resposta ativa
         </label>
-        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
           <input
             type="checkbox"
             checked=${replyAll}
             onChange=${(e) => setReplyAll(e.target.checked)}
-            class="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500 accent-blue-500"
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
           />
           Responder a todos
         </label>
-        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
           <input
             type="checkbox"
             checked=${onlyContacts}
             onChange=${(e) => setOnlyContacts(e.target.checked)}
-            class="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500 accent-blue-500"
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
           />
           Apenas contatos salvos
         </label>
@@ -205,7 +205,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <button
         onClick=${handleSave}
         disabled=${saving}
-        class="w-full py-2.5 ${saveSuccess ? 'bg-green-600' : 'bg-blue-600 hover:bg-blue-500'} disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+        class="w-full py-2.5 ${saveSuccess ? 'bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark'} disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
       >
         ${saving ? 'Salvando...' : saveSuccess ? '\u2713 Salvo!' : 'Salvar Configurações'}
       </button>

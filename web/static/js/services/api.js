@@ -67,6 +67,10 @@ export async function sendMessage(phone, message) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, { message });
 }
 
+export async function markAsRead(phone) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/read`);
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {

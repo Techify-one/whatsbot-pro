@@ -6,11 +6,11 @@ import { sandboxSend, sandboxClear, getLogs, clearLogs } from '../services/api.j
 const html = htm.bind(h);
 
 const LEVEL_COLORS = {
-  DEBUG: 'text-gray-500',
-  INFO: 'text-blue-400',
-  WARNING: 'text-yellow-400',
-  ERROR: 'text-red-400',
-  CRITICAL: 'text-red-500 font-bold',
+  DEBUG: 'text-gray-400',
+  INFO: 'text-blue-600',
+  WARNING: 'text-yellow-600',
+  ERROR: 'text-red-500',
+  CRITICAL: 'text-red-600 font-bold',
 };
 
 function LogPanel() {
@@ -49,41 +49,41 @@ function LogPanel() {
   return html`
     <div class="flex flex-col h-full">
       <div class="flex items-center gap-2 mb-2">
-        <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wide">Logs</h3>
+        <h3 class="text-sm font-semibold text-wa-text uppercase tracking-wide">Logs</h3>
         <input
           type="text"
           placeholder="Filtrar logs..."
           value=${filter}
           onInput=${(e) => setFilter(e.target.value)}
-          class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 focus:border-whatsapp focus:outline-none"
+          class="flex-1 bg-wa-panel border border-wa-border rounded px-2 py-1 text-xs text-wa-text focus:border-wa-teal focus:outline-none"
         />
-        <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none">
+        <label class="flex items-center gap-1 text-xs text-wa-secondary cursor-pointer select-none">
           <input
             type="checkbox"
             checked=${autoScroll}
             onChange=${(e) => setAutoScroll(e.target.checked)}
-            class="rounded border-gray-600"
+            class="rounded border-wa-border accent-wa-teal"
           />
           Auto-scroll
         </label>
         <button
           onClick=${handleClear}
-          class="text-xs text-gray-500 hover:text-red-400 transition-colors px-2 py-1"
+          class="text-xs text-wa-secondary hover:text-red-500 transition-colors px-2 py-1"
         >Limpar</button>
       </div>
       <div
         ref=${logRef}
-        class="flex-1 bg-gray-950 rounded border border-gray-800 overflow-y-auto font-mono text-xs p-2 min-h-0"
+        class="flex-1 bg-wa-panel rounded border border-wa-border overflow-y-auto font-mono text-xs p-2 min-h-0"
         style="max-height: 300px;"
       >
         ${filtered.length === 0
-          ? html`<div class="text-gray-600 text-center py-8">Nenhum log ainda...</div>`
+          ? html`<div class="text-wa-secondary text-center py-8">Nenhum log ainda...</div>`
           : filtered.map((log, i) => html`
-            <div key=${i} class="flex gap-2 py-0.5 hover:bg-gray-900 leading-tight">
-              <span class="text-gray-600 shrink-0">${log.ts}</span>
-              <span class="shrink-0 w-16 ${LEVEL_COLORS[log.level] || 'text-gray-400'}">${log.level}</span>
-              <span class="text-gray-500 shrink-0">${log.name}</span>
-              <span class="text-gray-300 break-all">${log.message}</span>
+            <div key=${i} class="flex gap-2 py-0.5 hover:bg-wa-hover leading-tight">
+              <span class="text-wa-secondary shrink-0">${log.ts}</span>
+              <span class="shrink-0 w-16 ${LEVEL_COLORS[log.level] || 'text-wa-secondary'}">${log.level}</span>
+              <span class="text-wa-secondary shrink-0">${log.name}</span>
+              <span class="text-wa-text break-all">${log.message}</span>
             </div>
           `)
         }
@@ -137,45 +137,45 @@ function ChatPanel() {
     <div class="flex flex-col h-full">
       <!-- Header -->
       <div class="flex items-center gap-2 mb-2">
-        <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wide shrink-0">Chat Sandbox</h3>
+        <h3 class="text-sm font-semibold text-wa-text uppercase tracking-wide shrink-0">Chat Sandbox</h3>
         <div class="flex items-center gap-1 flex-1">
-          <label class="text-xs text-gray-500 shrink-0">Telefone:</label>
+          <label class="text-xs text-wa-secondary shrink-0">Telefone:</label>
           <input
             type="text"
             value=${phone}
             onInput=${(e) => setPhone(e.target.value)}
             placeholder="5511999999999"
-            class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 w-36 focus:border-whatsapp focus:outline-none"
+            class="bg-wa-panel border border-wa-border rounded px-2 py-1 text-xs text-wa-text w-36 focus:border-wa-teal focus:outline-none"
           />
         </div>
         <button
           onClick=${handleClear}
-          class="text-xs text-gray-500 hover:text-red-400 transition-colors px-2 py-1"
+          class="text-xs text-wa-secondary hover:text-red-500 transition-colors px-2 py-1"
         >Limpar conversa</button>
       </div>
 
       <!-- Messages -->
       <div
         ref=${chatRef}
-        class="flex-1 bg-gray-950 rounded border border-gray-800 overflow-y-auto p-3 space-y-2 min-h-0"
+        class="flex-1 bg-wa-panel rounded border border-wa-border overflow-y-auto p-3 space-y-2 min-h-0"
         style="max-height: 400px;"
       >
         ${messages.length === 0
-          ? html`<div class="text-gray-600 text-center py-12 text-sm">
+          ? html`<div class="text-wa-secondary text-center py-12 text-sm">
               Envie uma mensagem para testar o bot.<br/>
-              <span class="text-xs text-gray-700">Usa o mesmo pipeline do WhatsApp (AgentHandler.process_message)</span>
+              <span class="text-xs text-wa-secondary opacity-70">Usa o mesmo pipeline do WhatsApp (AgentHandler.process_message)</span>
             </div>`
           : messages.map((msg, i) => html`
             <div key=${i} class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
               <div class="max-w-[80%] rounded-lg px-3 py-2 text-sm ${
                 msg.role === 'user'
-                  ? 'bg-whatsapp/20 text-green-100 rounded-br-none'
+                  ? 'bg-wa-outgoing text-wa-text rounded-br-none'
                   : msg.role === 'error'
-                    ? 'bg-red-900/30 text-red-300 rounded-bl-none'
-                    : 'bg-gray-800 text-gray-200 rounded-bl-none'
+                    ? 'bg-red-50 text-red-600 border border-red-200 rounded-bl-none'
+                    : 'bg-white text-wa-text rounded-bl-none shadow-sm'
               }">
                 <div class="whitespace-pre-wrap break-words">${msg.content}</div>
-                <div class="text-[10px] mt-1 ${msg.role === 'user' ? 'text-green-400/50' : 'text-gray-600'} text-right">
+                <div class="text-[10px] mt-1 text-wa-secondary text-right">
                   ${msg.ts.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </div>
               </div>
@@ -184,7 +184,7 @@ function ChatPanel() {
         }
         ${sending ? html`
           <div class="flex justify-start">
-            <div class="bg-gray-800 rounded-lg px-3 py-2 text-sm text-gray-400 rounded-bl-none animate-pulse-slow">
+            <div class="bg-white rounded-lg px-3 py-2 text-sm text-wa-secondary rounded-bl-none animate-pulse-slow shadow-sm">
               Processando...
             </div>
           </div>
@@ -199,12 +199,12 @@ function ChatPanel() {
           onInput=${(e) => setInput(e.target.value)}
           placeholder="Digite uma mensagem..."
           disabled=${sending}
-          class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-whatsapp focus:outline-none disabled:opacity-50"
+          class="flex-1 bg-white border border-wa-border rounded-lg px-3 py-2 text-sm text-wa-text placeholder-wa-secondary focus:border-wa-teal focus:outline-none disabled:opacity-50"
         />
         <button
           type="submit"
           disabled=${sending || !input.trim()}
-          class="bg-whatsapp hover:bg-whatsapp/80 disabled:bg-gray-700 disabled:text-gray-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          class="bg-wa-teal hover:bg-wa-tealDark disabled:bg-wa-panel disabled:text-wa-secondary text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
         >Enviar</button>
       </form>
     </div>
@@ -215,12 +215,12 @@ export function Sandbox() {
   return html`
     <div class="space-y-4">
       <!-- Chat -->
-      <div class="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+      <div class="bg-white rounded-lg p-4 border border-wa-border shadow-sm">
         <${ChatPanel} />
       </div>
 
       <!-- Logs -->
-      <div class="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+      <div class="bg-white rounded-lg p-4 border border-wa-border shadow-sm">
         <${LogPanel} />
       </div>
     </div>

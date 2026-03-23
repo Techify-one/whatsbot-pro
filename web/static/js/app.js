@@ -9,6 +9,13 @@ import { useConfig } from './hooks/useConfig.js';
 
 const html = htm.bind(h);
 
+const ROUTES = { '/': 'contacts', '/dashboard': 'dashboard', '/sandbox': 'sandbox' };
+const TAB_PATHS = { contacts: '/', dashboard: '/dashboard', sandbox: '/sandbox' };
+
+function tabFromPath() {
+  return ROUTES[window.location.pathname] || 'contacts';
+}
+
 function GearMenu({ tab, onTabChange }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
@@ -53,13 +60,41 @@ function GearMenu({ tab, onTabChange }) {
   `;
 }
 
+function PageHeader({ title, onBack }) {
+  return html`
+    <div class="flex items-center gap-3 mb-4">
+      <button
+        onClick=${onBack}
+        class="w-[36px] h-[36px] flex items-center justify-center rounded-full hover:bg-wa-hover transition-colors"
+      >
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="#54656f">
+          <path d="M12 4l1.4 1.4L7.8 11H20v2H7.8l5.6 5.6L12 20l-8-8 8-8z"/>
+        </svg>
+      </button>
+      <h1 class="text-[20px] font-medium text-wa-text">${title}</h1>
+    </div>
+  `;
+}
+
 function App() {
   const [status, setStatus] = useState({ connected: false, msg_count: 0, auto_reply_running: false });
   const [qrAvailable, setQrAvailable] = useState(false);
   const [qrVersion, setQrVersion] = useState(0);
   const [notification, setNotification] = useState('Iniciando...');
-  const [tab, setTab] = useState('contacts');
+  const [tab, setTabState] = useState(tabFromPath);
   const [newMessage, setNewMessage] = useState(null);
+
+  const setTab = useCallback((t) => {
+    setTabState(t);
+    const path = TAB_PATHS[t] || '/';
+    if (window.location.pathname !== path) history.pushState(null, '', path);
+  }, []);
+
+  useEffect(() => {
+    function onPopState() { setTabState(tabFromPath()); }
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const { config, loading, saving, save } = useConfig();
 
@@ -86,7 +121,7 @@ function App() {
   if (loading) {
     return html`
       <div class="h-screen flex items-center justify-center">
-        <div class="text-center text-gray-400 animate-pulse-slow">Carregando...</div>
+        <div class="text-center text-wa-secondary animate-pulse-slow">Carregando...</div>
       </div>
     `;
   }
@@ -95,20 +130,26 @@ function App() {
     <div class="h-screen flex flex-col relative">
       <${GearMenu} tab=${tab} onTabChange=${setTab} />
 
-      <main class="flex-1 overflow-auto">
+      <main class="flex-1 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${tab === 'dashboard'
-          ? html`<div class="max-w-5xl mx-auto p-4"><${Dashboard}
-              status=${status}
-              qrAvailable=${qrAvailable}
-              qrVersion=${qrVersion}
-              config=${config}
-              saving=${saving}
-              onSave=${handleSave}
-              onNotify=${handleNotify}
-            /></div>`
+          ? html`<div class="max-w-5xl mx-auto p-4">
+              <${PageHeader} title="Painel" onBack=${() => setTab('contacts')} />
+              <${Dashboard}
+                status=${status}
+                qrAvailable=${qrAvailable}
+                qrVersion=${qrVersion}
+                config=${config}
+                saving=${saving}
+                onSave=${handleSave}
+                onNotify=${handleNotify}
+              />
+            </div>`
           : tab === 'contacts'
             ? html`<${Contacts} newMessage=${newMessage} />`
-            : html`<div class="max-w-5xl mx-auto p-4"><${Sandbox} /></div>`
+            : html`<div class="max-w-5xl mx-auto p-4">
+                <${PageHeader} title="Sandbox" onBack=${() => setTab('contacts')} />
+                <${Sandbox} />
+              </div>`
         }
       </main>
     </div>

@@ -65,6 +65,7 @@ class ContactMemory:
         self.file_path = memory_dir / f"{phone}.json"
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
         self.messages: list[dict] = []
+        self.unread_count: int = 0
         self.created_at: float = time.time()
         self.updated_at: float = time.time()
         self._load()
@@ -81,6 +82,7 @@ class ContactMemory:
                 if old_notes and not any(self.info.values()):
                     self.info["observations"] = [old_notes]
                 self.messages = data.get("messages", [])
+                self.unread_count = data.get("unread_count", 0)
                 self.created_at = data.get("created_at", time.time())
                 self.updated_at = data.get("updated_at", time.time())
             except (json.JSONDecodeError, OSError) as e:
@@ -92,6 +94,7 @@ class ContactMemory:
             "phone": self.phone,
             "info": self.info,
             "messages": self.messages,
+            "unread_count": self.unread_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -108,6 +111,15 @@ class ContactMemory:
             "ts": time.time(),
         })
         self.save()
+
+    def increment_unread(self):
+        self.unread_count += 1
+        self.save()
+
+    def mark_as_read(self):
+        if self.unread_count > 0:
+            self.unread_count = 0
+            self.save()
 
     def get_context_messages(self, limit: int) -> list[dict]:
         """Return the last N messages formatted for the LLM (without ts)."""

@@ -258,6 +258,8 @@ def create_app(
     # ── Routes ────────────────────────────────────────────────────────
 
     @app.get("/")
+    @app.get("/dashboard")
+    @app.get("/sandbox")
     async def index():
         index_file = web_dir / "index.html"
         if index_file.exists():
@@ -450,6 +452,9 @@ def create_app(
 
         logger.info("[Webhook] Message from %s: %s", phone, text[:80])
 
+        # Increment unread count for incoming user messages
+        await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread())
+
         # Broadcast incoming message to frontend in real-time
         await ws_manager.broadcast("new_message", {
             "phone": phone,
@@ -541,6 +546,7 @@ def create_app(
                         "last_message_role": last["role"] if last else "",
                         "last_message_ts": last.get("ts", 0) if last else 0,
                         "msg_count": len(msgs),
+                        "unread_count": data.get("unread_count", 0),
                         "updated_at": data.get("updated_at", 0),
                     })
                 except Exception:
@@ -559,7 +565,14 @@ def create_app(
             fp = agent_handler.memory_dir / f"{phone}.json"
             if not fp.exists():
                 return None
-            return json.loads(fp.read_text(encoding="utf-8"))
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            # Mark as read when viewing contact
+            if data.get("unread_count", 0) > 0:
+                data["unread_count"] = 0
+                fp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                if phone in agent_handler._contacts:
+                    agent_handler._contacts[phone].unread_count = 0
+            return data
         data = await asyncio.to_thread(_load)
         if data is None:
             return _err("Contato não encontrado.", status=404)
@@ -595,6 +608,15 @@ def create_app(
         })
 
         return _ok({"message": "Mensagem enviada."})
+
+    @app.post("/api/contacts/{phone}/read")
+    async def mark_contact_read(phone: str):
+        """Mark all messages from this contact as read (reset unread_count)."""
+        def _mark():
+            contact = agent_handler._get_contact(phone)
+            contact.mark_as_read()
+        await asyncio.to_thread(_mark)
+        return _ok({"message": "Marcado como lido."})
 
     # ── Logs ───────────────────────────────────────────────────────────
 

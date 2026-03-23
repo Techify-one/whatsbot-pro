@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, sendMessage } from '../services/api.js';
+import { getContacts, getContact, sendMessage, markAsRead } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -151,9 +151,9 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                       <span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                         ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                       </span>
-                      ${c.msg_count > 0 ? html`
+                      ${c.unread_count > 0 ? html`
                         <span class="bg-wa-badge text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
-                          ${c.msg_count}
+                          ${c.unread_count}
                         </span>
                       ` : null}
                     </div>
@@ -329,6 +329,10 @@ export function Contacts({ newMessage }) {
   useEffect(() => {
     if (!selected) { setContactData(null); return; }
     setLoadingDetail(true);
+    // Clear unread badge immediately in local state
+    setContacts(prev => prev.map(c =>
+      c.phone === selected ? { ...c, unread_count: 0 } : c
+    ));
     getContact(selected).then(res => {
       if (res.ok) setContactData(res.data);
       setLoadingDetail(false);
@@ -347,6 +351,8 @@ export function Contacts({ newMessage }) {
         messages: [...(prev.messages || []), message],
         updated_at: message.ts,
       }));
+      // Persist read state since user is viewing this contact
+      if (message.role === 'user') markAsRead(phone);
     }
 
     // Update contact list preview
@@ -354,12 +360,17 @@ export function Contacts({ newMessage }) {
       const idx = prev.findIndex(c => c.phone === phone);
       if (idx >= 0) {
         const updated = [...prev];
+        const isUserMsg = message.role === 'user';
+        const isViewing = phone === selected;
         updated[idx] = {
           ...updated[idx],
           last_message: message.content.substring(0, 80),
           last_message_role: message.role,
           last_message_ts: message.ts,
           msg_count: updated[idx].msg_count + 1,
+          unread_count: isUserMsg && !isViewing
+            ? (updated[idx].unread_count || 0) + 1
+            : updated[idx].unread_count || 0,
           updated_at: message.ts,
         };
         updated.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
