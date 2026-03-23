@@ -5,7 +5,12 @@ import mimetypes
 import time
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from openai import OpenAI
+
+if TYPE_CHECKING:
+    from usage.tracker import UsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +237,8 @@ class AgentHandler:
         audio_model: str = "google/gemini-2.0-flash-001",
         image_model: str = "google/gemini-2.0-flash-001",
         memory_dir: Path | None = None,
+        usage_tracker: "UsageTracker | None" = None,
+        pricing_fn=None,
     ):
         self.api_key = api_key
         self.system_prompt = system_prompt
@@ -244,6 +251,35 @@ class AgentHandler:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
+        self.usage_tracker = usage_tracker
+        self.pricing_fn = pricing_fn
+
+    def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
+        """Extract usage from an OpenAI-compatible response and record it."""
+        if not self.usage_tracker:
+            return
+        try:
+            usage = getattr(response, "usage", None)
+            if not usage:
+                return
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+            cost_usd = 0.0
+            if self.pricing_fn:
+                prompt_price, completion_price = self.pricing_fn(model)
+                cost_usd = (prompt_tokens * prompt_price) + (completion_tokens * completion_price)
+            self.usage_tracker.record(
+                phone=phone,
+                call_type=call_type,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+            )
+        except Exception as e:
+            logger.warning("Failed to record usage: %s", e)
 
     def _get_client(self) -> OpenAI:
         if self._client is None or self._client.api_key != self.api_key:
@@ -279,7 +315,7 @@ class AgentHandler:
         if image_model is not None:
             self.image_model = image_model
 
-    def transcribe_audio(self, audio_path: str) -> str:
+    def transcribe_audio(self, audio_path: str, phone: str = "") -> str:
         """Transcribe an audio file using the configured audio model."""
         if not self.api_key:
             return ""
@@ -321,6 +357,7 @@ class AgentHandler:
                 }],
                 max_tokens=2048,
             )
+            self._record_usage(phone, "audio", self.audio_model, response)
             result = response.choices[0].message.content.strip()
             logger.info("Audio transcribed (%d chars): %s", len(result), result[:80])
             return result
@@ -328,7 +365,7 @@ class AgentHandler:
             logger.error("Audio transcription failed: %s", e)
             return ""
 
-    def describe_image(self, image_path: str) -> str:
+    def describe_image(self, image_path: str, phone: str = "") -> str:
         """Describe an image using the configured image model."""
         if not self.api_key:
             return ""
@@ -361,6 +398,7 @@ class AgentHandler:
                 }],
                 max_tokens=1024,
             )
+            self._record_usage(phone, "image", self.image_model, response)
             result = response.choices[0].message.content.strip()
             logger.info("Image described (%d chars): %s", len(result), result[:80])
             return result
@@ -430,6 +468,7 @@ class AgentHandler:
                 max_tokens=1024,
             )
 
+            self._record_usage(sender, "text", self.model, response)
             msg = response.choices[0].message
 
             # Handle tool calls (save contact info)
@@ -457,6 +496,7 @@ class AgentHandler:
                         messages=messages,
                         max_tokens=1024,
                     )
+                    self._record_usage(sender, "text", self.model, follow_up)
                     reply = follow_up.choices[0].message.content.strip()
                 else:
                     reply = msg.content.strip()

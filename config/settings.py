@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "response_delay_max": 3.0,
     "gowa_port": 3000,
     "web_port": 8080,
+    "usd_brl_rate": 5.50,
 }
 
 

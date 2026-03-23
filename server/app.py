@@ -141,6 +141,7 @@ def create_app(
     gowa_manager,
     gowa_client,
     agent_handler,
+    usage_tracker=None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
 
@@ -271,6 +272,7 @@ def create_app(
     @app.get("/")
     @app.get("/dashboard")
     @app.get("/sandbox")
+    @app.get("/costs")
     async def index():
         index_file = web_dir / "index.html"
         if index_file.exists():
@@ -360,6 +362,7 @@ def create_app(
                     "id": m.get("id", ""),
                     "name": m.get("name", ""),
                     "input_modalities": arch.get("input_modalities", ["text"]),
+                    "pricing": m.get("pricing", {}),
                 })
             models.sort(key=lambda x: x["name"].lower())
             _models_cache["data"] = models
@@ -491,16 +494,28 @@ def create_app(
             try:
                 if audio_path:
                     transcription = await asyncio.to_thread(
-                        agent_handler.transcribe_audio, audio_path)
+                        agent_handler.transcribe_audio, audio_path, phone)
                 elif image_path:
                     transcription = await asyncio.to_thread(
-                        agent_handler.describe_image, image_path)
+                        agent_handler.describe_image, image_path, phone)
             except Exception as e:
                 logger.error("[Batch] Transcription error for %s: %s", phone, e)
 
-            # Save transcription as private message and broadcast
+            # Save transcription as private message and broadcast.
+            # Also update the original user message so the LLM sees the
+            # transcription instead of the placeholder "[Áudio recebido]".
             if transcription:
                 contact.add_message("transcription", transcription)
+                # Update the last user message content with the transcription
+                for msg in reversed(contact.messages):
+                    if msg.get("role") == "user" and msg.get("media_type") in ("audio", "image"):
+                        if audio_path:
+                            msg["content"] = f"[Transcrição do áudio]: {transcription}"
+                        elif image_path:
+                            prefix = f"[Descrição da imagem]: {transcription}"
+                            msg["content"] = f"{prefix}\n{text}" if text else prefix
+                        contact.save()
+                        break
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
                     "message": {
@@ -973,6 +988,88 @@ def create_app(
             ws_manager.disconnect(websocket)
         except Exception:
             ws_manager.disconnect(websocket)
+
+    # ── Pricing lookup for usage tracking ──────────────────────────────
+
+    def _get_model_pricing(model_id: str) -> tuple[float, float]:
+        """Return (prompt_price_per_token, completion_price_per_token) from cache.
+
+        If the cache is empty, fetches models synchronously (runs in to_thread).
+        """
+        if not _models_cache["data"]:
+            try:
+                resp = httpx.get("https://openrouter.ai/api/v1/models", timeout=15)
+                resp.raise_for_status()
+                raw = resp.json()
+                models = []
+                for m in raw.get("data", []):
+                    arch = m.get("architecture", {})
+                    models.append({
+                        "id": m.get("id", ""),
+                        "name": m.get("name", ""),
+                        "input_modalities": arch.get("input_modalities", ["text"]),
+                        "pricing": m.get("pricing", {}),
+                    })
+                models.sort(key=lambda x: x["name"].lower())
+                _models_cache["data"] = models
+                _models_cache["fetched_at"] = time.time()
+                logger.info("Models cache populated for pricing (%d models)", len(models))
+            except Exception as e:
+                logger.warning("Failed to fetch models for pricing: %s", e)
+                return 0.0, 0.0
+        for m in _models_cache["data"]:
+            if m["id"] == model_id:
+                p = m.get("pricing", {})
+                return float(p.get("prompt", "0") or "0"), float(p.get("completion", "0") or "0")
+        return 0.0, 0.0
+
+    agent_handler.pricing_fn = _get_model_pricing
+
+    # ── Usage / Cost endpoints ───────────────────────────────────────
+
+    def _parse_period(period: str | None, start: float | None, end: float | None) -> tuple[float | None, float | None]:
+        """Convert period shorthand or explicit timestamps to (start_ts, end_ts)."""
+        if start is not None or end is not None:
+            return start, end
+        if not period:
+            return None, None
+        now = time.time()
+        mapping = {"24h": 86400, "3d": 259200, "7d": 604800, "30d": 2592000}
+        seconds = mapping.get(period)
+        if seconds:
+            return now - seconds, now
+        return None, None
+
+    @app.get("/api/usage/summary")
+    async def usage_summary(period: str | None = None, start: float | None = None, end: float | None = None):
+        if not usage_tracker:
+            return _err("Usage tracking not available", status=503)
+        start_ts, end_ts = _parse_period(period, start, end)
+        data = await asyncio.to_thread(usage_tracker.total_summary, start_ts, end_ts)
+        data["period_start"] = start_ts
+        data["period_end"] = end_ts
+        return _ok(data)
+
+    @app.get("/api/usage/by-contact")
+    async def usage_by_contact(period: str | None = None, start: float | None = None, end: float | None = None):
+        if not usage_tracker:
+            return _err("Usage tracking not available", status=503)
+        start_ts, end_ts = _parse_period(period, start, end)
+        rows = await asyncio.to_thread(usage_tracker.summary_by_contact, start_ts, end_ts)
+        # Enrich with contact names from agent_handler (load from disk if needed)
+        for row in rows:
+            phone = row["phone"]
+            contact = agent_handler._get_contact(phone)
+            row["name"] = (contact.info.get("name", "") if contact else "") or ""
+        return _ok(rows)
+
+    @app.get("/api/usage/contact/{phone}")
+    async def usage_contact_detail(phone: str, period: str | None = None, start: float | None = None, end: float | None = None):
+        if not usage_tracker:
+            return _err("Usage tracking not available", status=503)
+        start_ts, end_ts = _parse_period(period, start, end)
+        data = await asyncio.to_thread(usage_tracker.contact_detail, phone, start_ts, end_ts)
+        return _ok(data)
 
     return app
 

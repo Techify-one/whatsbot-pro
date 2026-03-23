@@ -115,3 +115,20 @@ export async function getLogs(limit = 200) {
 export async function clearLogs() {
   return request('DELETE', '/api/logs');
 }
+
+// ── Usage / Costs ─────────────────────────────────────────────────
+
+export async function getUsageSummary(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return request('GET', `/api/usage/summary${qs ? '?' + qs : ''}`);
+}
+
+export async function getUsageByContact(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return request('GET', `/api/usage/by-contact${qs ? '?' + qs : ''}`);
+}
+
+export async function getUsageContactDetail(phone, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return request('GET', `/api/usage/contact/${encodeURIComponent(phone)}${qs ? '?' + qs : ''}`);
+}
