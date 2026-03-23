@@ -376,8 +376,16 @@ def create_app(
         logger.info("[Batch] Processing %d messages from %s: %s",
                     len(messages), phone, combined[:80])
 
+        # Always save the user message to disk, regardless of AI status
+        contact = agent_handler._get_contact(phone)
+        contact.add_message("user", combined)
+
+        if not contact.ai_enabled:
+            logger.info("[Batch] AI disabled for %s, skipping LLM", phone)
+            return
+
         try:
-            reply = await asyncio.to_thread(agent_handler.process_message, phone, combined)
+            reply = await asyncio.to_thread(agent_handler.process_message, phone, combined, False)
         except Exception as e:
             logger.error("[Batch] Agent error for %s: %s", phone, e)
             return
@@ -547,6 +555,7 @@ def create_app(
                         "last_message_ts": last.get("ts", 0) if last else 0,
                         "msg_count": len(msgs),
                         "unread_count": data.get("unread_count", 0),
+                        "ai_enabled": data.get("ai_enabled", True),
                         "updated_at": data.get("updated_at", 0),
                     })
                 except Exception:
@@ -617,6 +626,23 @@ def create_app(
             contact.mark_as_read()
         await asyncio.to_thread(_mark)
         return _ok({"message": "Marcado como lido."})
+
+    @app.post("/api/contacts/{phone}/toggle-ai")
+    async def toggle_contact_ai(phone: str, body: dict):
+        """Enable or disable AI auto-reply for a specific contact."""
+        enabled = body.get("enabled")
+        if enabled is None:
+            return _err("Campo 'enabled' é obrigatório.")
+        def _toggle():
+            contact = agent_handler._get_contact(phone)
+            contact.set_ai_enabled(bool(enabled))
+            return contact.ai_enabled
+        result = await asyncio.to_thread(_toggle)
+        await ws_manager.broadcast("contact_ai_toggled", {
+            "phone": phone,
+            "ai_enabled": result,
+        })
+        return _ok({"ai_enabled": result})
 
     @app.put("/api/contacts/{phone}/info")
     async def update_contact_info(phone: str, body: dict):

@@ -65,6 +65,7 @@ class ContactMemory:
         self.file_path = memory_dir / f"{phone}.json"
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
         self.messages: list[dict] = []
+        self.ai_enabled: bool = True
         self.unread_count: int = 0
         self.created_at: float = time.time()
         self.updated_at: float = time.time()
@@ -82,6 +83,7 @@ class ContactMemory:
                 if old_notes and not any(self.info.values()):
                     self.info["observations"] = [old_notes]
                 self.messages = data.get("messages", [])
+                self.ai_enabled = data.get("ai_enabled", True)
                 self.unread_count = data.get("unread_count", 0)
                 self.created_at = data.get("created_at", time.time())
                 self.updated_at = data.get("updated_at", time.time())
@@ -94,6 +96,7 @@ class ContactMemory:
             "phone": self.phone,
             "info": self.info,
             "messages": self.messages,
+            "ai_enabled": self.ai_enabled,
             "unread_count": self.unread_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -120,6 +123,10 @@ class ContactMemory:
         if self.unread_count > 0:
             self.unread_count = 0
             self.save()
+
+    def set_ai_enabled(self, enabled: bool):
+        self.ai_enabled = enabled
+        self.save()
 
     def get_context_messages(self, limit: int) -> list[dict]:
         """Return the last N messages formatted for the LLM (without ts)."""
@@ -220,13 +227,14 @@ class AgentHandler:
             )
         return prompt
 
-    def process_message(self, sender: str, text: str) -> str:
+    def process_message(self, sender: str, text: str, save_user_message: bool = True) -> str:
         """Process an incoming message and return the AI response."""
         if not self.api_key:
             return "[WhatsBot] API key não configurada."
 
         contact = self._get_contact(sender)
-        contact.add_message("user", text)
+        if save_user_message:
+            contact.add_message("user", text)
 
         context_messages = contact.get_context_messages(self.max_context_messages)
 

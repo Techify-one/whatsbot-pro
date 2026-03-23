@@ -75,6 +75,10 @@ export async function updateContactInfo(phone, info) {
   return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/info`, info);
 }
 
+export async function toggleContactAI(phone, enabled) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, { enabled });
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {

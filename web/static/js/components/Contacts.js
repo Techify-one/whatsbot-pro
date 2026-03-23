@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, sendMessage, markAsRead, updateContactInfo } from '../services/api.js';
+import { getContacts, getContact, sendMessage, markAsRead, updateContactInfo, toggleContactAI } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -91,9 +91,47 @@ function DoubleCheckIcon() {
   `;
 }
 
+// ── Context Menu ─────────────────────────────────────────────────
+
+function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onClose }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [onClose]);
+
+  const left = Math.min(x, window.innerWidth - 200);
+  const top = Math.min(y, window.innerHeight - 50);
+
+  return html`
+    <div
+      ref=${ref}
+      class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[180px]"
+      style="left:${left}px;top:${top}px"
+    >
+      <button
+        onClick=${() => { onToggleAI(phone, !aiEnabled); onClose(); }}
+        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill=${aiEnabled ? '#ef4444' : '#00a884'}>
+          ${aiEnabled
+            ? html`<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/>`
+            : html`<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>`
+          }
+        </svg>
+        ${aiEnabled ? 'Desativar IA' : 'Ativar IA'}
+      </button>
+    </div>
+  `;
+}
+
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect }) {
+function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu }) {
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
@@ -132,6 +170,7 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                 <div
                   key=${c.phone}
                   onClick=${() => onSelect(c.phone)}
+                  onContextMenu=${(e) => { e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     selected === c.phone ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
@@ -144,7 +183,13 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                   <!-- Text content with bottom border -->
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
                     <div class="flex justify-between items-baseline">
-                      <span class="text-wa-text text-[17px] truncate leading-[21px]">${c.name || c.phone}</span>
+                      <span class="text-wa-text text-[17px] truncate leading-[21px]">
+                        ${c.name || c.phone}
+                        ${c.ai_enabled === false
+                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle">IA OFF</span>`
+                          : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
+                        }
+                      </span>
                       <span class="text-wa-secondary text-[12px] ml-[6px] shrink-0 leading-[14px]">${formatTime(c.last_message_ts)}</span>
                     </div>
                     <div class="flex justify-between items-center mt-[3px]">
@@ -492,6 +537,19 @@ export function Contacts({ newMessage }) {
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState(null);
+
+  const handleToggleAI = useCallback(async (phone, enabled) => {
+    const res = await toggleContactAI(phone, enabled);
+    if (res.ok) {
+      setContacts(prev => prev.map(c =>
+        c.phone === phone ? { ...c, ai_enabled: res.data.ai_enabled } : c
+      ));
+      if (contactData && contactData.phone === phone) {
+        setContactData(prev => prev ? { ...prev, ai_enabled: res.data.ai_enabled } : prev);
+      }
+    }
+  }, [contactData]);
 
   const fetchContacts = useCallback((q = '') => {
     setLoading(true);
@@ -581,6 +639,7 @@ export function Contacts({ newMessage }) {
           onSearchChange=${setSearch}
           selected=${selected}
           onSelect=${setSelected}
+          onContextMenu=${setCtxMenu}
         />
       </div>
       <!-- Chat panel -->
@@ -612,6 +671,16 @@ export function Contacts({ newMessage }) {
           ` : null}
         </div>
       </div>
+      ${ctxMenu ? html`
+        <${ContextMenu}
+          x=${ctxMenu.x}
+          y=${ctxMenu.y}
+          phone=${ctxMenu.phone}
+          aiEnabled=${ctxMenu.aiEnabled}
+          onToggleAI=${handleToggleAI}
+          onClose=${() => setCtxMenu(null)}
+        />
+      ` : null}
     </div>
   `;
 }
