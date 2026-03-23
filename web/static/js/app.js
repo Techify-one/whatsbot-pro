@@ -4,6 +4,7 @@ import htm from 'htm';
 import { Header } from './components/Header.js';
 import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
+import { Contacts } from './components/Contacts.js';
 import { StatusBar } from './components/StatusBar.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
@@ -40,54 +41,32 @@ function App() {
 
   if (loading) {
     return html`
-      <div class="max-w-4xl mx-auto p-4">
-        <${Header} />
-        <div class="text-center text-gray-400 py-20 animate-pulse-slow">Carregando...</div>
+      <div class="h-screen flex items-center justify-center">
+        <div class="text-center text-gray-400 animate-pulse-slow">Carregando...</div>
       </div>
     `;
   }
 
   return html`
-    <div class="max-w-4xl mx-auto p-4">
-      <${Header} />
+    <div class="h-screen flex flex-col">
+      <${Header} tab=${tab} onTabChange=${setTab} />
 
-      <!-- Tabs -->
-      <div class="flex gap-1 mb-4 bg-gray-800/50 rounded-lg p-1">
-        <button
-          onClick=${() => setTab('dashboard')}
-          class="flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-            tab === 'dashboard'
-              ? 'bg-gray-700 text-white'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'
-          }"
-        >
-          \u2699 Painel
-        </button>
-        <button
-          onClick=${() => setTab('sandbox')}
-          class="flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-            tab === 'sandbox'
-              ? 'bg-whatsapp/20 text-whatsapp'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'
-          }"
-        >
-          \uD83E\uDDEA Sandbox / Debug
-        </button>
-      </div>
-
-      <!-- Content -->
-      ${tab === 'dashboard'
-        ? html`<${Dashboard}
-            status=${status}
-            qrAvailable=${qrAvailable}
-            qrVersion=${qrVersion}
-            config=${config}
-            saving=${saving}
-            onSave=${handleSave}
-            onNotify=${handleNotify}
-          />`
-        : html`<${Sandbox} />`
-      }
+      <main class="flex-1 overflow-auto">
+        ${tab === 'dashboard'
+          ? html`<div class="max-w-5xl mx-auto p-4"><${Dashboard}
+              status=${status}
+              qrAvailable=${qrAvailable}
+              qrVersion=${qrVersion}
+              config=${config}
+              saving=${saving}
+              onSave=${handleSave}
+              onNotify=${handleNotify}
+            /></div>`
+          : tab === 'contacts'
+            ? html`<${Contacts} />`
+            : html`<div class="max-w-5xl mx-auto p-4"><${Sandbox} /></div>`
+        }
+      </main>
 
       <${StatusBar}
         status=${status}

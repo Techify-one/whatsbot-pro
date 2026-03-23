@@ -52,6 +52,17 @@ export async function sandboxClear(phone) {
   return request('POST', '/api/sandbox/clear', { phone: phone || '' });
 }
 
+// ── Contacts ──────────────────────────────────────────────────────
+
+export async function getContacts(q = '') {
+  const query = q ? `?q=${encodeURIComponent(q)}` : '';
+  return request('GET', `/api/contacts${query}`);
+}
+
+export async function getContact(phone) {
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}`);
+}
+
 // ── Logs ───────────────────────────────────────────────────────────
 
 export async function getLogs(limit = 200) {

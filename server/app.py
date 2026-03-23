@@ -507,6 +507,52 @@ def create_app(
             agent_handler.clear_all_conversations()
         return _ok({"message": "Conversa limpa."})
 
+    # ── Contacts ────────────────────────────────────────────────────────
+
+    @app.get("/api/contacts")
+    async def list_contacts(q: str = ""):
+        """List all contacts with summary info."""
+        def _list():
+            contacts_dir = agent_handler.memory_dir
+            results = []
+            for f in contacts_dir.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    phone = data.get("phone", f.stem)
+                    info = data.get("info", {})
+                    msgs = data.get("messages", [])
+                    last = msgs[-1] if msgs else None
+                    results.append({
+                        "phone": phone,
+                        "name": info.get("name", ""),
+                        "last_message": last["content"][:80] if last else "",
+                        "last_message_role": last["role"] if last else "",
+                        "last_message_ts": last.get("ts", 0) if last else 0,
+                        "msg_count": len(msgs),
+                        "updated_at": data.get("updated_at", 0),
+                    })
+                except Exception:
+                    continue
+            results.sort(key=lambda c: c["updated_at"], reverse=True)
+            if q:
+                ql = q.lower()
+                results = [c for c in results if ql in c["name"].lower() or ql in c["phone"]]
+            return results
+        return _ok(await asyncio.to_thread(_list))
+
+    @app.get("/api/contacts/{phone}")
+    async def get_contact(phone: str):
+        """Return full contact data including conversation history."""
+        def _load():
+            fp = agent_handler.memory_dir / f"{phone}.json"
+            if not fp.exists():
+                return None
+            return json.loads(fp.read_text(encoding="utf-8"))
+        data = await asyncio.to_thread(_load)
+        if data is None:
+            return _err("Contato não encontrado.", status=404)
+        return _ok(data)
+
     # ── Logs ───────────────────────────────────────────────────────────
 
     @app.get("/api/logs")

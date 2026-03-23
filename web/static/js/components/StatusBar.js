@@ -8,7 +8,7 @@ export function StatusBar({ status, notification }) {
   const msgCount = status?.msg_count || 0;
 
   return html`
-    <div class="mt-4 px-4 py-2 bg-gray-800 rounded-lg flex items-center justify-between text-sm">
+    <div class="px-4 py-1.5 bg-gray-800 border-t border-gray-700 flex items-center justify-between text-sm">
       <div class="flex items-center gap-4">
         <div class="flex items-center gap-2">
           <div class="w-2.5 h-2.5 rounded-full status-dot ${connected ? 'bg-green-400' : 'bg-red-400'}"></div>
