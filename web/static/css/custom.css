@@ -18,3 +18,72 @@
 .animate-pulse-slow {
   animation: pulse-slow 2s ease-in-out infinite;
 }
+
+/* ── WhatsApp Web replica styles ──────────────────────────────── */
+
+/* Incoming message tail (left, white) */
+.msg-tail-in {
+  position: relative;
+}
+.msg-tail-in::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -8px;
+  width: 0;
+  height: 0;
+  border-top: 8px solid #ffffff;
+  border-left: 8px solid transparent;
+}
+
+/* Outgoing message tail (right, light green) */
+.msg-tail-out {
+  position: relative;
+}
+.msg-tail-out::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: -8px;
+  width: 0;
+  height: 0;
+  border-top: 8px solid #d9fdd3;
+  border-right: 8px solid transparent;
+}
+
+/* Thin scrollbar like WhatsApp */
+.wa-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.wa-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.wa-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+.wa-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Contact row hover transition */
+.wa-contact-row {
+  transition: background-color 0.15s ease;
+}
+
+/* WhatsApp chat doodle background pattern */
+.wa-chat-pattern {
+  background-color: #efeae2;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300'%3E%3Cg fill='%23c8c3ba' fill-opacity='0.2'%3E%3Cpath d='M20 15a5 5 0 110 10 5 5 0 010-10zm0 2a3 3 0 100 6 3 3 0 000-6z'/%3E%3Cpath d='M80 45l-4 8h8l-4-8zm0 2l2.5 5h-5l2.5-5z'/%3E%3Crect x='140' y='15' width='8' height='10' rx='1' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Ccircle cx='200' cy='20' r='4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M258 15l6 5-6 5V15zm1 1.8v6.4l4.3-3.2-4.3-3.2z'/%3E%3Cpath d='M20 75a6 6 0 014 2l-1 1a4.8 4.8 0 00-7 0l-1-1a6 6 0 014-2z'/%3E%3Cpath d='M78 80h4v1h-4v3h-1v-3h-4v-1h4v-4h1v4z'/%3E%3Cpath d='M135 75h10v1h-10v-1zm0 4h7v1h-7v-1z'/%3E%3Ccircle cx='200' cy='80' r='5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M195 78l3 2 3-2v5l-3 2-3-2v-5z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.15'/%3E%3Cpath d='M260 75c2 0 4 2 4 4s-2 4-4 4-4-2-4-4 2-4 4-4zm0 1.5c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5z'/%3E%3Cpath d='M17 135h6l-3 6-3-6zm3 1.5l-1.8 3.5h3.6l-1.8-3.5z'/%3E%3Cpath d='M80 135a4 4 0 110 8 4 4 0 010-8zm0 1.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z'/%3E%3Cpath d='M140 138h3v-3h1v3h3v1h-3v3h-1v-3h-3v-1z'/%3E%3Cpath d='M195 135h10v8h-10v-8zm1 1v6h8v-6h-8z'/%3E%3Ccircle cx='260' cy='140' r='3'/%3E%3Cpath d='M20 200l4-3v6l-4-3zm1 0l2 1.5v-3l-2 1.5z'/%3E%3Cpath d='M75 195h10v1h-10v-1zm2 3h6v1h-6v-1z'/%3E%3Cpath d='M140 197a3 3 0 110 6 3 3 0 010-6z'/%3E%3Cpath d='M197 195l3 5 3-5h-6zm3 1.5l1.8 3h-3.6l1.8-3z'/%3E%3Cpath d='M258 197c1.7 0 3 1.3 3 3s-1.3 3-3 3-3-1.3-3-3 1.3-3 3-3z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M18 260h4v4h-4v-4zm.8.8v2.4h2.4v-2.4h-2.4z'/%3E%3Ccircle cx='80' cy='262' r='3.5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M138 258l4 4 4-4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2' stroke-width='1.2'/%3E%3Cpath d='M198 260a2 2 0 012 2c0 1.1-.9 2-2 2s-2-.9-2-2a2 2 0 012-2z'/%3E%3Cpath d='M256 258h8v6h-8v-6zm1 1v4h6v-4h-6z'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* WhatsApp bubble shadow */
+.wa-bubble {
+  box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+}
+
+/* Empty state background (WhatsApp's darker panel) */
+.wa-empty-bg {
+  background-color: #f0f2f5;
+  border-left: 1px solid #e9edef;
+}
