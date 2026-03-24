@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, sendMessage, sendImage, sendAudio, markAsRead, updateContactInfo, toggleContactAI } from '../services/api.js';
+import { getContacts, getContact, sendMessage, sendImage, sendAudio, markAsRead, updateContactInfo, toggleContactAI, sendPresence } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -131,7 +131,7 @@ function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onClose }) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu }) {
+function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState }) {
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
@@ -193,9 +193,14 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                       <span class="text-wa-secondary text-[12px] ml-[6px] shrink-0 leading-[14px]">${formatTime(c.last_message_ts)}</span>
                     </div>
                     <div class="flex justify-between items-center mt-[3px]">
-                      <span class="text-wa-secondary text-[14px] truncate leading-[20px]">
-                        ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
-                      </span>
+                      ${typingState && typingState[c.phone]
+                        ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
+                            ${typingState[c.phone] === 'audio' ? 'gravando áudio...' : 'digitando...'}
+                          </span>`
+                        : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
+                            ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
+                          </span>`
+                      }
                       ${c.unread_count > 0 ? html`
                         <span class="bg-wa-badge text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
                           ${c.unread_count}
@@ -405,7 +410,7 @@ function StopIcon() {
   `;
 }
 
-function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
+function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTyping }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -414,6 +419,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
   const fileInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const recordTimerRef = useRef(null);
+  const presenceTimerRef = useRef(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -421,10 +427,48 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
 
   useEffect(() => { setInput(''); }, [phone]);
 
+  // Send typing presence to contact (debounced)
+  function handleInputChange(e) {
+    const val = e.target.value;
+    setInput(val);
+    if (!phone) return;
+    // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
+    if (val.trim()) {
+      if (!presenceTimerRef.current) {
+        sendPresence(phone, 'start').catch(() => {});
+      }
+      clearTimeout(presenceTimerRef.current);
+      presenceTimerRef.current = setTimeout(() => {
+        sendPresence(phone, 'stop').catch(() => {});
+        presenceTimerRef.current = null;
+      }, 3000);
+    } else {
+      clearTimeout(presenceTimerRef.current);
+      presenceTimerRef.current = null;
+      sendPresence(phone, 'stop').catch(() => {});
+    }
+  }
+
+  // Clean up presence timer on unmount or phone change
+  useEffect(() => {
+    return () => {
+      if (presenceTimerRef.current) {
+        clearTimeout(presenceTimerRef.current);
+        presenceTimerRef.current = null;
+        if (phone) sendPresence(phone, 'stop').catch(() => {});
+      }
+    };
+  }, [phone]);
+
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
     if (!text || sending) return;
+
+    // Stop typing presence
+    clearTimeout(presenceTimerRef.current);
+    presenceTimerRef.current = null;
+    sendPresence(phone, 'stop').catch(() => {});
 
     setSending(true);
     setInput('');
@@ -541,7 +585,10 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
         </div>
         <div class="flex-1 min-w-0">
           <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}</div>
-          ${info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null}
+          ${contactTyping
+            ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
+            : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null
+          }
         </div>
       </div>
 
@@ -649,7 +696,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
             <input
               type="text"
               value=${input}
-              onInput=${(e) => setInput(e.target.value)}
+              onInput=${handleInputChange}
               placeholder="Digite uma mensagem"
               disabled=${sending}
               class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary disabled:opacity-50"
@@ -676,7 +723,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick }) {
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage }) {
+export function Contacts({ newMessage, chatPresence }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -686,8 +733,10 @@ export function Contacts({ newMessage }) {
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
+  const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
+  const typingTimers = useRef({});
 
   // Keep ref in sync — avoids stale closure in newMessage effect
   useEffect(() => { selectedRef.current = selected; }, [selected]);
@@ -758,6 +807,26 @@ export function Contacts({ newMessage }) {
       setLoadingDetail(false);
     });
   }, [selected]);
+
+  // Handle chat presence events (typing/recording indicators)
+  useEffect(() => {
+    if (!chatPresence) return;
+    const { phone, state, media } = chatPresence;
+    if (!phone) return;
+
+    if (state === 'composing') {
+      setTypingState(prev => ({ ...prev, [phone]: media === 'audio' ? 'audio' : 'text' }));
+      // Auto-clear after 5s if no "paused" arrives
+      clearTimeout(typingTimers.current[phone]);
+      typingTimers.current[phone] = setTimeout(() => {
+        setTypingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      }, 5000);
+    } else {
+      // paused or unknown → clear
+      clearTimeout(typingTimers.current[phone]);
+      setTypingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+    }
+  }, [chatPresence]);
 
   // Handle real-time messages from WebSocket
   useEffect(() => {
@@ -851,6 +920,7 @@ export function Contacts({ newMessage }) {
           selected=${selected}
           onSelect=${setSelected}
           onContextMenu=${setCtxMenu}
+          typingState=${typingState}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->
@@ -872,6 +942,7 @@ export function Contacts({ newMessage }) {
                 messages=${messages}
                 info=${info}
                 onAvatarClick=${() => selected && setShowInfoPanel(true)}
+                contactTyping=${selected && typingState[selected] || null}
               />`
           }
           ${showInfoPanel && selected ? html`

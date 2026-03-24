@@ -59,6 +59,10 @@ class GOWAManager:
         ]
         if self.webhook_url:
             cmd.extend(["--webhook", self.webhook_url])
+        # Enable chat_presence webhook events (typing/recording indicators)
+        cmd.extend(["--webhook-events", "message,chat_presence"])
+        # Must be "available" to receive typing events from contacts
+        cmd.extend(["--presence-on-connect", "available"])
 
         logger.info("Starting GOWA: %s", " ".join(cmd))
         creation_flags = 0

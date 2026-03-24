@@ -91,6 +91,7 @@ function App() {
   const [notification, setNotification] = useState('Iniciando...');
   const [tab, setTabState] = useState(tabFromPath);
   const [newMessage, setNewMessage] = useState(null);
+  const [chatPresence, setChatPresence] = useState(null);
 
   const setTab = useCallback((t) => {
     setTabState(t);
@@ -115,6 +116,7 @@ function App() {
     onGowaStatus: useCallback((data) => setNotification(data.message), []),
     onConfigSaved: useCallback(() => setNotification('Configurações salvas!'), []),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
+    onChatPresence: useCallback((data) => setChatPresence(data), []),
   });
 
   async function handleSave(data) {
@@ -153,7 +155,7 @@ function App() {
               />
             </div>`
           : tab === 'contacts'
-            ? html`<${Contacts} newMessage=${newMessage} />`
+            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} />`
             : tab === 'costs'
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />

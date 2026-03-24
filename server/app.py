@@ -427,6 +427,7 @@ def create_app(
         state.recently_sent[sent_key] = time.time()
 
         await asyncio.to_thread(gowa_client.send_message, phone, reply)
+        await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
         state.msg_count += 1
         logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
 
@@ -470,6 +471,7 @@ def create_app(
                 contact.add_message("user", combined)
                 if contact.ai_enabled:
                     try:
+                        await asyncio.to_thread(gowa_client.send_chat_presence, phone)
                         reply = await asyncio.to_thread(
                             agent_handler.process_message, phone, combined,
                             save_user_message=False)
@@ -545,6 +547,7 @@ def create_app(
                 llm_text = f"{prefix}\n{text}" if text else prefix
 
             try:
+                await asyncio.to_thread(gowa_client.send_chat_presence, phone)
                 reply = await asyncio.to_thread(
                     agent_handler.process_message, phone,
                     llm_text,
@@ -564,6 +567,22 @@ def create_app(
         event = body.get("event", "")
         # GOWA wraps message data inside "payload"
         data = body.get("payload", body.get("data", body))
+
+        # Handle chat presence events (typing/recording indicators)
+        if event == "chat_presence":
+            from_jid = data.get("from", "")
+            phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+            presence_state = data.get("state", "")
+            media = data.get("media", "")
+            if phone and presence_state:
+                logger.info("[Webhook] chat_presence %s from %s (media=%s)",
+                            presence_state, phone, media or "text")
+                await ws_manager.broadcast("chat_presence", {
+                    "phone": phone,
+                    "state": presence_state,
+                    "media": media,
+                })
+            return _ok({"status": "presence"})
 
         # Only process incoming messages
         if event and event not in ("message", "message:received", ""):
@@ -911,6 +930,13 @@ def create_app(
         await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
         logger.info("[Send] Audio sent to %s", phone)
         return _ok({"message": "Áudio enviado."})
+
+    @app.post("/api/contacts/{phone}/presence")
+    async def send_presence_to_contact(phone: str, body: dict):
+        """Send typing/stop presence indicator to a contact (operator-initiated)."""
+        action = body.get("action", "start")
+        await asyncio.to_thread(gowa_client.send_chat_presence, phone, action)
+        return _ok({"status": "ok"})
 
     @app.post("/api/contacts/{phone}/read")
     async def mark_contact_read(phone: str):

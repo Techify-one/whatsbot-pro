@@ -100,6 +100,10 @@ export async function sendAudio(phone, blob) {
   return res.json();
 }
 
+export async function sendPresence(phone, action = 'start') {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, { action });
+}
+
 // ── Models ──────────────────────────────────────────────────────────
 
 export async function getModels() {

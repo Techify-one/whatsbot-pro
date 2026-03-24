@@ -203,6 +203,19 @@ class GOWAClient:
             logger.error("GOWA send_audio error: %s", e)
             return None
 
+    # ── Presence ───────────────────────────────────────────────────
+
+    def send_chat_presence(self, phone: str, action: str = "start") -> dict | None:
+        """Send typing indicator. action: 'start' or 'stop'."""
+        payload = {"phone": self._clean_phone(phone), "action": action}
+        return self._request("POST", "/send/chat-presence", json=payload)
+
+    def stop_chat_presence(self, phone: str) -> dict | None:
+        """Stop typing indicator."""
+        return self.send_chat_presence(phone, "stop")
+
+    # ── Chats ─────────────────────────────────────────────────────
+
     def get_chats(self, limit: int = 20) -> list[dict]:
         """Get list of chats."""
         result = self._request("GET", f"/chats?limit={limit}")
