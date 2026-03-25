@@ -306,6 +306,8 @@ def create_app(
             "only_saved_contacts": settings.get("only_saved_contacts", False),
             "max_context_messages": settings.get("max_context_messages", 10),
             "message_batch_delay": settings.get("message_batch_delay", 3.0),
+            "split_messages": settings.get("split_messages", True),
+            "split_message_delay": settings.get("split_message_delay", 2.0),
         })
 
     @app.put("/api/config")

@@ -81,9 +81,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       reply_to_all: replyAll,
       only_saved_contacts: onlyContacts,
       max_context_messages: parseInt(maxContext, 10) || 10,
-      message_batch_delay: parseFloat(batchDelay) || 3,
+      message_batch_delay: isNaN(parseFloat(batchDelay)) ? 0 : parseFloat(batchDelay),
       split_messages: splitMessages,
-      split_message_delay: parseFloat(splitDelay) ?? 2,
+      split_message_delay: isNaN(parseFloat(splitDelay)) ? 0 : parseFloat(splitDelay),
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
