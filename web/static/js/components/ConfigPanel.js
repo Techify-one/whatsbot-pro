@@ -22,6 +22,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [testing, setTesting] = useState(false);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [promptFullscreen, setPromptFullscreen] = useState(false);
 
   // Populate form when config loads
   useEffect(() => {
@@ -167,7 +168,17 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
 
       <!-- System Prompt -->
       <div class="flex-1 flex flex-col">
-        <label class="block text-sm font-semibold text-wa-text mb-1">System Prompt</label>
+        <div class="flex items-center justify-between mb-1">
+          <label class="block text-sm font-semibold text-wa-text">System Prompt</label>
+          <button
+            type="button"
+            onClick=${() => setPromptFullscreen(true)}
+            class="text-wa-secondary hover:text-wa-teal transition-colors p-1 rounded"
+            title="Abrir editor em tela cheia"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          </button>
+        </div>
         <textarea
           value=${systemPrompt}
           onInput=${(e) => setSystemPrompt(e.target.value)}
@@ -175,6 +186,31 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           class="w-full flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
         ></textarea>
       </div>
+
+      <!-- Fullscreen Prompt Editor -->
+      ${promptFullscreen ? html`
+        <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick=${(e) => { if (e.target === e.currentTarget) setPromptFullscreen(false); }}>
+          <div class="bg-white w-full h-full rounded-xl flex flex-col shadow-2xl overflow-hidden">
+            <div class="flex items-center justify-between px-5 py-3 border-b border-wa-border">
+              <h2 class="text-sm font-semibold text-wa-text">System Prompt</h2>
+              <button
+                type="button"
+                onClick=${() => setPromptFullscreen(false)}
+                class="text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
+                title="Fechar"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <textarea
+              value=${systemPrompt}
+              onInput=${(e) => setSystemPrompt(e.target.value)}
+              class="flex-1 w-full bg-white text-wa-text px-5 py-4 text-sm leading-relaxed focus:outline-none resize-none"
+              autofocus
+            ></textarea>
+          </div>
+        </div>
+      ` : null}
 
       <!-- Context & Batch Settings -->
       <div class="grid grid-cols-2 gap-3">
