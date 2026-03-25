@@ -241,7 +241,7 @@ class GOWAClient:
         """Send an audio file to a phone number via multipart/form-data. Raises GOWASendError on failure."""
         phone = self._clean_phone(phone)
         url = f"{self.base_url}/send/audio"
-        mime = mimetypes.guess_type(audio_path)[0] or "audio/webm"
+        mime = mimetypes.guess_type(audio_path)[0] or "audio/ogg"
         try:
             with httpx.Client(timeout=30.0) as client:
                 with open(audio_path, "rb") as f:
@@ -309,10 +309,18 @@ class GOWAClient:
 
     # ── Session ──────────────────────────────────────────────────────
 
+    def reset(self):
+        """Reset client state (call after GOWA restarts, logout, etc.)."""
+        self._device_ready = False
+
     def logout(self) -> dict | None:
         """Disconnect from WhatsApp."""
-        return self._request("GET", "/app/logout")
+        result = self._request("GET", "/app/logout")
+        self.reset()
+        return result
 
     def reconnect(self) -> dict | None:
         """Reconnect to WhatsApp."""
-        return self._request("GET", "/app/reconnect")
+        result = self._request("GET", "/app/reconnect")
+        self.reset()
+        return result

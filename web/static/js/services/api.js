@@ -42,6 +42,10 @@ export function getQrUrl() {
   return `${BASE}/api/qr?t=${Date.now()}`;
 }
 
+export async function refreshQr() {
+  return request('POST', '/api/qr/refresh');
+}
+
 // ── Sandbox ────────────────────────────────────────────────────────
 
 export async function sandboxSend(phone, message) {
@@ -94,9 +98,9 @@ export async function sendImage(phone, file, caption = '') {
   return res.json();
 }
 
-export async function sendAudio(phone, blob) {
+export async function sendAudio(phone, blob, filename = 'voice.ogg') {
   const form = new FormData();
-  form.append('audio', blob, 'voice.webm');
+  form.append('audio', blob, filename);
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
     method: 'POST',
     body: form,

@@ -22,7 +22,7 @@ class GOWAManager:
     """Manages the GOWA subprocess lifecycle."""
 
     def __init__(self, port: int = 3000, data_dir: Path | None = None,
-                 webhook_url: str | None = None):
+                 webhook_url: str | None = None, on_restart=None):
         self.port = port
         self.webhook_url = webhook_url
         self.data_dir = data_dir or Path.home() / ".config" / "WhatsBot"
@@ -34,6 +34,7 @@ class GOWAManager:
         self._restart_window_start = 0.0
         self._max_restarts = 3
         self._restart_window_sec = 60
+        self._on_restart = on_restart
 
     @property
     def is_running(self) -> bool:
@@ -143,6 +144,11 @@ class GOWAManager:
                 if self._running:
                     try:
                         self.start()
+                        if self._on_restart:
+                            try:
+                                self._on_restart()
+                            except Exception as cb_err:
+                                logger.error("on_restart callback error: %s", cb_err)
                     except Exception as e:
                         logger.error("Failed to restart GOWA: %s", e)
                 break  # New watchdog thread is started by start()

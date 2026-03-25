@@ -151,6 +151,14 @@ def create_app(
     state = AppState()
     web_dir = _get_web_dir()
 
+    # ── GOWA restart callback ──────────────────────────────────────────
+    def _on_gowa_restart():
+        gowa_client.reset()
+        state.qr_data = None
+        state.qr_fetched_at = 0
+
+    gowa_manager._on_restart = _on_gowa_restart
+
     # ── Background Tasks ──────────────────────────────────────────────
 
     async def _start_gowa_task():
@@ -200,7 +208,7 @@ def create_app(
         only when the cache is older than QR_CACHE_TTL, so the frontend
         always shows a stable image the user can actually scan.
         """
-        QR_CACHE_TTL = 25  # seconds — slightly under WhatsApp's ~30s QR lifetime
+        QR_CACHE_TTL = 120  # seconds — WhatsApp QRs valid ~160s; refresh conservatively
         while not state.stop_event.is_set():
             try:
                 if not state.connected:
@@ -399,9 +407,19 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.post("/api/qr/refresh")
+    async def refresh_qr():
+        """Force a new QR code fetch on next poll cycle."""
+        state.qr_data = None
+        state.qr_fetched_at = 0
+        return _ok({"message": "QR refresh solicitado."})
+
     @app.post("/api/whatsapp/reconnect")
     async def reconnect():
         await asyncio.to_thread(gowa_client.reconnect)
+        state.qr_data = None
+        state.qr_fetched_at = 0
+        state.connected = False
         state.notification = "Reconectando..."
         await ws_manager.broadcast("gowa_status", {"message": state.notification})
         return _ok({"message": "Reconectando..."})
@@ -409,6 +427,8 @@ def create_app(
     @app.post("/api/whatsapp/logout")
     async def logout():
         await asyncio.to_thread(gowa_client.logout)
+        state.qr_data = None
+        state.qr_fetched_at = 0
         state.connected = False
         state.notification = "Desconectado."
         await ws_manager.broadcast("status", {
@@ -1019,7 +1039,7 @@ def create_app(
         audio: UploadFile = File(...),
     ):
         """Send an audio file to a contact (operator-initiated)."""
-        suffix = Path(audio.filename or "voice.webm").suffix or ".webm"
+        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
         dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
         dest.write_bytes(content)

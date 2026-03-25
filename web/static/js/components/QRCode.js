@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { getQrUrl, reconnect, logout } from '../services/api.js';
+import { getQrUrl, reconnect, logout, refreshQr } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -47,7 +47,13 @@ export function QRCode({ connected, qrAvailable, qrVersion }) {
       ${connected ? html`
         <span class="text-green-600 text-sm font-medium mb-3">Conectado ao WhatsApp</span>
       ` : qrAvailable ? html`
-        <span class="text-yellow-600 text-sm mb-3">Escaneie o QR Code com seu celular</span>
+        <span class="text-yellow-600 text-sm mb-1">Escaneie o QR Code com seu celular</span>
+        <button
+          onClick=${() => refreshQr()}
+          class="text-wa-teal hover:text-wa-tealDark text-xs underline mb-2 transition-colors"
+        >
+          Atualizar QR Code
+        </button>
       ` : html`
         <span class="text-red-500 text-sm mb-3">Desconectado</span>
       `}

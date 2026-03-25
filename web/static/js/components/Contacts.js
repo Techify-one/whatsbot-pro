@@ -545,17 +545,17 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
   }
 
   async function handleRetry(localId, text) {
-    updateMsgByLocalId(localId, () => ({ _status: 'sending' }));
+    updateMsgByLocalId(localId, () => ({ _status: 'sending', status: null }));
     try {
       const res = await retrySend(phone, text);
       if (res.ok) {
-        updateMsgByLocalId(localId, () => ({ _status: null }));
+        updateMsgByLocalId(localId, () => ({ _status: null, status: null }));
       } else {
-        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+        updateMsgByLocalId(localId, () => ({ _status: 'failed', status: 'failed' }));
       }
     } catch (err) {
       console.error('Retry error:', err);
-      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      updateMsgByLocalId(localId, () => ({ _status: 'failed', status: 'failed' }));
     }
   }
 
@@ -610,6 +610,45 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     }
   }
 
+  // Convert a WebM/Opus blob to WAV so GOWA accepts it (audio/wav is allowed)
+  async function convertToWav(webmBlob) {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    try {
+      const arrayBuf = await webmBlob.arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(arrayBuf);
+      const numCh = audioBuf.numberOfChannels;
+      const rate = audioBuf.sampleRate;
+      const length = audioBuf.length;
+      const bytesPerSample = 2; // 16-bit
+      const blockAlign = numCh * bytesPerSample;
+      const dataLen = length * blockAlign;
+      const buf = new ArrayBuffer(44 + dataLen);
+      const v = new DataView(buf);
+      // RIFF header
+      const w = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+      w(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true);
+      w(8, 'WAVE'); w(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); // PCM
+      v.setUint16(22, numCh, true); v.setUint32(24, rate, true);
+      v.setUint32(28, rate * blockAlign, true); v.setUint16(32, blockAlign, true);
+      v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, dataLen, true);
+      // Interleaved PCM samples
+      const channels = [];
+      for (let c = 0; c < numCh; c++) channels.push(audioBuf.getChannelData(c));
+      let off = 44;
+      for (let i = 0; i < length; i++) {
+        for (let c = 0; c < numCh; c++) {
+          const s = Math.max(-1, Math.min(1, channels[c][i]));
+          v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+          off += 2;
+        }
+      }
+      return new Blob([buf], { type: 'audio/wav' });
+    } finally {
+      ctx.close();
+    }
+  }
+
   async function handleMicClick() {
     if (recording) {
       // Stop recording
@@ -619,11 +658,13 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
       return;
     }
 
-    // Start recording
+    // Start recording — prefer OGG/Opus (accepted by GOWA), fallback to WebM then convert to WAV
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const chunks = [];
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      const useOgg = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus');
+      const mimeType = useOgg ? 'audio/ogg;codecs=opus' : 'audio/webm;codecs=opus';
+      const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
@@ -634,12 +675,23 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         setRecordDuration(0);
 
         if (chunks.length === 0) return;
-        const blob = new Blob(chunks, { type: 'audio/webm' });
         setSending(true);
+
+        // Prepare audio blob in a format GOWA accepts
+        let audioBlob, audioFilename;
+        if (useOgg) {
+          audioBlob = new Blob(chunks, { type: 'audio/ogg' });
+          audioFilename = 'voice.ogg';
+        } else {
+          // Browser recorded WebM — convert to WAV for GOWA compatibility
+          const webmBlob = new Blob(chunks, { type: 'audio/webm' });
+          audioBlob = await convertToWav(webmBlob);
+          audioFilename = 'voice.wav';
+        }
 
         // Optimistic: show audio in chat immediately
         const audioLocalId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const audioLocalUrl = URL.createObjectURL(blob);
+        const audioLocalUrl = URL.createObjectURL(audioBlob);
         setContactData(prev => prev ? {
           ...prev,
           messages: [...(prev.messages || []), {
@@ -649,7 +701,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         } : prev);
 
         try {
-          const res = await sendAudio(phone, blob);
+          const res = await sendAudio(phone, audioBlob, audioFilename);
           if (res.ok) {
             updateMsgByLocalId(audioLocalId, () => ({ _status: null }));
           } else {
