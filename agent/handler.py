@@ -266,6 +266,7 @@ class AgentHandler:
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
         self.pricing_fn = pricing_fn
+        self.split_messages: bool = True
         self._id_lock = threading.Lock()
 
     def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
@@ -305,6 +306,7 @@ class AgentHandler:
         model: str | None = None,
         audio_model: str | None = None,
         image_model: str | None = None,
+        split_messages: bool | None = None,
     ):
         if api_key is not None:
             self.api_key = api_key
@@ -321,6 +323,8 @@ class AgentHandler:
             self.audio_model = audio_model
         if image_model is not None:
             self.image_model = image_model
+        if split_messages is not None:
+            self.split_messages = split_messages
 
     def transcribe_audio(self, audio_path: str, phone: str = "") -> str:
         """Transcribe an audio file using the configured audio model."""
@@ -499,6 +503,24 @@ class AgentHandler:
             f"Hora: {now.strftime('%H:%M')}\n"
             "--- Fim ---"
         )
+        if self.split_messages:
+            prompt += (
+                "\n\n--- Formato de resposta ---\n"
+                "IMPORTANTE: Você DEVE responder SEMPRE em formato JSON array de strings.\n"
+                "Cada string é uma mensagem separada que será enviada no WhatsApp.\n"
+                "Regras de divisão:\n"
+                "- Saudação separada do conteúdo (ex: \"Oi! Tudo bem?\" como primeira msg)\n"
+                "- Cada ideia ou tópico em mensagem separada\n"
+                "- Mensagens curtas: 1 a 3 linhas cada, no máximo\n"
+                "- Total: geralmente 2 a 5 partes\n"
+                "- Estilo informal brasileiro de WhatsApp\n"
+                "- NÃO use markdown nem formatação especial\n"
+                "Exemplo:\n"
+                '[\"Oi! Tudo bem? 😊\", \"Então, sobre o que você perguntou...\", '
+                '\"A resposta é X porque Y\", \"Qualquer dúvida me fala!\"]\n'
+                "Retorne APENAS o JSON array, sem texto antes ou depois.\n"
+                "--- Fim do formato ---"
+            )
         return prompt
 
     def process_message(self, sender: str, text: str, *,

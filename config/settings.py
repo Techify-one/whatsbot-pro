@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     "gowa_port": 3000,
     "web_port": 8080,
     "usd_brl_rate": 5.50,
+    "split_messages": True,
+    "split_message_delay": 2.0,
 }
 
 

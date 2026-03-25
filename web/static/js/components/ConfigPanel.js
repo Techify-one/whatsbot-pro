@@ -17,6 +17,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [onlyContacts, setOnlyContacts] = useState(false);
   const [maxContext, setMaxContext] = useState(10);
   const [batchDelay, setBatchDelay] = useState(3);
+  const [splitMessages, setSplitMessages] = useState(true);
+  const [splitDelay, setSplitDelay] = useState(2);
   const [testing, setTesting] = useState(false);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -34,6 +36,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setOnlyContacts(config.only_saved_contacts ?? false);
       setMaxContext(config.max_context_messages ?? 10);
       setBatchDelay(config.message_batch_delay ?? 3);
+      setSplitMessages(config.split_messages ?? true);
+      setSplitDelay(config.split_message_delay ?? 2);
     }
   }, [config]);
 
@@ -78,6 +82,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       only_saved_contacts: onlyContacts,
       max_context_messages: parseInt(maxContext, 10) || 10,
       message_batch_delay: parseFloat(batchDelay) || 3,
+      split_messages: splitMessages,
+      split_message_delay: parseFloat(splitDelay) || 2,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -197,6 +203,34 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           />
           <span class="text-xs text-wa-secondary">Espera antes de responder</span>
         </div>
+      </div>
+
+      <!-- Split Messages -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+          <input
+            type="checkbox"
+            checked=${splitMessages}
+            onChange=${(e) => setSplitMessages(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Mensagens picadas (dividir resposta)
+        </label>
+        <span class="text-xs text-wa-secondary">Divide a resposta da IA em várias mensagens curtas, como uma conversa natural</span>
+        ${splitMessages ? html`
+          <div class="mt-1">
+            <label class="block text-xs font-medium text-wa-text mb-1">Intervalo entre mensagens (s)</label>
+            <input
+              type="number"
+              min="0.5"
+              max="10"
+              step="0.5"
+              value=${splitDelay}
+              onInput=${(e) => setSplitDelay(e.target.value)}
+              class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            />
+          </div>
+        ` : null}
       </div>
 
       <!-- Checkboxes -->

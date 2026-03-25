@@ -314,6 +314,7 @@ def create_app(
             "openrouter_api_key", "model", "audio_model", "image_model",
             "system_prompt", "auto_reply", "reply_to_all", "only_saved_contacts",
             "max_context_messages", "message_batch_delay",
+            "split_messages", "split_message_delay",
         }
         for key, value in body.items():
             if key in allowed_keys:
@@ -327,6 +328,7 @@ def create_app(
             audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
             image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
             max_context_messages=settings.get("max_context_messages", 10),
+            split_messages=settings.get("split_messages", True),
         )
 
         await ws_manager.broadcast("config_saved", {})
@@ -441,45 +443,82 @@ def create_app(
 
     # ── Message Batch Processing ────────────────────────────────────
 
+    def _parse_split_reply(reply: str) -> list[str]:
+        """Parse LLM reply as JSON array of strings. Fallback to single message."""
+        text = reply.strip()
+        # Strip markdown code block if LLM wraps in ```json ... ```
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1]).strip()
+        if text.startswith("["):
+            try:
+                parts = json.loads(text)
+                if isinstance(parts, list) and all(isinstance(p, str) for p in parts):
+                    filtered = [p.strip() for p in parts if p.strip()]
+                    if filtered:
+                        return filtered
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return [reply]
+
     async def _send_reply(phone: str, reply: str):
-        """Send a text reply and broadcast to frontend."""
+        """Send reply (possibly split into multiple parts) and broadcast."""
+        split_enabled = settings.get("split_messages", True)
+
+        if split_enabled:
+            parts = _parse_split_reply(reply)
+        else:
+            parts = [reply]
+
+        # Initial response delay (simulates typing)
         delay_min = settings.get("response_delay_min", 1.0)
         delay_max = settings.get("response_delay_max", 3.0)
         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        # Track sent reply so webhook can filter GOWA echo-backs
-        sent_key = f"{phone}:{reply[:120]}"
-        state.recently_sent[sent_key] = time.time()
+        combined_text = "\n".join(parts)
 
-        try:
-            await asyncio.to_thread(gowa_client.send_message, phone, reply)
-        except GOWASendError as e:
-            logger.error("[Batch] Send failed for %s: %s", phone, e)
-            await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
+        for i, part in enumerate(parts):
+            if i > 0:
+                # Inter-message delay with ±0.5s variation
+                base_delay = settings.get("split_message_delay", 2.0)
+                await asyncio.sleep(base_delay + random.uniform(-0.5, 0.5))
+                # Re-send typing indicator between parts
+                try:
+                    await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                except Exception:
+                    pass
+
+            # Track for echo-back filtering
+            sent_key = f"{phone}:{part[:120]}"
+            state.recently_sent[sent_key] = time.time()
+
+            try:
+                await asyncio.to_thread(gowa_client.send_message, phone, part)
+            except GOWASendError as e:
+                logger.error("[Batch] Send failed for %s (part %d/%d): %s", phone, i + 1, len(parts), e)
+                await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "message": {"role": "error", "content": f"Falha ao enviar: {e}", "ts": time.time()},
+                })
+                return
+
+            # Broadcast each part to frontend individually
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao enviar mensagem: {e}",
-                    "ts": time.time(),
-                },
+                "message": {"role": "assistant", "content": part, "ts": time.time()},
             })
-            return
 
-        # Save to contact memory only after successful send
+        # Save combined text as ONE message to memory (for LLM context)
         try:
-            await asyncio.to_thread(agent_handler.save_assistant_message, phone, reply)
+            await asyncio.to_thread(agent_handler.save_assistant_message, phone, combined_text)
         except Exception as e:
             logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
 
         await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
         state.msg_count += 1
-        logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
+        logger.info("[Batch] Replied to %s (%d parts): %s", phone, len(parts), combined_text[:80])
 
-        await ws_manager.broadcast("new_message", {
-            "phone": phone,
-            "message": {"role": "assistant", "content": reply, "ts": time.time()},
-        })
         await ws_manager.broadcast("status", {
             "connected": state.connected,
             "msg_count": state.msg_count,
