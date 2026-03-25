@@ -18,7 +18,8 @@ main.py              → entry point, inicia uvicorn + abre browser
 server/app.py        → FastAPI app (endpoints REST, WebSocket, webhook, background tasks)
 gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
-agent/handler.py     → processa mensagens com LLM via OpenRouter (tool calling para salvar dados do contato)
+agent/handler.py     → processa mensagens com LLM via OpenRouter (tool calling)
+agent/tools/         → definições de tools do LLM (uma tool por arquivo, exportadas em __init__.py)
 config/settings.py   → load/save config.json na pasta do projeto
 web/index.html       → entry point do frontend (HTML + import map)
 web/static/js/       → componentes Preact + HTM (sem build step)
@@ -118,6 +119,7 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
+- **Tools do LLM**: sempre criar em `agent/tools/`, um arquivo por tool, e exportar em `agent/tools/__init__.py` na lista `ALL_TOOLS`. Nunca definir tools inline no handler
 
 ## Dados do projeto
 

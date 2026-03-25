@@ -4,50 +4,14 @@ import logging
 import mimetypes
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from openai import OpenAI
 
+from agent.tools import ALL_TOOLS
+
 logger = logging.getLogger(__name__)
-
-
-SAVE_CONTACT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "save_contact_info",
-        "description": (
-            "Salva informações pessoais do contato quando ele mencionar dados como "
-            "nome, email, profissão, empresa, ou qualquer observação importante. "
-            "Chame esta função SEMPRE que o usuário revelar dados pessoais na conversa."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Nome completo do contato",
-                },
-                "email": {
-                    "type": "string",
-                    "description": "Email do contato",
-                },
-                "profession": {
-                    "type": "string",
-                    "description": "Profissão ou cargo do contato",
-                },
-                "company": {
-                    "type": "string",
-                    "description": "Empresa onde trabalha",
-                },
-                "observation": {
-                    "type": "string",
-                    "description": "Qualquer outra informação relevante sobre o contato",
-                },
-            },
-            "required": [],
-        },
-    },
-}
 
 
 class ContactMemory:
@@ -67,7 +31,7 @@ class ContactMemory:
         self.phone = phone
         self.file_path = memory_dir / f"{phone}.json"
         self.id: int | None = None
-        self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
+        self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
         self.messages: list[dict] = []
         self.usage: list[dict] = []
         self.ai_enabled: bool = True
@@ -83,7 +47,7 @@ class ContactMemory:
                     data = json.load(f)
                 # Migrate old "notes" format to structured "info"
                 old_notes = data.get("notes", "")
-                default_info = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
+                default_info = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
                 self.info = data.get("info", default_info)
                 if old_notes and not any(self.info.values()):
                     self.info["observations"] = [old_notes]
@@ -178,7 +142,7 @@ class ContactMemory:
 
     def update_info(self, **kwargs):
         """Update contact info fields. Only overwrites non-empty values."""
-        for key in ("name", "email", "profession", "company"):
+        for key in ("name", "email", "profession", "company", "address"):
             val = kwargs.get(key, "")
             if val:
                 self.info[key] = val
@@ -241,6 +205,8 @@ class ContactMemory:
             parts.append(f"Profissão: {self.info['profession']}")
         if self.info.get("company"):
             parts.append(f"Empresa: {self.info['company']}")
+        if self.info.get("address"):
+            parts.append(f"Endereço: {self.info['address']}")
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
         return "\n".join(parts)
@@ -512,15 +478,27 @@ class AgentHandler:
         return contact
 
     def _build_system_prompt(self, contact: ContactMemory) -> str:
-        """Build system prompt with contact info injected."""
+        """Build system prompt with contact info and current date/time injected."""
         prompt = self.system_prompt
         info_summary = contact.get_info_summary()
         if info_summary:
             prompt += (
-                f"\n\n--- Informações sobre este contato ({contact.phone}) ---\n"
+                f"\n\n--- Informações já conhecidas sobre este contato ({contact.phone}) ---\n"
                 f"{info_summary}\n"
+                "IMPORTANTE: Use estas informações na conversa. "
+                "NÃO pergunte dados que já estão listados acima (ex: nome, email, etc).\n"
                 "--- Fim das informações ---"
             )
+        _BRT = timezone(timedelta(hours=-3))
+        now = datetime.now(_BRT)
+        dias = ["segunda-feira", "terça-feira", "quarta-feira",
+                "quinta-feira", "sexta-feira", "sábado", "domingo"]
+        prompt += (
+            f"\n\n--- Data e hora atual ---\n"
+            f"Data: {now.strftime('%d/%m/%Y')} ({dias[now.weekday()]})\n"
+            f"Hora: {now.strftime('%H:%M')}\n"
+            "--- Fim ---"
+        )
         return prompt
 
     def process_message(self, sender: str, text: str, *,
@@ -564,7 +542,7 @@ class AgentHandler:
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                tools=[SAVE_CONTACT_TOOL],
+                tools=ALL_TOOLS,
                 tool_choice="auto",
                 max_tokens=1024,
             )

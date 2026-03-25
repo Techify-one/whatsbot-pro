@@ -288,7 +288,7 @@ function PlusIcon() {
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
 
 function ContactInfoPanel({ phone, info, onClose, onSave }) {
-  const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', observations: [] });
+  const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [saving, setSaving] = useState(false);
   const [newObs, setNewObs] = useState('');
 
@@ -300,6 +300,7 @@ function ContactInfoPanel({ phone, info, onClose, onSave }) {
         email: info.email || '',
         profession: info.profession || '',
         company: info.company || '',
+        address: info.address || '',
         observations: [...(info.observations || [])],
       });
     }
@@ -338,6 +339,7 @@ function ContactInfoPanel({ phone, info, onClose, onSave }) {
     { key: 'email', label: 'Email', placeholder: 'email@exemplo.com' },
     { key: 'profession', label: 'Profissão', placeholder: 'Ex: Desenvolvedor' },
     { key: 'company', label: 'Empresa', placeholder: 'Nome da empresa' },
+    { key: 'address', label: 'Endereço', placeholder: 'Rua, número, bairro' },
   ];
 
   return html`
@@ -450,6 +452,8 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordDuration, setRecordDuration] = useState(0);
+  // pendingMedia: { type: 'image'|'audio', file, blob, filename, previewUrl }
+  const [pendingMedia, setPendingMedia] = useState(null);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -563,37 +567,15 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     if (fileInputRef.current) fileInputRef.current.click();
   }
 
-  async function sendImageFile(file) {
-    if (!file || sending) return;
-    setSending(true);
-
-    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const localUrl = URL.createObjectURL(file);
-    setContactData(prev => prev ? {
-      ...prev,
-      messages: [...(prev.messages || []), {
-        role: 'assistant', content: '', ts: Date.now() / 1000,
-        media_type: 'image', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
-      }],
-    } : prev);
-
-    try {
-      const res = await sendImage(phone, file);
-      if (res.ok) {
-        updateMsgByLocalId(localId, () => ({ _status: null }));
-      } else {
-        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
-      }
-    } catch (err) {
-      console.error('Send image error:', err);
-      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
-    }
-    setSending(false);
+  function requestImageSend(file) {
+    if (!file || sending || pendingMedia) return;
+    const previewUrl = URL.createObjectURL(file);
+    setPendingMedia({ type: 'image', file, previewUrl });
   }
 
   function handleFileSelected(e) {
     const file = e.target.files[0];
-    if (file) sendImageFile(file);
+    if (file) requestImageSend(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
@@ -604,10 +586,59 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
       if (item.type.startsWith('image/')) {
         e.preventDefault();
         const file = item.getAsFile();
-        if (file) sendImageFile(file);
+        if (file) requestImageSend(file);
         return;
       }
     }
+  }
+
+  function cancelPendingMedia() {
+    if (pendingMedia?.previewUrl) URL.revokeObjectURL(pendingMedia.previewUrl);
+    setPendingMedia(null);
+  }
+
+  async function confirmPendingMedia() {
+    if (!pendingMedia || sending) return;
+    const media = pendingMedia;
+    setPendingMedia(null);
+    setSending(true);
+
+    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const localUrl = media.previewUrl || URL.createObjectURL(media.blob || media.file);
+
+    if (media.type === 'image') {
+      setContactData(prev => prev ? {
+        ...prev,
+        messages: [...(prev.messages || []), {
+          role: 'assistant', content: '', ts: Date.now() / 1000,
+          media_type: 'image', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
+        }],
+      } : prev);
+      try {
+        const res = await sendImage(phone, media.file);
+        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed' }));
+      } catch (err) {
+        console.error('Send image error:', err);
+        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      }
+    } else {
+      // audio
+      setContactData(prev => prev ? {
+        ...prev,
+        messages: [...(prev.messages || []), {
+          role: 'assistant', content: '[Áudio]', ts: Date.now() / 1000,
+          media_type: 'audio', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
+        }],
+      } : prev);
+      try {
+        const res = await sendAudio(phone, media.blob, media.filename);
+        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed' }));
+      } catch (err) {
+        console.error('Send audio error:', err);
+        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      }
+    }
+    setSending(false);
   }
 
   // Convert a WebM/Opus blob to WAV so GOWA accepts it (audio/wav is allowed)
@@ -675,7 +706,6 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         setRecordDuration(0);
 
         if (chunks.length === 0) return;
-        setSending(true);
 
         // Prepare audio blob in a format GOWA accepts
         let audioBlob, audioFilename;
@@ -683,35 +713,13 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
           audioBlob = new Blob(chunks, { type: 'audio/ogg' });
           audioFilename = 'voice.ogg';
         } else {
-          // Browser recorded WebM — convert to WAV for GOWA compatibility
           const webmBlob = new Blob(chunks, { type: 'audio/webm' });
           audioBlob = await convertToWav(webmBlob);
           audioFilename = 'voice.wav';
         }
 
-        // Optimistic: show audio in chat immediately
-        const audioLocalId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const audioLocalUrl = URL.createObjectURL(audioBlob);
-        setContactData(prev => prev ? {
-          ...prev,
-          messages: [...(prev.messages || []), {
-            role: 'assistant', content: '[Áudio]', ts: Date.now() / 1000,
-            media_type: 'audio', media_path: audioLocalUrl, _localId: audioLocalId, _status: 'sending', _isLocalBlob: true,
-          }],
-        } : prev);
-
-        try {
-          const res = await sendAudio(phone, audioBlob, audioFilename);
-          if (res.ok) {
-            updateMsgByLocalId(audioLocalId, () => ({ _status: null }));
-          } else {
-            updateMsgByLocalId(audioLocalId, () => ({ _status: 'failed' }));
-          }
-        } catch (err) {
-          console.error('Send audio error:', err);
-          updateMsgByLocalId(audioLocalId, () => ({ _status: 'failed' }));
-        }
-        setSending(false);
+        const previewUrl = URL.createObjectURL(audioBlob);
+        setPendingMedia({ type: 'audio', blob: audioBlob, filename: audioFilename, previewUrl });
       };
 
       recorder.start();
@@ -844,7 +852,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
                         : null}
                     ` : m.media_type === 'audio' ? html`
                       <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
-                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/webm" />
+                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/wav" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/ogg" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
                       </audio>
@@ -875,8 +883,35 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         onChange=${handleFileSelected}
       />
 
+      <!-- Media confirmation overlay -->
+      ${pendingMedia ? html`
+        <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
+          ${pendingMedia.type === 'image' ? html`
+            <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
+          ` : html`
+            <audio controls preload="auto" class="w-full max-w-[320px]">
+              <source src=${pendingMedia.previewUrl} type="audio/wav" />
+              <source src=${pendingMedia.previewUrl} type="audio/ogg" />
+            </audio>
+          `}
+          <div class="flex gap-[12px]">
+            <button
+              type="button"
+              onClick=${cancelPendingMedia}
+              class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-hover text-wa-text border border-wa-border hover:bg-wa-inputBg transition-colors"
+            >Cancelar</button>
+            <button
+              type="button"
+              onClick=${confirmPendingMedia}
+              disabled=${sending}
+              class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-outgoing text-wa-text border border-wa-border hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-[6px]"
+            ><${SendIcon} /> Enviar</button>
+          </div>
+        </div>
+      ` : ''}
+
       <!-- Input area -->
-      ${recording ? html`
+      ${pendingMedia ? '' : recording ? html`
         <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
           <div class="flex-1 flex items-center gap-3 mx-[5px]">
             <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>
