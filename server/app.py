@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from gowa.client import GOWASendError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -268,13 +269,17 @@ def create_app(
     statics_senditems_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")
 
+    # ── Migrate contact IDs ────────────────────────────────────────────
+    agent_handler.ensure_contact_ids()
+
     # ── Routes ────────────────────────────────────────────────────────
 
     @app.get("/")
     @app.get("/dashboard")
     @app.get("/sandbox")
     @app.get("/costs")
-    async def index():
+    @app.get("/contacts/{contact_id:int}")
+    async def index(contact_id: int | None = None):
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
@@ -426,7 +431,27 @@ def create_app(
         sent_key = f"{phone}:{reply[:120]}"
         state.recently_sent[sent_key] = time.time()
 
-        await asyncio.to_thread(gowa_client.send_message, phone, reply)
+        try:
+            await asyncio.to_thread(gowa_client.send_message, phone, reply)
+        except GOWASendError as e:
+            logger.error("[Batch] Send failed for %s: %s", phone, e)
+            await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao enviar mensagem: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return
+
+        # Save to contact memory only after successful send
+        try:
+            await asyncio.to_thread(agent_handler.save_assistant_message, phone, reply)
+        except Exception as e:
+            logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
+
         await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
         state.msg_count += 1
         logger.info("[Batch] Replied to %s: %s", phone, reply[:80])
@@ -474,7 +499,7 @@ def create_app(
                         await asyncio.to_thread(gowa_client.send_chat_presence, phone)
                         reply = await asyncio.to_thread(
                             agent_handler.process_message, phone, combined,
-                            save_user_message=False)
+                            save_user_message=False, save_response=False)
                         if reply:
                             await _send_reply(phone, reply)
                     except Exception as e:
@@ -551,7 +576,7 @@ def create_app(
                 reply = await asyncio.to_thread(
                     agent_handler.process_message, phone,
                     llm_text,
-                    save_user_message=False,
+                    save_user_message=False, save_response=False,
                     image_path=image_path if not transcription else None,
                 )
                 if reply:
@@ -773,6 +798,8 @@ def create_app(
             contacts_dir = agent_handler.memory_dir
             results = []
             for f in contacts_dir.glob("*.json"):
+                if f.stem.startswith("_"):
+                    continue
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     phone = data.get("phone", f.stem)
@@ -838,22 +865,44 @@ def create_app(
         if not message:
             return _err("Campo 'message' é obrigatório.")
 
-        # Save to contact memory
+        # Track sent message to filter GOWA echo-backs (must be before send)
+        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
+
+        # Try to send via GOWA — always save message (with status on failure)
+        send_failed = False
+        error_msg = ""
         try:
-            msg_data = await asyncio.to_thread(agent_handler.save_operator_message, phone, message)
+            await asyncio.to_thread(gowa_client.send_message, phone, message)
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+        except Exception as e:
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+
+        # Always save to contact memory (with status="failed" if send failed)
+        try:
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message,
+                status="failed" if send_failed else None,
+            )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
             return _err(f"Erro ao salvar mensagem: {e}", status=500)
 
-        # Track sent message to filter GOWA echo-backs
-        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
-
-        # Send via GOWA
-        try:
-            await asyncio.to_thread(gowa_client.send_message, phone, message)
-        except Exception as e:
-            logger.error("[Send] Failed to send message to %s: %s", phone, e)
-            return _err(f"Erro ao enviar mensagem: {e}", status=500)
+        if send_failed:
+            # Broadcast error event for frontend toast/error bubble
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao enviar mensagem: {error_msg}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Falha ao enviar mensagem: {error_msg}", status=500)
 
         logger.info("[Send] Manual message to %s: %s", phone, message[:80])
 
@@ -864,6 +913,51 @@ def create_app(
         })
 
         return _ok({"message": "Mensagem enviada."})
+
+    @app.post("/api/contacts/{phone}/retry-send")
+    async def retry_send_to_contact(phone: str, body: dict):
+        """Retry sending a message that previously failed."""
+        message = (body.get("message") or "").strip()
+        if not message:
+            return _err("Campo 'message' é obrigatório.")
+
+        # Track for echo-back filtering
+        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
+
+        try:
+            await asyncio.to_thread(gowa_client.send_message, phone, message)
+        except GOWASendError as e:
+            logger.error("[Retry] Failed to resend to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao reenviar mensagem: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Falha ao reenviar: {e}", status=500)
+        except Exception as e:
+            logger.error("[Retry] Failed to resend to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Erro inesperado ao reenviar: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Erro ao reenviar: {e}", status=500)
+
+        # Mark the existing failed message as sent (remove status)
+        try:
+            await asyncio.to_thread(agent_handler.mark_message_sent, phone, message)
+        except Exception as e:
+            logger.error("[Retry] Failed to update message status for %s: %s", phone, e)
+
+        state.msg_count += 1
+        logger.info("[Retry] Resent to %s: %s", phone, message[:80])
+        return _ok({"message": "Mensagem reenviada."})
 
     @app.post("/api/contacts/{phone}/send-image")
     async def send_image_to_contact(
@@ -879,8 +973,27 @@ def create_app(
 
         try:
             await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send image to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao enviar imagem: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Falha ao enviar imagem: {e}", status=500)
         except Exception as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Erro inesperado ao enviar imagem: {e}",
+                    "ts": time.time(),
+                },
+            })
             return _err(f"Erro ao enviar imagem: {e}", status=500)
 
         # Relative path for storage and frontend
@@ -912,8 +1025,27 @@ def create_app(
 
         try:
             await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send audio to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao enviar áudio: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Falha ao enviar áudio: {e}", status=500)
         except Exception as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Erro inesperado ao enviar áudio: {e}",
+                    "ts": time.time(),
+                },
+            })
             return _err(f"Erro ao enviar áudio: {e}", status=500)
 
         rel_path = f"statics/senditems/{dest.name}"

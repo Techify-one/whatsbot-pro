@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import mimetypes
+import threading
 import time
 from pathlib import Path
 
@@ -65,6 +66,7 @@ class ContactMemory:
     def __init__(self, phone: str, memory_dir: Path):
         self.phone = phone
         self.file_path = memory_dir / f"{phone}.json"
+        self.id: int | None = None
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "observations": []}
         self.messages: list[dict] = []
         self.usage: list[dict] = []
@@ -88,6 +90,7 @@ class ContactMemory:
                 self.messages = data.get("messages", [])
                 self.usage = data.get("usage", [])
                 self.ai_enabled = data.get("ai_enabled", True)
+                self.id = data.get("id")
                 self.unread_count = data.get("unread_count", 0)
                 self.created_at = data.get("created_at", time.time())
                 self.updated_at = data.get("updated_at", time.time())
@@ -97,6 +100,7 @@ class ContactMemory:
     def save(self):
         self.updated_at = time.time()
         data = {
+            "id": self.id,
             "phone": self.phone,
             "info": self.info,
             "messages": self.messages,
@@ -113,12 +117,15 @@ class ContactMemory:
             logger.error("Failed to save memory for %s: %s", self.phone, e)
 
     def add_message(self, role: str, content: str, *,
-                    media_type: str | None = None, media_path: str | None = None):
+                    media_type: str | None = None, media_path: str | None = None,
+                    status: str | None = None):
         entry: dict = {"role": role, "content": content, "ts": time.time()}
         if media_type:
             entry["media_type"] = media_type
         if media_path:
             entry["media_path"] = media_path
+        if status:
+            entry["status"] = status
         self.messages.append(entry)
         self.save()
 
@@ -143,8 +150,9 @@ class ContactMemory:
         placeholder to keep token usage reasonable.
         Transcription messages (role="transcription") are excluded from LLM context.
         """
-        # Filter out transcription-only messages before slicing
-        eligible = [m for m in self.messages if m.get("role") != "transcription"]
+        # Filter out transcription-only and failed messages before slicing
+        eligible = [m for m in self.messages
+                    if m.get("role") != "transcription" and m.get("status") != "failed"]
         recent = eligible[-limit:] if len(eligible) > limit else eligible
 
         # Find the index of the last user image message (within *recent*)
@@ -292,6 +300,7 @@ class AgentHandler:
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
         self.pricing_fn = pricing_fn
+        self._id_lock = threading.Lock()
 
     def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
         """Extract usage from an OpenAI-compatible response and record it."""
@@ -438,10 +447,69 @@ class AgentHandler:
             logger.error("Image description failed: %s", e)
             return ""
 
+    def _next_contact_id(self) -> int:
+        """Return the next sequential contact ID (thread-safe)."""
+        with self._id_lock:
+            counter_file = self.memory_dir / "_counter.json"
+            next_id = 1
+            if counter_file.exists():
+                try:
+                    data = json.loads(counter_file.read_text(encoding="utf-8"))
+                    next_id = data.get("next_id", 1)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            counter_file.write_text(
+                json.dumps({"next_id": next_id + 1}), encoding="utf-8"
+            )
+            return next_id
+
+    def ensure_contact_ids(self) -> None:
+        """Assign sequential IDs to existing contacts that lack one (migration)."""
+        counter_file = self.memory_dir / "_counter.json"
+        next_id = 1
+        if counter_file.exists():
+            try:
+                data = json.loads(counter_file.read_text(encoding="utf-8"))
+                next_id = data.get("next_id", 1)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        needs_id: list[tuple[float, Path, dict]] = []
+        max_existing = 0
+        for f in self.memory_dir.glob("*.json"):
+            if f.stem.startswith("_"):
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                cid = data.get("id")
+                if cid is not None:
+                    max_existing = max(max_existing, cid)
+                else:
+                    needs_id.append((data.get("created_at", 0), f, data))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        next_id = max(next_id, max_existing + 1)
+        needs_id.sort(key=lambda x: x[0])
+
+        for _, f, data in needs_id:
+            data["id"] = next_id
+            f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            next_id += 1
+
+        counter_file.write_text(
+            json.dumps({"next_id": next_id}), encoding="utf-8"
+        )
+        logger.info("Contact IDs ensured: %d migrated, next_id=%d", len(needs_id), next_id)
+
     def _get_contact(self, phone: str) -> ContactMemory:
         if phone not in self._contacts:
             self._contacts[phone] = ContactMemory(phone, self.memory_dir)
-        return self._contacts[phone]
+        contact = self._contacts[phone]
+        if contact.id is None:
+            contact.id = self._next_contact_id()
+            contact.save()
+        return contact
 
     def _build_system_prompt(self, contact: ContactMemory) -> str:
         """Build system prompt with contact info injected."""
@@ -457,6 +525,7 @@ class AgentHandler:
 
     def process_message(self, sender: str, text: str, *,
                         save_user_message: bool = True,
+                        save_response: bool = True,
                         image_path: str | None = None,
                         audio_path: str | None = None) -> str:
         """Process an incoming message and return the AI response.
@@ -535,7 +604,8 @@ class AgentHandler:
             else:
                 reply = msg.content.strip()
 
-            contact.add_message("assistant", reply)
+            if save_response:
+                contact.add_message("assistant", reply)
             logger.info("Processed message from %s", sender)
             return reply
 
@@ -564,11 +634,28 @@ class AgentHandler:
         except Exception as e:
             return False, f"Erro: {e}"
 
-    def save_operator_message(self, phone: str, text: str) -> dict:
-        """Save a manually sent message (from the operator) without LLM processing."""
+    def save_assistant_message(self, phone: str, text: str) -> dict:
+        """Save an assistant (bot) message to contact memory after successful send."""
         contact = self._get_contact(phone)
         contact.add_message("assistant", text)
         return contact.messages[-1]
+
+    def save_operator_message(self, phone: str, text: str,
+                              status: str | None = None) -> dict:
+        """Save a manually sent message (from the operator) without LLM processing."""
+        contact = self._get_contact(phone)
+        contact.add_message("assistant", text, status=status)
+        return contact.messages[-1]
+
+    def mark_message_sent(self, phone: str, content: str) -> dict | None:
+        """Find the most recent failed message with matching content and mark as sent."""
+        contact = self._get_contact(phone)
+        for msg in reversed(contact.messages):
+            if msg.get("status") == "failed" and msg.get("content") == content:
+                msg.pop("status", None)
+                contact.save()
+                return msg
+        return None
 
     def clear_conversation(self, sender: str):
         contact = self._get_contact(sender)

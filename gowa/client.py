@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DEVICE_NAME = "whatsbot"
 
 
+class GOWASendError(Exception):
+    """Raised when sending a message via GOWA fails."""
+
+    def __init__(self, message: str, error_type: str = "unknown"):
+        super().__init__(message)
+        self.error_type = error_type  # network, api, unknown
+
+
 class GOWAClient:
     """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.3.3)."""
 
@@ -26,7 +34,8 @@ class GOWAClient:
         return {"X-Device-Id": self.device_id}
 
     def _request(self, method: str, path: str, raw: bool = False,
-                 skip_device_header: bool = False, **kwargs) -> dict | bytes | None:
+                 skip_device_header: bool = False,
+                 raise_on_error: bool = False, **kwargs) -> dict | bytes | None:
         url = f"{self.base_url}{path}"
         if skip_device_header:
             headers = kwargs.pop("headers", {})
@@ -42,12 +51,37 @@ class GOWAClient:
                 return resp.json() if resp.text else {}
         except httpx.ConnectError:
             logger.debug("GOWA not reachable at %s", url)
+            if raise_on_error:
+                raise GOWASendError(
+                    "WhatsApp não está acessível. Verifique se o serviço está rodando.",
+                    error_type="network",
+                )
             return None
         except httpx.HTTPStatusError as e:
             logger.error("GOWA HTTP %s %s -> %s", method, path, e.response.status_code)
+            if raise_on_error:
+                status = e.response.status_code
+                # Try to extract error message from GOWA response
+                detail = ""
+                try:
+                    body = e.response.json()
+                    detail = body.get("message", body.get("error", ""))
+                except Exception:
+                    pass
+                msg = f"Erro da API do WhatsApp (HTTP {status})"
+                if detail:
+                    msg += f": {detail}"
+                raise GOWASendError(msg, error_type="api")
             return None
+        except GOWASendError:
+            raise
         except Exception as e:
             logger.error("GOWA request error: %s", e)
+            if raise_on_error:
+                raise GOWASendError(
+                    f"Erro ao enviar mensagem: {e}",
+                    error_type="unknown",
+                )
             return None
 
     # ── Device Management ────────────────────────────────────────────
@@ -159,16 +193,16 @@ class GOWAClient:
     def _clean_phone(self, phone: str) -> str:
         return phone.strip().replace("+", "").replace(" ", "").replace("-", "")
 
-    def send_message(self, phone: str, text: str) -> dict | None:
-        """Send a text message to a phone number."""
+    def send_message(self, phone: str, text: str) -> dict:
+        """Send a text message to a phone number. Raises GOWASendError on failure."""
         payload = {
             "phone": self._clean_phone(phone),
             "message": text,
         }
-        return self._request("POST", "/send/message", json=payload)
+        return self._request("POST", "/send/message", raise_on_error=True, json=payload)
 
-    def send_image(self, phone: str, image_path: str, caption: str = "") -> dict | None:
-        """Send an image to a phone number via multipart/form-data."""
+    def send_image(self, phone: str, image_path: str, caption: str = "") -> dict:
+        """Send an image to a phone number via multipart/form-data. Raises GOWASendError on failure."""
         phone = self._clean_phone(phone)
         url = f"{self.base_url}/send/image"
         mime = mimetypes.guess_type(image_path)[0] or "image/png"
@@ -182,12 +216,29 @@ class GOWAClient:
                     resp = client.post(url, headers=self._headers, data=data, files=files)
                     resp.raise_for_status()
                     return resp.json() if resp.text else {}
+        except httpx.ConnectError:
+            raise GOWASendError(
+                "WhatsApp não está acessível. Verifique se o serviço está rodando.",
+                error_type="network",
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                body = e.response.json()
+                detail = body.get("message", body.get("error", ""))
+            except Exception:
+                pass
+            msg = f"Erro da API do WhatsApp (HTTP {e.response.status_code})"
+            if detail:
+                msg += f": {detail}"
+            raise GOWASendError(msg, error_type="api")
+        except GOWASendError:
+            raise
         except Exception as e:
-            logger.error("GOWA send_image error: %s", e)
-            return None
+            raise GOWASendError(f"Erro ao enviar imagem: {e}", error_type="unknown")
 
-    def send_audio(self, phone: str, audio_path: str) -> dict | None:
-        """Send an audio file to a phone number via multipart/form-data."""
+    def send_audio(self, phone: str, audio_path: str) -> dict:
+        """Send an audio file to a phone number via multipart/form-data. Raises GOWASendError on failure."""
         phone = self._clean_phone(phone)
         url = f"{self.base_url}/send/audio"
         mime = mimetypes.guess_type(audio_path)[0] or "audio/ogg"
@@ -199,9 +250,26 @@ class GOWAClient:
                     resp = client.post(url, headers=self._headers, data=data, files=files)
                     resp.raise_for_status()
                     return resp.json() if resp.text else {}
+        except httpx.ConnectError:
+            raise GOWASendError(
+                "WhatsApp não está acessível. Verifique se o serviço está rodando.",
+                error_type="network",
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                body = e.response.json()
+                detail = body.get("message", body.get("error", ""))
+            except Exception:
+                pass
+            msg = f"Erro da API do WhatsApp (HTTP {e.response.status_code})"
+            if detail:
+                msg += f": {detail}"
+            raise GOWASendError(msg, error_type="api")
+        except GOWASendError:
+            raise
         except Exception as e:
-            logger.error("GOWA send_audio error: %s", e)
-            return None
+            raise GOWASendError(f"Erro ao enviar áudio: {e}", error_type="unknown")
 
     # ── Presence ───────────────────────────────────────────────────
 

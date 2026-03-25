@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, sendMessage, sendImage, sendAudio, markAsRead, updateContactInfo, toggleContactAI, sendPresence } from '../services/api.js';
+import { getContacts, getContact, sendMessage, retrySend, sendImage, sendAudio, markAsRead, updateContactInfo, toggleContactAI, sendPresence } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -91,9 +91,35 @@ function DoubleCheckIcon() {
   `;
 }
 
+function ClockIcon() {
+  return html`
+    <svg viewBox="0 0 16 15" width="14" height="14" class="inline-block mr-[3px] align-middle shrink-0">
+      <path d="M9.75 7.713H8.244V5.359a.5.5 0 00-.5-.5H7.65a.5.5 0 00-.5.5v2.947a.5.5 0 00.5.5h2.1a.5.5 0 00.5-.5v-.094a.5.5 0 00-.5-.5zm-1.2-5.783A5.545 5.545 0 003 7.475a5.545 5.545 0 005.55 5.546 5.545 5.545 0 005.55-5.546A5.545 5.545 0 008.55 1.93z" fill="#92a58c"/>
+    </svg>
+  `;
+}
+
+function FailedIcon() {
+  return html`
+    <svg viewBox="0 0 16 16" width="14" height="14" class="inline-block mr-[3px] align-middle shrink-0">
+      <path d="M8 1.5a6.5 6.5 0 110 13 6.5 6.5 0 010-13zM7.25 5v4.5h1.5V5h-1.5zm0 6v1.5h1.5V11h-1.5z" fill="#e53e3e"/>
+    </svg>
+  `;
+}
+
+function RetryIcon({ onClick }) {
+  return html`
+    <button onClick=${onClick} class="ml-[6px] inline-flex items-center align-middle opacity-70 hover:opacity-100 transition-opacity" title="Reenviar mensagem" style="background:none;border:none;cursor:pointer;padding:2px;">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="#e53e3e">
+        <path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+      </svg>
+    </button>
+  `;
+}
+
 // ── Context Menu ─────────────────────────────────────────────────
 
-function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onClose }) {
+function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onEditContact, onClose }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -124,6 +150,15 @@ function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onClose }) {
           }
         </svg>
         ${aiEnabled ? 'Desativar IA' : 'Ativar IA'}
+      </button>
+      <button
+        onClick=${() => { onEditContact(phone); onClose(); }}
+        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 000-1.42l-2.34-2.33a1.003 1.003 0 00-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.83z"/>
+        </svg>
+        Editar Contato
       </button>
     </div>
   `;
@@ -410,7 +445,7 @@ function StopIcon() {
   `;
 }
 
-function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTyping }) {
+function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTyping, setContactData }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -460,6 +495,17 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     };
   }, [phone]);
 
+  // Helper to find and update a message by its local ID
+  function updateMsgByLocalId(localId, updater) {
+    setContactData(prev => {
+      if (!prev) return prev;
+      const msgs = (prev.messages || []).map(m =>
+        m._localId === localId ? { ...m, ...updater(m) } : m
+      );
+      return { ...prev, messages: msgs };
+    });
+  }
+
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
@@ -472,13 +518,45 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
 
     setSending(true);
     setInput('');
+
+    // Add message optimistically
+    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const msgTs = Date.now() / 1000;
+    setContactData(prev => prev ? {
+      ...prev,
+      messages: [...(prev.messages || []), {
+        role: 'assistant', content: text, ts: msgTs,
+        _localId: localId, _status: 'sending',
+      }],
+    } : prev);
+
     try {
       const res = await sendMessage(phone, text);
-      if (!res.ok) console.error('Send failed:', res.error);
+      if (res.ok) {
+        updateMsgByLocalId(localId, () => ({ _status: null }));
+      } else {
+        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      }
     } catch (err) {
       console.error('Send error:', err);
+      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
     setSending(false);
+  }
+
+  async function handleRetry(localId, text) {
+    updateMsgByLocalId(localId, () => ({ _status: 'sending' }));
+    try {
+      const res = await retrySend(phone, text);
+      if (res.ok) {
+        updateMsgByLocalId(localId, () => ({ _status: null }));
+      } else {
+        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      }
+    } catch (err) {
+      console.error('Retry error:', err);
+      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+    }
   }
 
   function handleAttachClick() {
@@ -489,11 +567,28 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     const file = e.target.files[0];
     if (!file || sending) return;
     setSending(true);
+
+    // Optimistic: show image in chat immediately
+    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const localUrl = URL.createObjectURL(file);
+    setContactData(prev => prev ? {
+      ...prev,
+      messages: [...(prev.messages || []), {
+        role: 'assistant', content: '', ts: Date.now() / 1000,
+        media_type: 'image', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
+      }],
+    } : prev);
+
     try {
       const res = await sendImage(phone, file);
-      if (!res.ok) console.error('Send image failed:', res.error);
+      if (res.ok) {
+        updateMsgByLocalId(localId, () => ({ _status: null }));
+      } else {
+        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+      }
     } catch (err) {
       console.error('Send image error:', err);
+      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
     setSending(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -525,11 +620,28 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         if (chunks.length === 0) return;
         const blob = new Blob(chunks, { type: 'audio/webm' });
         setSending(true);
+
+        // Optimistic: show audio in chat immediately
+        const audioLocalId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const audioLocalUrl = URL.createObjectURL(blob);
+        setContactData(prev => prev ? {
+          ...prev,
+          messages: [...(prev.messages || []), {
+            role: 'assistant', content: '[Áudio]', ts: Date.now() / 1000,
+            media_type: 'audio', media_path: audioLocalUrl, _localId: audioLocalId, _status: 'sending', _isLocalBlob: true,
+          }],
+        } : prev);
+
         try {
           const res = await sendAudio(phone, blob);
-          if (!res.ok) console.error('Send audio failed:', res.error);
+          if (res.ok) {
+            updateMsgByLocalId(audioLocalId, () => ({ _status: null }));
+          } else {
+            updateMsgByLocalId(audioLocalId, () => ({ _status: 'failed' }));
+          }
         } catch (err) {
           console.error('Send audio error:', err);
+          updateMsgByLocalId(audioLocalId, () => ({ _status: 'failed' }));
         }
         setSending(false);
       };
@@ -583,7 +695,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
         <div onClick=${onAvatarClick} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] cursor-pointer">
           <${DefaultAvatar} size=${40} />
         </div>
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
           <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}</div>
           ${contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
@@ -601,6 +713,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
           : messages.map((m, i) => {
               const isUser = m.role === 'user';
               const isTranscription = m.role === 'transcription';
+              const isError = m.role === 'error';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
 
               if (isTranscription) {
@@ -621,20 +734,41 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
                 `;
               }
 
+              if (isError) {
+                return html`
+                  <div key=${i} class="flex justify-center mt-[4px]">
+                    <div class="max-w-[85%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
+                         style="background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;">
+                      <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                        Erro no envio
+                      </span>
+                      <span>${m.content}</span>
+                      <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
+                        ${formatBubbleTime(m.ts)}
+                      </span>
+                    </div>
+                  </div>
+                `;
+              }
+
+              const isFailed = m._status === 'failed' || m.status === 'failed';
+              const isSending = m._status === 'sending';
+
               return html`
-                <div key=${i} class="flex ${isUser ? 'justify-start' : 'justify-end'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
+                <div key=${m._localId || i} class="flex ${isUser ? 'justify-start' : 'justify-end'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
                   <div class="wa-bubble max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
                     isUser
                       ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
-                      : `bg-wa-outgoing text-wa-text ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
-                  }">
+                      : `${isFailed ? 'text-wa-text' : 'bg-wa-outgoing text-wa-text'} ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
+                  }" style="${isFailed ? 'background: #fce8e8;' : ''}">
                     ${m.media_type === 'image' ? html`
                       <img
-                        src="/${m.media_path}"
+                        src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}"
                         alt="Imagem"
                         class="rounded-[4px] max-w-full max-h-[300px] mb-1 cursor-pointer"
                         style="min-width:120px"
-                        onClick=${() => window.open('/' + m.media_path, '_blank')}
+                        onClick=${() => window.open(m._isLocalBlob ? m.media_path : '/' + m.media_path, '_blank')}
                         loading="lazy"
                       />
                       ${m.content && m.content !== '[Imagem enviada pelo contato]'
@@ -642,15 +776,19 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
                         : null}
                     ` : m.media_type === 'audio' ? html`
                       <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
-                        <source src="/${m.media_path}" type="audio/ogg" />
-                        <source src="/${m.media_path}" type="audio/mpeg" />
+                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/ogg" />
+                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
                       </audio>
                       ${m.content && m.content !== '[Áudio recebido]' && m.content !== '[Áudio]'
                         ? html`<span class="block text-[12px] text-wa-secondary italic">${m.content}</span>`
                         : null}
                     ` : html`<span>${m.content}</span>`}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
-                      ${!isUser ? html`<${DoubleCheckIcon} />` : ''}${formatBubbleTime(m.ts)}
+                      ${!isUser ? (
+                        isFailed ? html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}` :
+                        isSending ? html`<${ClockIcon} />` :
+                        html`<${DoubleCheckIcon} />`
+                      ) : ''}${formatBubbleTime(m.ts)}
                     </span>
                   </div>
                 </div>
@@ -731,6 +869,7 @@ export function Contacts({ newMessage, chatPresence }) {
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const openInfoAfterSelect = useRef(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
@@ -773,7 +912,12 @@ export function Contacts({ newMessage, chatPresence }) {
   // Load contact detail when selected changes
   useEffect(() => {
     if (!selected) { setContactData(null); return; }
-    setShowInfoPanel(false);
+    if (openInfoAfterSelect.current) {
+      openInfoAfterSelect.current = false;
+      setShowInfoPanel(true);
+    } else {
+      setShowInfoPanel(false);
+    }
     setLoadingDetail(true);
     // Preserve any messages already buffered for this contact (arrived before selection)
     // but reset the accumulator for new messages arriving during fetch
@@ -801,6 +945,13 @@ export function Contacts({ newMessage, chatPresence }) {
             data.messages = [...(data.messages || []), ...newMsgs];
           }
         }
+        // Hydrate failed messages with _localId so retry button works after reload
+        data.messages = (data.messages || []).map(m => {
+          if (m.status === 'failed') {
+            return { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' };
+          }
+          return m;
+        });
         pendingWsMessages.current[selected] = [];
         setContactData(data);
       }
@@ -874,8 +1025,8 @@ export function Contacts({ newMessage, chatPresence }) {
       }
     }
 
-    // Skip contact list preview update for transcription messages
-    if (message.role === 'transcription') return;
+    // Skip contact list preview update for transcription and error messages
+    if (message.role === 'transcription' || message.role === 'error') return;
 
     setContacts(prev => {
       const idx = prev.findIndex(c => c.phone === phone);
@@ -940,6 +1091,7 @@ export function Contacts({ newMessage, chatPresence }) {
                 phone=${selected}
                 onBack=${() => setSelected(null)}
                 messages=${messages}
+                setContactData=${setContactData}
                 info=${info}
                 onAvatarClick=${() => selected && setShowInfoPanel(true)}
                 contactTyping=${selected && typingState[selected] || null}
@@ -968,6 +1120,7 @@ export function Contacts({ newMessage, chatPresence }) {
           phone=${ctxMenu.phone}
           aiEnabled=${ctxMenu.aiEnabled}
           onToggleAI=${handleToggleAI}
+          onEditContact=${(phone) => { openInfoAfterSelect.current = true; setSelected(phone); }}
           onClose=${() => setCtxMenu(null)}
         />
       ` : null}
