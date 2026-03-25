@@ -563,12 +563,10 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     if (fileInputRef.current) fileInputRef.current.click();
   }
 
-  async function handleFileSelected(e) {
-    const file = e.target.files[0];
+  async function sendImageFile(file) {
     if (!file || sending) return;
     setSending(true);
 
-    // Optimistic: show image in chat immediately
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const localUrl = URL.createObjectURL(file);
     setContactData(prev => prev ? {
@@ -591,7 +589,25 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
       updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
     setSending(false);
+  }
+
+  function handleFileSelected(e) {
+    const file = e.target.files[0];
+    if (file) sendImageFile(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) sendImageFile(file);
+        return;
+      }
+    }
   }
 
   async function handleMicClick() {
@@ -776,6 +792,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
                         : null}
                     ` : m.media_type === 'audio' ? html`
                       <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
+                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/webm" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/ogg" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
                       </audio>
@@ -835,6 +852,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
               type="text"
               value=${input}
               onInput=${handleInputChange}
+              onPaste=${handlePaste}
               placeholder="Digite uma mensagem"
               disabled=${sending}
               class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary disabled:opacity-50"

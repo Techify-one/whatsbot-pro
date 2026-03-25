@@ -1019,7 +1019,7 @@ def create_app(
         audio: UploadFile = File(...),
     ):
         """Send an audio file to a contact (operator-initiated)."""
-        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
+        suffix = Path(audio.filename or "voice.webm").suffix or ".webm"
         dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
         dest.write_bytes(content)
