@@ -819,6 +819,7 @@ def create_app(
                         else:
                             last_content = (last.get("content") or "")[:80]
                     results.append({
+                        "id": data.get("id"),
                         "phone": phone,
                         "name": info.get("name", ""),
                         "last_message": last_content,

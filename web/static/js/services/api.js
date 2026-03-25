@@ -96,7 +96,7 @@ export async function sendImage(phone, file, caption = '') {
 
 export async function sendAudio(phone, blob) {
   const form = new FormData();
-  form.append('audio', blob, 'voice.ogg');
+  form.append('audio', blob, 'voice.webm');
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
     method: 'POST',
     body: form,

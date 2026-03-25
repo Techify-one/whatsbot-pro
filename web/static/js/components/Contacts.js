@@ -861,7 +861,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence }) {
+export function Contacts({ newMessage, chatPresence, initialContactId }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -876,9 +876,12 @@ export function Contacts({ newMessage, chatPresence }) {
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
+  const contactsRef = useRef([]);
+  const initialIdHandled = useRef(false);
 
-  // Keep ref in sync — avoids stale closure in newMessage effect
+  // Keep refs in sync — avoids stale closures
   useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { contactsRef.current = contacts; }, [contacts]);
 
   const handleToggleAI = useCallback(async (phone, enabled) => {
     const res = await toggleContactAI(phone, enabled);
@@ -892,16 +895,47 @@ export function Contacts({ newMessage, chatPresence }) {
     }
   }, [contactData]);
 
+  // Push URL when selecting/deselecting a contact
+  const selectContact = useCallback((phone) => {
+    setSelected(phone);
+    if (phone) {
+      const c = contactsRef.current.find(c => c.phone === phone);
+      if (c && c.id != null) {
+        history.pushState(null, '', `/contacts/${c.id}`);
+      }
+    } else {
+      history.pushState(null, '', '/');
+    }
+  }, []);
+
   const fetchContacts = useCallback((q = '') => {
     setLoading(true);
     getContacts(q).then(res => {
-      if (res.ok) setContacts(res.data);
+      if (res.ok) {
+        setContacts(res.data);
+        contactsRef.current = res.data;
+      }
       setLoading(false);
     });
   }, []);
 
   // Initial load
   useEffect(() => { fetchContacts(); }, []);
+
+  // Resolve initialContactId → phone when contacts are loaded
+  useEffect(() => {
+    if (initialContactId == null) {
+      // popstate back to "/" — deselect without pushing URL again
+      if (initialIdHandled.current) setSelected(null);
+      return;
+    }
+    if (contacts.length === 0 || loading) return;
+    const c = contacts.find(c => c.id === initialContactId);
+    if (c) {
+      setSelected(c.phone);
+      initialIdHandled.current = true;
+    }
+  }, [initialContactId, contacts, loading]);
 
   // Debounced search
   useEffect(() => {
@@ -1069,7 +1103,7 @@ export function Contacts({ newMessage, chatPresence }) {
           search=${search}
           onSearchChange=${setSearch}
           selected=${selected}
-          onSelect=${setSelected}
+          onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
         />
@@ -1089,7 +1123,7 @@ export function Contacts({ newMessage, chatPresence }) {
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
             : html`<${ContactDetail}
                 phone=${selected}
-                onBack=${() => setSelected(null)}
+                onBack=${() => selectContact(null)}
                 messages=${messages}
                 setContactData=${setContactData}
                 info=${info}
@@ -1120,7 +1154,7 @@ export function Contacts({ newMessage, chatPresence }) {
           phone=${ctxMenu.phone}
           aiEnabled=${ctxMenu.aiEnabled}
           onToggleAI=${handleToggleAI}
-          onEditContact=${(phone) => { openInfoAfterSelect.current = true; setSelected(phone); }}
+          onEditContact=${(phone) => { openInfoAfterSelect.current = true; selectContact(phone); }}
           onClose=${() => setCtxMenu(null)}
         />
       ` : null}

@@ -241,7 +241,7 @@ class GOWAClient:
         """Send an audio file to a phone number via multipart/form-data. Raises GOWASendError on failure."""
         phone = self._clean_phone(phone)
         url = f"{self.base_url}/send/audio"
-        mime = mimetypes.guess_type(audio_path)[0] or "audio/ogg"
+        mime = mimetypes.guess_type(audio_path)[0] or "audio/webm"
         try:
             with httpx.Client(timeout=30.0) as client:
                 with open(audio_path, "rb") as f:

@@ -14,7 +14,14 @@ const ROUTES = { '/': 'contacts', '/dashboard': 'dashboard', '/sandbox': 'sandbo
 const TAB_PATHS = { contacts: '/', dashboard: '/dashboard', sandbox: '/sandbox', costs: '/costs' };
 
 function tabFromPath() {
-  return ROUTES[window.location.pathname] || 'contacts';
+  const path = window.location.pathname;
+  if (path.match(/^\/contacts\/\d+$/)) return 'contacts';
+  return ROUTES[path] || 'contacts';
+}
+
+function contactIdFromPath() {
+  const m = window.location.pathname.match(/^\/contacts\/(\d+)$/);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 function GearMenu({ tab, onTabChange }) {
@@ -92,6 +99,7 @@ function App() {
   const [tab, setTabState] = useState(tabFromPath);
   const [newMessage, setNewMessage] = useState(null);
   const [chatPresence, setChatPresence] = useState(null);
+  const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
 
   const setTab = useCallback((t) => {
     setTabState(t);
@@ -100,7 +108,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    function onPopState() { setTabState(tabFromPath()); }
+    function onPopState() {
+      setTabState(tabFromPath());
+      setInitialContactId(contactIdFromPath());
+    }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
@@ -155,7 +166,7 @@ function App() {
               />
             </div>`
           : tab === 'contacts'
-            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} />`
+            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} initialContactId=${initialContactId} />`
             : tab === 'costs'
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
