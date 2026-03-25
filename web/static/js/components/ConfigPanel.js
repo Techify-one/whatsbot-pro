@@ -83,7 +83,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       max_context_messages: parseInt(maxContext, 10) || 10,
       message_batch_delay: parseFloat(batchDelay) || 3,
       split_messages: splitMessages,
-      split_message_delay: parseFloat(splitDelay) || 2,
+      split_message_delay: parseFloat(splitDelay) ?? 2,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -222,7 +222,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             <label class="block text-xs font-medium text-wa-text mb-1">Intervalo entre mensagens (s)</label>
             <input
               type="number"
-              min="0.5"
+              min="0"
               max="10"
               step="0.5"
               value=${splitDelay}

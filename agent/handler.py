@@ -20,6 +20,7 @@ class ProcessResult:
     """Result of process_message with optional tool call metadata."""
     reply: str
     tool_calls: list[dict] = dataclasses.field(default_factory=list)
+    contact_info: dict | None = None
 
 
 class ContactMemory:
@@ -625,7 +626,15 @@ class AgentHandler:
             if save_response:
                 contact.add_message("assistant", reply)
             logger.info("Processed message from %s", sender)
-            return ProcessResult(reply=reply, tool_calls=executed_tools)
+
+            # Snapshot contact info if any tool modified it
+            updated_info = None
+            if any(tc.get("tool") == "save_contact_info" for tc in executed_tools):
+                updated_info = dict(contact.info)
+                # Deep copy observations list
+                updated_info["observations"] = list(updated_info.get("observations", []))
+
+            return ProcessResult(reply=reply, tool_calls=executed_tools, contact_info=updated_info)
 
         except Exception as e:
             logger.error("LLM error for %s: %s", sender, e)

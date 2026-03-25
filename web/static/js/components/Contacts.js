@@ -985,7 +985,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, initialContactId }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initialContactId }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -1136,6 +1136,24 @@ export function Contacts({ newMessage, chatPresence, initialContactId }) {
       setTypingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
     }
   }, [chatPresence]);
+
+  // Handle real-time contact info updates (e.g. from save_contact_info tool)
+  useEffect(() => {
+    if (!contactInfoUpdated) return;
+    const { phone, info: updatedInfo } = contactInfoUpdated;
+    console.log('[WS] contact_info_updated', phone, updatedInfo);
+    if (!phone || !updatedInfo) return;
+
+    // Update sidebar name
+    setContacts(prev => prev.map(c =>
+      c.phone === phone ? { ...c, name: updatedInfo.name || c.name } : c
+    ));
+
+    // Update detail view if this contact is selected
+    if (phone === selectedRef.current) {
+      setContactData(prev => prev ? { ...prev, info: { ...updatedInfo } } : prev);
+    }
+  }, [contactInfoUpdated]);
 
   // Handle real-time messages from WebSocket
   useEffect(() => {

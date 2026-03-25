@@ -99,6 +99,7 @@ function App() {
   const [tab, setTabState] = useState(tabFromPath);
   const [newMessage, setNewMessage] = useState(null);
   const [chatPresence, setChatPresence] = useState(null);
+  const [contactInfoUpdated, setContactInfoUpdated] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
 
   const setTab = useCallback((t) => {
@@ -128,6 +129,7 @@ function App() {
     onConfigSaved: useCallback(() => setNotification('Configurações salvas!'), []),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
     onChatPresence: useCallback((data) => setChatPresence(data), []),
+    onContactInfoUpdated: useCallback((data) => setContactInfoUpdated(data), []),
   });
 
   async function handleSave(data) {
@@ -166,7 +168,7 @@ function App() {
               />
             </div>`
           : tab === 'contacts'
-            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} initialContactId=${initialContactId} />`
+            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} initialContactId=${initialContactId} />`
             : tab === 'costs'
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />

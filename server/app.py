@@ -481,7 +481,8 @@ def create_app(
             if i > 0:
                 # Inter-message delay with ±0.5s variation
                 base_delay = settings.get("split_message_delay", 2.0)
-                await asyncio.sleep(base_delay + random.uniform(-0.5, 0.5))
+                if base_delay > 0:
+                    await asyncio.sleep(base_delay + random.uniform(-0.5, 0.5))
                 # Re-send typing indicator between parts
                 try:
                     await asyncio.to_thread(gowa_client.send_chat_presence, phone)
@@ -525,7 +526,8 @@ def create_app(
             "auto_reply_running": state.auto_reply_running,
         })
 
-    async def _broadcast_tool_calls(phone: str, tool_calls: list[dict]):
+    async def _broadcast_tool_calls(phone: str, tool_calls: list[dict],
+                                    contact_info: dict | None = None):
         """Broadcast private messages for each tool call executed by the LLM."""
         contact = agent_handler._get_contact(phone)
         for tc in tool_calls:
@@ -545,6 +547,14 @@ def create_app(
                     "content": content,
                     "ts": time.time(),
                 },
+            })
+
+        # Broadcast updated contact info so the frontend refreshes name/details
+        if contact_info:
+            logger.info("[ToolCall] Broadcasting contact_info_updated for %s: %s", phone, contact_info)
+            await ws_manager.broadcast("contact_info_updated", {
+                "phone": phone,
+                "info": contact_info,
             })
 
     async def _process_batch(phone: str, delay: float):
@@ -582,7 +592,7 @@ def create_app(
                             agent_handler.process_message, phone, combined,
                             save_user_message=False, save_response=False)
                         if result.tool_calls:
-                            await _broadcast_tool_calls(phone, result.tool_calls)
+                            await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
                         if result.reply:
                             await _send_reply(phone, result.reply)
                     except Exception as e:
@@ -663,7 +673,7 @@ def create_app(
                     image_path=image_path if not transcription else None,
                 )
                 if result.tool_calls:
-                    await _broadcast_tool_calls(phone, result.tool_calls)
+                    await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
                 if result.reply:
                     await _send_reply(phone, result.reply)
             except Exception as e:
@@ -854,7 +864,7 @@ def create_app(
             return _err(f"Erro ao processar mensagem: {e}", status=500)
 
         if result.tool_calls:
-            await _broadcast_tool_calls(phone, result.tool_calls)
+            await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
 
         state.msg_count += 1
 
