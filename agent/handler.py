@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import json
 import logging
 import mimetypes
@@ -12,6 +13,13 @@ from openai import OpenAI
 from agent.tools import ALL_TOOLS
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class ProcessResult:
+    """Result of process_message with optional tool call metadata."""
+    reply: str
+    tool_calls: list[dict] = dataclasses.field(default_factory=list)
 
 
 class ContactMemory:
@@ -116,7 +124,7 @@ class ContactMemory:
         """
         # Filter out transcription-only and failed messages before slicing
         eligible = [m for m in self.messages
-                    if m.get("role") != "transcription" and m.get("status") != "failed"]
+                    if m.get("role") not in ("transcription", "tool_call") and m.get("status") != "failed"]
         recent = eligible[-limit:] if len(eligible) > limit else eligible
 
         # Find the index of the last user image message (within *recent*)
@@ -527,7 +535,7 @@ class AgentHandler:
                         save_user_message: bool = True,
                         save_response: bool = True,
                         image_path: str | None = None,
-                        audio_path: str | None = None) -> str:
+                        audio_path: str | None = None) -> ProcessResult:
         """Process an incoming message and return the AI response.
 
         If *image_path* is provided the image is sent to a vision-capable model.
@@ -535,7 +543,7 @@ class AgentHandler:
         like ``[Áudio recebido]`` — the LLM will see that label.
         """
         if not self.api_key:
-            return "[WhatsBot] API key não configurada."
+            return ProcessResult(reply="[WhatsBot] API key não configurada.")
 
         contact = self._get_contact(sender)
 
@@ -572,16 +580,26 @@ class AgentHandler:
             self._record_usage(sender, "text", self.model, response)
             msg = response.choices[0].message
 
-            # Handle tool calls (save contact info)
+            # Handle tool calls generically
+            executed_tools: list[dict] = []
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    if tc.function.name == "save_contact_info":
+                    tool_name = tc.function.name
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError as e:
+                        logger.warning("Failed to parse tool args for %s: %s", sender, e)
+                        args = {}
+
+                    # Dispatch tool execution
+                    if tool_name == "save_contact_info":
                         try:
-                            args = json.loads(tc.function.arguments)
                             contact.update_info(**args)
-                            logger.info("Saved contact info for %s: %s", sender, args)
-                        except (json.JSONDecodeError, Exception) as e:
-                            logger.warning("Failed to parse tool call for %s: %s", sender, e)
+                        except Exception as e:
+                            logger.warning("Failed to execute %s for %s: %s", tool_name, sender, e)
+
+                    executed_tools.append({"tool": tool_name, "args": args})
+                    logger.info("Tool call for %s: %s(%s)", sender, tool_name, args)
 
                 # If model only called tools without text, do a follow-up call
                 if not msg.content:
@@ -607,16 +625,16 @@ class AgentHandler:
             if save_response:
                 contact.add_message("assistant", reply)
             logger.info("Processed message from %s", sender)
-            return reply
+            return ProcessResult(reply=reply, tool_calls=executed_tools)
 
         except Exception as e:
             logger.error("LLM error for %s: %s", sender, e)
             error_msg = str(e)
             if "401" in error_msg or "unauthorized" in error_msg.lower():
-                return "[WhatsBot] API key inválida. Verifique sua chave OpenRouter."
+                return ProcessResult(reply="[WhatsBot] API key inválida. Verifique sua chave OpenRouter.")
             if "429" in error_msg or "rate" in error_msg.lower():
-                return "[WhatsBot] Limite de requisições atingido. Tente novamente em instantes."
-            return "[WhatsBot] Erro ao processar mensagem. Tente novamente."
+                return ProcessResult(reply="[WhatsBot] Limite de requisições atingido. Tente novamente em instantes.")
+            return ProcessResult(reply="[WhatsBot] Erro ao processar mensagem. Tente novamente.")
 
     def test_api_key(self, api_key: str) -> tuple[bool, str]:
         """Test if an API key is valid."""

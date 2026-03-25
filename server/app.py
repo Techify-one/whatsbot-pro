@@ -525,6 +525,28 @@ def create_app(
             "auto_reply_running": state.auto_reply_running,
         })
 
+    async def _broadcast_tool_calls(phone: str, tool_calls: list[dict]):
+        """Broadcast private messages for each tool call executed by the LLM."""
+        contact = agent_handler._get_contact(phone)
+        for tc in tool_calls:
+            tool_name = tc.get("tool", "unknown")
+            args = tc.get("args", {})
+            # Format: tool name + each arg on its own line
+            lines = [f"\U0001f527 {tool_name}"]
+            for key, value in args.items():
+                lines.append(f"{key}: {value}")
+            content = "\n".join(lines)
+
+            contact.add_message("tool_call", content)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "tool_call",
+                    "content": content,
+                    "ts": time.time(),
+                },
+            })
+
     async def _process_batch(phone: str, delay: float):
         """Wait for batch delay, then process all accumulated messages."""
         await asyncio.sleep(delay)
@@ -556,11 +578,13 @@ def create_app(
                 if contact.ai_enabled:
                     try:
                         await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                        reply = await asyncio.to_thread(
+                        result = await asyncio.to_thread(
                             agent_handler.process_message, phone, combined,
                             save_user_message=False, save_response=False)
-                        if reply:
-                            await _send_reply(phone, reply)
+                        if result.tool_calls:
+                            await _broadcast_tool_calls(phone, result.tool_calls)
+                        if result.reply:
+                            await _send_reply(phone, result.reply)
                     except Exception as e:
                         logger.error("[Batch] Agent error for %s: %s", phone, e)
 
@@ -632,14 +656,16 @@ def create_app(
 
             try:
                 await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                reply = await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     agent_handler.process_message, phone,
                     llm_text,
                     save_user_message=False, save_response=False,
                     image_path=image_path if not transcription else None,
                 )
-                if reply:
-                    await _send_reply(phone, reply)
+                if result.tool_calls:
+                    await _broadcast_tool_calls(phone, result.tool_calls)
+                if result.reply:
+                    await _send_reply(phone, result.reply)
             except Exception as e:
                 logger.error("[Batch] Agent error for %s (%s): %s", phone, media_label, e)
 
@@ -822,10 +848,13 @@ def create_app(
 
         logger.info("[Sandbox] Message from %s: %s", phone, message[:80])
         try:
-            reply = await asyncio.to_thread(agent_handler.process_message, phone, message)
+            result = await asyncio.to_thread(agent_handler.process_message, phone, message)
         except Exception as e:
             logger.error("[Sandbox] Error processing message: %s", e)
             return _err(f"Erro ao processar mensagem: {e}", status=500)
+
+        if result.tool_calls:
+            await _broadcast_tool_calls(phone, result.tool_calls)
 
         state.msg_count += 1
 
@@ -835,8 +864,8 @@ def create_app(
             "auto_reply_running": state.auto_reply_running,
         })
 
-        logger.info("[Sandbox] Reply to %s: %s", phone, reply[:80] if reply else "")
-        return _ok({"reply": reply, "phone": phone})
+        logger.info("[Sandbox] Reply to %s: %s", phone, result.reply[:80] if result.reply else "")
+        return _ok({"reply": result.reply, "phone": phone})
 
     @app.post("/api/sandbox/clear")
     async def sandbox_clear(body: dict):

@@ -789,6 +789,7 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
           : messages.map((m, i) => {
               const isUser = m.role === 'user';
               const isTranscription = m.role === 'transcription';
+              const isToolCall = m.role === 'tool_call';
               const isError = m.role === 'error';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
 
@@ -800,6 +801,24 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
                       <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
                         Transcrição privada
+                      </span>
+                      <span>${m.content}</span>
+                      <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
+                        ${formatBubbleTime(m.ts)}
+                      </span>
+                    </div>
+                  </div>
+                `;
+              }
+
+              if (isToolCall) {
+                return html`
+                  <div key=${i} class="flex justify-center mt-[4px]">
+                    <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
+                         style="background: #2d1b0e; color: #fbbf24; border: 1px solid #78350f;">
+                      <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
+                        Ferramenta IA
                       </span>
                       <span>${m.content}</span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
@@ -1164,8 +1183,8 @@ export function Contacts({ newMessage, chatPresence, initialContactId }) {
       }
     }
 
-    // Skip contact list preview update for transcription and error messages
-    if (message.role === 'transcription' || message.role === 'error') return;
+    // Skip contact list preview update for transcription, tool_call, and error messages
+    if (message.role === 'transcription' || message.role === 'tool_call' || message.role === 'error') return;
 
     setContacts(prev => {
       const idx = prev.findIndex(c => c.phone === phone);
