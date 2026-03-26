@@ -21,7 +21,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
       interval: 30s
       timeout: 10s
-      start_period: 60s
+      start_period: 15s
       retries: 5
 
 volumes:
