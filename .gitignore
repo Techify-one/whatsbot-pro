@@ -1,6 +1,6 @@
 # Dados sensíveis / sessão WhatsApp
 storages/
-contacts/
+/contacts/
 statics/
 
 # Logs
