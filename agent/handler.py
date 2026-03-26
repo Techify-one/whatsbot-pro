@@ -44,6 +44,8 @@ class ContactMemory:
         self.messages: list[dict] = []
         self.usage: list[dict] = []
         self.ai_enabled: bool = True
+        self.is_group: bool = False
+        self.group_name: str = ""
         self.unread_count: int = 0
         self.unread_ai_count: int = 0
         self.unread_msg_ids: list[str] = []
@@ -65,6 +67,8 @@ class ContactMemory:
                 self.messages = data.get("messages", [])
                 self.usage = data.get("usage", [])
                 self.ai_enabled = data.get("ai_enabled", True)
+                self.is_group = data.get("is_group", False)
+                self.group_name = data.get("group_name", "")
                 self.id = data.get("id")
                 self.unread_count = data.get("unread_count", 0)
                 self.unread_ai_count = data.get("unread_ai_count", 0)
@@ -83,6 +87,8 @@ class ContactMemory:
             "messages": self.messages,
             "usage": self.usage,
             "ai_enabled": self.ai_enabled,
+            "is_group": self.is_group,
+            "group_name": self.group_name,
             "unread_count": self.unread_count,
             "unread_ai_count": self.unread_ai_count,
             "unread_msg_ids": self.unread_msg_ids,
@@ -512,6 +518,16 @@ class AgentHandler:
     def _build_system_prompt(self, contact: ContactMemory) -> str:
         """Build system prompt with contact info and current date/time injected."""
         prompt = self.system_prompt
+        if contact.is_group:
+            gname = f" chamado '{contact.group_name}'" if contact.group_name else ""
+            prompt += (
+                f"\n\n--- Contexto de grupo ---\n"
+                f"Esta é uma conversa de grupo do WhatsApp{gname}.\n"
+                "As mensagens de usuários estão no formato '[Nome]: mensagem'.\n"
+                "Quando responder, leve em conta quem fez a pergunta e responda "
+                "de forma natural ao grupo.\n"
+                "--- Fim do contexto de grupo ---"
+            )
         info_summary = contact.get_info_summary()
         if info_summary:
             prompt += (

@@ -13,6 +13,8 @@ export function Dashboard({ status, qrAvailable, qrVersion, config, saving, onSa
         connected=${status?.connected || false}
         qrAvailable=${qrAvailable}
         qrVersion=${qrVersion}
+        botPhone=${status?.bot_phone || ''}
+        botName=${status?.bot_name || ''}
       />
 
       <!-- Right: Config Panel -->

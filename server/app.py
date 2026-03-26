@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import threading
 import time
 import uuid
@@ -132,6 +133,9 @@ class AppState:
         self.batch_tasks: dict[str, asyncio.Task] = {}  # phone -> scheduled task
         # Track recently sent replies to filter GOWA webhook echo-backs
         self.recently_sent: dict[str, float] = {}  # "phone:content_hash" -> timestamp
+        # Bot's own identity for @mention detection in groups
+        self.bot_phone: str = ""
+        self.bot_name: str = ""
 
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -191,9 +195,42 @@ def create_app(
                     "connected": state.connected,
                     "msg_count": state.msg_count,
                     "auto_reply_running": state.auto_reply_running,
+                    "bot_phone": state.bot_phone,
+                    "bot_name": state.bot_name,
                 })
                 # Auto-reply is handled via GOWA webhook (POST /api/webhook)
                 state.auto_reply_running = connected and settings.get("auto_reply", True)
+                # Populate bot identity for @mention detection in groups
+                if connected and not state.bot_phone:
+                    # Try config first
+                    state.bot_phone = settings.get("bot_phone", "").split(":")[0]
+                    state.bot_name = settings.get("bot_name", "")
+                    # Auto-detect: fetch recent chat messages to find our own JID
+                    if not state.bot_phone:
+                        try:
+                            chats = await asyncio.to_thread(gowa_client.get_chats, 5)
+                            for chat in chats:
+                                cjid = chat.get("jid", "")
+                                if "@s.whatsapp.net" in cjid:
+                                    msgs = await asyncio.to_thread(
+                                        gowa_client.get_chat_messages, cjid, 5)
+                                    for m in msgs:
+                                        if m.get("is_from_me") or m.get("from_me"):
+                                            own_jid = (m.get("sender_jid", "")
+                                                       or m.get("sender", "")
+                                                       or m.get("from", ""))
+                                            if own_jid and "@s.whatsapp.net" in own_jid:
+                                                state.bot_phone = own_jid.split("@")[0].split(":")[0]
+                                                logger.info("[Status] Bot phone auto-detected: %s",
+                                                            state.bot_phone)
+                                                break
+                                    if state.bot_phone:
+                                        break
+                        except Exception:
+                            pass
+                    if state.bot_phone:
+                        logger.info("[Status] Bot phone: %s, name: %s",
+                                    state.bot_phone, state.bot_name or "(empty)")
             except Exception as e:
                 logger.error("Status poll error: %s", e)
             await asyncio.sleep(5)
@@ -314,6 +351,7 @@ def create_app(
             "system_prompt", "auto_reply", "reply_to_all", "only_saved_contacts",
             "max_context_messages", "message_batch_delay",
             "split_messages", "split_message_delay",
+            "group_reply_mode", "bot_phone", "bot_name",
         }
         for key, value in body.items():
             if key in allowed_keys:
@@ -396,6 +434,8 @@ def create_app(
             "msg_count": state.msg_count,
             "auto_reply_running": state.auto_reply_running,
             "notification": state.notification,
+            "bot_phone": state.bot_phone,
+            "bot_name": state.bot_name,
         })
 
     @app.get("/api/qr")
@@ -436,9 +476,44 @@ def create_app(
             "connected": False,
             "msg_count": state.msg_count,
             "auto_reply_running": state.auto_reply_running,
+            "bot_phone": state.bot_phone,
+            "bot_name": state.bot_name,
         })
         await ws_manager.broadcast("gowa_status", {"message": state.notification})
         return _ok({"message": "Desconectado."})
+
+    # ── Group Mention Helpers ──────────────────────────────────────
+
+    def _is_bot_mentioned(text: str, data: dict) -> bool:
+        """Check if the bot is mentioned in a group message."""
+        if not text:
+            return False
+        text_lower = text.lower()
+        # Check @phone mention
+        bot_phone = state.bot_phone
+        if bot_phone and f"@{bot_phone}" in text:
+            return True
+        # Check @name mention (case-insensitive)
+        bot_name = state.bot_name
+        if bot_name and f"@{bot_name.lower()}" in text_lower:
+            return True
+        # Check mentioned_jids from GOWA payload (if present)
+        mentioned = data.get("mentioned_jids", data.get("mentioned", []))
+        if mentioned and bot_phone:
+            for jid in mentioned:
+                if bot_phone in str(jid):
+                    return True
+        return False
+
+    def _strip_bot_mention(text: str) -> str:
+        """Remove bot @mention from message text."""
+        bot_phone = state.bot_phone
+        bot_name = state.bot_name
+        if bot_phone:
+            text = text.replace(f"@{bot_phone}", "").strip()
+        if bot_name:
+            text = re.sub(rf"@{re.escape(bot_name)}", "", text, flags=re.IGNORECASE).strip()
+        return text
 
     # ── Message Batch Processing ────────────────────────────────────
 
@@ -527,6 +602,8 @@ def create_app(
             "connected": state.connected,
             "msg_count": state.msg_count,
             "auto_reply_running": state.auto_reply_running,
+            "bot_phone": state.bot_phone,
+            "bot_name": state.bot_name,
         })
 
     async def _broadcast_tool_calls(phone: str, tool_calls: list[dict],
@@ -722,6 +799,13 @@ def create_app(
         # Extract message fields (GOWA field names vary)
         is_from_me = data.get("is_from_me", data.get("from_me", data.get("FromMe", False)))
         if is_from_me:
+            # Capture bot's own phone from outgoing messages (for @mention detection)
+            if not state.bot_phone:
+                own_jid = (data.get("sender_jid", "") or data.get("from", "")
+                           or data.get("sender", ""))
+                if own_jid and "@s.whatsapp.net" in own_jid:
+                    state.bot_phone = own_jid.split("@")[0].split(":")[0]
+                    logger.info("[Webhook] Bot phone captured from own message: %s", state.bot_phone)
             return _ok({"status": "ignored"})
 
         msg_id = data.get("id", data.get("Id", data.get("message_id", ""))
@@ -768,21 +852,32 @@ def create_app(
         if audio_path and not text:
             text = "[Áudio recebido]"
 
-        # Extract sender
-        sender = (data.get("sender_jid", "")
-                  or data.get("chat_jid", "")
-                  or data.get("jid", "")
-                  or data.get("from", "")
-                  or data.get("sender", ""))
+        # Extract chat and sender separately for group support
+        chat_jid = (data.get("chat_jid", "") or data.get("chat_id", "")
+                    or data.get("from", "") or data.get("jid", ""))
+        sender_jid = data.get("sender_jid", "") or data.get("sender", "")
 
-        if not sender or (not text and not image_path and not audio_path):
-            logger.info("[Webhook] Skipping: text=%r sender=%r media=%s",
-                        text[:50] if text else "", sender,
+        is_group = "@g.us" in chat_jid
+
+        if is_group:
+            # For groups: route replies to the group, track individual sender
+            phone = chat_jid  # keep full JID (e.g. 120363xxx@g.us)
+            individual_phone = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
+            from_name = data.get("from_name", "") or data.get("pushName", "") or data.get("notify", "")
+        else:
+            # For private chats: use sender as before
+            sender = sender_jid or chat_jid
+            phone = sender.split("@")[0] if "@" in sender else sender
+            individual_phone = phone
+            from_name = ""
+
+        if not phone or (not text and not image_path and not audio_path):
+            logger.info("[Webhook] Skipping: text=%r phone=%r media=%s",
+                        text[:50] if text else "", phone,
                         "image" if image_path else ("audio" if audio_path else "none"))
             return _ok({"status": "ignored"})
 
         state.processed_messages.add(msg_id)
-        phone = sender.split("@")[0] if "@" in sender else sender
 
         # Filter GOWA echo-backs: ignore messages we recently sent
         if text:
@@ -802,15 +897,65 @@ def create_app(
             media_type = "audio"
             media_path = audio_path
 
-        logger.info("[Webhook] %s from %s: %s",
-                    media_type.capitalize() if media_type else "Message",
-                    phone, text[:80] if text else f"[{media_type}]")
+        # For groups: prefix text with sender name and check @mention
+        display_text = text
+        skip_ai = False
+        if is_group:
+            # Log full group payload for debugging field names
+            logger.info("[Webhook] Group payload: %s", json.dumps(data, default=str, ensure_ascii=False)[:2000])
+
+            # Ensure group metadata is stored
+            contact = agent_handler._get_contact(phone)
+            if not contact.is_group or not contact.group_name:
+                contact.is_group = True
+                # Try to get group name from payload fields (NOT from_name, that's the sender)
+                group_name = (data.get("subject", "")
+                              or data.get("group_name", "")
+                              or data.get("group_subject", "")
+                              or data.get("chat_name", ""))
+                # Fallback: fetch group name from GOWA API
+                if not group_name:
+                    try:
+                        group_name = await asyncio.to_thread(
+                            gowa_client.get_group_name, phone)
+                    except Exception as e:
+                        logger.warning("[Webhook] Failed to fetch group name: %s", e)
+                if group_name:
+                    contact.group_name = group_name
+                    logger.info("[Webhook] Group name resolved: %s -> %s", phone, group_name)
+                else:
+                    logger.warning("[Webhook] Could not resolve group name for %s", phone)
+                contact.save()
+
+            # Prefix message with sender name for group context
+            sender_label = from_name or individual_phone
+            if text:
+                display_text = f"[{sender_label}]: {text}"
+
+            # Check if bot is mentioned
+            group_mode = settings.get("group_reply_mode", "mention_only")
+            bot_mentioned = _is_bot_mentioned(text, data)
+
+            if group_mode == "never" or (group_mode == "mention_only" and not bot_mentioned):
+                skip_ai = True
+                logger.info("[Webhook] Group message (no mention) from %s in %s: %s",
+                            sender_label, phone, text[:80] if text else "[media]")
+            else:
+                # Bot was mentioned — strip mention from text for LLM
+                cleaned = _strip_bot_mention(text)
+                display_text = f"[{sender_label}]: {cleaned}" if cleaned else display_text
+                logger.info("[Webhook] Group message (@mention) from %s in %s: %s",
+                            sender_label, phone, text[:80] if text else "[media]")
+        else:
+            logger.info("[Webhook] %s from %s: %s",
+                        media_type.capitalize() if media_type else "Message",
+                        phone, text[:80] if text else f"[{media_type}]")
 
         # Increment unread count for incoming user messages
         await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread(msg_id))
 
         # Broadcast incoming message to frontend in real-time
-        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time(), "msg_id": msg_id}
+        broadcast_msg: dict = {"role": "user", "content": display_text, "ts": time.time(), "msg_id": msg_id}
         if media_type:
             broadcast_msg["media_type"] = media_type
             broadcast_msg["media_path"] = media_path
@@ -819,11 +964,18 @@ def create_app(
             "message": broadcast_msg,
         })
 
+        # For group messages without mention: save to history but don't trigger AI
+        if skip_ai:
+            await asyncio.to_thread(
+                agent_handler._get_contact(phone).add_message,
+                "user", display_text, msg_id=msg_id)
+            return _ok({"status": "group_no_mention"})
+
         # Batch messages — accumulate and wait before responding
         if phone not in state.pending_messages:
             state.pending_messages[phone] = []
         state.pending_messages[phone].append({
-            "text": text,
+            "text": display_text,
             "image_path": image_path,
             "audio_path": audio_path,
             "msg_id": msg_id,
@@ -881,6 +1033,8 @@ def create_app(
             "connected": state.connected,
             "msg_count": state.msg_count,
             "auto_reply_running": state.auto_reply_running,
+            "bot_phone": state.bot_phone,
+            "bot_name": state.bot_name,
         })
 
         logger.info("[Sandbox] Reply to %s: %s", phone, result.reply[:80] if result.reply else "")
@@ -925,10 +1079,12 @@ def create_app(
                             last_content = "🎤 Áudio"
                         else:
                             last_content = (last.get("content") or "")[:80]
+                    is_group = data.get("is_group", False)
+                    group_name = data.get("group_name", "")
                     results.append({
                         "id": data.get("id"),
                         "phone": phone,
-                        "name": info.get("name", ""),
+                        "name": group_name if is_group else info.get("name", ""),
                         "last_message": last_content,
                         "last_message_role": last["role"] if last else "",
                         "last_message_ts": last.get("ts", 0) if last else 0,
@@ -936,6 +1092,8 @@ def create_app(
                         "unread_count": data.get("unread_count", 0),
                         "unread_ai_count": data.get("unread_ai_count", 0),
                         "ai_enabled": data.get("ai_enabled", True),
+                        "is_group": is_group,
+                        "group_name": group_name,
                         "updated_at": data.get("updated_at", 0),
                     })
                 except Exception:
@@ -943,7 +1101,9 @@ def create_app(
             results.sort(key=lambda c: c["updated_at"], reverse=True)
             if q:
                 ql = q.lower()
-                results = [c for c in results if ql in c["name"].lower() or ql in c["phone"]]
+                results = [c for c in results if ql in c["name"].lower()
+                           or ql in c["phone"]
+                           or ql in c.get("group_name", "").lower()]
             return results
         return _ok(await asyncio.to_thread(_list))
 

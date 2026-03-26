@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "usd_brl_rate": 5.50,
     "split_messages": True,
     "split_message_delay": 2.0,
+    "group_reply_mode": "mention_only",
+    "bot_phone": "",
+    "bot_name": "",
 }
 
 

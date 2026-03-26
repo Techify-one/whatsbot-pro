@@ -193,17 +193,28 @@ class GOWAClient:
     def _clean_phone(self, phone: str) -> str:
         return phone.strip().replace("+", "").replace(" ", "").replace("-", "")
 
+    @staticmethod
+    def _is_group_jid(phone: str) -> bool:
+        """Check if a phone/JID string refers to a group."""
+        return "@g.us" in phone
+
+    def _format_target(self, phone: str) -> str:
+        """Format phone for GOWA API. Groups keep full JID, individuals get cleaned."""
+        if self._is_group_jid(phone):
+            return phone
+        return self._clean_phone(phone)
+
     def send_message(self, phone: str, text: str) -> dict:
-        """Send a text message to a phone number. Raises GOWASendError on failure."""
+        """Send a text message to a phone number or group. Raises GOWASendError on failure."""
         payload = {
-            "phone": self._clean_phone(phone),
+            "phone": self._format_target(phone),
             "message": text,
         }
         return self._request("POST", "/send/message", raise_on_error=True, json=payload)
 
     def send_image(self, phone: str, image_path: str, caption: str = "") -> dict:
-        """Send an image to a phone number via multipart/form-data. Raises GOWASendError on failure."""
-        phone = self._clean_phone(phone)
+        """Send an image to a phone number or group via multipart/form-data. Raises GOWASendError on failure."""
+        phone = self._format_target(phone)
         url = f"{self.base_url}/send/image"
         mime = mimetypes.guess_type(image_path)[0] or "image/png"
         try:
@@ -238,8 +249,8 @@ class GOWAClient:
             raise GOWASendError(f"Erro ao enviar imagem: {e}", error_type="unknown")
 
     def send_audio(self, phone: str, audio_path: str) -> dict:
-        """Send an audio file to a phone number via multipart/form-data. Raises GOWASendError on failure."""
-        phone = self._clean_phone(phone)
+        """Send an audio file to a phone number or group via multipart/form-data. Raises GOWASendError on failure."""
+        phone = self._format_target(phone)
         url = f"{self.base_url}/send/audio"
         mime = mimetypes.guess_type(audio_path)[0] or "audio/ogg"
         try:
@@ -275,7 +286,10 @@ class GOWAClient:
 
     def mark_as_read(self, message_id: str, phone: str) -> dict | None:
         """Send a read receipt for a message (best-effort, never raises)."""
-        jid = f"{self._clean_phone(phone)}@s.whatsapp.net"
+        if self._is_group_jid(phone):
+            jid = phone
+        else:
+            jid = f"{self._clean_phone(phone)}@s.whatsapp.net"
         payload = {"phone": jid}
         try:
             return self._request("POST", f"/message/{message_id}/read", json=payload)
@@ -287,7 +301,7 @@ class GOWAClient:
 
     def send_chat_presence(self, phone: str, action: str = "start") -> dict | None:
         """Send typing indicator. action: 'start' or 'stop'."""
-        payload = {"phone": self._clean_phone(phone), "action": action}
+        payload = {"phone": self._format_target(phone), "action": action}
         return self._request("POST", "/send/chat-presence", json=payload)
 
     def stop_chat_presence(self, phone: str) -> dict | None:
@@ -307,6 +321,23 @@ class GOWAClient:
             if isinstance(results, list):
                 return results
         return []
+
+    def get_group_name(self, group_jid: str) -> str:
+        """Get a group's name/subject via GOWA group info endpoint."""
+        try:
+            result = self._request("GET", f"/group/info?group_id={group_jid}")
+            if result and isinstance(result, dict):
+                results = result.get("results", result)
+                if isinstance(results, dict):
+                    name = (results.get("Name", "")
+                            or results.get("name", "")
+                            or results.get("subject", "")
+                            or results.get("Topic", ""))
+                    if name:
+                        return name
+        except Exception as e:
+            logger.warning("[GOWA] get_group_name failed for %s: %s", group_jid, e)
+        return ""
 
     def get_chat_messages(self, chat_jid: str, limit: int = 20) -> list[dict]:
         """Get messages from a specific chat."""

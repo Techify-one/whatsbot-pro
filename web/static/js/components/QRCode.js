@@ -5,7 +5,18 @@ import { getQrUrl, reconnect, logout, refreshQr } from '../services/api.js';
 
 const html = htm.bind(h);
 
-export function QRCode({ connected, qrAvailable, qrVersion }) {
+function formatPhone(phone) {
+  if (!phone) return '';
+  if (phone.length === 13 && phone.startsWith('55')) {
+    return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
+  }
+  if (phone.length === 12 && phone.startsWith('55')) {
+    return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 8)}-${phone.slice(8)}`;
+  }
+  return `+${phone}`;
+}
+
+export function QRCode({ connected, qrAvailable, qrVersion, botPhone, botName }) {
   const [imgSrc, setImgSrc] = useState(null);
   const [imgError, setImgError] = useState(false);
 
@@ -28,6 +39,12 @@ export function QRCode({ connected, qrAvailable, qrVersion }) {
           <div class="text-center">
             <div class="text-4xl mb-2">\u2713</div>
             <span class="text-green-600 font-medium">Conectado!</span>
+            ${botPhone ? html`
+              <div class="mt-2 text-sm text-wa-secondary">
+                ${botName ? html`<div class="font-medium text-wa-text">${botName}</div>` : ''}
+                <div class="text-xs text-wa-secondary">${formatPhone(botPhone)}</div>
+              </div>
+            ` : ''}
           </div>
         ` : qrAvailable && imgSrc && !imgError ? html`
           <img
@@ -45,7 +62,9 @@ export function QRCode({ connected, qrAvailable, qrVersion }) {
       </div>
 
       ${connected ? html`
-        <span class="text-green-600 text-sm font-medium mb-3">Conectado ao WhatsApp</span>
+        <span class="text-green-600 text-sm font-medium mb-3">
+          Conectado ao WhatsApp${botPhone ? html` · <span class="text-wa-secondary font-normal">${formatPhone(botPhone)}</span>` : ''}
+        </span>
       ` : qrAvailable ? html`
         <span class="text-yellow-600 text-sm mb-1">Escaneie o QR Code com seu celular</span>
         <button

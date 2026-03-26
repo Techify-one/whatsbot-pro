@@ -58,6 +58,15 @@ function DefaultAvatar({ size = 49 }) {
   `;
 }
 
+function GroupAvatar({ size = 49 }) {
+  return html`
+    <svg viewBox="0 0 212 212" width="${size}" height="${size}">
+      <path fill="#DFE5E7" d="M106.251.5C164.653.5 212 47.846 212 106.25S164.653 212 106.25 212C47.846 212 .5 164.654.5 106.25S47.846.5 106.251.5z"/>
+      <path fill="#FFF" d="M82 108c-8.284 0-15-6.716-15-15s6.716-15 15-15 15 6.716 15 15-6.716 15-15 15zm48 0c-8.284 0-15-6.716-15-15s6.716-15 15-15 15 6.716 15 15-6.716 15-15 15zM82 118c-13.255 0-25 8.745-25 22v5h50v-5c0-13.255-11.745-22-25-22zm48 0c-2.08 0-4.08.254-6 .72 5.268 4.75 8.5 11.568 8.5 19.28v5h22.5v-5c0-13.255-11.745-20-25-20z"/>
+    </svg>
+  `;
+}
+
 function EmojiIcon() {
   return html`
     <svg viewBox="0 0 24 24" width="26" height="26" fill="#54656f" class="shrink-0">
@@ -212,14 +221,17 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                 >
                   <!-- Avatar -->
                   <div class="w-[49px] h-[49px] rounded-full overflow-hidden shrink-0 mr-[13px]">
-                    <${DefaultAvatar} size=${49} />
+                    ${c.is_group
+                      ? html`<${GroupAvatar} size=${49} />`
+                      : html`<${DefaultAvatar} size=${49} />`
+                    }
                   </div>
 
                   <!-- Text content with bottom border -->
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
                     <div class="flex justify-between items-baseline">
                       <span class="text-wa-text text-[17px] truncate leading-[21px]">
-                        ${c.name || c.phone}
+                        ${c.is_group ? (c.group_name || c.name || c.phone) : (c.name || c.phone)}
                         ${c.ai_enabled === false
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle">IA OFF</span>`
                           : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
@@ -292,7 +304,7 @@ function PlusIcon() {
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
 
-function ContactInfoPanel({ phone, info, onClose, onSave }) {
+function ContactInfoPanel({ phone, info, isGroup, groupName, onClose, onSave }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [saving, setSaving] = useState(false);
   const [newObs, setNewObs] = useState('');
@@ -363,10 +375,15 @@ function ContactInfoPanel({ phone, info, onClose, onSave }) {
           <!-- Avatar -->
           <div class="flex flex-col items-center py-7 bg-wa-panel">
             <div class="w-[200px] h-[200px] rounded-full overflow-hidden mb-3">
-              <${DefaultAvatar} size=${200} />
+              ${isGroup
+                ? html`<${GroupAvatar} size=${200} />`
+                : html`<${DefaultAvatar} size=${200} />`
+              }
             </div>
-            <div class="text-wa-text text-[22px] font-light">${form.name || phone}</div>
-            ${form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
+            <div class="text-wa-text text-[22px] font-light">${isGroup ? (groupName || phone) : (form.name || phone)}</div>
+            ${isGroup
+              ? html`<div class="text-wa-secondary text-[14px] mt-0.5">Grupo</div>`
+              : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
           </div>
 
           <!-- Fields -->
@@ -452,7 +469,7 @@ function StopIcon() {
   `;
 }
 
-function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTyping, setContactData }) {
+function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -763,7 +780,8 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
     `;
   }
 
-  const displayName = (info && info.name) || phone;
+  const isGroup = contact && contact.is_group;
+  const displayName = isGroup ? (contact.group_name || phone) : ((info && info.name) || phone);
   const hasText = input.trim().length > 0;
 
   return html`
@@ -774,12 +792,16 @@ function ContactDetail({ phone, onBack, messages, info, onAvatarClick, contactTy
           <${BackArrowIcon} />
         </button>
         <div onClick=${onAvatarClick} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] cursor-pointer">
-          <${DefaultAvatar} size=${40} />
+          ${isGroup
+            ? html`<${GroupAvatar} size=${40} />`
+            : html`<${DefaultAvatar} size=${40} />`
+          }
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
           <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}</div>
           ${contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
+            : isGroup ? html`<div class="text-wa-secondary text-[13px] leading-tight">Grupo</div>`
             : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null
           }
         </div>
@@ -1284,6 +1306,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
                 messages=${messages}
                 setContactData=${setContactData}
                 info=${info}
+                contact=${contactData}
                 onAvatarClick=${() => selected && setShowInfoPanel(true)}
                 contactTyping=${selected && typingState[selected] || null}
               />`
@@ -1292,6 +1315,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
             <${ContactInfoPanel}
               phone=${selected}
               info=${info}
+              isGroup=${contactData && contactData.is_group}
+              groupName=${contactData && contactData.group_name}
               onClose=${() => setShowInfoPanel(false)}
               onSave=${(updatedInfo) => {
                 setContactData(prev => prev ? { ...prev, info: updatedInfo } : prev);
