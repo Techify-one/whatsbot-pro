@@ -12,6 +12,9 @@ services:
       - whatsbot-storages:/app/storages
       - whatsbot-statics:/app/statics
       - whatsbot-logs:/app/logs
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.whatsbot.loadbalancer.server.port=8080
     environment:
       - WHATSBOT_DOCKER=1
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
