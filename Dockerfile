@@ -36,8 +36,9 @@ COPY main.py .
 # Create bin/gowa symlink so gowa/manager.py finds the binary at expected path
 RUN mkdir -p bin && ln -s /usr/local/bin/gowa bin/gowa
 
-# Create runtime directories (will be overridden by volume mounts)
+# Create runtime directories and declare as volumes for persistence
 RUN mkdir -p contacts logs storages statics
+VOLUME ["/app/contacts", "/app/storages", "/app/statics", "/app/logs"]
 
 EXPOSE 8080
 

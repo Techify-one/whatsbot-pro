@@ -57,7 +57,11 @@ DEFAULT_CONFIG = {
 class Settings:
     def __init__(self):
         self.data_dir = get_data_dir()
-        self.config_path = self.data_dir / "config.json"
+        # In Docker, store config.json inside storages/ so it's persisted by the volume
+        if os.environ.get("WHATSBOT_DOCKER"):
+            self.config_path = self.data_dir / "storages" / "config.json"
+        else:
+            self.config_path = self.data_dir / "config.json"
         self.logs_dir = self.data_dir / "logs"
         self.logs_dir.mkdir(exist_ok=True)
         self._config: dict = {}
