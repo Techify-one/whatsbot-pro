@@ -11,7 +11,9 @@ export function createWebSocket(handlers) {
     if (closed) return;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}/ws`);
+    const token = localStorage.getItem('whatsbot_token') || '';
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    ws = new WebSocket(`${protocol}//${location.host}/ws${qs}`);
 
     ws.onopen = () => {
       if (handlers.onConnect) handlers.onConnect();

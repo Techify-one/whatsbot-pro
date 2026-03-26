@@ -6,14 +6,15 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,37 @@ def create_app(
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")
 
+    # ── Auth middleware ────────────────────────────────────────────────
+
+    # Paths exempt from authentication
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/")
+    _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs"}
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        path = request.url.path
+
+        # SPA pages, static assets, webhook, and auth endpoints are always open
+        if path in _SPA_PATHS or path.startswith(("/contacts/",)):
+            return await call_next(request)
+        for prefix in _AUTH_EXEMPT_PREFIXES:
+            if path.startswith(prefix):
+                return await call_next(request)
+
+        # Only protect /api/* paths
+        if path.startswith("/api/") and auth_required(settings):
+            auth_header = request.headers.get("authorization", "")
+            token = ""
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+            if not token or not verify_token(token, settings):
+                return JSONResponse(
+                    {"ok": False, "error": "Não autenticado."},
+                    status_code=401,
+                )
+
+        return await call_next(request)
+
     # ── Migrate contact IDs ────────────────────────────────────────────
     agent_handler.ensure_contact_ids()
 
@@ -141,6 +173,7 @@ def create_app(
     # ── Register route modules ─────────────────────────────────────────
     # Order matters: webhook must be registered before sandbox so
     # broadcast_tool_calls is available via deps.
+    auth.register_routes(app, deps)
     webhook.register_routes(app, deps)
     logs.register_routes(app, deps)
     sandbox.register_routes(app, deps)

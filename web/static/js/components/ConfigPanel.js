@@ -20,6 +20,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [splitMessages, setSplitMessages] = useState(true);
   const [splitDelay, setSplitDelay] = useState(2);
   const [testing, setTesting] = useState(false);
+  const [webPassword, setWebPassword] = useState('');
+  const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
+  const [removePassword, setRemovePassword] = useState(false);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [promptFullscreen, setPromptFullscreen] = useState(false);
@@ -90,10 +93,23 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     if (apiKey.trim()) {
       data.openrouter_api_key = apiKey.trim();
     }
+    // Handle password change/removal
+    if (removePassword) {
+      data.web_password = '';
+    } else if (webPassword.trim()) {
+      if (webPassword !== webPasswordConfirm) {
+        onNotify('As senhas não coincidem.');
+        return;
+      }
+      data.web_password = webPassword;
+    }
     setSaveSuccess(false);
     const result = await onSave(data);
     if (result !== false) {
       setSaveSuccess(true);
+      setWebPassword('');
+      setWebPasswordConfirm('');
+      setRemovePassword(false);
       setTimeout(() => setSaveSuccess(false), 3000);
     }
   }
@@ -298,6 +314,51 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           />
           Apenas contatos salvos
         </label>
+      </div>
+
+      <!-- Panel Password -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-semibold text-wa-text">Senha do Painel</label>
+          ${config.has_password ? html`
+            <span class="text-xs bg-wa-teal text-white px-2 py-0.5 rounded-full">Ativa</span>
+          ` : html`
+            <span class="text-xs bg-wa-secondary/20 text-wa-secondary px-2 py-0.5 rounded-full">Desativada</span>
+          `}
+        </div>
+        <span class="text-xs text-wa-secondary">Protege o acesso ao painel web com senha</span>
+        ${!removePassword ? html`
+          <input
+            type="password"
+            value=${webPassword}
+            onInput=${(e) => setWebPassword(e.target.value)}
+            placeholder=${config.has_password ? 'Nova senha (deixe vazio para manter)' : 'Definir senha'}
+            class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+          />
+          ${webPassword ? html`
+            <input
+              type="password"
+              value=${webPasswordConfirm}
+              onInput=${(e) => setWebPasswordConfirm(e.target.value)}
+              placeholder="Confirmar senha"
+              class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? 'border-red-400' : ''}"
+            />
+            ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? html`
+              <span class="text-xs text-red-500">As senhas não coincidem</span>
+            ` : null}
+          ` : null}
+        ` : null}
+        ${config.has_password ? html`
+          <label class="flex items-center gap-2 text-sm text-red-600 cursor-pointer mt-1">
+            <input
+              type="checkbox"
+              checked=${removePassword}
+              onChange=${(e) => { setRemovePassword(e.target.checked); if (e.target.checked) { setWebPassword(''); setWebPasswordConfirm(''); } }}
+              class="w-4 h-4 rounded border-wa-border accent-red-600"
+            />
+            Remover senha
+          </label>
+        ` : null}
       </div>
 
       <!-- Save Button -->

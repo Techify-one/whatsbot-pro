@@ -5,8 +5,10 @@ import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
 import { CostsDashboard } from './components/CostsDashboard.js';
+import { LoginScreen } from './components/LoginScreen.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
+import { checkAuth } from './services/api.js';
 
 const html = htm.bind(h);
 
@@ -24,7 +26,7 @@ function contactIdFromPath() {
   return m ? parseInt(m[1], 10) : null;
 }
 
-function GearMenu({ tab, onTabChange }) {
+function GearMenu({ tab, onTabChange, hasPassword, onLogout }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -69,6 +71,16 @@ function GearMenu({ tab, onTabChange }) {
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>
             Custos
           </button>
+          ${hasPassword ? html`
+            <div class="border-t border-wa-border my-1"></div>
+            <button
+              onClick=${() => { onLogout(); setOpen(false); }}
+              class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-red-50 transition-colors flex items-center gap-2 text-red-600"
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
+              Sair
+            </button>
+          ` : null}
         </div>
       ` : null}
     </div>
@@ -91,7 +103,7 @@ function PageHeader({ title, onBack }) {
   `;
 }
 
-function App() {
+function App({ onLogout, hasPassword }) {
   const [status, setStatus] = useState({ connected: false, msg_count: 0, auto_reply_running: false });
   const [qrAvailable, setQrAvailable] = useState(false);
   const [qrVersion, setQrVersion] = useState(0);
@@ -151,7 +163,7 @@ function App() {
 
   return html`
     <div class="h-screen flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} hasPassword=${hasPassword} onLogout=${onLogout} />
 
       <main class="flex-1 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${tab === 'dashboard'
@@ -184,4 +196,56 @@ function App() {
   `;
 }
 
-render(html`<${App} />`, document.getElementById('app'));
+function AuthGate() {
+  const [authState, setAuthState] = useState('checking'); // 'checking' | 'login' | 'ready'
+  const [hasPassword, setHasPassword] = useState(false);
+
+  useEffect(() => {
+    checkAuth().then(res => {
+      if (res.ok) {
+        setHasPassword(res.data.has_password);
+        setAuthState('ready');
+      } else {
+        setHasPassword(true);
+        setAuthState('login');
+      }
+    }).catch(() => {
+      setAuthState('ready');
+    });
+  }, []);
+
+  useEffect(() => {
+    function onUnauthorized() {
+      setHasPassword(true);
+      setAuthState('login');
+    }
+    window.addEventListener('whatsbot:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('whatsbot:unauthorized', onUnauthorized);
+  }, []);
+
+  function handleLogin() {
+    setAuthState('ready');
+    setHasPassword(true);
+  }
+
+  function handleLogout() {
+    localStorage.removeItem('whatsbot_token');
+    setAuthState('login');
+  }
+
+  if (authState === 'checking') {
+    return html`
+      <div class="h-screen flex items-center justify-center">
+        <div class="text-center text-wa-secondary animate-pulse-slow">Carregando...</div>
+      </div>
+    `;
+  }
+
+  if (authState === 'login') {
+    return html`<${LoginScreen} onLogin=${handleLogin} />`;
+  }
+
+  return html`<${App} onLogout=${handleLogout} hasPassword=${hasPassword} />`;
+}
+
+render(html`<${AuthGate} />`, document.getElementById('app'));

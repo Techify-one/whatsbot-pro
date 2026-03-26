@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
     "group_reply_mode": "mention_only",
     "bot_phone": "",
     "bot_name": "",
+    "web_password_hash": "",
+    "web_password_salt": "",
 }
 
 

@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from server.auth import generate_salt, hash_password
 from server.helpers import _ok, _err, _mask_key
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def register_routes(app, deps):
             "message_batch_delay": settings.get("message_batch_delay", 3.0),
             "split_messages": settings.get("split_messages", True),
             "split_message_delay": settings.get("split_message_delay", 2.0),
+            "has_password": bool(settings.get("web_password_hash", "")),
         })
 
     @app.put("/api/config")
@@ -56,6 +58,20 @@ def register_routes(app, deps):
         for key, value in body.items():
             if key in allowed_keys:
                 settings[key] = value
+
+        # Handle password set/change/remove
+        if "web_password" in body:
+            raw_password = body["web_password"]
+            if raw_password:
+                salt = generate_salt()
+                settings["web_password_hash"] = hash_password(raw_password, salt)
+                settings["web_password_salt"] = salt
+                logger.info("Web panel password set/changed.")
+            else:
+                settings["web_password_hash"] = ""
+                settings["web_password_salt"] = ""
+                logger.info("Web panel password removed.")
+
         settings.save()
 
         agent_handler.update_config(

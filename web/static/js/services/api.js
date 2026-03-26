@@ -4,13 +4,28 @@
 
 const BASE = '';
 
+function _getToken() {
+  return localStorage.getItem('whatsbot_token') || '';
+}
+
+function _authHeaders(headers = {}) {
+  const token = _getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
 async function request(method, path, body) {
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: _authHeaders({ 'Content-Type': 'application/json' }),
   };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${BASE}${path}`, opts);
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
   return res.json();
 }
 
@@ -93,8 +108,14 @@ export async function sendImage(phone, file, caption = '') {
   form.append('caption', caption);
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
     method: 'POST',
+    headers: _authHeaders(),
     body: form,
   });
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
   return res.json();
 }
 
@@ -103,8 +124,14 @@ export async function sendAudio(phone, blob, filename = 'voice.ogg') {
   form.append('audio', blob, filename);
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
     method: 'POST',
+    headers: _authHeaders(),
     body: form,
   });
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
   return res.json();
 }
 
@@ -143,4 +170,20 @@ export async function getUsageByContact(params = {}) {
 export async function getUsageContactDetail(phone, params = {}) {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/usage/contact/${encodeURIComponent(phone)}${qs ? '?' + qs : ''}`);
+}
+
+// ── Auth ──────────────────────────────────────────────────────────
+
+export async function login(password) {
+  return request('POST', '/api/auth/login', { password });
+}
+
+export async function checkAuth() {
+  // checkAuth needs to send token but not trigger unauthorized event on 401
+  const opts = {
+    method: 'GET',
+    headers: _authHeaders({ 'Content-Type': 'application/json' }),
+  };
+  const res = await fetch(`${BASE}/api/auth/check`, opts);
+  return res.json();
 }
