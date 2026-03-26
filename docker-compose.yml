@@ -14,6 +14,7 @@ services:
       - whatsbot-logs:/app/logs
     labels:
       - traefik.enable=true
+      - traefik.docker.network=coolify
       - traefik.http.services.whatsbot.loadbalancer.server.port=8080
     environment:
       - WHATSBOT_DOCKER=1
