@@ -248,15 +248,19 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                             ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
-                      ${c.unread_ai_count > 0 ? html`
-                        <span class="bg-blue-500 text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
-                          ${c.unread_ai_count}
-                        </span>
-                      ` : null}
-                      ${c.unread_count > 0 ? html`
-                        <span class="bg-wa-badge text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
-                          ${c.unread_count}
-                        </span>
+                      ${(c.unread_ai_count > 0 || c.unread_count > 0) ? html`
+                        <div class="flex items-center gap-[4px] ml-auto pl-[6px] shrink-0">
+                          ${c.unread_ai_count > 0 ? html`
+                            <span class="bg-blue-500 text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px]">
+                              ${c.unread_ai_count}
+                            </span>
+                          ` : null}
+                          ${c.unread_count > 0 ? html`
+                            <span class="bg-wa-badge text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px]">
+                              ${c.unread_count}
+                            </span>
+                          ` : null}
+                        </div>
                       ` : null}
                     </div>
                   </div>
