@@ -129,11 +129,11 @@ Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
 - `logs/` — logs com rotação
 - `storages/` — dados do GOWA (sessão WhatsApp)
 
-## Teste obrigatório com Evolution API
+## Teste opcional com Evolution API
 
-**IMPORTANTE**: Sempre que fizer alterações no fluxo de mensagens (webhook, agent, handler, batching), você DEVE testar enviando uma mensagem real via Evolution API e verificando os logs ANTES de dizer que está pronto.
+Se você tiver acesso a uma instância da Evolution API, pode testar o fluxo de mensagens de ponta a ponta. Isso é opcional, mas recomendado ao alterar webhook, agent, handler ou batching.
 
-Variáveis de teste estão no arquivo `.env`:
+Variáveis de teste devem ser configuradas no arquivo `.env`:
 - `EVOLUTION_API_URL` — URL base da Evolution API
 - `EVOLUTION_API_KEY` — API key de autenticação
 - `EVOLUTION_INSTANCE_ID` — ID da instância Evolution
