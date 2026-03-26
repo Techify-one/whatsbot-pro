@@ -3,8 +3,8 @@ services:
     build: .
     container_name: whatsbot
     restart: unless-stopped
-    ports:
-      - "${WHATSBOT_WEB_PORT:-8080}:8080"
+    expose:
+      - "8080"
     volumes:
       - whatsbot-contacts:/app/contacts
       - whatsbot-storages:/app/storages
