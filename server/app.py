@@ -474,8 +474,6 @@ def create_app(
         delay_max = settings.get("response_delay_max", 3.0)
         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        combined_text = "\n".join(parts)
-
         for i, part in enumerate(parts):
             if i > 0:
                 # Inter-message delay with ±0.5s variation
@@ -509,15 +507,17 @@ def create_app(
                 "message": {"role": "assistant", "content": part, "ts": time.time()},
             })
 
-        # Save combined text as ONE message to memory (for LLM context)
-        try:
-            await asyncio.to_thread(agent_handler.save_assistant_message, phone, combined_text)
-        except Exception as e:
-            logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
+        # Save each part as a separate message to preserve split across page refresh
+        for part in parts:
+            try:
+                await asyncio.to_thread(agent_handler.save_assistant_message, phone, part)
+            except Exception as e:
+                logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
 
         await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
         state.msg_count += 1
-        logger.info("[Batch] Replied to %s (%d parts): %s", phone, len(parts), combined_text[:80])
+        full_reply = "\n".join(parts)
+        logger.info("[Batch] Replied to %s (%d parts): %s", phone, len(parts), full_reply[:80])
 
         await ws_manager.broadcast("status", {
             "connected": state.connected,
