@@ -1,17 +1,11 @@
 import json
 import os
-import sys
 from pathlib import Path
 
 
 def get_data_dir() -> Path:
-    """Return the application data directory (same folder as the project)."""
-    if getattr(sys, "frozen", False):
-        # PyInstaller: use the directory where the EXE is located
-        data_dir = Path(sys.executable).resolve().parent
-    else:
-        # Dev: use the project root (parent of config/)
-        data_dir = Path(__file__).resolve().parent.parent
+    """Return the application data directory (project root)."""
+    data_dir = Path(__file__).resolve().parent.parent
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 

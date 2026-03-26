@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import random
-import sys
 import threading
 import time
 import uuid
@@ -67,9 +66,7 @@ if _root.level == logging.NOTSET or _root.level > logging.INFO:
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _get_web_dir() -> Path:
-    """Locate the web/ directory, handling both dev and PyInstaller paths."""
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS) / "web"
+    """Locate the web/ directory."""
     return Path(__file__).resolve().parent.parent / "web"
 
 

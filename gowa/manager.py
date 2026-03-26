@@ -9,11 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def _get_gowa_binary() -> Path:
-    """Locate the GOWA binary, handling both dev and PyInstaller paths."""
-    if getattr(sys, "frozen", False):
-        base = Path(sys._MEIPASS)
-    else:
-        base = Path(__file__).resolve().parent.parent
+    """Locate the GOWA binary."""
+    base = Path(__file__).resolve().parent.parent
     binary = base / "bin" / ("gowa.exe" if sys.platform == "win32" else "gowa")
     return binary
 
