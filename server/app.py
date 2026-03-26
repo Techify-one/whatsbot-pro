@@ -126,7 +126,7 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/")
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/health")
     _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs"}
 
     @app.middleware("http")
@@ -156,6 +156,12 @@ def create_app(
 
     # ── Migrate contact IDs ────────────────────────────────────────────
     agent_handler.ensure_contact_ids()
+
+    # ── Health endpoint (always open, used by Docker healthcheck) ──────
+
+    @app.get("/health")
+    async def healthcheck():
+        return JSONResponse({"ok": True})
 
     # ── Frontend routes ────────────────────────────────────────────────
 

@@ -43,6 +43,6 @@ VOLUME ["/app/contacts", "/app/storages", "/app/statics", "/app/logs"]
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD curl -f http://localhost:8080/api/status || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["python", "main.py"]

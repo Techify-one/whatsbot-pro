@@ -18,10 +18,10 @@ services:
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
       - WHATSBOT_GOWA_PORT=${WHATSBOT_GOWA_PORT:-3000}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
-      start_period: 15s
+      start_period: 60s
       retries: 5
 
 volumes:
