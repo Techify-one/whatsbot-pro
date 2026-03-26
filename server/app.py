@@ -511,6 +511,10 @@ def create_app(
         for part in parts:
             try:
                 await asyncio.to_thread(agent_handler.save_assistant_message, phone, part)
+                # Increment unread AI count (operator hasn't seen this reply yet)
+                contact = agent_handler._contacts.get(phone)
+                if contact:
+                    await asyncio.to_thread(contact.increment_unread_ai)
             except Exception as e:
                 logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
 
@@ -570,12 +574,15 @@ def create_app(
 
         # Separate plain text items from media items
         text_parts: list[str] = []
+        text_msg_ids: list[str] = []
         media_items: list[dict] = []
         for item in items:
             if item.get("image_path") or item.get("audio_path"):
                 media_items.append(item)
             else:
                 text_parts.append(item.get("text", ""))
+                if item.get("msg_id"):
+                    text_msg_ids.append(item["msg_id"])
 
         # Process combined text messages first
         if text_parts:
@@ -583,7 +590,8 @@ def create_app(
             if combined:
                 logger.info("[Batch] Processing %d text messages from %s: %s",
                             len(text_parts), phone, combined[:80])
-                contact.add_message("user", combined)
+                last_msg_id = text_msg_ids[-1] if text_msg_ids else None
+                contact.add_message("user", combined, msg_id=last_msg_id)
                 if contact.ai_enabled:
                     try:
                         await asyncio.to_thread(gowa_client.send_chat_presence, phone)
@@ -611,6 +619,7 @@ def create_app(
                 "user", text or ("[Áudio recebido]" if audio_path else ""),
                 media_type="image" if image_path else "audio",
                 media_path=image_path or audio_path,
+                msg_id=item.get("msg_id"),
             )
 
             # Transcribe audio / describe image
@@ -798,10 +807,10 @@ def create_app(
                     phone, text[:80] if text else f"[{media_type}]")
 
         # Increment unread count for incoming user messages
-        await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread())
+        await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread(msg_id))
 
         # Broadcast incoming message to frontend in real-time
-        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time()}
+        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time(), "msg_id": msg_id}
         if media_type:
             broadcast_msg["media_type"] = media_type
             broadcast_msg["media_path"] = media_path
@@ -817,6 +826,7 @@ def create_app(
             "text": text,
             "image_path": image_path,
             "audio_path": audio_path,
+            "msg_id": msg_id,
         })
 
         # Cancel existing batch timer for this contact
@@ -924,6 +934,7 @@ def create_app(
                         "last_message_ts": last.get("ts", 0) if last else 0,
                         "msg_count": len(msgs),
                         "unread_count": data.get("unread_count", 0),
+                        "unread_ai_count": data.get("unread_ai_count", 0),
                         "ai_enabled": data.get("ai_enabled", True),
                         "updated_at": data.get("updated_at", 0),
                     })
@@ -942,18 +953,26 @@ def create_app(
         def _load():
             fp = agent_handler.memory_dir / f"{phone}.json"
             if not fp.exists():
-                return None
+                return None, []
             data = json.loads(fp.read_text(encoding="utf-8"))
+            msg_ids: list[str] = []
             # Mark as read when viewing contact
-            if data.get("unread_count", 0) > 0:
+            if data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0:
                 data["unread_count"] = 0
+                data["unread_ai_count"] = 0
+                msg_ids = data.pop("unread_msg_ids", [])
+                data["unread_msg_ids"] = []
                 fp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
                 if phone in agent_handler._contacts:
                     agent_handler._contacts[phone].unread_count = 0
-            return data
-        data = await asyncio.to_thread(_load)
+                    agent_handler._contacts[phone].unread_ai_count = 0
+                    agent_handler._contacts[phone].unread_msg_ids.clear()
+            return data, msg_ids
+        data, msg_ids = await asyncio.to_thread(_load)
         if data is None:
             return _err("Contato não encontrado.", status=404)
+        if msg_ids:
+            asyncio.create_task(_send_read_receipts(phone, msg_ids))
         return _ok(data)
 
     @app.post("/api/contacts/{phone}/send")
@@ -1168,13 +1187,24 @@ def create_app(
         await asyncio.to_thread(gowa_client.send_chat_presence, phone, action)
         return _ok({"status": "ok"})
 
+    async def _send_read_receipts(phone: str, msg_ids: list[str]):
+        """Send read receipts to GOWA in background (best-effort)."""
+        for mid in msg_ids:
+            try:
+                await asyncio.to_thread(gowa_client.mark_as_read, mid, phone)
+                logger.info("[ReadReceipt] Sent for %s msg %s", phone, mid)
+            except Exception as e:
+                logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
+
     @app.post("/api/contacts/{phone}/read")
     async def mark_contact_read(phone: str):
         """Mark all messages from this contact as read (reset unread_count)."""
         def _mark():
             contact = agent_handler._get_contact(phone)
-            contact.mark_as_read()
-        await asyncio.to_thread(_mark)
+            return contact.mark_as_read()
+        msg_ids = await asyncio.to_thread(_mark)
+        if msg_ids:
+            asyncio.create_task(_send_read_receipts(phone, msg_ids))
         return _ok({"message": "Marcado como lido."})
 
     @app.post("/api/contacts/{phone}/toggle-ai")

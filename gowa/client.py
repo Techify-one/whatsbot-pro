@@ -271,6 +271,18 @@ class GOWAClient:
         except Exception as e:
             raise GOWASendError(f"Erro ao enviar áudio: {e}", error_type="unknown")
 
+    # ── Read Receipts ──────────────────────────────────────────────
+
+    def mark_as_read(self, message_id: str, phone: str) -> dict | None:
+        """Send a read receipt for a message (best-effort, never raises)."""
+        jid = f"{self._clean_phone(phone)}@s.whatsapp.net"
+        payload = {"phone": jid}
+        try:
+            return self._request("POST", f"/message/{message_id}/read", json=payload)
+        except Exception as e:
+            logger.warning("mark_as_read failed for %s: %s", message_id, e)
+            return None
+
     # ── Presence ───────────────────────────────────────────────────
 
     def send_chat_presence(self, phone: str, action: str = "start") -> dict | None:

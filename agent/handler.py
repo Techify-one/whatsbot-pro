@@ -45,6 +45,8 @@ class ContactMemory:
         self.usage: list[dict] = []
         self.ai_enabled: bool = True
         self.unread_count: int = 0
+        self.unread_ai_count: int = 0
+        self.unread_msg_ids: list[str] = []
         self.created_at: float = time.time()
         self.updated_at: float = time.time()
         self._load()
@@ -65,6 +67,8 @@ class ContactMemory:
                 self.ai_enabled = data.get("ai_enabled", True)
                 self.id = data.get("id")
                 self.unread_count = data.get("unread_count", 0)
+                self.unread_ai_count = data.get("unread_ai_count", 0)
+                self.unread_msg_ids = data.get("unread_msg_ids", [])
                 self.created_at = data.get("created_at", time.time())
                 self.updated_at = data.get("updated_at", time.time())
             except (json.JSONDecodeError, OSError) as e:
@@ -80,6 +84,8 @@ class ContactMemory:
             "usage": self.usage,
             "ai_enabled": self.ai_enabled,
             "unread_count": self.unread_count,
+            "unread_ai_count": self.unread_ai_count,
+            "unread_msg_ids": self.unread_msg_ids,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -91,7 +97,7 @@ class ContactMemory:
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
-                    status: str | None = None):
+                    status: str | None = None, msg_id: str | None = None):
         entry: dict = {"role": role, "content": content, "ts": time.time()}
         if media_type:
             entry["media_type"] = media_type
@@ -99,17 +105,30 @@ class ContactMemory:
             entry["media_path"] = media_path
         if status:
             entry["status"] = status
+        if msg_id:
+            entry["msg_id"] = msg_id
         self.messages.append(entry)
         self.save()
 
-    def increment_unread(self):
+    def increment_unread(self, msg_id: str | None = None):
         self.unread_count += 1
+        if msg_id:
+            self.unread_msg_ids.append(msg_id)
         self.save()
 
-    def mark_as_read(self):
-        if self.unread_count > 0:
+    def increment_unread_ai(self):
+        self.unread_ai_count += 1
+        self.save()
+
+    def mark_as_read(self) -> list[str]:
+        """Reset unread count and return the list of unread msg_ids (for read receipts)."""
+        msg_ids = list(self.unread_msg_ids)
+        if self.unread_count > 0 or msg_ids or self.unread_ai_count > 0:
             self.unread_count = 0
+            self.unread_ai_count = 0
+            self.unread_msg_ids.clear()
             self.save()
+        return msg_ids
 
     def set_ai_enabled(self, enabled: bool):
         self.ai_enabled = enabled

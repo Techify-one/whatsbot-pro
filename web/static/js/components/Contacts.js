@@ -236,6 +236,11 @@ function ContactList({ contacts, loading, search, onSearchChange, selected, onSe
                             ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
+                      ${c.unread_ai_count > 0 ? html`
+                        <span class="bg-blue-500 text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
+                          ${c.unread_ai_count}
+                        </span>
+                      ` : null}
                       ${c.unread_count > 0 ? html`
                         <span class="bg-wa-badge text-white text-[11px] font-bold min-w-[20px] h-[20px] rounded-full flex items-center justify-center px-[3px] ml-[6px] shrink-0">
                           ${c.unread_count}
@@ -1087,9 +1092,9 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
     // but reset the accumulator for new messages arriving during fetch
     const preFetchBuffer = pendingWsMessages.current[selected] || [];
     pendingWsMessages.current[selected] = [];
-    // Clear unread badge immediately in local state
+    // Clear unread badges immediately in local state
     setContacts(prev => prev.map(c =>
-      c.phone === selected ? { ...c, unread_count: 0 } : c
+      c.phone === selected ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
     ));
     getContact(selected).then(res => {
       if (res.ok) {
@@ -1229,6 +1234,9 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
           unread_count: isUserMsg && !isViewing
             ? (updated[idx].unread_count || 0) + 1
             : updated[idx].unread_count || 0,
+          unread_ai_count: message.role === 'assistant' && !isViewing
+            ? (updated[idx].unread_ai_count || 0) + 1
+            : updated[idx].unread_ai_count || 0,
           updated_at: message.ts,
         };
         updated.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
