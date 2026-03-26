@@ -215,17 +215,25 @@ def register_routes(app, deps):
                 last_msg_id = text_msg_ids[-1] if text_msg_ids else None
                 contact.add_message("user", combined, msg_id=last_msg_id)
                 if contact.ai_enabled:
-                    try:
-                        await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                        result = await asyncio.to_thread(
-                            agent_handler.process_message, phone, combined,
-                            save_user_message=False, save_response=False)
-                        if result.tool_calls:
-                            await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
-                        if result.reply:
-                            await _send_reply(phone, result.reply)
-                    except Exception as e:
-                        logger.error("[Batch] Agent error for %s: %s", phone, e)
+                    if not agent_handler.api_key:
+                        notice = "[WhatsBot] API key não configurada."
+                        contact.add_message("transcription", notice)
+                        await ws_manager.broadcast("new_message", {
+                            "phone": phone,
+                            "message": {"role": "transcription", "content": notice, "ts": time.time()},
+                        })
+                    else:
+                        try:
+                            await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                            result = await asyncio.to_thread(
+                                agent_handler.process_message, phone, combined,
+                                save_user_message=False, save_response=False)
+                            if result.tool_calls:
+                                await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                            if result.reply:
+                                await _send_reply(phone, result.reply)
+                        except Exception as e:
+                            logger.error("[Batch] Agent error for %s: %s", phone, e)
 
         # Process each media item individually
         for item in media_items:
@@ -281,6 +289,15 @@ def register_routes(app, deps):
                 })
 
             if not contact.ai_enabled:
+                continue
+
+            if not agent_handler.api_key:
+                notice = "[WhatsBot] API key não configurada."
+                contact.add_message("transcription", notice)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "message": {"role": "transcription", "content": notice, "ts": time.time()},
+                })
                 continue
 
             # Build text for LLM: use transcription if available
