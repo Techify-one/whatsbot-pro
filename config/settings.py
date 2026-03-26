@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Any, Callable
 
 
 def get_data_dir() -> Path:
@@ -9,6 +10,19 @@ def get_data_dir() -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
+
+_ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
+    "OPENROUTER_API_KEY": ("openrouter_api_key", str),
+    "WHATSBOT_MODEL": ("model", str),
+    "WHATSBOT_AUDIO_MODEL": ("audio_model", str),
+    "WHATSBOT_IMAGE_MODEL": ("image_model", str),
+    "WHATSBOT_SYSTEM_PROMPT": ("system_prompt", str),
+    "WHATSBOT_WEB_PORT": ("web_port", int),
+    "WHATSBOT_GOWA_PORT": ("gowa_port", int),
+    "WHATSBOT_AUTO_REPLY": ("auto_reply", lambda v: v.lower() in ("1", "true", "yes")),
+    "WHATSBOT_MAX_CONTEXT": ("max_context_messages", int),
+    "WHATSBOT_BATCH_DELAY": ("message_batch_delay", float),
+}
 
 DEFAULT_CONFIG = {
     "openrouter_api_key": "",
@@ -65,6 +79,17 @@ class Settings:
         # Persist on first run or when new defaults were added
         if added or not self.config_path.exists():
             self.save()
+        self._apply_env_overrides()
+
+    def _apply_env_overrides(self):
+        """Override config values with environment variables when present."""
+        for env_key, (config_key, cast) in _ENV_OVERRIDES.items():
+            value = os.environ.get(env_key)
+            if value:
+                try:
+                    self._config[config_key] = cast(value)
+                except (ValueError, TypeError):
+                    pass
 
     def save(self):
         with open(self.config_path, "w", encoding="utf-8") as f:

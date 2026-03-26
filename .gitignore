@@ -26,3 +26,6 @@ dist/
 build/
 *.exe
 !bin/gowa.exe
+
+# Docker persistent data
+data/

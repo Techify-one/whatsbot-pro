@@ -1,6 +1,7 @@
 """WhatsBot — WhatsApp AI Bot with Web GUI."""
 
 import logging
+import os
 import sys
 import threading
 import webbrowser
@@ -58,13 +59,17 @@ def main():
         agent_handler=agent_handler,
     )
 
-    # Open browser after server has time to start
-    url = f"http://127.0.0.1:{web_port}"
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    is_docker = os.environ.get("WHATSBOT_DOCKER") == "1" or Path("/.dockerenv").exists()
+    host = "0.0.0.0"
+
+    # Open browser after server has time to start (skip in Docker — no display)
+    if not is_docker:
+        url = f"http://127.0.0.1:{web_port}"
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     import uvicorn
-    logger.info("Starting web server on http://127.0.0.1:%d", web_port)
-    uvicorn.run(app, host="127.0.0.1", port=web_port, log_level="warning")
+    logger.info("Starting web server on http://%s:%d", host, web_port)
+    uvicorn.run(app, host=host, port=web_port, log_level="warning")
     logger.info("WhatsBot exiting.")
 
 

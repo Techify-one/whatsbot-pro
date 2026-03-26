@@ -1,0 +1,32 @@
+.git
+.gitignore
+.env
+.env.*
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+
+# Windows-only
+bin/gowa.exe
+start.bat
+*.bat
+
+# Runtime data (mounted as volumes)
+storages/
+contacts/
+statics/
+logs/
+config.json
+data/
+
+# Dev / docs
+assets/
+plans/
+CLAUDE.md
+README.md
+LEIA-ME.txt
