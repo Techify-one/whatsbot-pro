@@ -126,7 +126,7 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/api/qr", "/health")
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/health")
     _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs"}
 
     @app.middleware("http")

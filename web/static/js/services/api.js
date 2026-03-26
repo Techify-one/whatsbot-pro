@@ -53,8 +53,13 @@ export async function logout() {
   return request('POST', '/api/whatsapp/logout');
 }
 
-export function getQrUrl() {
-  return `${BASE}/api/qr?t=${Date.now()}`;
+export async function fetchQrBlob() {
+  const res = await fetch(`${BASE}/api/qr?t=${Date.now()}`, {
+    headers: _authHeaders(),
+  });
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 export async function refreshQr() {

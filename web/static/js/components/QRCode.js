@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { getQrUrl, reconnect, logout, refreshQr } from '../services/api.js';
+import { fetchQrBlob, reconnect, logout, refreshQr } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -23,10 +23,13 @@ export function QRCode({ connected, qrAvailable, qrVersion, botPhone, botName })
   // Update QR image only when version changes (backend cached, ~20s per QR)
   useEffect(() => {
     if (!connected && qrAvailable && qrVersion) {
-      setImgSrc(getQrUrl());
-      setImgError(false);
+      let cancelled = false;
+      fetchQrBlob().then(url => {
+        if (!cancelled && url) { setImgSrc(url); setImgError(false); }
+      });
+      return () => { cancelled = true; };
     } else if (connected) {
-      setImgSrc(null);
+      setImgSrc(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
     }
   }, [connected, qrAvailable, qrVersion]);
 
