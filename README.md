@@ -81,7 +81,7 @@ Uma tela parecida com o WhatsApp Web onde você acompanha tudo o que está acont
 - **Enviar imagens** — selecione uma imagem do seu computador e envie com legenda
 - **Gravar e enviar áudio** — grave áudio direto pelo painel e envie para o contato
 - **Indicador de digitação** — veja quando o contato está digitando ou gravando áudio em tempo real
-- **Mensagens não lidas** — contador verde mostra quantas mensagens do cliente você ainda não viu, e contador azul mostra quantas respostas a IA enviou que você ainda não conferiu. Ao abrir a conversa, ambos zeram
+- **Mensagens não lidas** — contador verde mostra quantas mensagens do cliente você ainda não viu, e contador azul mostra quantas respostas a IA enviou que você ainda não conferiu. Ao abrir a conversa, ambos zeram e o WhatsApp marca as mensagens como lidas (✓✓ azul) automaticamente
 - **Reenviar mensagens com erro** — se uma mensagem falhar, você pode tentar enviar de novo com um clique
 - **Busca de contatos** — encontre qualquer contato rapidamente pela barra de pesquisa
 
