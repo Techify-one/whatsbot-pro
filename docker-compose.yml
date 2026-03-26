@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
+    networks:
+      - coolify
     volumes:
       - whatsbot-contacts:/app/contacts
       - whatsbot-storages:/app/storages
@@ -17,6 +19,10 @@ services:
       - WHATSBOT_SYSTEM_PROMPT=${WHATSBOT_SYSTEM_PROMPT:-}
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
       - WHATSBOT_GOWA_PORT=${WHATSBOT_GOWA_PORT:-3000}
+
+networks:
+  coolify:
+    external: true
 
 volumes:
   whatsbot-contacts:
