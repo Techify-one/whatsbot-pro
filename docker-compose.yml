@@ -6,11 +6,10 @@ services:
     ports:
       - "${WHATSBOT_WEB_PORT:-8080}:8080"
     volumes:
-      - ./data/contacts:/app/contacts
-      - ./data/storages:/app/storages
-      - ./data/statics:/app/statics
-      - ./data/logs:/app/logs
-      - ./data/config.json:/app/config.json
+      - whatsbot-contacts:/app/contacts
+      - whatsbot-storages:/app/storages
+      - whatsbot-statics:/app/statics
+      - whatsbot-logs:/app/logs
     environment:
       - WHATSBOT_DOCKER=1
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -18,3 +17,9 @@ services:
       - WHATSBOT_SYSTEM_PROMPT=${WHATSBOT_SYSTEM_PROMPT:-}
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
       - WHATSBOT_GOWA_PORT=${WHATSBOT_GOWA_PORT:-3000}
+
+volumes:
+  whatsbot-contacts:
+  whatsbot-storages:
+  whatsbot-statics:
+  whatsbot-logs:
