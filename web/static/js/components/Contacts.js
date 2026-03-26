@@ -992,6 +992,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
   const [selected, setSelected] = useState(null);
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const hasLoadedDetail = useRef(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const openInfoAfterSelect = useRef(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
@@ -1001,7 +1002,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
   const contactsRef = useRef([]);
-  const initialIdHandled = useRef(false);
+  const lastResolvedId = useRef(null);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { selectedRef.current = selected; }, [selected]);
@@ -1050,14 +1051,19 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
   useEffect(() => {
     if (initialContactId == null) {
       // popstate back to "/" — deselect without pushing URL again
-      if (initialIdHandled.current) setSelected(null);
+      if (lastResolvedId.current != null) {
+        setSelected(null);
+        lastResolvedId.current = null;
+      }
       return;
     }
+    // Already resolved this exact ID — skip (prevents re-selecting on contacts list refresh)
+    if (initialContactId === lastResolvedId.current) return;
     if (contacts.length === 0 || loading) return;
     const c = contacts.find(c => c.id === initialContactId);
     if (c) {
       setSelected(c.phone);
-      initialIdHandled.current = true;
+      lastResolvedId.current = initialContactId;
     }
   }, [initialContactId, contacts, loading]);
 
@@ -1076,7 +1082,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
     } else {
       setShowInfoPanel(false);
     }
-    setLoadingDetail(true);
+    if (!hasLoadedDetail.current) setLoadingDetail(true);
     // Preserve any messages already buffered for this contact (arrived before selection)
     // but reset the accumulator for new messages arriving during fetch
     const preFetchBuffer = pendingWsMessages.current[selected] || [];
@@ -1113,6 +1119,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
         pendingWsMessages.current[selected] = [];
         setContactData(data);
       }
+      hasLoadedDetail.current = true;
       setLoadingDetail(false);
     });
   }, [selected]);
