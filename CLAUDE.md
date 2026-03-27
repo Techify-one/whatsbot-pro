@@ -85,6 +85,8 @@ Cada contato tem um arquivo JSON em `contacts/{phone}.json`:
 | POST | `/api/whatsapp/reconnect` | Reconectar GOWA |
 | POST | `/api/whatsapp/logout` | Logout GOWA |
 | POST | `/api/webhook` | Recebe mensagens do GOWA (webhook) |
+| GET | `/api/contacts?archived=true` | Lista apenas contatos/grupos arquivados |
+| GET | `/api/webhook-payloads?limit=N` | Últimos N payloads raw do webhook (debug, max 50) |
 | WS | `/ws` | WebSocket para eventos real-time |
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
@@ -129,6 +131,7 @@ Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
 - `logs/` — logs com rotação
 - `storages/` — dados do GOWA (sessão WhatsApp)
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
+- **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` no JSON do contato. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
 
 ## Teste opcional com Evolution API
 
@@ -186,3 +189,5 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - Frontend vendorizado: libs JS em `web/static/vendor/` — sem dependência de CDN em runtime
 - **Sockets fantasma no Windows**: ao reiniciar frequentemente, portas podem ficar presas em LISTENING com PIDs inexistentes. Use porta alternativa ou reinicie o PC
 - **run_dev.bat mata processos**: o bat já executa `taskkill` para gowa.exe e uvicorn.exe antes de iniciar
+- **GOWA `/chats` limit máximo**: `GET /chats?limit=N` retorna HTTP 400 para valores acima de ~200. Usar `limit=100` como máximo seguro
+- **Archive status é chat-level**: o webhook do GOWA **não** inclui campo de archive no payload. Para saber se um chat é arquivado, consultar `GET /chats` e verificar o campo `archived` no item com o `jid` correspondente
