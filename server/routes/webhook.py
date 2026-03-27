@@ -262,10 +262,10 @@ def register_routes(app, deps):
             # Transcribe audio / describe image
             transcription = ""
             try:
-                if audio_path:
+                if audio_path and settings.get("audio_transcription_enabled", True):
                     transcription = await asyncio.to_thread(
                         agent_handler.transcribe_audio, audio_path, phone)
-                elif image_path:
+                elif image_path and settings.get("image_transcription_enabled", True):
                     transcription = await asyncio.to_thread(
                         agent_handler.describe_image, image_path, phone)
             except Exception as e:

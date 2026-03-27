@@ -121,7 +121,7 @@ export function ModelSelect({ value, onChange, filterModality, placeholder }) {
 
   // Find display name for current value
   const currentModel = models.find(m => m.id === value);
-  const displayValue = open ? query : (value || '');
+  const displayValue = open ? query : (currentModel ? currentModel.name : (value || ''));
 
   return html`
     <div ref=${wrapperRef} class="relative w-full">
@@ -134,12 +134,8 @@ export function ModelSelect({ value, onChange, filterModality, placeholder }) {
         onInput=${(e) => { setQuery(e.target.value); setOpen(true); }}
         onKeyDown=${handleKeyDown}
         class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+        title=${value || ''}
       />
-      ${value && !open ? html`
-        <div class="absolute right-8 top-1/2 -translate-y-1/2 text-[10px] text-wa-secondary truncate max-w-[50%] pointer-events-none">
-          ${currentModel ? currentModel.name : ''}
-        </div>
-      ` : null}
       ${open && html`
         <div
           ref=${listRef}

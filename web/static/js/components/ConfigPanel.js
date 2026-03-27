@@ -17,6 +17,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [batchDelay, setBatchDelay] = useState(3);
   const [splitMessages, setSplitMessages] = useState(true);
   const [splitDelay, setSplitDelay] = useState(2);
+  const [audioTranscriptionEnabled, setAudioTranscriptionEnabled] = useState(true);
+  const [imageTranscriptionEnabled, setImageTranscriptionEnabled] = useState(true);
   const [testing, setTesting] = useState(false);
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
@@ -38,6 +40,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setBatchDelay(config.message_batch_delay ?? 3);
       setSplitMessages(config.split_messages ?? true);
       setSplitDelay(config.split_message_delay ?? 2);
+      setAudioTranscriptionEnabled(config.audio_transcription_enabled ?? true);
+      setImageTranscriptionEnabled(config.image_transcription_enabled ?? true);
     }
   }, [config]);
 
@@ -82,6 +86,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       message_batch_delay: isNaN(parseFloat(batchDelay)) ? 0 : parseFloat(batchDelay),
       split_messages: splitMessages,
       split_message_delay: isNaN(parseFloat(splitDelay)) ? 0 : parseFloat(splitDelay),
+      audio_transcription_enabled: audioTranscriptionEnabled,
+      image_transcription_enabled: imageTranscriptionEnabled,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -174,6 +180,15 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             placeholder="google/gemini-2.0-flash-001"
           />
           <span class="text-xs text-wa-secondary">Modelo com suporte a áudio</span>
+          <label class="flex items-center gap-2 mt-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${audioTranscriptionEnabled}
+              onChange=${(e) => setAudioTranscriptionEnabled(e.target.checked)}
+              class="accent-wa-teal w-4 h-4"
+            />
+            <span class="text-sm text-wa-text">Ativar transcrição de áudio</span>
+          </label>
         </div>
         <div>
           <label class="block text-sm font-semibold text-wa-text mb-1">Modelo descrição imagem</label>
@@ -184,6 +199,15 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             placeholder="google/gemini-2.0-flash-001"
           />
           <span class="text-xs text-wa-secondary">Modelo com suporte a visão</span>
+          <label class="flex items-center gap-2 mt-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${imageTranscriptionEnabled}
+              onChange=${(e) => setImageTranscriptionEnabled(e.target.checked)}
+              class="accent-wa-teal w-4 h-4"
+            />
+            <span class="text-sm text-wa-text">Ativar transcrição de imagem</span>
+          </label>
         </div>
       </div>
 
