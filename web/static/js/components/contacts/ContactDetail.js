@@ -321,7 +321,9 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }
 
   const isGroup = contact && contact.is_group;
-  const displayName = isGroup ? (contact.group_name || phone) : ((info && info.name) || phone);
+  const rawName = info && info.name;
+  const isAutoName = !isGroup && rawName && rawName.startsWith('~');
+  const displayName = isGroup ? (contact.group_name || phone) : (rawName ? rawName.replace(/^~/, '') : phone);
   const hasText = input.trim().length > 0;
 
   return html`
@@ -338,7 +340,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           }
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
-          <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}</div>
+          <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}${isAutoName ? html` <span class="text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] align-middle" title="Nome obtido do WhatsApp">WA</span>` : null}</div>
           ${contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
             : isGroup ? html`<div class="text-wa-secondary text-[13px] leading-tight">Grupo</div>`

@@ -445,7 +445,7 @@ def register_routes(app, deps):
             sender = sender_jid or chat_jid
             phone = sender.split("@")[0] if "@" in sender else sender
             individual_phone = phone
-            from_name = ""
+            from_name = data.get("from_name", "") or data.get("pushName", "") or data.get("notify", "")
 
         if not phone or (not text and not image_path and not audio_path):
             logger.info("[Webhook] Skipping: text=%r phone=%r media=%s",
@@ -526,6 +526,10 @@ def register_routes(app, deps):
             logger.info("[Webhook] %s from %s: %s",
                         media_type.capitalize() if media_type else "Message",
                         phone, text[:80] if text else f"[{media_type}]")
+
+        # Auto-fill contact name from WhatsApp pushName (private chats only)
+        if from_name and not is_group:
+            await asyncio.to_thread(agent_handler._get_contact(phone).set_wa_name, from_name)
 
         # Increment unread count for incoming user messages
         await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread(msg_id))

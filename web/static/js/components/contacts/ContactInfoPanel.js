@@ -17,7 +17,7 @@ export function ContactInfoPanel({ phone, info, isGroup, groupName, onClose, onS
   useEffect(() => {
     if (info) {
       setForm({
-        name: info.name || '',
+        name: (info.name || '').replace(/^~/, ''),
         email: info.email || '',
         profession: info.profession || '',
         company: info.company || '',

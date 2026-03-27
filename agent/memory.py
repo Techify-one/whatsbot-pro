@@ -159,6 +159,20 @@ class ContactMemory:
                 result.append({"role": m["role"], "content": m.get("content", "")})
         return result
 
+    def set_wa_name(self, wa_name: str) -> None:
+        """Set contact name from WhatsApp pushName if no manual name exists.
+
+        Auto-detected names are prefixed with '~' to distinguish from manual edits.
+        If current name doesn't start with '~' and is non-empty, it's manual — don't overwrite.
+        """
+        current = self.info.get("name", "")
+        if current and not current.startswith("~"):
+            return
+        new_name = f"~{wa_name}"
+        if current != new_name:
+            self.info["name"] = new_name
+            self.save()
+
     def update_info(self, **kwargs):
         """Update contact info fields. Only overwrites non-empty values."""
         for key in ("name", "email", "profession", "company", "address"):
