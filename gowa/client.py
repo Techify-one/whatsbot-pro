@@ -345,7 +345,8 @@ class GOWAClient:
         logger.info("[GOWA] is_chat_archived(%s): got %d chats", jid, len(chats))
         for chat in chats:
             if chat.get("jid") == jid:
-                result = bool(chat.get("archived"))
+                logger.info("[GOWA] Raw chat data for %s: %s", jid, chat)
+                result = bool(chat.get("archived") or chat.get("Archived"))
                 logger.info("[GOWA] is_chat_archived(%s): found, archived=%s", jid, result)
                 return result
         logger.info("[GOWA] is_chat_archived(%s): JID not found in chat list", jid)
