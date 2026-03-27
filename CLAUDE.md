@@ -128,6 +128,7 @@ Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
 - `contacts/` — memória persistente por contato (JSON por telefone)
 - `logs/` — logs com rotação
 - `storages/` — dados do GOWA (sessão WhatsApp)
+- **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
 
 ## Teste opcional com Evolution API
 

@@ -349,6 +349,13 @@ def register_routes(app, deps):
         # GOWA wraps message data inside "payload"
         data = body.get("payload", body.get("data", body))
 
+        # Store raw payload for debugging (last 50)
+        state.webhook_payloads.append({
+            "ts": time.time(),
+            "event": event,
+            "payload": data,
+        })
+
         # Handle chat presence events (typing/recording indicators)
         if event == "chat_presence":
             from_jid = data.get("from", "")
@@ -374,15 +381,14 @@ def register_routes(app, deps):
 
         # Extract message fields (GOWA field names vary)
         is_from_me = data.get("is_from_me", data.get("from_me", data.get("FromMe", False)))
-        if is_from_me:
-            # Capture bot's own phone from outgoing messages (for @mention detection)
-            if not state.bot_phone:
-                own_jid = (data.get("sender_jid", "") or data.get("from", "")
-                           or data.get("sender", ""))
-                if own_jid and "@s.whatsapp.net" in own_jid:
-                    state.bot_phone = own_jid.split("@")[0].split(":")[0]
-                    logger.info("[Webhook] Bot phone captured from own message: %s", state.bot_phone)
-            return _ok({"status": "ignored"})
+
+        # Capture bot's own phone from outgoing messages (for @mention detection)
+        if is_from_me and not state.bot_phone:
+            own_jid = (data.get("sender_jid", "") or data.get("from", "")
+                       or data.get("sender", ""))
+            if own_jid and "@s.whatsapp.net" in own_jid:
+                state.bot_phone = own_jid.split("@")[0].split(":")[0]
+                logger.info("[Webhook] Bot phone captured from own message: %s", state.bot_phone)
 
         msg_id = data.get("id", data.get("Id", data.get("message_id", ""))
                          ) or str(uuid.uuid4())
@@ -426,7 +432,11 @@ def register_routes(app, deps):
 
         # For audio without text, set a placeholder
         if audio_path and not text:
-            text = "[Áudio recebido]"
+            text = "[Áudio recebido]" if not is_from_me else "[Áudio enviado]"
+
+        # For image without text, set a placeholder for outgoing
+        if image_path and not text and is_from_me:
+            text = "[Imagem enviada]"
 
         # Extract chat and sender separately for group support
         chat_jid = (data.get("chat_jid", "") or data.get("chat_id", "")
@@ -462,6 +472,41 @@ def register_routes(app, deps):
             if sent_at and (time.time() - sent_at) < 30:
                 logger.info("[Webhook] Ignoring echo-back for %s", phone)
                 return _ok({"status": "echo"})
+
+        # Sync outgoing messages sent from phone (not via our app)
+        if is_from_me:
+            # Determine media metadata
+            media_type: str | None = None
+            media_path: str | None = None
+            if image_path:
+                media_type = "image"
+                media_path = image_path
+            elif audio_path:
+                media_type = "audio"
+                media_path = audio_path
+
+            logger.info("[Webhook] Syncing outgoing %s to %s: %s",
+                        media_type or "message", phone,
+                        text[:80] if text else f"[{media_type}]")
+
+            # Save as "assistant" in contact memory
+            contact = agent_handler._get_contact(phone)
+            await asyncio.to_thread(
+                contact.add_message, "assistant", text,
+                media_type=media_type, media_path=media_path, msg_id=msg_id)
+
+            # Broadcast to frontend
+            broadcast_msg: dict = {"role": "assistant", "content": text,
+                                   "ts": time.time(), "msg_id": msg_id}
+            if media_type:
+                broadcast_msg["media_type"] = media_type
+                broadcast_msg["media_path"] = media_path
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": broadcast_msg,
+            })
+
+            return _ok({"status": "synced"})
 
         # Determine media metadata for broadcast
         media_type: str | None = None

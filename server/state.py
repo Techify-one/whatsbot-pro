@@ -92,3 +92,5 @@ class AppState:
         # Bot's own identity for @mention detection in groups
         self.bot_phone: str = ""
         self.bot_name: str = ""
+        # Last 50 raw webhook payloads for debugging
+        self.webhook_payloads: deque[dict] = deque(maxlen=50)
