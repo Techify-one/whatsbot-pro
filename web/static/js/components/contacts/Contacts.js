@@ -234,8 +234,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
       }
     }
 
-    // Skip contact list preview update for transcription, tool_call, and error messages
-    if (message.role === 'transcription' || message.role === 'tool_call' || message.role === 'error') return;
+    // Skip contact list preview update for transcription, system_notice, tool_call, and error messages
+    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'error') return;
 
     setContacts(prev => {
       const idx = prev.findIndex(c => c.phone === phone);

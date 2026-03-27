@@ -356,6 +356,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           : messages.map((m, i) => {
               const isUser = m.role === 'user';
               const isTranscription = m.role === 'transcription';
+              const isSystemNotice = m.role === 'system_notice';
               const isToolCall = m.role === 'tool_call';
               const isError = m.role === 'error';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
@@ -368,6 +369,24 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                       <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
                         Transcrição privada
+                      </span>
+                      <span>${m.content}</span>
+                      <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
+                        ${formatBubbleTime(m.ts)}
+                      </span>
+                    </div>
+                  </div>
+                `;
+              }
+
+              if (isSystemNotice) {
+                return html`
+                  <div key=${i} class="flex justify-center mt-[4px]">
+                    <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
+                         style="background: #1b2e4e; color: #93c5fd; border: 1px solid #1e40af;">
+                      <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                        Mensagem do Sistema
                       </span>
                       <span>${m.content}</span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">

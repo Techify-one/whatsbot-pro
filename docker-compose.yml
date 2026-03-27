@@ -12,9 +12,6 @@ services:
       - whatsbot-logs:/app/logs
     environment:
       - WHATSBOT_DOCKER=1
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - WHATSBOT_MODEL=${WHATSBOT_MODEL:-}
-      - WHATSBOT_SYSTEM_PROMPT=${WHATSBOT_SYSTEM_PROMPT:-}
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
       - WHATSBOT_GOWA_PORT=${WHATSBOT_GOWA_PORT:-3000}
     healthcheck:

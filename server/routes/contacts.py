@@ -46,7 +46,7 @@ def register_routes(app, deps):
                     info = data.get("info", {})
                     msgs = data.get("messages", [])
                     # Skip transcription messages for preview
-                    visible = [m for m in msgs if m.get("role") != "transcription"]
+                    visible = [m for m in msgs if m.get("role") not in ("transcription", "system_notice")]
                     last = visible[-1] if visible else None
                     # Build last message preview with media indicator
                     last_content = ""

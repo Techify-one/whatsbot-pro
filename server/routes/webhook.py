@@ -217,10 +217,10 @@ def register_routes(app, deps):
                 if contact.ai_enabled:
                     if not agent_handler.api_key:
                         notice = "[WhatsBot] API key não configurada."
-                        contact.add_message("transcription", notice)
+                        contact.add_message("system_notice", notice)
                         await ws_manager.broadcast("new_message", {
                             "phone": phone,
-                            "message": {"role": "transcription", "content": notice, "ts": time.time()},
+                            "message": {"role": "system_notice", "content": notice, "ts": time.time()},
                         })
                     else:
                         try:
@@ -231,7 +231,14 @@ def register_routes(app, deps):
                             if result.tool_calls:
                                 await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
                             if result.reply:
-                                await _send_reply(phone, result.reply)
+                                if result.reply.startswith("[WhatsBot]"):
+                                    contact.add_message("system_notice", result.reply)
+                                    await ws_manager.broadcast("new_message", {
+                                        "phone": phone,
+                                        "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                                    })
+                                else:
+                                    await _send_reply(phone, result.reply)
                         except Exception as e:
                             logger.error("[Batch] Agent error for %s: %s", phone, e)
 
@@ -293,10 +300,10 @@ def register_routes(app, deps):
 
             if not agent_handler.api_key:
                 notice = "[WhatsBot] API key não configurada."
-                contact.add_message("transcription", notice)
+                contact.add_message("system_notice", notice)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
-                    "message": {"role": "transcription", "content": notice, "ts": time.time()},
+                    "message": {"role": "system_notice", "content": notice, "ts": time.time()},
                 })
                 continue
 
@@ -322,7 +329,14 @@ def register_routes(app, deps):
                 if result.tool_calls:
                     await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
                 if result.reply:
-                    await _send_reply(phone, result.reply)
+                    if result.reply.startswith("[WhatsBot]"):
+                        contact.add_message("system_notice", result.reply)
+                        await ws_manager.broadcast("new_message", {
+                            "phone": phone,
+                            "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                        })
+                    else:
+                        await _send_reply(phone, result.reply)
             except Exception as e:
                 logger.error("[Batch] Agent error for %s (%s): %s", phone, media_label, e)
 

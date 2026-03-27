@@ -135,7 +135,7 @@ class ContactMemory:
         """
         # Filter out transcription-only and failed messages before slicing
         eligible = [m for m in self.messages
-                    if m.get("role") not in ("transcription", "tool_call") and m.get("status") != "failed"]
+                    if m.get("role") not in ("transcription", "tool_call", "system_notice") and m.get("status") != "failed"]
         recent = eligible[-limit:] if len(eligible) > limit else eligible
 
         # Find the index of the last user image message (within *recent*)
