@@ -339,6 +339,14 @@ class GOWAClient:
             logger.warning("[GOWA] get_group_name failed for %s: %s", group_jid, e)
         return ""
 
+    def is_chat_archived(self, jid: str) -> bool:
+        """Check if a specific chat is archived in WhatsApp."""
+        chats = self.get_chats(limit=100)
+        for chat in chats:
+            if chat.get("jid") == jid:
+                return bool(chat.get("archived"))
+        return False
+
     def get_chat_messages(self, chat_jid: str, limit: int = 20) -> list[dict]:
         """Get messages from a specific chat."""
         result = self._request("GET", f"/chat/{chat_jid}/messages?limit={limit}")

@@ -31,6 +31,7 @@ class ContactMemory:
         self.ai_enabled: bool = True
         self.is_group: bool = False
         self.group_name: str = ""
+        self.is_archived: bool = False
         self.unread_count: int = 0
         self.unread_ai_count: int = 0
         self.unread_msg_ids: list[str] = []
@@ -54,6 +55,7 @@ class ContactMemory:
                 self.ai_enabled = data.get("ai_enabled", True)
                 self.is_group = data.get("is_group", False)
                 self.group_name = data.get("group_name", "")
+                self.is_archived = data.get("is_archived", False)
                 self.id = data.get("id")
                 self.unread_count = data.get("unread_count", 0)
                 self.unread_ai_count = data.get("unread_ai_count", 0)
@@ -74,6 +76,7 @@ class ContactMemory:
             "ai_enabled": self.ai_enabled,
             "is_group": self.is_group,
             "group_name": self.group_name,
+            "is_archived": self.is_archived,
             "unread_count": self.unread_count,
             "unread_ai_count": self.unread_ai_count,
             "unread_msg_ids": self.unread_msg_ids,

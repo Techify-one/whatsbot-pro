@@ -78,8 +78,11 @@ export async function sandboxClear(phone) {
 
 // ── Contacts ──────────────────────────────────────────────────────
 
-export async function getContacts(q = '') {
-  const query = q ? `?q=${encodeURIComponent(q)}` : '';
+export async function getContacts(q = '', archived = false) {
+  const params = [];
+  if (archived) params.push('archived=true');
+  if (q) params.push(`q=${encodeURIComponent(q)}`);
+  const query = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts${query}`);
 }
 

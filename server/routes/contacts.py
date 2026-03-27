@@ -32,7 +32,7 @@ def register_routes(app, deps):
                 logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
 
     @app.get("/api/contacts")
-    async def list_contacts(q: str = ""):
+    async def list_contacts(q: str = "", archived: bool = False):
         """List all contacts with summary info."""
         def _list():
             contacts_dir = agent_handler.memory_dir
@@ -43,6 +43,10 @@ def register_routes(app, deps):
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     phone = data.get("phone", f.stem)
+                    is_archived = data.get("is_archived", False)
+                    # Filter by archived status
+                    if is_archived != archived:
+                        continue
                     info = data.get("info", {})
                     msgs = data.get("messages", [])
                     # Skip transcription messages for preview
@@ -73,6 +77,7 @@ def register_routes(app, deps):
                         "ai_enabled": data.get("ai_enabled", True),
                         "is_group": is_group,
                         "group_name": group_name,
+                        "is_archived": is_archived,
                         "updated_at": data.get("updated_at", 0),
                     })
                 except Exception:

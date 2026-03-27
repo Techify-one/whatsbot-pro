@@ -572,6 +572,16 @@ def register_routes(app, deps):
                         media_type.capitalize() if media_type else "Message",
                         phone, text[:80] if text else f"[{media_type}]")
 
+        # Check/update archive status from GOWA
+        try:
+            archived = await asyncio.to_thread(gowa_client.is_chat_archived, chat_jid)
+            contact = agent_handler._get_contact(phone)
+            if contact.is_archived != archived:
+                contact.is_archived = archived
+                contact.save()
+        except Exception:
+            pass
+
         # Auto-fill contact name from WhatsApp pushName (private chats only)
         if from_name and not is_group:
             await asyncio.to_thread(agent_handler._get_contact(phone).set_wa_name, from_name)

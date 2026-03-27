@@ -24,6 +24,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
+  const [showArchived, setShowArchived] = useState(false);
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
@@ -59,9 +60,12 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
     }
   }, []);
 
+  const showArchivedRef = useRef(false);
+  useEffect(() => { showArchivedRef.current = showArchived; }, [showArchived]);
+
   const fetchContacts = useCallback((q = '') => {
     setLoading(true);
-    getContacts(q).then(res => {
+    getContacts(q, showArchivedRef.current).then(res => {
       if (res.ok) {
         setContacts(res.data);
         contactsRef.current = res.data;
@@ -70,8 +74,16 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
     });
   }, []);
 
+  const handleToggleArchived = useCallback(() => {
+    setShowArchived(prev => !prev);
+    setSelected(null);
+  }, []);
+
   // Initial load
   useEffect(() => { fetchContacts(); }, []);
+
+  // Reload when archive filter changes
+  useEffect(() => { fetchContacts(search); }, [showArchived]);
 
   // Resolve initialContactId → phone when contacts are loaded
   useEffect(() => {
@@ -284,6 +296,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
           onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
+          showArchived=${showArchived}
+          onToggleArchived=${handleToggleArchived}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->

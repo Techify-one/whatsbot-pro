@@ -1,24 +1,28 @@
 import { h } from 'preact';
 import htm from 'htm';
-import { SearchIcon, DefaultAvatar, GroupAvatar, DoubleCheckIcon } from './icons.js';
+import { SearchIcon, DefaultAvatar, GroupAvatar, DoubleCheckIcon, ArchiveIcon } from './icons.js';
 import { formatTime } from './utils.js';
 
 const html = htm.bind(h);
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState }) {
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived }) {
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
-      <div class="h-[59px] flex items-center justify-between px-4 bg-wa-teal shrink-0">
+      <div class="h-[59px] flex items-center justify-between px-4 ${showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal'} shrink-0 transition-colors">
         <div class="flex items-center gap-3">
-          <div class="w-[40px] h-[40px] rounded-full overflow-hidden">
-            <${DefaultAvatar} size=${40} />
-          </div>
+          <button
+            onClick=${onToggleArchived}
+            class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 transition-colors ${showArchived ? 'bg-white/15' : ''}"
+            title=${showArchived ? 'Voltar às conversas' : 'Ver arquivados'}
+          >
+            <span class="text-white"><${ArchiveIcon} /></span>
+          </button>
         </div>
         <div class="flex items-center gap-2">
-          <span class="text-white text-[15px] font-medium opacity-90">WhatsBot</span>
+          <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot'}</span>
         </div>
       </div>
 
