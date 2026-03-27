@@ -579,8 +579,9 @@ def register_routes(app, deps):
             if contact.is_archived != archived:
                 contact.is_archived = archived
                 contact.save()
-        except Exception:
-            pass
+                logger.info("[Webhook] Archive status updated: %s -> %s", phone, archived)
+        except Exception as e:
+            logger.warning("[Webhook] Failed to check archive status for %s: %s", phone, e)
 
         # Auto-fill contact name from WhatsApp pushName (private chats only)
         if from_name and not is_group:
