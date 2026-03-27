@@ -114,6 +114,17 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
 
   return html`
     <div class="bg-white rounded-xl p-5 flex flex-col gap-4 flex-1 border border-wa-border shadow-sm">
+      <!-- Auto Reply Toggle -->
+      <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+        <input
+          type="checkbox"
+          checked=${autoReply}
+          onChange=${(e) => setAutoReply(e.target.checked)}
+          class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+        />
+        Ativar agente de IA para responder mensagens
+      </label>
+
       <!-- API Key -->
       <div>
         <label class="block text-sm font-semibold text-wa-text mb-1">API Key OpenRouter</label>
@@ -277,19 +288,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
           </div>
         ` : null}
-      </div>
-
-      <!-- Checkboxes -->
-      <div class="flex flex-col gap-2">
-        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${autoReply}
-            onChange=${(e) => setAutoReply(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Auto-resposta ativa
-        </label>
       </div>
 
       <!-- Panel Password -->
