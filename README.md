@@ -156,9 +156,16 @@ Teste a IA antes de colocar para funcionar:
 
 ## O que você precisa
 
+### Opção 1: Windows (direto)
 - **Windows 10** ou mais recente
 - **Conexão com internet**
 - **Conta na OpenRouter** — crie grátis em [openrouter.ai](https://openrouter.ai) (você só paga pelo uso da IA, sem mensalidade)
+- **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
+
+### Opção 2: Docker (Windows, Mac ou Linux)
+- **Docker** instalado ([docker.com](https://www.docker.com/get-started))
+- **Conexão com internet**
+- **Conta na OpenRouter** — crie grátis em [openrouter.ai](https://openrouter.ai)
 - **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
 
 ---
@@ -190,7 +197,7 @@ Sim. Como tudo roda no seu computador, o programa precisa estar aberto para a IA
 O programa tenta reconectar automaticamente. Quando a internet voltar, ele retoma o funcionamento normalmente.
 
 **Posso usar no Mac ou Linux?**
-Por enquanto, o WhatsBot está disponível apenas para Windows.
+Sim! Usando Docker, o WhatsBot roda em qualquer sistema operacional (Windows, Mac ou Linux). Veja a seção **Instalação com Docker** abaixo. A versão sem Docker (direto pelo start.bat) está disponível apenas para Windows.
 
 **Quero personalizar algo no programa, como faço?**
 O WhatsBot é de código aberto e roda direto do código (sem precisar compilar). Você pode pedir para qualquer ferramenta de IA (como ChatGPT, Claude Code, Cursor, Cowork, etc.) fazer alterações — é só salvar o arquivo, fechar e abrir o iniciar.bat de novo. As mudanças já funcionam. Não precisa saber programar.
