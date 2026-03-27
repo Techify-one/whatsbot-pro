@@ -34,8 +34,6 @@ DEFAULT_CONFIG = {
         "Use português brasileiro."
     ),
     "auto_reply": True,
-    "reply_to_all": True,
-    "only_saved_contacts": False,
     "max_context_messages": 10,
     "inactivity_timeout_min": 30,
     "message_batch_delay": 3.0,

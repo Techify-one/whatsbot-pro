@@ -37,8 +37,6 @@ def register_routes(app, deps):
             "image_model": settings.get("image_model", "google/gemini-2.0-flash-001"),
             "system_prompt": settings.get("system_prompt", ""),
             "auto_reply": settings.get("auto_reply", True),
-            "reply_to_all": settings.get("reply_to_all", True),
-            "only_saved_contacts": settings.get("only_saved_contacts", False),
             "max_context_messages": settings.get("max_context_messages", 10),
             "message_batch_delay": settings.get("message_batch_delay", 3.0),
             "split_messages": settings.get("split_messages", True),
@@ -50,7 +48,7 @@ def register_routes(app, deps):
     async def save_config(body: dict):
         allowed_keys = {
             "openrouter_api_key", "model", "audio_model", "image_model",
-            "system_prompt", "auto_reply", "reply_to_all", "only_saved_contacts",
+            "system_prompt", "auto_reply",
             "max_context_messages", "message_batch_delay",
             "split_messages", "split_message_delay",
             "group_reply_mode", "bot_phone", "bot_name",

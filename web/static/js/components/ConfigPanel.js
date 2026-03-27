@@ -13,8 +13,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [imageModel, setImageModel] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [autoReply, setAutoReply] = useState(true);
-  const [replyAll, setReplyAll] = useState(true);
-  const [onlyContacts, setOnlyContacts] = useState(false);
   const [maxContext, setMaxContext] = useState(10);
   const [batchDelay, setBatchDelay] = useState(3);
   const [splitMessages, setSplitMessages] = useState(true);
@@ -36,8 +34,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setImageModel(config.image_model || '');
       setSystemPrompt(config.system_prompt || '');
       setAutoReply(config.auto_reply ?? true);
-      setReplyAll(config.reply_to_all ?? true);
-      setOnlyContacts(config.only_saved_contacts ?? false);
       setMaxContext(config.max_context_messages ?? 10);
       setBatchDelay(config.message_batch_delay ?? 3);
       setSplitMessages(config.split_messages ?? true);
@@ -82,8 +78,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       image_model: imageModel.trim() || 'google/gemini-2.0-flash-001',
       system_prompt: systemPrompt,
       auto_reply: autoReply,
-      reply_to_all: replyAll,
-      only_saved_contacts: onlyContacts,
       max_context_messages: parseInt(maxContext, 10) || 10,
       message_batch_delay: isNaN(parseFloat(batchDelay)) ? 0 : parseFloat(batchDelay),
       split_messages: splitMessages,
@@ -295,24 +289,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             class="w-4 h-4 rounded border-wa-border accent-wa-teal"
           />
           Auto-resposta ativa
-        </label>
-        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${replyAll}
-            onChange=${(e) => setReplyAll(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Responder a todos
-        </label>
-        <label class="flex items-center gap-2 text-sm text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${onlyContacts}
-            onChange=${(e) => setOnlyContacts(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Apenas contatos salvos
         </label>
       </div>
 

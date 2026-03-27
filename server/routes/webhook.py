@@ -214,7 +214,7 @@ def register_routes(app, deps):
                             len(text_parts), phone, combined[:80])
                 last_msg_id = text_msg_ids[-1] if text_msg_ids else None
                 contact.add_message("user", combined, msg_id=last_msg_id)
-                if contact.ai_enabled:
+                if contact.ai_enabled and settings.get("auto_reply", True):
                     if not agent_handler.api_key:
                         notice = "[WhatsBot] API key não configurada."
                         contact.add_message("system_notice", notice)
@@ -295,7 +295,7 @@ def register_routes(app, deps):
                     },
                 })
 
-            if not contact.ai_enabled:
+            if not contact.ai_enabled or not settings.get("auto_reply", True):
                 continue
 
             if not agent_handler.api_key:
