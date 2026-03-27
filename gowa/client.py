@@ -342,9 +342,13 @@ class GOWAClient:
     def is_chat_archived(self, jid: str) -> bool:
         """Check if a specific chat is archived in WhatsApp."""
         chats = self.get_chats(limit=100)
+        logger.info("[GOWA] is_chat_archived(%s): got %d chats", jid, len(chats))
         for chat in chats:
             if chat.get("jid") == jid:
-                return bool(chat.get("archived"))
+                result = bool(chat.get("archived"))
+                logger.info("[GOWA] is_chat_archived(%s): found, archived=%s", jid, result)
+                return result
+        logger.info("[GOWA] is_chat_archived(%s): JID not found in chat list", jid)
         return False
 
     def get_chat_messages(self, chat_jid: str, limit: int = 20) -> list[dict]:

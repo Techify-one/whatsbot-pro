@@ -575,6 +575,7 @@ def register_routes(app, deps):
         # Check/update archive status from GOWA
         try:
             archived = await asyncio.to_thread(gowa_client.is_chat_archived, chat_jid)
+            logger.info("[Webhook] Archive check: %s (jid=%s) -> archived=%s", phone, chat_jid, archived)
             contact = agent_handler._get_contact(phone)
             if contact.is_archived != archived:
                 contact.is_archived = archived
