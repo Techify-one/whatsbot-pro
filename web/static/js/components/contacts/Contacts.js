@@ -407,6 +407,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           onEditContact=${(phone) => { openInfoAfterSelect.current = true; selectContact(phone); }}
           onTagsUpdate=${(phone, newTags) => {
             setContacts(prev => prev.map(c => c.phone === phone ? { ...c, tags: newTags } : c));
+            setCtxMenu(prev => prev && prev.phone === phone ? { ...prev, tags: newTags } : prev);
             if (phone === selectedRef.current) {
               setContactData(prev => prev ? { ...prev, tags: newTags } : prev);
             }
