@@ -1,13 +1,15 @@
 import { h } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
+import { updateContactTags } from '../../services/api.js';
 
 const html = htm.bind(h);
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onEditContact, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, onToggleAI, onEditContact, onTagsUpdate, onClose }) {
   const ref = useRef(null);
+  const [showTags, setShowTags] = useState(false);
 
   useEffect(() => {
     function handleClick(e) {
@@ -19,6 +21,19 @@ export function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onEditContact,
 
   const left = Math.min(x, window.innerWidth - 200);
   const top = Math.min(y, window.innerHeight - 50);
+
+  async function toggleTag(tagName) {
+    const current = contactTags || [];
+    const newTags = current.includes(tagName)
+      ? current.filter(t => t !== tagName)
+      : [...current, tagName];
+    const res = await updateContactTags(phone, newTags);
+    if (res.ok) {
+      onTagsUpdate(phone, res.data.tags);
+    }
+  }
+
+  const tagEntries = Object.entries(globalTags || {});
 
   return html`
     <div
@@ -47,6 +62,52 @@ export function ContextMenu({ x, y, phone, aiEnabled, onToggleAI, onEditContact,
         </svg>
         Editar Contato
       </button>
+
+      <!-- Tags toggle -->
+      <button
+        onClick=${() => setShowTags(prev => !prev)}
+        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/>
+        </svg>
+        Tags
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${showTags ? 'rotate-180' : ''}">
+          <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
+        </svg>
+      </button>
+
+      ${showTags ? html`
+        <div class="border-t border-wa-border">
+          ${tagEntries.length === 0 ? html`
+            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma tag criada</div>
+          ` : tagEntries.map(([name, tagData]) => {
+            const isActive = (contactTags || []).includes(name);
+            return html`
+              <button
+                key=${name}
+                onClick=${() => toggleTag(name)}
+                class="w-full text-left px-4 py-[8px] text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-3"
+              >
+                <span
+                  class="w-[16px] h-[16px] rounded border-2 flex items-center justify-center shrink-0"
+                  style="border-color: ${tagData.color}; background: ${isActive ? tagData.color : 'transparent'};"
+                >
+                  ${isActive ? html`
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="white">
+                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                    </svg>
+                  ` : null}
+                </span>
+                <span
+                  class="font-medium"
+                  style="color: ${tagData.color};"
+                >${name}</span>
+              </button>
+            `;
+          })}
+        </div>
+      ` : null}
     </div>
   `;
 }

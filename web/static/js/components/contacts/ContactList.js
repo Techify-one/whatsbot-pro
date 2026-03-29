@@ -50,7 +50,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${c.phone}
                   onClick=${() => onSelect(c.phone)}
-                  onContextMenu=${(e) => { e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false }); }}
+                  onContextMenu=${(e) => { e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false, tags: c.tags || [] }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     selected === c.phone ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"

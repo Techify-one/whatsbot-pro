@@ -378,8 +378,16 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           y=${ctxMenu.y}
           phone=${ctxMenu.phone}
           aiEnabled=${ctxMenu.aiEnabled}
+          contactTags=${ctxMenu.tags}
+          globalTags=${globalTags}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => { openInfoAfterSelect.current = true; selectContact(phone); }}
+          onTagsUpdate=${(phone, newTags) => {
+            setContacts(prev => prev.map(c => c.phone === phone ? { ...c, tags: newTags } : c));
+            if (phone === selectedRef.current) {
+              setContactData(prev => prev ? { ...prev, tags: newTags } : prev);
+            }
+          }}
           onClose=${() => setCtxMenu(null)}
         />
       ` : null}
