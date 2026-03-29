@@ -4,6 +4,7 @@ import htm from 'htm';
 import { sendMessage, retrySend, sendImage, sendAudio, sendPresence } from '../../services/api.js';
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
 import { formatBubbleTime } from './utils.js';
+import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 
 const html = htm.bind(h);
 
@@ -381,7 +382,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
                         Transcrição privada
                       </span>
-                      <span>${m.content}</span>
+                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -399,7 +400,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
                         Mensagem do Sistema
                       </span>
-                      <span>${m.content}</span>
+                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -417,7 +418,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
                         Ferramenta IA
                       </span>
-                      <span>${m.content}</span>
+                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -435,7 +436,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
                         Erro no envio
                       </span>
-                      <span>${m.content}</span>
+                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -464,7 +465,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         loading="lazy"
                       />
                       ${m.content && m.content !== '[Imagem enviada pelo contato]'
-                        ? html`<span>${m.content}</span>`
+                        ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`
                         : null}
                     ` : m.media_type === 'audio' ? html`
                       <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
@@ -473,9 +474,9 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
                       </audio>
                       ${m.content && m.content !== '[Áudio recebido]' && m.content !== '[Áudio]'
-                        ? html`<span class="block text-[12px] text-wa-secondary italic">${m.content}</span>`
+                        ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`
                         : null}
-                    ` : html`<span>${m.content}</span>`}
+                    ` : html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
                       ${!isUser ? (
                         isFailed ? html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}` :
