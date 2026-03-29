@@ -7,26 +7,42 @@ import threading
 import webbrowser
 from pathlib import Path
 
-# Setup logging early
-from config.settings import Settings
-
-settings = Settings()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(
-            settings.logs_dir / "whatsbot.log",
-            encoding="utf-8",
-        ),
-    ],
-)
-logger = logging.getLogger("whatsbot")
+from config.settings import get_data_dir
 
 
 def main():
+    data_dir = get_data_dir()
+
+    # Initialize SQLite database before anything else
+    from db import init_db
+    is_docker = os.environ.get("WHATSBOT_DOCKER") == "1" or Path("/.dockerenv").exists()
+    storages_dir = data_dir / "storages"
+    storages_dir.mkdir(exist_ok=True)
+    db_path = storages_dir / "whatsbot.db"
+    init_db(db_path)
+
+    # Auto-migrate from JSON files if DB is empty
+    from db.migrate_json import needs_migration, migrate
+    if needs_migration(data_dir):
+        migrate(data_dir)
+
+    # Now load settings (reads from SQLite)
+    from config.settings import Settings
+    settings = Settings()
+
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(
+                settings.logs_dir / "whatsbot.log",
+                encoding="utf-8",
+            ),
+        ],
+    )
+    logger = logging.getLogger("whatsbot")
     logger.info("WhatsBot starting...")
 
     from gowa.manager import GOWAManager
@@ -59,7 +75,6 @@ def main():
         agent_handler=agent_handler,
     )
 
-    is_docker = os.environ.get("WHATSBOT_DOCKER") == "1" or Path("/.dockerenv").exists()
     host = "0.0.0.0"
 
     # Open browser after server has time to start (skip in Docker — no display)

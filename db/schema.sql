@@ -1,0 +1,80 @@
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone           TEXT    NOT NULL UNIQUE,
+    name            TEXT    NOT NULL DEFAULT '',
+    email           TEXT    NOT NULL DEFAULT '',
+    profession      TEXT    NOT NULL DEFAULT '',
+    company         TEXT    NOT NULL DEFAULT '',
+    address         TEXT    NOT NULL DEFAULT '',
+    ai_enabled      INTEGER NOT NULL DEFAULT 1,
+    is_group        INTEGER NOT NULL DEFAULT 0,
+    group_name      TEXT    NOT NULL DEFAULT '',
+    is_archived     INTEGER NOT NULL DEFAULT 0,
+    unread_count    INTEGER NOT NULL DEFAULT 0,
+    unread_ai_count INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL    NOT NULL,
+    updated_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_updated ON contacts(updated_at);
+CREATE INDEX IF NOT EXISTS idx_contacts_archived ON contacts(is_archived);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    text       TEXT    NOT NULL,
+    created_at REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_obs_contact ON observations(contact_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    role       TEXT    NOT NULL,
+    content    TEXT    NOT NULL DEFAULT '',
+    ts         REAL    NOT NULL,
+    media_type TEXT,
+    media_path TEXT,
+    status     TEXT,
+    msg_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_msg_contact_ts ON messages(contact_id, ts);
+CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(msg_id);
+
+CREATE TABLE IF NOT EXISTS usage (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id        INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    call_type         TEXT    NOT NULL,
+    model             TEXT    NOT NULL,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens      INTEGER NOT NULL DEFAULT 0,
+    cost_usd          REAL    NOT NULL DEFAULT 0.0,
+    ts                REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_contact_ts ON usage(contact_id, ts);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name  TEXT    NOT NULL UNIQUE,
+    color TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contact_tags (
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (contact_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ct_tag ON contact_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS unread_msg_ids (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    msg_id     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_unread_contact ON unread_msg_ids(contact_id);

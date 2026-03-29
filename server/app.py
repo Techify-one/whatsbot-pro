@@ -154,9 +154,6 @@ def create_app(
 
         return await call_next(request)
 
-    # ── Migrate contact IDs ────────────────────────────────────────────
-    agent_handler.ensure_contact_ids()
-
     # ── Health endpoint (always open, used by Docker healthcheck) ──────
 
     @app.get("/health")

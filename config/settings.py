@@ -1,7 +1,8 @@
-import json
 import os
 from pathlib import Path
 from typing import Any, Callable
+
+from db.repositories import config_repo
 
 
 def get_data_dir() -> Path:
@@ -59,23 +60,13 @@ DEFAULT_CONFIG = {
 class Settings:
     def __init__(self):
         self.data_dir = get_data_dir()
-        # In Docker, store config.json inside storages/ so it's persisted by the volume
-        if os.environ.get("WHATSBOT_DOCKER"):
-            self.config_path = self.data_dir / "storages" / "config.json"
-        else:
-            self.config_path = self.data_dir / "config.json"
         self.logs_dir = self.data_dir / "logs"
         self.logs_dir.mkdir(exist_ok=True)
         self._config: dict = {}
         self.load()
 
     def load(self):
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    self._config = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self._config = {}
+        self._config = config_repo.get_all()
         # Merge defaults for missing keys
         added = False
         for key, value in DEFAULT_CONFIG.items():
@@ -83,7 +74,7 @@ class Settings:
                 self._config[key] = value
                 added = True
         # Persist on first run or when new defaults were added
-        if added or not self.config_path.exists():
+        if added or not self._config:
             self.save()
         self._apply_env_overrides()
 
@@ -98,8 +89,7 @@ class Settings:
                     pass
 
     def save(self):
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(self._config, f, indent=2, ensure_ascii=False)
+        config_repo.set_many(self._config)
 
     def get(self, key: str, default=None):
         return self._config.get(key, default)

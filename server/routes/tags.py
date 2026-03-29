@@ -1,12 +1,11 @@
 """Tag CRUD and contact-tag assignment endpoints."""
 
 import asyncio
-import json
 import logging
-from pathlib import Path
 
 from fastapi import Request
 
+from db.repositories import contact_repo
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -50,9 +49,14 @@ def register_routes(app, deps):
             return _err(f"Tag '{new_name}' já existe.")
         if not agent_handler.tag_registry.update(name, new_name=new_name, color=color):
             return _err(f"Tag '{name}' não encontrada.", 404)
-        # If renamed, update all contacts that reference the old name
+        # Tag rename in contact_tags is handled automatically by tag_repo.update()
+        # which updates the tags table — contact_tags references tag_id, not name.
+        # Update in-memory cache for loaded contacts
         if new_name and new_name != name:
-            await asyncio.to_thread(_rename_tag_in_contacts, name, new_name)
+            for contact in agent_handler._contacts.values():
+                if name in contact.tags:
+                    idx = contact.tags.index(name)
+                    contact.tags[idx] = new_name
         await ws_manager.broadcast("tags_changed", agent_handler.tag_registry.all())
         final_name = new_name or name
         tag_data = agent_handler.tag_registry.get(final_name)
@@ -63,9 +67,13 @@ def register_routes(app, deps):
         """Delete a global tag and remove it from all contacts."""
         if not agent_handler.tag_registry.delete(name):
             return _err(f"Tag '{name}' não encontrada.", 404)
-        affected = await asyncio.to_thread(_remove_tag_from_contacts, name)
+        # tag_repo.delete() already handles DELETE FROM contact_tags
+        # Update in-memory cache
+        for contact in agent_handler._contacts.values():
+            if name in contact.tags:
+                contact.tags.remove(name)
         await ws_manager.broadcast("tags_changed", agent_handler.tag_registry.all())
-        return _ok({"deleted": name, "contacts_affected": affected})
+        return _ok({"deleted": name})
 
     @app.put("/api/contacts/{phone}/tags")
     async def set_contact_tags(phone: str, request: Request):
@@ -76,9 +84,8 @@ def register_routes(app, deps):
             return _err("Tags deve ser uma lista.")
 
         def _update():
-            # Check contact file exists before modifying
-            fp = agent_handler.memory_dir / f"{phone}.json"
-            if not fp.exists():
+            c = contact_repo.get_by_phone(phone)
+            if c is None:
                 return None
             contact = agent_handler._get_contact(phone)
             contact.set_tags(tags)
@@ -89,50 +96,3 @@ def register_routes(app, deps):
             return _err("Contato não encontrado.", 404)
         await ws_manager.broadcast("contact_tags_updated", {"phone": phone, "tags": result})
         return _ok({"phone": phone, "tags": result})
-
-    def _remove_tag_from_contacts(tag_name: str) -> int:
-        """Remove a tag from all contact files. Returns count of affected contacts."""
-        contacts_dir = agent_handler.memory_dir
-        affected = 0
-        for f in contacts_dir.glob("*.json"):
-            if f.stem.startswith("_"):
-                continue
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                tags = data.get("tags", [])
-                if tag_name in tags:
-                    tags.remove(tag_name)
-                    data["tags"] = tags
-                    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                    affected += 1
-                    # Update in-memory contact if loaded
-                    phone = data.get("phone", f.stem)
-                    if phone in agent_handler._contacts:
-                        agent_handler._contacts[phone].tags = tags
-            except Exception:
-                continue
-        return affected
-
-    def _rename_tag_in_contacts(old_name: str, new_name: str) -> int:
-        """Rename a tag in all contact files. Returns count of affected contacts."""
-        contacts_dir = agent_handler.memory_dir
-        affected = 0
-        for f in contacts_dir.glob("*.json"):
-            if f.stem.startswith("_"):
-                continue
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                tags = data.get("tags", [])
-                if old_name in tags:
-                    idx = tags.index(old_name)
-                    tags[idx] = new_name
-                    data["tags"] = tags
-                    f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                    affected += 1
-                    # Update in-memory contact if loaded
-                    phone = data.get("phone", f.stem)
-                    if phone in agent_handler._contacts:
-                        agent_handler._contacts[phone].tags = tags
-            except Exception:
-                continue
-        return affected

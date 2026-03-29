@@ -1,38 +1,26 @@
 import base64
-import json
 import logging
 import mimetypes
 import time
 from pathlib import Path
 
+from db.repositories import contact_repo, message_repo, tag_repo, usage_repo
+
 logger = logging.getLogger(__name__)
 
 
 class TagRegistry:
-    """Global tag registry stored as contacts/_tags.json.
+    """Global tag registry backed by SQLite tags table."""
 
-    Format: {"TagName": {"color": "#ef4444"}, ...}
-    """
-
-    def __init__(self, memory_dir: Path):
-        self.file_path = memory_dir / "_tags.json"
+    def __init__(self):
         self._tags: dict[str, dict] = {}
         self._load()
 
     def _load(self):
-        if self.file_path.exists():
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    self._tags = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self._tags = {}
+        self._tags = tag_repo.get_all()
 
     def save(self):
-        try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self._tags, f, indent=2, ensure_ascii=False)
-        except OSError as e:
-            logger.error("Failed to save tag registry: %s", e)
+        pass  # Each mutation already commits to DB
 
     def all(self) -> dict[str, dict]:
         return dict(self._tags)
@@ -40,52 +28,45 @@ class TagRegistry:
     def create(self, name: str, color: str) -> bool:
         if name in self._tags:
             return False
-        self._tags[name] = {"color": color}
-        self.save()
-        return True
+        if tag_repo.create(name, color):
+            self._tags[name] = {"color": color}
+            return True
+        return False
 
     def update(self, old_name: str, *, new_name: str | None = None, color: str | None = None) -> bool:
         if old_name not in self._tags:
+            return False
+        if not tag_repo.update(old_name, new_name=new_name, color=color):
             return False
         if color:
             self._tags[old_name]["color"] = color
         if new_name and new_name != old_name:
             self._tags[new_name] = self._tags.pop(old_name)
-        self.save()
         return True
 
     def delete(self, name: str) -> bool:
         if name not in self._tags:
             return False
-        del self._tags[name]
-        self.save()
-        return True
+        if tag_repo.delete(name):
+            del self._tags[name]
+            return True
+        return False
 
     def get(self, name: str) -> dict | None:
         return self._tags.get(name)
 
 
 class ContactMemory:
-    """Persistent per-contact memory stored as a JSON file.
+    """Persistent per-contact memory backed by SQLite.
 
-    File structure:
-    {
-        "phone": "5511999999999",
-        "info": {"name": "", "email": "", "profession": "", "company": "", "observations": []},
-        "messages": [{"role": "user"|"assistant", "content": "...", "ts": 1234567890}, ...],
-        "tags": ["VIP", "Lead"],
-        "created_at": 1234567890,
-        "updated_at": 1234567890
-    }
+    Maintains an in-memory cache of contact metadata for fast access.
+    Messages and usage are stored directly in SQLite (not cached in memory).
     """
 
-    def __init__(self, phone: str, memory_dir: Path):
+    def __init__(self, phone: str):
         self.phone = phone
-        self.file_path = memory_dir / f"{phone}.json"
         self.id: int | None = None
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
-        self.messages: list[dict] = []
-        self.usage: list[dict] = []
         self.tags: list[str] = []
         self.ai_enabled: bool = True
         self.is_group: bool = False
@@ -93,115 +74,111 @@ class ContactMemory:
         self.is_archived: bool = False
         self.unread_count: int = 0
         self.unread_ai_count: int = 0
-        self.unread_msg_ids: list[str] = []
         self.created_at: float = time.time()
         self.updated_at: float = time.time()
         self._load()
 
     def _load(self):
-        if self.file_path.exists():
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # Migrate old "notes" format to structured "info"
-                old_notes = data.get("notes", "")
-                default_info = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
-                self.info = data.get("info", default_info)
-                if old_notes and not any(self.info.values()):
-                    self.info["observations"] = [old_notes]
-                self.messages = data.get("messages", [])
-                self.usage = data.get("usage", [])
-                self.tags = data.get("tags", [])
-                self.ai_enabled = data.get("ai_enabled", True)
-                self.is_group = data.get("is_group", False)
-                self.group_name = data.get("group_name", "")
-                self.is_archived = data.get("is_archived", False)
-                self.id = data.get("id")
-                self.unread_count = data.get("unread_count", 0)
-                self.unread_ai_count = data.get("unread_ai_count", 0)
-                self.unread_msg_ids = data.get("unread_msg_ids", [])
-                self.created_at = data.get("created_at", time.time())
-                self.updated_at = data.get("updated_at", time.time())
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning("Failed to load memory for %s: %s", self.phone, e)
+        data = contact_repo.get_or_create(self.phone)
+        self.id = data["id"]
+        self.ai_enabled = data["ai_enabled"]
+        self.is_group = data["is_group"]
+        self.group_name = data["group_name"]
+        self.is_archived = data["is_archived"]
+        self.unread_count = data["unread_count"]
+        self.unread_ai_count = data["unread_ai_count"]
+        self.created_at = data["created_at"]
+        self.updated_at = data["updated_at"]
+
+        # Load info fields
+        observations = contact_repo.get_observations(self.id)
+        self.info = {
+            "name": data["name"],
+            "email": data["email"],
+            "profession": data["profession"],
+            "company": data["company"],
+            "address": data["address"],
+            "observations": observations,
+        }
+
+        # Load tags
+        self.tags = tag_repo.get_contact_tags(self.id)
+
+    @property
+    def messages(self) -> list[dict]:
+        """Lazy-load all messages from SQLite."""
+        return message_repo.get_all(self.id)
 
     def save(self):
+        """Persist current contact metadata to SQLite."""
         self.updated_at = time.time()
-        data = {
-            "id": self.id,
-            "phone": self.phone,
-            "info": self.info,
-            "messages": self.messages,
-            "usage": self.usage,
-            "tags": self.tags,
-            "ai_enabled": self.ai_enabled,
-            "is_group": self.is_group,
-            "group_name": self.group_name,
-            "is_archived": self.is_archived,
-            "unread_count": self.unread_count,
-            "unread_ai_count": self.unread_ai_count,
-            "unread_msg_ids": self.unread_msg_ids,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
-        try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except OSError as e:
-            logger.error("Failed to save memory for %s: %s", self.phone, e)
+        contact_repo.update(
+            self.id,
+            name=self.info.get("name", ""),
+            email=self.info.get("email", ""),
+            profession=self.info.get("profession", ""),
+            company=self.info.get("company", ""),
+            address=self.info.get("address", ""),
+            ai_enabled=1 if self.ai_enabled else 0,
+            is_group=1 if self.is_group else 0,
+            group_name=self.group_name,
+            is_archived=1 if self.is_archived else 0,
+            unread_count=self.unread_count,
+            unread_ai_count=self.unread_ai_count,
+        )
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None):
-        entry: dict = {"role": role, "content": content, "ts": time.time()}
-        if media_type:
-            entry["media_type"] = media_type
-        if media_path:
-            entry["media_path"] = media_path
-        if status:
-            entry["status"] = status
-        if msg_id:
-            entry["msg_id"] = msg_id
-        self.messages.append(entry)
-        self.save()
+        message_repo.add(
+            self.id, role, content,
+            media_type=media_type, media_path=media_path,
+            status=status, msg_id=msg_id,
+        )
+        # Touch updated_at
+        contact_repo.update(self.id)
+
+    def get_unread_msg_ids(self) -> list[str]:
+        """Return unread message IDs from the database."""
+        from db.connection import get_db
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT msg_id FROM unread_msg_ids WHERE contact_id = ?", (self.id,)
+        ).fetchall()
+        return [r["msg_id"] for r in rows]
 
     def increment_unread(self, msg_id: str | None = None):
         self.unread_count += 1
-        if msg_id:
-            self.unread_msg_ids.append(msg_id)
-        self.save()
+        contact_repo.increment_unread(self.id, msg_id)
 
     def increment_unread_ai(self):
         self.unread_ai_count += 1
-        self.save()
+        contact_repo.increment_unread_ai(self.id)
 
     def mark_as_read(self) -> list[str]:
         """Reset unread count and return the list of unread msg_ids (for read receipts)."""
-        msg_ids = list(self.unread_msg_ids)
-        if self.unread_count > 0 or msg_ids or self.unread_ai_count > 0:
-            self.unread_count = 0
-            self.unread_ai_count = 0
-            self.unread_msg_ids.clear()
-            self.save()
+        msg_ids = contact_repo.mark_as_read(self.id)
+        self.unread_count = 0
+        self.unread_ai_count = 0
         return msg_ids
 
     def set_ai_enabled(self, enabled: bool):
         self.ai_enabled = enabled
-        self.save()
+        contact_repo.update(self.id, ai_enabled=1 if enabled else 0)
 
     def set_tags(self, tags: list[str]):
         self.tags = list(tags)
-        self.save()
+        tag_repo.set_contact_tags(self.id, self.tags)
 
     def add_tag(self, tag_name: str):
         if tag_name not in self.tags:
             self.tags.append(tag_name)
-            self.save()
+            tag_repo.add_contact_tag(self.id, tag_name)
 
     def remove_tag(self, tag_name: str):
         if tag_name in self.tags:
             self.tags.remove(tag_name)
-            self.save()
+            tag_repo.remove_contact_tag(self.id, tag_name)
 
     def get_context_messages(self, limit: int) -> list[dict]:
         """Return the last N messages formatted for the LLM (without ts).
@@ -209,14 +186,10 @@ class ContactMemory:
         For the most recent image message from the user, include a base64 data
         URI so the vision model can see it.  Older images are replaced with a
         placeholder to keep token usage reasonable.
-        Transcription messages (role="transcription") are excluded from LLM context.
         """
-        # Filter out transcription-only and failed messages before slicing
-        eligible = [m for m in self.messages
-                    if m.get("role") not in ("transcription", "tool_call", "system_notice") and m.get("status") != "failed"]
-        recent = eligible[-limit:] if len(eligible) > limit else eligible
+        recent = message_repo.get_context(self.id, limit)
 
-        # Find the index of the last user image message (within *recent*)
+        # Find the index of the last user image message
         last_image_idx = -1
         for i in range(len(recent) - 1, -1, -1):
             if recent[i].get("media_type") == "image" and recent[i]["role"] == "user":
@@ -228,7 +201,6 @@ class ContactMemory:
             mt = m.get("media_type")
             if mt == "image" and m["role"] == "user":
                 if i == last_image_idx:
-                    # Build vision content array with base64
                     content = _build_image_content(m.get("media_path", ""), m.get("content", ""))
                 else:
                     content = m.get("content") or "[Imagem enviada pelo contato]"
@@ -238,72 +210,40 @@ class ContactMemory:
         return result
 
     def set_wa_name(self, wa_name: str) -> None:
-        """Set contact name from WhatsApp pushName if no manual name exists.
-
-        Auto-detected names are prefixed with '~' to distinguish from manual edits.
-        If current name doesn't start with '~' and is non-empty, it's manual — don't overwrite.
-        """
+        """Set contact name from WhatsApp pushName if no manual name exists."""
         current = self.info.get("name", "")
         if current and not current.startswith("~"):
             return
         new_name = f"~{wa_name}"
         if current != new_name:
             self.info["name"] = new_name
-            self.save()
+            contact_repo.update(self.id, name=new_name)
 
     def update_info(self, **kwargs):
         """Update contact info fields. Only overwrites non-empty values."""
+        fields_to_update = {}
         for key in ("name", "email", "profession", "company", "address"):
             val = kwargs.get(key, "")
             if val:
                 self.info[key] = val
+                fields_to_update[key] = val
+        if fields_to_update:
+            contact_repo.update(self.id, **fields_to_update)
         observation = kwargs.get("observation", "")
         if observation and observation not in self.info.get("observations", []):
             self.info.setdefault("observations", []).append(observation)
-        self.save()
+            contact_repo.add_observation(self.id, observation)
 
     def add_usage(self, call_type: str, model: str,
                   prompt_tokens: int, completion_tokens: int,
                   total_tokens: int, cost_usd: float) -> None:
-        self.usage.append({
-            "call_type": call_type,
-            "model": model,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "cost_usd": cost_usd,
-            "ts": time.time(),
-        })
-        self.save()
+        usage_repo.add(self.id, call_type, model, prompt_tokens,
+                       completion_tokens, total_tokens, cost_usd)
 
     def get_usage_summary(self, start_ts: float | None = None,
                           end_ts: float | None = None) -> dict:
         """Return aggregated usage stats for this contact."""
-        filtered = self.usage
-        if start_ts is not None:
-            filtered = [u for u in filtered if u.get("ts", 0) >= start_ts]
-        if end_ts is not None:
-            filtered = [u for u in filtered if u.get("ts", 0) <= end_ts]
-
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                  "cost_usd": 0.0, "call_count": 0, "by_type": {}}
-        for u in filtered:
-            totals["prompt_tokens"] += u.get("prompt_tokens", 0)
-            totals["completion_tokens"] += u.get("completion_tokens", 0)
-            totals["total_tokens"] += u.get("total_tokens", 0)
-            totals["cost_usd"] += u.get("cost_usd", 0.0)
-            totals["call_count"] += 1
-            ct = u.get("call_type", "text")
-            bt = totals["by_type"].setdefault(ct, {
-                "cost_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
-                "total_tokens": 0, "call_count": 0,
-            })
-            bt["cost_usd"] += u.get("cost_usd", 0.0)
-            bt["prompt_tokens"] += u.get("prompt_tokens", 0)
-            bt["completion_tokens"] += u.get("completion_tokens", 0)
-            bt["total_tokens"] += u.get("total_tokens", 0)
-            bt["call_count"] += 1
-        return totals
+        return usage_repo.summary(self.id, start_ts, end_ts)
 
     def get_info_summary(self) -> str:
         """Format contact info for injection into system prompt."""

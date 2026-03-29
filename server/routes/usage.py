@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from db.repositories import usage_repo, contact_repo
 from server.helpers import _ok
 from server.routes.config import get_models_cache
 
@@ -13,10 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_model_pricing(model_id: str) -> tuple[float, float]:
-    """Return (prompt_price_per_token, completion_price_per_token) from cache.
-
-    If the cache is empty, fetches models synchronously (runs in to_thread).
-    """
+    """Return (prompt_price_per_token, completion_price_per_token) from cache."""
     _models_cache = get_models_cache()
     if not _models_cache["data"]:
         try:
@@ -66,67 +64,25 @@ def register_routes(app, deps):
     # Wire up pricing function
     agent_handler.pricing_fn = _get_model_pricing
 
-    def _load_all_contacts() -> list:
-        """Load all contact files from disk (for usage aggregation)."""
-        contacts_dir = agent_handler.memory_dir
-        result = []
-        if not contacts_dir.exists():
-            return result
-        for f in contacts_dir.glob("*.json"):
-            phone = f.stem
-            contact = agent_handler._get_contact(phone)
-            result.append(contact)
-        return result
-
     @app.get("/api/usage/summary")
-    async def usage_summary(period: str | None = None, start: float | None = None, end: float | None = None):
+    async def usage_summary_endpoint(period: str | None = None, start: float | None = None, end: float | None = None):
         start_ts, end_ts = _parse_period(period, start, end)
-        contacts = await asyncio.to_thread(_load_all_contacts)
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                  "cost_usd": 0.0, "call_count": 0, "by_type": {}}
-        for c in contacts:
-            s = c.get_usage_summary(start_ts, end_ts)
-            totals["prompt_tokens"] += s["prompt_tokens"]
-            totals["completion_tokens"] += s["completion_tokens"]
-            totals["total_tokens"] += s["total_tokens"]
-            totals["cost_usd"] += s["cost_usd"]
-            totals["call_count"] += s["call_count"]
-            for ct, bt in s["by_type"].items():
-                agg = totals["by_type"].setdefault(ct, {
-                    "cost_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
-                    "total_tokens": 0, "call_count": 0,
-                })
-                agg["cost_usd"] += bt["cost_usd"]
-                agg["prompt_tokens"] += bt["prompt_tokens"]
-                agg["completion_tokens"] += bt["completion_tokens"]
-                agg["total_tokens"] += bt["total_tokens"]
-                agg["call_count"] += bt["call_count"]
+        totals = await asyncio.to_thread(usage_repo.global_summary, start_ts, end_ts)
         totals["period_start"] = start_ts
         totals["period_end"] = end_ts
         return _ok(totals)
 
     @app.get("/api/usage/by-contact")
-    async def usage_by_contact(period: str | None = None, start: float | None = None, end: float | None = None):
+    async def usage_by_contact_endpoint(period: str | None = None, start: float | None = None, end: float | None = None):
         start_ts, end_ts = _parse_period(period, start, end)
-        contacts = await asyncio.to_thread(_load_all_contacts)
-        rows = []
-        for c in contacts:
-            s = c.get_usage_summary(start_ts, end_ts)
-            if s["call_count"] == 0:
-                continue
-            s["phone"] = c.phone
-            s["name"] = c.info.get("name", "") or ""
-            rows.append(s)
-        rows.sort(key=lambda r: r["cost_usd"], reverse=True)
+        rows = await asyncio.to_thread(usage_repo.by_contact, start_ts, end_ts)
         return _ok(rows)
 
     @app.get("/api/usage/contact/{phone}")
     async def usage_contact_detail(phone: str, period: str | None = None, start: float | None = None, end: float | None = None):
         start_ts, end_ts = _parse_period(period, start, end)
-        contact = agent_handler._get_contact(phone)
-        filtered = contact.usage
-        if start_ts is not None:
-            filtered = [u for u in filtered if u.get("ts", 0) >= start_ts]
-        if end_ts is not None:
-            filtered = [u for u in filtered if u.get("ts", 0) <= end_ts]
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if contact is None:
+            return _ok([])
+        filtered = await asyncio.to_thread(usage_repo.detail, contact["id"], start_ts, end_ts)
         return _ok(filtered)

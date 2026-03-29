@@ -1,7 +1,6 @@
 """Contact CRUD and messaging endpoints."""
 
 import asyncio
-import json
 import logging
 import time
 from pathlib import Path
@@ -9,6 +8,7 @@ from pathlib import Path
 from fastapi import File, Form, UploadFile
 from gowa.client import GOWASendError
 
+from db.repositories import contact_repo, message_repo
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -34,85 +34,31 @@ def register_routes(app, deps):
     @app.get("/api/contacts")
     async def list_contacts(q: str = "", archived: bool = False):
         """List all contacts with summary info."""
-        def _list():
-            contacts_dir = agent_handler.memory_dir
-            results = []
-            for f in contacts_dir.glob("*.json"):
-                if f.stem.startswith("_"):
-                    continue
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    phone = data.get("phone", f.stem)
-                    is_archived = data.get("is_archived", False)
-                    # Filter by archived status
-                    if is_archived != archived:
-                        continue
-                    info = data.get("info", {})
-                    msgs = data.get("messages", [])
-                    # Skip transcription messages for preview
-                    visible = [m for m in msgs if m.get("role") not in ("transcription", "system_notice")]
-                    last = visible[-1] if visible else None
-                    # Build last message preview with media indicator
-                    last_content = ""
-                    if last:
-                        lmt = last.get("media_type")
-                        if lmt == "image":
-                            last_content = last.get("content", "")[:80] or "\U0001f4f7 Imagem"
-                        elif lmt == "audio":
-                            last_content = "\U0001f3a4 \u00c1udio"
-                        else:
-                            last_content = (last.get("content") or "")[:80]
-                    is_group = data.get("is_group", False)
-                    group_name = data.get("group_name", "")
-                    results.append({
-                        "id": data.get("id"),
-                        "phone": phone,
-                        "name": group_name if is_group else info.get("name", ""),
-                        "last_message": last_content,
-                        "last_message_role": last["role"] if last else "",
-                        "last_message_ts": last.get("ts", 0) if last else 0,
-                        "msg_count": len(msgs),
-                        "unread_count": data.get("unread_count", 0),
-                        "unread_ai_count": data.get("unread_ai_count", 0),
-                        "ai_enabled": data.get("ai_enabled", True),
-                        "is_group": is_group,
-                        "group_name": group_name,
-                        "is_archived": is_archived,
-                        "tags": data.get("tags", []),
-                        "updated_at": data.get("updated_at", 0),
-                    })
-                except Exception:
-                    continue
-            results.sort(key=lambda c: c["updated_at"], reverse=True)
-            if q:
-                ql = q.lower()
-                results = [c for c in results if ql in c["name"].lower()
-                           or ql in c["phone"]
-                           or ql in c.get("group_name", "").lower()
-                           or any(ql in t.lower() for t in c.get("tags", []))]
-            return results
-        return _ok(await asyncio.to_thread(_list))
+        results = await asyncio.to_thread(contact_repo.list_contacts, q, archived)
+        return _ok(results)
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str):
         """Return full contact data including conversation history."""
         def _load():
-            fp = agent_handler.memory_dir / f"{phone}.json"
-            if not fp.exists():
+            data = contact_repo.get_full_contact(phone)
+            if data is None:
                 return None, []
-            data = json.loads(fp.read_text(encoding="utf-8"))
-            msg_ids: list[str] = []
+            contact_id = data["id"]
             # Mark as read when viewing contact
+            msg_ids = []
             if data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0:
+                msg_ids = contact_repo.mark_as_read(contact_id)
                 data["unread_count"] = 0
                 data["unread_ai_count"] = 0
-                msg_ids = data.pop("unread_msg_ids", [])
-                data["unread_msg_ids"] = []
-                fp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                # Update in-memory cache
                 if phone in agent_handler._contacts:
                     agent_handler._contacts[phone].unread_count = 0
                     agent_handler._contacts[phone].unread_ai_count = 0
-                    agent_handler._contacts[phone].unread_msg_ids.clear()
+            # Load messages
+            data["messages"] = message_repo.get_all(contact_id)
+            # Load usage for the full response
+            data["usage"] = []
             return data, msg_ids
         data, msg_ids = await asyncio.to_thread(_load)
         if data is None:
@@ -375,10 +321,11 @@ def register_routes(app, deps):
             )
             # Observations: replace entire list (update_info only appends)
             if "observations" in body:
-                contact.info["observations"] = [
+                new_obs = [
                     o for o in body["observations"] if isinstance(o, str) and o.strip()
                 ]
-                contact.save()
+                contact.info["observations"] = new_obs
+                contact_repo.set_observations(contact.id, new_obs)
             return contact.info
         info = await asyncio.to_thread(_update)
         return _ok(info)

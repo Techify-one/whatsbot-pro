@@ -290,15 +290,17 @@ def register_routes(app, deps):
             if transcription:
                 contact.add_message("transcription", transcription)
                 # Update the last user message content with the transcription
-                for msg in reversed(contact.messages):
-                    if msg.get("role") == "user" and msg.get("media_type") in ("audio", "image"):
-                        if audio_path:
-                            msg["content"] = f"[Transcrição do áudio]: {transcription}"
-                        elif image_path:
-                            prefix = f"[Descrição da imagem]: {transcription}"
-                            msg["content"] = f"{prefix}\n{text}" if text else prefix
-                        contact.save()
-                        break
+                if audio_path:
+                    new_content = f"[Transcrição do áudio]: {transcription}"
+                elif image_path:
+                    prefix = f"[Descrição da imagem]: {transcription}"
+                    new_content = f"{prefix}\n{text}" if text else prefix
+                else:
+                    new_content = None
+                if new_content:
+                    await asyncio.to_thread(
+                        agent_handler.update_last_user_message_content, phone, new_content
+                    )
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
                     "message": {
@@ -392,7 +394,8 @@ def register_routes(app, deps):
                 msg_ids = data.get("ids", [])
                 # Find which contact these message IDs belong to
                 for phone_key, contact in agent_handler._contacts.items():
-                    matched = [mid for mid in msg_ids if mid in contact.unread_msg_ids]
+                    unread_ids = contact.get_unread_msg_ids()
+                    matched = [mid for mid in msg_ids if mid in unread_ids]
                     if matched:
                         logger.info("[Webhook] message.ack read for %s (ids=%s)", phone_key, matched)
                         contact.mark_as_read()

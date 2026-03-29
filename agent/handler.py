@@ -3,7 +3,6 @@ import dataclasses
 import json
 import logging
 import mimetypes
-import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -12,6 +11,7 @@ from openai import OpenAI
 
 from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import ALL_TOOLS
+from db.repositories import message_repo, contact_repo
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +47,11 @@ class AgentHandler:
         self.audio_model = audio_model
         self.image_model = image_model
         self.memory_dir = memory_dir or Path.home() / ".config" / "WhatsBot" / "contacts"
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
         self.pricing_fn = pricing_fn
         self.split_messages: bool = True
-        self._id_lock = threading.Lock()
-        self.tag_registry = TagRegistry(self.memory_dir)
+        self.tag_registry = TagRegistry()
 
     def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
         """Extract usage from an OpenAI-compatible response and record it."""
@@ -203,69 +201,10 @@ class AgentHandler:
             logger.error("Image description failed: %s", e)
             return ""
 
-    def _next_contact_id(self) -> int:
-        """Return the next sequential contact ID (thread-safe)."""
-        with self._id_lock:
-            counter_file = self.memory_dir / "_counter.json"
-            next_id = 1
-            if counter_file.exists():
-                try:
-                    data = json.loads(counter_file.read_text(encoding="utf-8"))
-                    next_id = data.get("next_id", 1)
-                except (json.JSONDecodeError, OSError):
-                    pass
-            counter_file.write_text(
-                json.dumps({"next_id": next_id + 1}), encoding="utf-8"
-            )
-            return next_id
-
-    def ensure_contact_ids(self) -> None:
-        """Assign sequential IDs to existing contacts that lack one (migration)."""
-        counter_file = self.memory_dir / "_counter.json"
-        next_id = 1
-        if counter_file.exists():
-            try:
-                data = json.loads(counter_file.read_text(encoding="utf-8"))
-                next_id = data.get("next_id", 1)
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        needs_id: list[tuple[float, Path, dict]] = []
-        max_existing = 0
-        for f in self.memory_dir.glob("*.json"):
-            if f.stem.startswith("_"):
-                continue
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                cid = data.get("id")
-                if cid is not None:
-                    max_existing = max(max_existing, cid)
-                else:
-                    needs_id.append((data.get("created_at", 0), f, data))
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        next_id = max(next_id, max_existing + 1)
-        needs_id.sort(key=lambda x: x[0])
-
-        for _, f, data in needs_id:
-            data["id"] = next_id
-            f.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            next_id += 1
-
-        counter_file.write_text(
-            json.dumps({"next_id": next_id}), encoding="utf-8"
-        )
-        logger.info("Contact IDs ensured: %d migrated, next_id=%d", len(needs_id), next_id)
-
     def _get_contact(self, phone: str) -> ContactMemory:
         if phone not in self._contacts:
-            self._contacts[phone] = ContactMemory(phone, self.memory_dir)
-        contact = self._contacts[phone]
-        if contact.id is None:
-            contact.id = self._next_contact_id()
-            contact.save()
-        return contact
+            self._contacts[phone] = ContactMemory(phone)
+        return self._contacts[phone]
 
     def _build_system_prompt(self, contact: ContactMemory) -> str:
         """Build system prompt with contact info and current date/time injected."""
@@ -325,12 +264,7 @@ class AgentHandler:
                         save_response: bool = True,
                         image_path: str | None = None,
                         audio_path: str | None = None) -> ProcessResult:
-        """Process an incoming message and return the AI response.
-
-        If *image_path* is provided the image is sent to a vision-capable model.
-        If *audio_path* is provided the text should already contain a placeholder
-        like ``[Áudio recebido]`` — the LLM will see that label.
-        """
+        """Process an incoming message and return the AI response."""
         if not self.api_key:
             return ProcessResult(reply="[WhatsBot] API key não configurada.")
 
@@ -465,32 +399,33 @@ class AgentHandler:
         """Save an assistant (bot) message to contact memory after successful send."""
         contact = self._get_contact(phone)
         contact.add_message("assistant", text)
-        return contact.messages[-1]
+        return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def save_operator_message(self, phone: str, text: str,
                               status: str | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing."""
         contact = self._get_contact(phone)
         contact.add_message("assistant", text, status=status)
-        return contact.messages[-1]
+        return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def mark_message_sent(self, phone: str, content: str) -> dict | None:
         """Find the most recent failed message with matching content and mark as sent."""
         contact = self._get_contact(phone)
-        for msg in reversed(contact.messages):
-            if msg.get("status") == "failed" and msg.get("content") == content:
-                msg.pop("status", None)
-                contact.save()
-                return msg
-        return None
+        message_repo.update_status(contact.id, content, None)
+        return {"content": content}
+
+    def update_last_user_message_content(self, phone: str, new_content: str) -> None:
+        """Update the content of the last user message (e.g., with transcription)."""
+        contact = self._get_contact(phone)
+        msg = message_repo.get_last_user_message(contact.id)
+        if msg and msg.get("_id"):
+            message_repo.update_content(msg["_id"], new_content)
 
     def clear_conversation(self, sender: str):
         contact = self._get_contact(sender)
-        contact.messages.clear()
-        contact.save()
+        message_repo.delete_all(contact.id)
 
     def clear_all_conversations(self):
         for contact in self._contacts.values():
-            contact.messages.clear()
-            contact.save()
+            message_repo.delete_all(contact.id)
         self._contacts.clear()
