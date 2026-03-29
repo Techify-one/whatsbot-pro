@@ -21,6 +21,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [imageTranscriptionEnabled, setImageTranscriptionEnabled] = useState(true);
   const [transferAlertEnabled, setTransferAlertEnabled] = useState(true);
   const [transferAlertDuration, setTransferAlertDuration] = useState(5);
+  const [maxExecutions, setMaxExecutions] = useState(200);
   const [testing, setTesting] = useState(false);
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
@@ -46,6 +47,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setImageTranscriptionEnabled(config.image_transcription_enabled ?? true);
       setTransferAlertEnabled(config.transfer_alert_enabled ?? true);
       setTransferAlertDuration(config.transfer_alert_duration ?? 5);
+      setMaxExecutions(config.max_executions ?? 200);
     }
   }, [config]);
 
@@ -94,6 +96,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       image_transcription_enabled: imageTranscriptionEnabled,
       transfer_alert_enabled: transferAlertEnabled,
       transfer_alert_duration: parseInt(transferAlertDuration, 10) || 5,
+      max_executions: parseInt(maxExecutions, 10) || 200,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -346,6 +349,21 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
           </div>
         ` : null}
+      </div>
+
+      <!-- Max Executions -->
+      <div>
+        <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
+        <input
+          type="number"
+          min="10"
+          max="10000"
+          step="10"
+          value=${maxExecutions}
+          onInput=${(e) => setMaxExecutions(e.target.value)}
+          class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+        />
+        <span class="text-xs text-wa-secondary">Quantidade máxima de execuções e payloads mantidos no banco</span>
       </div>
 
       <!-- Panel Password -->

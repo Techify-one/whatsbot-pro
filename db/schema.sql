@@ -78,3 +78,24 @@ CREATE TABLE IF NOT EXISTS unread_msg_ids (
     msg_id     TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_unread_contact ON unread_msg_ids(contact_id);
+
+CREATE TABLE IF NOT EXISTS executions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone        TEXT    NOT NULL,
+    trigger_type TEXT    NOT NULL DEFAULT 'webhook',
+    status       TEXT    NOT NULL DEFAULT 'running',
+    started_at   REAL    NOT NULL,
+    completed_at REAL,
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_exec_started ON executions(started_at);
+
+CREATE TABLE IF NOT EXISTS execution_steps (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id INTEGER NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+    step_type    TEXT    NOT NULL,
+    status       TEXT    NOT NULL DEFAULT 'ok',
+    data         TEXT,
+    ts           REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_step_exec ON execution_steps(execution_id);

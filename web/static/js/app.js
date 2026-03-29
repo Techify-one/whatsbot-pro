@@ -5,6 +5,7 @@ import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
 import { CostsDashboard } from './components/CostsDashboard.js';
+import { Executions } from './components/Executions.js';
 import { LoginScreen } from './components/LoginScreen.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
@@ -13,8 +14,8 @@ import { playTransferAlert } from './utils/alertSound.js';
 
 const html = htm.bind(h);
 
-const ROUTES = { '/': 'contacts', '/dashboard': 'dashboard', '/sandbox': 'sandbox', '/costs': 'costs' };
-const TAB_PATHS = { contacts: '/', dashboard: '/dashboard', sandbox: '/sandbox', costs: '/costs' };
+const ROUTES = { '/': 'contacts', '/dashboard': 'dashboard', '/sandbox': 'sandbox', '/costs': 'costs', '/executions': 'executions' };
+const TAB_PATHS = { contacts: '/', dashboard: '/dashboard', sandbox: '/sandbox', costs: '/costs', executions: '/executions' };
 
 function tabFromPath() {
   const path = window.location.pathname;
@@ -71,6 +72,13 @@ function GearMenu({ tab, onTabChange, hasPassword, onLogout }) {
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>
             Custos
+          </button>
+          <button
+            onClick=${() => { onTabChange('executions'); setOpen(false); }}
+            class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-2 ${tab === 'executions' ? 'text-wa-teal font-medium' : 'text-wa-text'}"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+            Execuções
           </button>
           ${hasPassword ? html`
             <div class="border-t border-wa-border my-1"></div>
@@ -204,10 +212,15 @@ function App({ onLogout, hasPassword }) {
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
                   <${CostsDashboard} />
                 </div>`
-              : html`<div class="max-w-5xl mx-auto p-4">
-                  <${PageHeader} title="Sandbox" onBack=${() => setTab('contacts')} />
-                  <${Sandbox} />
-                </div>`
+              : tab === 'executions'
+                ? html`<div class="max-w-5xl mx-auto p-4 h-full">
+                    <${PageHeader} title="Execuções" onBack=${() => setTab('contacts')} />
+                    <${Executions} />
+                  </div>`
+                : html`<div class="max-w-5xl mx-auto p-4">
+                    <${PageHeader} title="Sandbox" onBack=${() => setTab('contacts')} />
+                    <${Sandbox} />
+                  </div>`
         }
       </main>
     </div>

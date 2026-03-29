@@ -45,6 +45,7 @@ def register_routes(app, deps):
             "image_transcription_enabled": settings.get("image_transcription_enabled", True),
             "transfer_alert_enabled": settings.get("transfer_alert_enabled", True),
             "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
+            "max_executions": settings.get("max_executions", 200),
             "has_password": bool(settings.get("web_password_hash", "")),
         })
 
@@ -58,6 +59,7 @@ def register_routes(app, deps):
             "split_messages", "split_message_delay",
             "transfer_alert_enabled", "transfer_alert_duration",
             "group_reply_mode", "bot_phone", "bot_name",
+            "max_executions",
         }
         for key, value in body.items():
             if key in allowed_keys:

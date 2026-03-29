@@ -185,6 +185,17 @@ export async function clearLogs() {
   return request('DELETE', '/api/logs');
 }
 
+// ── Executions ───────────────────────────────────────────────────
+
+export async function getExecutions(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return request('GET', `/api/executions${qs ? '?' + qs : ''}`);
+}
+
+export async function getExecution(id) {
+  return request('GET', `/api/executions/${id}`);
+}
+
 // ── Usage / Costs ─────────────────────────────────────────────────
 
 export async function getUsageSummary(params = {}) {

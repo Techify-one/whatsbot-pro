@@ -14,7 +14,7 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def create_app(
 
     # Paths exempt from authentication
     _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/health")
-    _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs"}
+    _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs", "/executions"}
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -166,6 +166,7 @@ def create_app(
     @app.get("/dashboard")
     @app.get("/sandbox")
     @app.get("/costs")
+    @app.get("/executions")
     @app.get("/contacts/{contact_id:int}")
     async def index(contact_id: int | None = None):
         index_file = web_dir / "index.html"
@@ -186,5 +187,6 @@ def create_app(
     usage.register_routes(app, deps)
     contacts.register_routes(app, deps)
     tags.register_routes(app, deps)
+    executions.register_routes(app, deps)
 
     return app

@@ -10,6 +10,7 @@ import uuid
 
 from gowa.client import GOWASendError
 
+from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok
 
 logger = logging.getLogger(__name__)
@@ -107,8 +108,12 @@ def register_routes(app, deps):
 
             try:
                 await asyncio.to_thread(gowa_client.send_message, phone, part)
+                await atrack_step("gowa_send", {"phone": phone, "part": i + 1, "total_parts": len(parts)})
             except GOWASendError as e:
                 logger.error("[Batch] Send failed for %s (part %d/%d): %s", phone, i + 1, len(parts), e)
+                await atrack_step("gowa_send", {
+                    "phone": phone, "part": i + 1, "error": str(e),
+                }, status="error")
                 await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
@@ -136,6 +141,11 @@ def register_routes(app, deps):
         await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
         state.msg_count += 1
         full_reply = "\n".join(parts)
+        await atrack_step("response_sent", {
+            "phone": phone,
+            "parts": len(parts),
+            "reply_preview": full_reply[:200],
+        })
         logger.info("[Batch] Replied to %s (%d parts): %s", phone, len(parts), full_reply[:80])
 
         await ws_manager.broadcast("status", {
@@ -205,155 +215,188 @@ def register_routes(app, deps):
         if not items:
             return
 
-        contact = agent_handler._get_contact(phone)
+        # Create execution tracking
+        exec_id = await astart_execution(phone, "webhook")
 
-        # Separate plain text items from media items
-        text_parts: list[str] = []
-        text_msg_ids: list[str] = []
-        media_items: list[dict] = []
-        for item in items:
-            if item.get("image_path") or item.get("audio_path"):
-                media_items.append(item)
-            else:
-                text_parts.append(item.get("text", ""))
-                if item.get("msg_id"):
-                    text_msg_ids.append(item["msg_id"])
+        try:
+            # Record webhook payload
+            await atrack_step("webhook_received", {
+                "phone": phone,
+                "items": [
+                    {k: v for k, v in it.items() if k != "audio_path" or v}
+                    for it in items
+                ],
+            })
 
-        # Process combined text messages first
-        if text_parts:
-            combined = "\n".join(t for t in text_parts if t)
-            if combined:
-                logger.info("[Batch] Processing %d text messages from %s: %s",
-                            len(text_parts), phone, combined[:80])
-                last_msg_id = text_msg_ids[-1] if text_msg_ids else None
-                contact.add_message("user", combined, msg_id=last_msg_id)
-                if contact.ai_enabled and settings.get("auto_reply", True):
-                    if not agent_handler.api_key:
-                        notice = "[WhatsBot] API key não configurada."
-                        contact.add_message("system_notice", notice)
-                        await ws_manager.broadcast("new_message", {
-                            "phone": phone,
-                            "message": {"role": "system_notice", "content": notice, "ts": time.time()},
-                        })
-                    else:
-                        try:
-                            await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                            result = await asyncio.to_thread(
-                                agent_handler.process_message, phone, combined,
-                                save_user_message=False, save_response=False)
-                            if result.tool_calls:
-                                await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
-                            if result.reply:
-                                if result.reply.startswith("[WhatsBot]"):
-                                    contact.add_message("system_notice", result.reply)
-                                    await ws_manager.broadcast("new_message", {
-                                        "phone": phone,
-                                        "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
-                                    })
-                                else:
-                                    await _send_reply(phone, result.reply)
-                        except Exception as e:
-                            logger.error("[Batch] Agent error for %s: %s", phone, e)
+            contact = agent_handler._get_contact(phone)
 
-        # Process each media item individually
-        for item in media_items:
-            text = item.get("text", "")
-            image_path = item.get("image_path")
-            audio_path = item.get("audio_path")
-
-            media_label = "image" if image_path else "audio"
-            logger.info("[Batch] Processing %s from %s", media_label, phone)
-
-            # Save message to contact memory
-            contact.add_message(
-                "user", text or ("[Áudio recebido]" if audio_path else ""),
-                media_type="image" if image_path else "audio",
-                media_path=image_path or audio_path,
-                msg_id=item.get("msg_id"),
-            )
-
-            # Transcribe audio / describe image
-            transcription = ""
-            try:
-                if audio_path and settings.get("audio_transcription_enabled", True):
-                    transcription = await asyncio.to_thread(
-                        agent_handler.transcribe_audio, audio_path, phone)
-                elif image_path and settings.get("image_transcription_enabled", True):
-                    transcription = await asyncio.to_thread(
-                        agent_handler.describe_image, image_path, phone)
-            except Exception as e:
-                logger.error("[Batch] Transcription error for %s: %s", phone, e)
-
-            # Save transcription as private message and broadcast.
-            # Also update the original user message so the LLM sees the
-            # transcription instead of the placeholder "[Áudio recebido]".
-            if transcription:
-                contact.add_message("transcription", transcription)
-                # Update the last user message content with the transcription
-                if audio_path:
-                    new_content = f"[Transcrição do áudio]: {transcription}"
-                elif image_path:
-                    prefix = f"[Descrição da imagem]: {transcription}"
-                    new_content = f"{prefix}\n{text}" if text else prefix
+            # Separate plain text items from media items
+            text_parts: list[str] = []
+            text_msg_ids: list[str] = []
+            media_items: list[dict] = []
+            for item in items:
+                if item.get("image_path") or item.get("audio_path"):
+                    media_items.append(item)
                 else:
-                    new_content = None
-                if new_content:
-                    await asyncio.to_thread(
-                        agent_handler.update_last_user_message_content, phone, new_content
-                    )
-                await ws_manager.broadcast("new_message", {
-                    "phone": phone,
-                    "message": {
-                        "role": "transcription",
-                        "content": transcription,
-                        "ts": time.time(),
-                    },
-                })
+                    text_parts.append(item.get("text", ""))
+                    if item.get("msg_id"):
+                        text_msg_ids.append(item["msg_id"])
 
-            if not contact.ai_enabled or not settings.get("auto_reply", True):
-                continue
+            await atrack_step("batch_accumulated", {
+                "text_count": len(text_parts),
+                "media_count": len(media_items),
+                "combined_preview": "\n".join(t for t in text_parts if t)[:200],
+            })
 
-            if not agent_handler.api_key:
-                notice = "[WhatsBot] API key não configurada."
-                contact.add_message("system_notice", notice)
-                await ws_manager.broadcast("new_message", {
-                    "phone": phone,
-                    "message": {"role": "system_notice", "content": notice, "ts": time.time()},
-                })
-                continue
+            # Process combined text messages first
+            if text_parts:
+                combined = "\n".join(t for t in text_parts if t)
+                if combined:
+                    logger.info("[Batch] Processing %d text messages from %s: %s",
+                                len(text_parts), phone, combined[:80])
+                    last_msg_id = text_msg_ids[-1] if text_msg_ids else None
+                    contact.add_message("user", combined, msg_id=last_msg_id)
+                    if contact.ai_enabled and settings.get("auto_reply", True):
+                        if not agent_handler.api_key:
+                            notice = "[WhatsBot] API key não configurada."
+                            contact.add_message("system_notice", notice)
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone,
+                                "message": {"role": "system_notice", "content": notice, "ts": time.time()},
+                            })
+                        else:
+                            try:
+                                await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                                result = await asyncio.to_thread(
+                                    agent_handler.process_message, phone, combined,
+                                    save_user_message=False, save_response=False)
+                                if result.tool_calls:
+                                    await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                                if result.reply:
+                                    if result.reply.startswith("[WhatsBot]"):
+                                        contact.add_message("system_notice", result.reply)
+                                        await ws_manager.broadcast("new_message", {
+                                            "phone": phone,
+                                            "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                                        })
+                                    else:
+                                        await _send_reply(phone, result.reply)
+                            except Exception as e:
+                                logger.error("[Batch] Agent error for %s: %s", phone, e)
+                                await atrack_step("error", {"error": str(e), "phase": "text_processing"}, status="error")
 
-            # Build text for LLM: use transcription if available
-            llm_text = text or ""
-            if audio_path:
-                if transcription:
-                    llm_text = f"[Transcrição do áudio]: {transcription}"
-                else:
-                    llm_text = llm_text or "[Áudio recebido]"
-            elif image_path and transcription:
-                prefix = f"[Descrição da imagem]: {transcription}"
-                llm_text = f"{prefix}\n{text}" if text else prefix
+            # Process each media item individually
+            for item in media_items:
+                text = item.get("text", "")
+                image_path = item.get("image_path")
+                audio_path = item.get("audio_path")
 
-            try:
-                await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                result = await asyncio.to_thread(
-                    agent_handler.process_message, phone,
-                    llm_text,
-                    save_user_message=False, save_response=False,
-                    image_path=image_path if not transcription else None,
+                media_label = "image" if image_path else "audio"
+                logger.info("[Batch] Processing %s from %s", media_label, phone)
+
+                # Save message to contact memory
+                contact.add_message(
+                    "user", text or ("[Áudio recebido]" if audio_path else ""),
+                    media_type="image" if image_path else "audio",
+                    media_path=image_path or audio_path,
+                    msg_id=item.get("msg_id"),
                 )
-                if result.tool_calls:
-                    await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
-                if result.reply:
-                    if result.reply.startswith("[WhatsBot]"):
-                        contact.add_message("system_notice", result.reply)
-                        await ws_manager.broadcast("new_message", {
-                            "phone": phone,
-                            "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
-                        })
+
+                # Transcribe audio / describe image
+                transcription = ""
+                try:
+                    if audio_path and settings.get("audio_transcription_enabled", True):
+                        transcription = await asyncio.to_thread(
+                            agent_handler.transcribe_audio, audio_path, phone)
+                    elif image_path and settings.get("image_transcription_enabled", True):
+                        transcription = await asyncio.to_thread(
+                            agent_handler.describe_image, image_path, phone)
+                except Exception as e:
+                    logger.error("[Batch] Transcription error for %s: %s", phone, e)
+
+                # Save transcription as private message and broadcast.
+                # Also update the original user message so the LLM sees the
+                # transcription instead of the placeholder "[Áudio recebido]".
+                if transcription:
+                    contact.add_message("transcription", transcription)
+                    # Update the last user message content with the transcription
+                    if audio_path:
+                        new_content = f"[Transcrição do áudio]: {transcription}"
+                    elif image_path:
+                        prefix = f"[Descrição da imagem]: {transcription}"
+                        new_content = f"{prefix}\n{text}" if text else prefix
                     else:
-                        await _send_reply(phone, result.reply)
-            except Exception as e:
-                logger.error("[Batch] Agent error for %s (%s): %s", phone, media_label, e)
+                        new_content = None
+                    if new_content:
+                        await asyncio.to_thread(
+                            agent_handler.update_last_user_message_content, phone, new_content
+                        )
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone,
+                        "message": {
+                            "role": "transcription",
+                            "content": transcription,
+                            "ts": time.time(),
+                        },
+                    })
+
+                if not contact.ai_enabled or not settings.get("auto_reply", True):
+                    continue
+
+                if not agent_handler.api_key:
+                    notice = "[WhatsBot] API key não configurada."
+                    contact.add_message("system_notice", notice)
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone,
+                        "message": {"role": "system_notice", "content": notice, "ts": time.time()},
+                    })
+                    continue
+
+                # Build text for LLM: use transcription if available
+                llm_text = text or ""
+                if audio_path:
+                    if transcription:
+                        llm_text = f"[Transcrição do áudio]: {transcription}"
+                    else:
+                        llm_text = llm_text or "[Áudio recebido]"
+                elif image_path and transcription:
+                    prefix = f"[Descrição da imagem]: {transcription}"
+                    llm_text = f"{prefix}\n{text}" if text else prefix
+
+                try:
+                    await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                    result = await asyncio.to_thread(
+                        agent_handler.process_message, phone,
+                        llm_text,
+                        save_user_message=False, save_response=False,
+                        image_path=image_path if not transcription else None,
+                    )
+                    if result.tool_calls:
+                        await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                    if result.reply:
+                        if result.reply.startswith("[WhatsBot]"):
+                            contact.add_message("system_notice", result.reply)
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone,
+                                "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                            })
+                        else:
+                            await _send_reply(phone, result.reply)
+                except Exception as e:
+                    logger.error("[Batch] Agent error for %s (%s): %s", phone, media_label, e)
+                    await atrack_step("error", {"error": str(e), "phase": f"{media_label}_processing"}, status="error")
+
+            # Finalize execution as completed
+            await aend_execution(exec_id)
+        except Exception as exc:
+            await aend_execution(exec_id, error=str(exc))
+
+        # Prune old executions if beyond limit
+        max_exec = settings.get("max_executions", 200)
+        try:
+            await asyncio.to_thread(prune_executions, max_exec)
+        except Exception:
+            pass
 
     # ── Webhook Endpoint ──────────────────────────────────────────
 
@@ -364,7 +407,7 @@ def register_routes(app, deps):
         # GOWA wraps message data inside "payload"
         data = body.get("payload", body.get("data", body))
 
-        # Store raw payload for debugging (last 50)
+        # Store raw payload for debugging (last 50, in-memory fallback)
         state.webhook_payloads.append({
             "ts": time.time(),
             "event": event,

@@ -12,6 +12,7 @@ from openai import OpenAI
 from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import ALL_TOOLS
 from db.repositories import message_repo, contact_repo
+from agent.execution import track_step
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +153,16 @@ class AgentHandler:
             )
             self._record_usage(phone, "audio", self.audio_model, response)
             result = response.choices[0].message.content.strip()
+            track_step("media_processed", {
+                "type": "audio",
+                "model": self.audio_model,
+                "transcription_length": len(result),
+            })
             logger.info("Audio transcribed (%d chars): %s", len(result), result[:80])
             return result
         except Exception as e:
             logger.error("Audio transcription failed: %s", e)
+            track_step("error", {"error": str(e), "phase": "audio_transcription"}, status="error")
             return ""
 
     def describe_image(self, image_path: str, phone: str = "") -> str:
@@ -193,10 +200,16 @@ class AgentHandler:
             )
             self._record_usage(phone, "image", self.image_model, response)
             result = response.choices[0].message.content.strip()
+            track_step("media_processed", {
+                "type": "image",
+                "model": self.image_model,
+                "description_length": len(result),
+            })
             logger.info("Image described (%d chars): %s", len(result), result[:80])
             return result
         except Exception as e:
             logger.error("Image description failed: %s", e)
+            track_step("error", {"error": str(e), "phase": "image_description"}, status="error")
             return ""
 
     def _get_contact(self, phone: str) -> ContactMemory:
@@ -290,6 +303,11 @@ class AgentHandler:
 
         try:
             client = self._get_client()
+            track_step("llm_request", {
+                "model": self.model,
+                "context_messages": len(messages) - 1,
+                "tools": [t["function"]["name"] for t in ALL_TOOLS],
+            })
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -299,6 +317,13 @@ class AgentHandler:
             )
 
             self._record_usage(sender, "text", self.model, response)
+            usage = response.usage
+            track_step("llm_response", {
+                "model": self.model,
+                "prompt_tokens": usage.prompt_tokens if usage else 0,
+                "completion_tokens": usage.completion_tokens if usage else 0,
+                "has_tool_calls": bool(response.choices[0].message.tool_calls),
+            })
             msg = response.choices[0].message
 
             # Handle tool calls generically
@@ -329,6 +354,7 @@ class AgentHandler:
                             logger.warning("Failed to execute %s for %s: %s", tool_name, sender, e)
 
                     executed_tools.append({"tool": tool_name, "args": args})
+                    track_step("tool_executed", {"tool": tool_name, "args": args})
                     logger.info("Tool call for %s: %s(%s)", sender, tool_name, args)
 
                 # If model only called tools without text, do a follow-up call
@@ -343,12 +369,20 @@ class AgentHandler:
                             "tool_call_id": tc.id,
                             "content": tool_results.get(tc.function.name, "Informações salvas com sucesso."),
                         })
+                    track_step("llm_request", {"model": self.model, "type": "followup"})
                     follow_up = client.chat.completions.create(
                         model=self.model,
                         messages=messages,
                         max_tokens=1024,
                     )
                     self._record_usage(sender, "text", self.model, follow_up)
+                    fu_usage = follow_up.usage
+                    track_step("llm_response", {
+                        "model": self.model,
+                        "type": "followup",
+                        "prompt_tokens": fu_usage.prompt_tokens if fu_usage else 0,
+                        "completion_tokens": fu_usage.completion_tokens if fu_usage else 0,
+                    })
                     reply = follow_up.choices[0].message.content.strip()
                 else:
                     reply = msg.content.strip()
@@ -370,6 +404,7 @@ class AgentHandler:
 
         except Exception as e:
             logger.error("LLM error for %s: %s", sender, e)
+            track_step("error", {"error": str(e), "phase": "llm_call"}, status="error")
             error_msg = str(e)
             if "401" in error_msg or "unauthorized" in error_msg.lower():
                 return ProcessResult(reply="[WhatsBot] API key inválida. Verifique sua chave OpenRouter.")
