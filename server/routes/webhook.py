@@ -385,6 +385,20 @@ def register_routes(app, deps):
                 })
             return _ok({"status": "presence"})
 
+        # Handle message.ack events (read receipts from WhatsApp mobile)
+        if event == "message.ack":
+            receipt_type = data.get("receipt_type", "")
+            if receipt_type in ("read", "read-self"):
+                msg_ids = data.get("ids", [])
+                # Find which contact these message IDs belong to
+                for phone_key, contact in agent_handler._contacts.items():
+                    matched = [mid for mid in msg_ids if mid in contact.unread_msg_ids]
+                    if matched:
+                        logger.info("[Webhook] message.ack read for %s (ids=%s)", phone_key, matched)
+                        contact.mark_as_read()
+                        await ws_manager.broadcast("messages_read", {"phone": phone_key})
+            return _ok({"status": "ack"})
+
         # Only process incoming messages
         if event and event not in ("message", "message:received", ""):
             return _ok({"status": "ignored"})

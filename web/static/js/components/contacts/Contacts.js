@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, initialContactId }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -237,6 +237,16 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       setContactData(prev => prev ? { ...prev, tags } : prev);
     }
   }, [contactTagsUpdated]);
+
+  // Handle messages read on WhatsApp mobile (message.ack from GOWA)
+  useEffect(() => {
+    if (!messagesRead) return;
+    const { phone } = messagesRead;
+    if (!phone) return;
+    setContacts(prev => prev.map(c =>
+      c.phone === phone ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
+    ));
+  }, [messagesRead]);
 
   // Handle real-time messages from WebSocket
   useEffect(() => {

@@ -116,6 +116,7 @@ function App({ onLogout, hasPassword }) {
   const [tagsChanged, setTagsChanged] = useState(null);
   const [contactTagsUpdated, setContactTagsUpdated] = useState(null);
   const [contactAiToggled, setContactAiToggled] = useState(null);
+  const [messagesRead, setMessagesRead] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
 
   const setTab = useCallback((t) => {
@@ -158,6 +159,7 @@ function App({ onLogout, hasPassword }) {
       playTransferAlert(duration);
     }, []),
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),
+    onMessagesRead: useCallback((data) => setMessagesRead(data), []),
   });
 
   async function handleSave(data) {
@@ -196,7 +198,7 @@ function App({ onLogout, hasPassword }) {
               />
             </div>`
           : tab === 'contacts'
-            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} initialContactId=${initialContactId} />`
+            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} initialContactId=${initialContactId} />`
             : tab === 'costs'
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
