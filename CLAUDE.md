@@ -5,6 +5,7 @@ Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
 ## Stack
 
 - **Python 3.11+** — linguagem principal
+- **SQLite** — banco de dados local (WAL mode, stdlib `sqlite3`)
 - **GOWA** (go-whatsapp-web-multidevice v8.3.3) — bridge WhatsApp via REST, roda como subprocess
 - **OpenRouter** — LLM provider (API compatível com OpenAI)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
@@ -19,8 +20,19 @@ server/app.py        → FastAPI app (endpoints REST, WebSocket, webhook, backgr
 gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
 agent/handler.py     → processa mensagens com LLM via OpenRouter (tool calling)
+agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no SQLite via repos)
 agent/tools/         → definições de tools do LLM (uma tool por arquivo, exportadas em __init__.py)
-config/settings.py   → load/save config.json na pasta do projeto
+config/settings.py   → load/save config na tabela `config` do SQLite
+db/                  → módulo de banco de dados
+  connection.py      → thread-local connection pool, init_db(), PRAGMAs
+  schema.sql         → CREATE TABLE statements (9 tabelas)
+  migrate_json.py    → migração one-time de JSON legado → SQLite
+  repositories/      → data access layer (um arquivo por domínio)
+    config_repo.py   → get_all(), get(), set(), set_many()
+    contact_repo.py  → get_or_create(), update(), list_contacts(), get_full_contact()
+    message_repo.py  → add(), get_all(), get_context(), get_last(), delete_all()
+    usage_repo.py    → add(), global_summary(), by_contact(), detail()
+    tag_repo.py      → get_all(), create(), update(), delete(), set_contact_tags()
 web/index.html       → entry point do frontend (HTML + import map)
 web/static/js/       → componentes Preact + HTM (sem build step)
 web/static/vendor/   → libs JS vendorizadas (preact, htm, tailwind)
@@ -41,6 +53,34 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Banco de dados
+
+Todos os dados persistentes ficam em um único arquivo SQLite: `storages/whatsbot.db`. O banco é criado automaticamente na primeira execução via `db/schema.sql`.
+
+### Tabelas
+
+| Tabela | Descrição |
+|--------|-----------|
+| `config` | Configurações do app (key-value, valores JSON-encoded) |
+| `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags) |
+| `observations` | Notas/observações por contato (texto livre) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media) |
+| `usage` | Registros de uso da API (tokens, custo, modelo) |
+| `tags` | Tags globais (name, color) |
+| `contact_tags` | Relação N:N contato ↔ tag |
+| `unread_msg_ids` | IDs de mensagens não lidas por contato |
+
+### Configuração do SQLite
+
+- `PRAGMA journal_mode=WAL` — permite leituras concorrentes
+- `PRAGMA foreign_keys=ON` — integridade referencial
+- `PRAGMA busy_timeout=5000` — espera até 5s em lock contention
+- Thread-local connections via `threading.local()` para compatibilidade com `asyncio.to_thread()`
+
+### Padrão de acesso
+
+Todas as operações de banco usam o padrão **repository** (`db/repositories/`). Nunca acessar `sqlite3` diretamente fora dos repos. As rotas FastAPI chamam repos via `asyncio.to_thread()`.
+
 ## Fluxo de mensagens (webhook)
 
 Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA:
@@ -56,21 +96,17 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 ## Memória por contato
 
-Cada contato tem um arquivo JSON em `contacts/{phone}.json`:
+Cada contato é armazenado na tabela `contacts` com campos normalizados:
 
-```json
-{
-  "phone": "5511999999999",
-  "info": {"name": "", "email": "", "profession": "", "company": "", "observations": []},
-  "messages": [{"role": "user|assistant", "content": "...", "ts": 1234567890}],
-  "created_at": 1234567890,
-  "updated_at": 1234567890
-}
-```
+- **Info** (name, email, profession, company, address) — colunas diretas na tabela `contacts`
+- **Observações** — tabela `observations` (uma linha por observação)
+- **Mensagens** — tabela `messages` com colunas `role`, `content`, `ts`, `media_type`, `media_path`, `status`, `msg_id`
+- **Usage** — tabela `usage` com tokens, custo e modelo por chamada
+- **Tags** — relação N:N via `contact_tags`
 
-- `info` é salvo automaticamente via tool calling do LLM e injetado no system prompt
-- `messages` é o histórico completo; apenas as últimas N (configurável) são enviadas ao LLM
-- Histórico persiste entre reinícios do app
+`ContactMemory` em `agent/memory.py` é o wrapper que encapsula o acesso via repos. Mensagens são lazy-loaded do DB (não mantidas em memória). Apenas as últimas N (configurável) são enviadas ao LLM.
+
+Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
 
 ## API REST do WhatsBot (backend FastAPI)
 
@@ -117,21 +153,47 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 
 - Python com type hints nas assinaturas de função
 - Logging via `logging` stdlib (nunca print)
-- Operações bloqueantes (GOWA, OpenRouter) usam `asyncio.to_thread()` no backend FastAPI
+- Operações bloqueantes (GOWA, OpenRouter, SQLite) usam `asyncio.to_thread()` no backend FastAPI
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
 - **Tools do LLM**: sempre criar em `agent/tools/`, um arquivo por tool, e exportar em `agent/tools/__init__.py` na lista `ALL_TOOLS`. Nunca definir tools inline no handler
+- **Acesso a dados**: sempre via repositórios em `db/repositories/`. Nunca usar `sqlite3` diretamente fora do módulo `db/`
 
 ## Dados do projeto
 
 Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
-- `config.json` — configurações do usuário
-- `contacts/` — memória persistente por contato (JSON por telefone)
+- `storages/whatsbot.db` — banco de dados SQLite (configs, contatos, mensagens, usage, tags)
+- `storages/` — dados do GOWA (sessão WhatsApp) + banco de dados da aplicação
 - `logs/` — logs com rotação
-- `storages/` — dados do GOWA (sessão WhatsApp)
+- `statics/senditems/` — mídia enviada pelo operador
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
-- **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` no JSON do contato. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
+- **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` na tabela `contacts`. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
+
+## Migração de dados legados
+
+Para instalações que usavam a versão anterior (armazenamento em JSON), o sistema detecta automaticamente na inicialização se o banco está vazio e existem arquivos JSON legados (`contacts/*.json`, `config.json`). Nesse caso, executa a migração via `db/migrate_json.py`. Os arquivos JSON originais não são deletados.
+
+## Testes automatizados
+
+Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient com banco SQLite temporário. GOWA e OpenRouter são mockados.
+
+```bash
+# Rodar testes (não precisa de servidor rodando)
+source venv/Scripts/activate
+python tests/test_endpoints.py
+```
+
+Os testes criam um banco temporário, inserem dados de teste (contatos, mensagens, tags, usage), e validam 122 assertions cobrindo:
+- Health, Auth (com e sem senha), Config (GET/PUT/test-key), Status
+- Contacts (list, detail, search, archived, send, retry, image, audio, presence, read, toggle-ai, update info)
+- Tags (CRUD + contact tags)
+- Usage (summary, by-contact, detail)
+- Logs, Webhook payloads, Webhook (presence, echo, ack)
+- WhatsApp/QR (get, refresh, reconnect, logout)
+- Sandbox (send, clear)
+- Frontend SPA routes
+- Auth middleware (proteção de endpoints, exemptions)
 
 ## Teste opcional com Evolution API
 
@@ -162,7 +224,6 @@ curl -s http://127.0.0.1:{web_port}/api/logs?limit=10
    - `[Webhook] Message from ...` — mensagem recebida
    - `[Batch] Processing N messages ...` — batch processado
    - `[Batch] Replied to ...` — resposta enviada
-5. Se o teste envolveu dados pessoais, verifique o arquivo `contacts/{phone}.json` para confirmar que `info` foi atualizado
 
 ### Processo de teste para kill/restart
 
@@ -191,3 +252,5 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **run_dev.bat mata processos**: o bat já executa `taskkill` para gowa.exe e uvicorn.exe antes de iniciar
 - **GOWA `/chats` limit máximo**: `GET /chats?limit=N` retorna HTTP 400 para valores acima de ~200. Usar `limit=100` como máximo seguro
 - **Archive status é chat-level**: o webhook do GOWA **não** inclui campo de archive no payload. Para saber se um chat é arquivado, consultar `GET /chats` e verificar o campo `archived` no item com o `jid` correspondente
+- **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
+- **Auto-criação do banco**: se `storages/whatsbot.db` não existir, é criado automaticamente na inicialização com o schema completo

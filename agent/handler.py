@@ -36,7 +36,6 @@ class AgentHandler:
         model: str = "openai/gpt-4o-mini",
         audio_model: str = "google/gemini-2.0-flash-001",
         image_model: str = "google/gemini-2.0-flash-001",
-        memory_dir: Path | None = None,
         pricing_fn=None,
     ):
         self.api_key = api_key
@@ -46,7 +45,6 @@ class AgentHandler:
         self.model = model
         self.audio_model = audio_model
         self.image_model = image_model
-        self.memory_dir = memory_dir or Path.home() / ".config" / "WhatsBot" / "contacts"
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
         self.pricing_fn = pricing_fn

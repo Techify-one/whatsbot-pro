@@ -3,12 +3,7 @@
 set -e
 
 # Create persistent data directories
-mkdir -p data/contacts data/storages data/statics data/logs
-
-# Create empty config.json if not present (required for Docker volume mount)
-if [ ! -f data/config.json ]; then
-    echo '{}' > data/config.json
-fi
+mkdir -p data/storages data/statics data/logs
 
 # Build and start
 docker compose up --build -d

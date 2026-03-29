@@ -91,9 +91,9 @@ Uma tela parecida com o WhatsApp Web onde você acompanha tudo o que está acont
 
 A IA lembra de quem está falando e coleta informações automaticamente:
 
-- **Salva informações automaticamente** — quando o cliente menciona nome, email, profissão, empresa ou endereço durante a conversa, a IA salva isso sozinha
+- **Salva informações automaticamente** — quando o cliente menciona nome, email, profissão, empresa ou endereço durante a conversa, a IA salva isso sozinha no banco de dados local
 - **Observações e anotações** — adicione notas sobre cada contato manualmente (ex: "cliente VIP", "prefere atendimento pela manhã")
-- **Histórico completo** — todas as conversas ficam salvas e sobrevivem mesmo se você fechar o programa
+- **Histórico completo** — todas as conversas ficam salvas no banco de dados local e sobrevivem mesmo se você fechar o programa
 - **Ligar/desligar IA por contato** — desative a resposta automática para contatos específicos (ex: família, amigos, fornecedores) com clique direito no contato
 - **Editar informações** — clique no nome do contato no chat para abrir a ficha e editar nome, email, profissão, empresa, endereço e observações
 
@@ -148,7 +148,7 @@ Teste a IA antes de colocar para funcionar:
 
 ### Privacidade e segurança
 
-- **Tudo roda no seu computador** — seus dados, conversas e informações de contatos ficam salvos apenas na sua máquina
+- **Tudo roda no seu computador** — seus dados, conversas e informações de contatos ficam salvos em um banco de dados local na sua máquina
 - **Sem servidor externo** — o programa não envia seus dados para nenhum lugar (a única comunicação externa é com a IA para processar as mensagens)
 - **Seus dados são seus** — se você apagar o programa, todos os dados vão junto. Ninguém mais tem acesso
 
@@ -179,7 +179,7 @@ Sim! O programa é 100% gratuito e de código aberto. O único custo é o uso da
 Depende do modelo escolhido e do volume de mensagens. Na prática, a maioria dos usuários gasta menos de R$ 1 por dia. Você acompanha os custos em tempo real pelo painel.
 
 **Meus dados ficam seguros?**
-Sim. Tudo fica salvo no seu computador. O programa não tem servidor próprio — as conversas, contatos e configurações ficam apenas na pasta do WhatsBot na sua máquina.
+Sim. Tudo fica salvo em um banco de dados local no seu computador. O programa não tem servidor próprio — as conversas, contatos e configurações ficam apenas na pasta do WhatsBot na sua máquina.
 
 **Posso usar qualquer modelo de IA?**
 Sim. A OpenRouter oferece dezenas de modelos (GPT, Gemini, Claude, Llama, e muitos outros). Você escolhe qual usar para cada função (conversa, áudio, imagem).

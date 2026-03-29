@@ -58,6 +58,5 @@ app = create_app(
         model=settings.get("model", "openai/gpt-4o-mini"),
         audio_model=settings.get("audio_model", "google/gemini-2.0-flash-001"),
         image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
-        memory_dir=settings.data_dir / "contacts",
     ),
 )

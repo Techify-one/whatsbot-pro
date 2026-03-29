@@ -18,10 +18,8 @@ start.bat
 
 # Runtime data (mounted as volumes)
 storages/
-contacts/
 statics/
 logs/
-config.json
 data/
 
 # Dev / docs

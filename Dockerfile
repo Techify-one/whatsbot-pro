@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY agent/ agent/
 COPY config/ config/
 COPY gowa/ gowa/
+COPY db/ db/
 COPY server/ server/
 COPY web/ web/
 COPY main.py .
@@ -37,8 +38,8 @@ COPY main.py .
 RUN mkdir -p bin && ln -s /usr/local/bin/gowa bin/gowa
 
 # Create runtime directories and declare as volumes for persistence
-RUN mkdir -p contacts logs storages statics
-VOLUME ["/app/contacts", "/app/storages", "/app/statics", "/app/logs"]
+RUN mkdir -p logs storages statics
+VOLUME ["/app/storages", "/app/statics", "/app/logs"]
 
 EXPOSE 8080
 

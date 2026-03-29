@@ -1,6 +1,5 @@
-# Dados sensíveis / sessão WhatsApp
+# Dados sensíveis / sessão WhatsApp / banco de dados
 storages/
-/contacts/
 statics/
 
 # Logs
@@ -17,9 +16,6 @@ __pycache__/
 # Variáveis de ambiente
 .env
 .env.*
-
-# Config local com API keys (salvo em %APPDATA%, mas por segurança)
-config.json
 
 # Build artifacts
 dist/
