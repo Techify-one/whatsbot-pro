@@ -19,6 +19,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [splitDelay, setSplitDelay] = useState(2);
   const [audioTranscriptionEnabled, setAudioTranscriptionEnabled] = useState(true);
   const [imageTranscriptionEnabled, setImageTranscriptionEnabled] = useState(true);
+  const [transferAlertEnabled, setTransferAlertEnabled] = useState(true);
+  const [transferAlertDuration, setTransferAlertDuration] = useState(5);
   const [testing, setTesting] = useState(false);
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
@@ -42,6 +44,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setSplitDelay(config.split_message_delay ?? 2);
       setAudioTranscriptionEnabled(config.audio_transcription_enabled ?? true);
       setImageTranscriptionEnabled(config.image_transcription_enabled ?? true);
+      setTransferAlertEnabled(config.transfer_alert_enabled ?? true);
+      setTransferAlertDuration(config.transfer_alert_duration ?? 5);
     }
   }, [config]);
 
@@ -88,6 +92,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       split_message_delay: isNaN(parseFloat(splitDelay)) ? 0 : parseFloat(splitDelay),
       audio_transcription_enabled: audioTranscriptionEnabled,
       image_transcription_enabled: imageTranscriptionEnabled,
+      transfer_alert_enabled: transferAlertEnabled,
+      transfer_alert_duration: parseInt(transferAlertDuration, 10) || 5,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -308,6 +314,34 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
               step="0.5"
               value=${splitDelay}
               onInput=${(e) => setSplitDelay(e.target.value)}
+              class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            />
+          </div>
+        ` : null}
+      </div>
+
+      <!-- Transfer Alert -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+          <input
+            type="checkbox"
+            checked=${transferAlertEnabled}
+            onChange=${(e) => setTransferAlertEnabled(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Alerta sonoro ao transferir para humano
+        </label>
+        <span class="text-xs text-wa-secondary">Emite um alerta sonoro quando a IA transfere o atendimento para um humano</span>
+        ${transferAlertEnabled ? html`
+          <div class="mt-1">
+            <label class="block text-xs font-medium text-wa-text mb-1">Duração do alerta (segundos)</label>
+            <input
+              type="number"
+              min="1"
+              max="30"
+              step="1"
+              value=${transferAlertDuration}
+              onInput=${(e) => setTransferAlertDuration(e.target.value)}
               class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
             />
           </div>

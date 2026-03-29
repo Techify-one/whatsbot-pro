@@ -43,6 +43,8 @@ def register_routes(app, deps):
             "split_message_delay": settings.get("split_message_delay", 2.0),
             "audio_transcription_enabled": settings.get("audio_transcription_enabled", True),
             "image_transcription_enabled": settings.get("image_transcription_enabled", True),
+            "transfer_alert_enabled": settings.get("transfer_alert_enabled", True),
+            "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
             "has_password": bool(settings.get("web_password_hash", "")),
         })
 
@@ -54,6 +56,7 @@ def register_routes(app, deps):
             "system_prompt", "auto_reply",
             "max_context_messages", "message_batch_delay",
             "split_messages", "split_message_delay",
+            "transfer_alert_enabled", "transfer_alert_duration",
             "group_reply_mode", "bot_phone", "bot_name",
         }
         for key, value in body.items():

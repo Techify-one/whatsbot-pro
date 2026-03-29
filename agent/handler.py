@@ -304,16 +304,17 @@ class AgentHandler:
                 "\n\n--- Formato de resposta ---\n"
                 "IMPORTANTE: Você DEVE responder SEMPRE em formato JSON array de strings.\n"
                 "Cada string é uma mensagem separada que será enviada no WhatsApp.\n"
-                "Regras de divisão:\n"
-                "- Saudação separada do conteúdo (ex: \"Oi! Tudo bem?\" como primeira msg)\n"
-                "- Cada ideia ou tópico em mensagem separada\n"
-                "- Mensagens curtas: 1 a 3 linhas cada, no máximo\n"
-                "- Total: geralmente 2 a 5 partes\n"
-                "- Estilo informal brasileiro de WhatsApp\n"
+                "Regras:\n"
+                "- Seja DIRETO e CONCISO. Não enrole. Responda apenas o necessário.\n"
+                "- Respostas curtas e simples: USE APENAS 1 MENSAGEM (array com 1 elemento)\n"
+                "- Só divida em múltiplas mensagens quando a resposta total for LONGA (mais de 4-5 linhas)\n"
+                "- Quando dividir: máximo 2 a 3 partes, cada uma com 1-3 linhas\n"
+                "- NÃO separe saudação do conteúdo se a resposta for curta\n"
                 "- NÃO use markdown nem formatação especial\n"
-                "Exemplo:\n"
-                '[\"Oi! Tudo bem? 😊\", \"Então, sobre o que você perguntou...\", '
-                '\"A resposta é X porque Y\", \"Qualquer dúvida me fala!\"]\n'
+                "Exemplos:\n"
+                'Resposta curta: [\"Ok, só um minuto!\"]\n'
+                'Resposta longa: [\"Então, sobre o plano mensal...\", '
+                '\"O valor é R$99 e inclui X, Y e Z\", \"Quer que eu te mande o link?\"]\n'
                 "Retorne APENAS o JSON array, sem texto antes ou depois.\n"
                 "--- Fim do formato ---"
             )
@@ -385,6 +386,15 @@ class AgentHandler:
                             contact.update_info(**args)
                         except Exception as e:
                             logger.warning("Failed to execute %s for %s: %s", tool_name, sender, e)
+                    elif tool_name == "transfer_to_human":
+                        try:
+                            contact.set_ai_enabled(False)
+                            self.tag_registry.create("transferido_atendente", "#ef4444")
+                            contact.add_tag("transferido_atendente")
+                            contact.save()
+                            logger.info("Transfer to human for %s: %s", sender, args.get("reason", ""))
+                        except Exception as e:
+                            logger.warning("Failed to execute %s for %s: %s", tool_name, sender, e)
 
                     executed_tools.append({"tool": tool_name, "args": args})
                     logger.info("Tool call for %s: %s(%s)", sender, tool_name, args)
@@ -392,11 +402,14 @@ class AgentHandler:
                 # If model only called tools without text, do a follow-up call
                 if not msg.content:
                     messages.append(msg.model_dump())
+                    tool_results = {
+                        "transfer_to_human": "Transferência realizada. O atendente humano foi notificado.",
+                    }
                     for tc in msg.tool_calls:
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
-                            "content": "Informações salvas com sucesso.",
+                            "content": tool_results.get(tc.function.name, "Informações salvas com sucesso."),
                         })
                     follow_up = client.chat.completions.create(
                         model=self.model,

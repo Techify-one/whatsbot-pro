@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, initialContactId }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, initialContactId }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -211,6 +211,19 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     if (!tagsChanged) return;
     setGlobalTags(tagsChanged);
   }, [tagsChanged]);
+
+  // Handle real-time AI toggle (e.g. from transfer_to_human tool)
+  useEffect(() => {
+    if (!contactAiToggled) return;
+    const { phone, ai_enabled } = contactAiToggled;
+    if (!phone) return;
+    setContacts(prev => prev.map(c =>
+      c.phone === phone ? { ...c, ai_enabled } : c
+    ));
+    if (phone === selectedRef.current) {
+      setContactData(prev => prev ? { ...prev, ai_enabled } : prev);
+    }
+  }, [contactAiToggled]);
 
   // Handle contact-level tag changes
   useEffect(() => {

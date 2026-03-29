@@ -177,6 +177,19 @@ def register_routes(app, deps):
                 "info": contact_info,
             })
 
+        # If transfer_to_human was called, broadcast alert + state updates
+        if any(tc.get("tool") == "transfer_to_human" for tc in tool_calls):
+            await ws_manager.broadcast("human_transfer_alert", {"phone": phone})
+            await ws_manager.broadcast("contact_ai_toggled", {
+                "phone": phone,
+                "ai_enabled": False,
+            })
+            await ws_manager.broadcast("tags_changed", agent_handler.tag_registry.all())
+            await ws_manager.broadcast("contact_tags_updated", {
+                "phone": phone,
+                "tags": list(contact.tags),
+            })
+
     # Expose broadcast_tool_calls for sandbox route
     deps.broadcast_tool_calls = _broadcast_tool_calls
 

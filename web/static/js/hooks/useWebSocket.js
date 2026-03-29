@@ -1,7 +1,7 @@
 import { useEffect } from 'preact/hooks';
 import { createWebSocket } from '../services/websocket.js';
 
-export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated }) {
+export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled }) {
   useEffect(() => {
     const ws = createWebSocket({
       status: onStatus,
@@ -13,6 +13,8 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       contact_info_updated: onContactInfoUpdated,
       tags_changed: onTagsChanged,
       contact_tags_updated: onContactTagsUpdated,
+      human_transfer_alert: onHumanTransferAlert,
+      contact_ai_toggled: onContactAiToggled,
     });
     return () => ws.close();
   }, []);

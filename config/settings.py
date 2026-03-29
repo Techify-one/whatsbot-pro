@@ -46,6 +46,8 @@ DEFAULT_CONFIG = {
     "split_message_delay": 2.0,
     "audio_transcription_enabled": True,
     "image_transcription_enabled": True,
+    "transfer_alert_enabled": True,
+    "transfer_alert_duration": 5,
     "group_reply_mode": "mention_only",
     "bot_phone": "",
     "bot_name": "",
