@@ -8,6 +8,63 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+class TagRegistry:
+    """Global tag registry stored as contacts/_tags.json.
+
+    Format: {"TagName": {"color": "#ef4444"}, ...}
+    """
+
+    def __init__(self, memory_dir: Path):
+        self.file_path = memory_dir / "_tags.json"
+        self._tags: dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        if self.file_path.exists():
+            try:
+                with open(self.file_path, "r", encoding="utf-8") as f:
+                    self._tags = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                self._tags = {}
+
+    def save(self):
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(self._tags, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            logger.error("Failed to save tag registry: %s", e)
+
+    def all(self) -> dict[str, dict]:
+        return dict(self._tags)
+
+    def create(self, name: str, color: str) -> bool:
+        if name in self._tags:
+            return False
+        self._tags[name] = {"color": color}
+        self.save()
+        return True
+
+    def update(self, old_name: str, *, new_name: str | None = None, color: str | None = None) -> bool:
+        if old_name not in self._tags:
+            return False
+        if color:
+            self._tags[old_name]["color"] = color
+        if new_name and new_name != old_name:
+            self._tags[new_name] = self._tags.pop(old_name)
+        self.save()
+        return True
+
+    def delete(self, name: str) -> bool:
+        if name not in self._tags:
+            return False
+        del self._tags[name]
+        self.save()
+        return True
+
+    def get(self, name: str) -> dict | None:
+        return self._tags.get(name)
+
+
 class ContactMemory:
     """Persistent per-contact memory stored as a JSON file.
 
@@ -16,6 +73,7 @@ class ContactMemory:
         "phone": "5511999999999",
         "info": {"name": "", "email": "", "profession": "", "company": "", "observations": []},
         "messages": [{"role": "user"|"assistant", "content": "...", "ts": 1234567890}, ...],
+        "tags": ["VIP", "Lead"],
         "created_at": 1234567890,
         "updated_at": 1234567890
     }
@@ -28,6 +86,7 @@ class ContactMemory:
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
         self.messages: list[dict] = []
         self.usage: list[dict] = []
+        self.tags: list[str] = []
         self.ai_enabled: bool = True
         self.is_group: bool = False
         self.group_name: str = ""
@@ -52,6 +111,7 @@ class ContactMemory:
                     self.info["observations"] = [old_notes]
                 self.messages = data.get("messages", [])
                 self.usage = data.get("usage", [])
+                self.tags = data.get("tags", [])
                 self.ai_enabled = data.get("ai_enabled", True)
                 self.is_group = data.get("is_group", False)
                 self.group_name = data.get("group_name", "")
@@ -73,6 +133,7 @@ class ContactMemory:
             "info": self.info,
             "messages": self.messages,
             "usage": self.usage,
+            "tags": self.tags,
             "ai_enabled": self.ai_enabled,
             "is_group": self.is_group,
             "group_name": self.group_name,
@@ -127,6 +188,20 @@ class ContactMemory:
     def set_ai_enabled(self, enabled: bool):
         self.ai_enabled = enabled
         self.save()
+
+    def set_tags(self, tags: list[str]):
+        self.tags = list(tags)
+        self.save()
+
+    def add_tag(self, tag_name: str):
+        if tag_name not in self.tags:
+            self.tags.append(tag_name)
+            self.save()
+
+    def remove_tag(self, tag_name: str):
+        if tag_name in self.tags:
+            self.tags.remove(tag_name)
+            self.save()
 
     def get_context_messages(self, limit: int) -> list[dict]:
         """Return the last N messages formatted for the LLM (without ts).

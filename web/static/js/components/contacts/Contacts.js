@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, toggleContactAI } from '../../services/api.js';
+import { getContacts, getContact, markAsRead, toggleContactAI, getTags } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initialContactId }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, initialContactId }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -25,6 +25,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
   const [ctxMenu, setCtxMenu] = useState(null);
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
   const [showArchived, setShowArchived] = useState(false);
+  const [globalTags, setGlobalTags] = useState({});
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
@@ -81,6 +82,11 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
 
   // Initial load
   useEffect(() => { fetchContacts(); }, []);
+
+  // Load global tags
+  useEffect(() => {
+    getTags().then(res => { if (res.ok) setGlobalTags(res.data); });
+  }, []);
 
   // Reload when archive filter changes
   useEffect(() => { fetchContacts(search); }, [showArchived]);
@@ -200,6 +206,25 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
     }
   }, [contactInfoUpdated]);
 
+  // Handle global tags registry changes (create/update/delete)
+  useEffect(() => {
+    if (!tagsChanged) return;
+    setGlobalTags(tagsChanged);
+  }, [tagsChanged]);
+
+  // Handle contact-level tag changes
+  useEffect(() => {
+    if (!contactTagsUpdated) return;
+    const { phone, tags } = contactTagsUpdated;
+    if (!phone) return;
+    setContacts(prev => prev.map(c =>
+      c.phone === phone ? { ...c, tags } : c
+    ));
+    if (phone === selectedRef.current) {
+      setContactData(prev => prev ? { ...prev, tags } : prev);
+    }
+  }, [contactTagsUpdated]);
+
   // Handle real-time messages from WebSocket
   useEffect(() => {
     if (!newMessage) return;
@@ -298,6 +323,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
           typingState=${typingState}
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
+          globalTags=${globalTags}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->
@@ -322,19 +348,23 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, initial
                 contact=${contactData}
                 onAvatarClick=${() => selected && setShowInfoPanel(true)}
                 contactTyping=${selected && typingState[selected] || null}
+                globalTags=${globalTags}
               />`
           }
           ${showInfoPanel && selected ? html`
             <${ContactInfoPanel}
               phone=${selected}
               info=${info}
+              contactTags=${contactData && contactData.tags || []}
+              globalTags=${globalTags}
+              onGlobalTagsChange=${setGlobalTags}
               isGroup=${contactData && contactData.is_group}
               groupName=${contactData && contactData.group_name}
               onClose=${() => setShowInfoPanel(false)}
-              onSave=${(updatedInfo) => {
-                setContactData(prev => prev ? { ...prev, info: updatedInfo } : prev);
+              onSave=${(updatedInfo, updatedTags) => {
+                setContactData(prev => prev ? { ...prev, info: updatedInfo, tags: updatedTags } : prev);
                 setContacts(prev => prev.map(c =>
-                  c.phone === selected ? { ...c, name: updatedInfo.name || c.name } : c
+                  c.phone === selected ? { ...c, name: updatedInfo.name || c.name, tags: updatedTags } : c
                 ));
                 setShowInfoPanel(false);
               }}

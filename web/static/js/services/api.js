@@ -147,6 +147,28 @@ export async function sendPresence(phone, action = 'start') {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, { action });
 }
 
+// ── Tags ─────────────────────────────────────────────────────────────
+
+export async function getTags() {
+  return request('GET', '/api/tags');
+}
+
+export async function createTag(name, color) {
+  return request('POST', '/api/tags', { name, color });
+}
+
+export async function updateTag(name, data) {
+  return request('PUT', `/api/tags/${encodeURIComponent(name)}`, data);
+}
+
+export async function deleteTag(name) {
+  return request('DELETE', `/api/tags/${encodeURIComponent(name)}`);
+}
+
+export async function updateContactTags(phone, tags) {
+  return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/tags`, { tags });
+}
+
 // ── Models ──────────────────────────────────────────────────────────
 
 export async function getModels() {

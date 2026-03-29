@@ -10,7 +10,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from agent.memory import ContactMemory, _build_image_content
+from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import ALL_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ class AgentHandler:
         self.pricing_fn = pricing_fn
         self.split_messages: bool = True
         self._id_lock = threading.Lock()
+        self.tag_registry = TagRegistry(self.memory_dir)
 
     def _record_usage(self, phone: str, call_type: str, model: str, response) -> None:
         """Extract usage from an OpenAI-compatible response and record it."""

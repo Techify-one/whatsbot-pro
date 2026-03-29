@@ -78,6 +78,7 @@ def register_routes(app, deps):
                         "is_group": is_group,
                         "group_name": group_name,
                         "is_archived": is_archived,
+                        "tags": data.get("tags", []),
                         "updated_at": data.get("updated_at", 0),
                     })
                 except Exception:
@@ -87,7 +88,8 @@ def register_routes(app, deps):
                 ql = q.lower()
                 results = [c for c in results if ql in c["name"].lower()
                            or ql in c["phone"]
-                           or ql in c.get("group_name", "").lower()]
+                           or ql in c.get("group_name", "").lower()
+                           or any(ql in t.lower() for t in c.get("tags", []))]
             return results
         return _ok(await asyncio.to_thread(_list))
 

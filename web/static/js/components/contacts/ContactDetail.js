@@ -9,7 +9,7 @@ const html = htm.bind(h);
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData }) {
+export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -340,7 +340,16 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           }
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
-          <div class="text-wa-text text-[16px] leading-tight truncate">${displayName}${isAutoName ? html` <span class="text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] align-middle" title="Nome obtido do WhatsApp">WA</span>` : null}</div>
+          <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
+            <span class="truncate">${displayName}</span>${isAutoName ? html`<span class="text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] shrink-0" title="Nome obtido do WhatsApp">WA</span>` : null}${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
+              const tagInfo = globalTags && globalTags[tagName];
+              const color = tagInfo ? tagInfo.color : '#6b7280';
+              return html`<span
+                class="text-[9px] font-semibold rounded-full px-[5px] py-[0.5px] leading-[14px] shrink-0"
+                style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
+              >${tagName}</span>`;
+            }) : null}
+          </div>
           ${contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
             : isGroup ? html`<div class="text-wa-secondary text-[13px] leading-tight">Grupo</div>`

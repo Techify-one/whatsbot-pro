@@ -7,7 +7,7 @@ const html = htm.bind(h);
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived }) {
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags }) {
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
@@ -79,6 +79,20 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                       </span>
                       <span class="text-wa-secondary text-[12px] ml-[6px] shrink-0 leading-[14px]">${formatTime(c.last_message_ts)}</span>
                     </div>
+                    ${(c.tags && c.tags.length > 0) ? html`
+                      <div class="flex items-center gap-[3px] mt-[2px] flex-wrap">
+                        ${c.tags.slice(0, 3).map(tagName => {
+                          const tagInfo = globalTags && globalTags[tagName];
+                          const color = tagInfo ? tagInfo.color : '#6b7280';
+                          return html`<span
+                            class="text-[9px] font-semibold rounded px-[4px] py-[0.5px] max-w-[70px] truncate leading-[14px]"
+                            style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
+                            title=${tagName}
+                          >${tagName}</span>`;
+                        })}
+                        ${c.tags.length > 3 ? html`<span class="text-[9px] text-wa-secondary">+${c.tags.length - 3}</span>` : null}
+                      </div>
+                    ` : null}
                     <div class="flex justify-between items-center mt-[3px]">
                       ${typingState && typingState[c.phone]
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
