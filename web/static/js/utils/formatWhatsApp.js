@@ -33,5 +33,13 @@ export function formatWhatsApp(text) {
   // Strikethrough
   s = s.replace(/~([^~\n]+?)~/g, '<s>$1</s>');
 
+  // Links (URLs) — after escaping, so &amp; in query strings is fine
+  s = s.replace(/(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#53bdeb;text-decoration:underline;word-break:break-all">$1</a>');
+
+  // Phone numbers with @ (e.g. 5511999999999@s.whatsapp.net) — styled as link but not clickable
+  s = s.replace(/(\d{7,15})@([\w.]+)/g,
+    '<span style="color:#53bdeb;text-decoration:underline;cursor:default">$1@$2</span>');
+
   return s;
 }

@@ -5,9 +5,11 @@ SAVE_CONTACT_INFO_TOOL = {
     "function": {
         "name": "save_contact_info",
         "description": (
-            "Salva informações pessoais do contato quando ele mencionar dados como "
-            "nome, email, profissão, empresa, endereço ou qualquer observação importante. "
-            "Chame esta função SEMPRE que o usuário revelar dados pessoais na conversa."
+            "Salva informações pessoais do contato (nome, email, profissão, empresa, "
+            "endereço ou observação relevante). "
+            "Chame APENAS quando a ÚLTIMA mensagem do usuário contiver dados pessoais "
+            "NOVOS que ainda NÃO estão listados na seção 'Informações já conhecidas' "
+            "do system prompt. NÃO chame se os dados já foram salvos anteriormente."
         ),
         "parameters": {
             "type": "object",

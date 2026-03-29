@@ -562,11 +562,12 @@ def register_routes(app, deps):
                         media_type or "message", phone,
                         text[:80] if text else f"[{media_type}]")
 
-            # Save as "assistant" in contact memory
+            # Save as "assistant" in contact memory (status="operator" to distinguish from AI)
             contact = agent_handler._get_contact(phone)
             await asyncio.to_thread(
                 contact.add_message, "assistant", text,
-                media_type=media_type, media_path=media_path, msg_id=msg_id)
+                media_type=media_type, media_path=media_path, msg_id=msg_id,
+                status="operator")
 
             # Broadcast to frontend
             broadcast_msg: dict = {"role": "assistant", "content": text,

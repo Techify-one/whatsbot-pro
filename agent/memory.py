@@ -206,7 +206,10 @@ class ContactMemory:
                     content = m.get("content") or "[Imagem enviada pelo contato]"
                 result.append({"role": m["role"], "content": content})
             else:
-                result.append({"role": m["role"], "content": m.get("content", "")})
+                content = m.get("content", "")
+                if m["role"] == "assistant" and m.get("status") == "operator":
+                    content = f"[Mensagem do operador humano]: {content}"
+                result.append({"role": m["role"], "content": content})
         return result
 
     def set_wa_name(self, wa_name: str) -> None:

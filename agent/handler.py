@@ -236,9 +236,17 @@ class AgentHandler:
                 f"\n\n--- Informações já conhecidas sobre este contato ({contact.phone}) ---\n"
                 f"{info_summary}\n"
                 "IMPORTANTE: Use estas informações na conversa. "
-                "NÃO pergunte dados que já estão listados acima (ex: nome, email, etc).\n"
+                "NÃO pergunte dados que já estão listados acima (ex: nome, email, etc). "
+                "NÃO chame save_contact_info para dados que já aparecem nesta seção — "
+                "eles já estão salvos. Só use save_contact_info quando o usuário revelar "
+                "informação NOVA na mensagem mais recente.\n"
                 "--- Fim das informações ---"
             )
+        prompt += (
+            "\n\nMensagens marcadas com '[Mensagem do operador humano]' no histórico "
+            "foram enviadas por um atendente real, não por você. Considere o contexto "
+            "mas não imite o estilo do operador."
+        )
         _BRT = timezone(timedelta(hours=-3))
         now = datetime.now(_BRT)
         dias = ["segunda-feira", "terça-feira", "quarta-feira",
