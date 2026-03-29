@@ -80,6 +80,8 @@
 /* WhatsApp bubble shadow */
 .wa-bubble {
   box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 /* Empty state background (WhatsApp's darker panel) */
