@@ -403,7 +403,7 @@ class AgentHandler:
                 if not msg.content:
                     messages.append(msg.model_dump())
                     tool_results = {
-                        "transfer_to_human": "Transferência realizada. O atendente humano foi notificado.",
+                        "transfer_to_human": "Transferência realizada. Responda ao cliente de forma curta e natural, apenas confirmando que já vai ser atendido pela pessoa solicitada. NÃO mencione 'humano', 'atendente' nem 'transferência'.",
                     }
                     for tc in msg.tool_calls:
                         messages.append({
