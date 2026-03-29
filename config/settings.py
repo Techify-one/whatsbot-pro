@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {
     "message_batch_delay": 3.0,
     "response_delay_min": 1.0,
     "response_delay_max": 3.0,
-    "gowa_port": 3000,
+    "gowa_port": 64999,
     "web_port": 8080,
     "usd_brl_rate": 5.50,
     "split_messages": True,
