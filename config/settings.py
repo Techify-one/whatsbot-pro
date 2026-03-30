@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
         "Você é um assistente útil e amigável. Responda de forma clara e concisa. "
         "Use português brasileiro."
     ),
-    "auto_reply": True,
+    "auto_reply": False,
     "max_context_messages": 10,
     "inactivity_timeout_min": 30,
     "message_batch_delay": 3.0,

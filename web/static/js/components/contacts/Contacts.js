@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId, wsConnected }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId, wsConnected, config, onConfigSave }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -395,6 +395,13 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
 
+  const autoReply = config ? config.auto_reply : false;
+  const handleToggleAutoReply = useCallback(async (newValue) => {
+    if (onConfigSave) {
+      await onConfigSave({ auto_reply: newValue });
+    }
+  }, [onConfigSave]);
+
   return html`
     <div class="flex flex-col lg:flex-row h-full">
       <!-- Sidebar -->
@@ -415,6 +422,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           checkingPhone=${checkingPhone}
           checkPhoneError=${checkPhoneError}
           wsConnected=${wsConnected}
+          autoReply=${autoReply}
+          onToggleAutoReply=${handleToggleAutoReply}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->
