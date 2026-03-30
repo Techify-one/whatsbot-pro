@@ -17,6 +17,17 @@ function formatPhone(phone) {
 }
 
 export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopyLink() {
+    if (!botPhone) return;
+    const link = `https://wa.me/${botPhone}?text=Oi`;
+    navigator.clipboard.writeText(link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
   return html`
     <div class="rounded-xl px-4 py-3 flex items-center justify-between border shadow-sm ${connected ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
       <div class="flex items-center gap-3">
@@ -31,6 +42,13 @@ export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
           ` : null}
           ${connected && botPhone ? html`
             <span class="text-wa-secondary text-xs">${formatPhone(botPhone)}</span>
+            <button
+              onClick=${handleCopyLink}
+              class="px-2 py-0.5 text-xs rounded border transition-colors ${copied ? 'bg-green-100 border-green-300 text-green-700' : 'bg-white border-wa-border text-wa-secondary hover:text-wa-text hover:bg-wa-panel'}"
+              title="Copiar link wa.me"
+            >
+              ${copied ? 'Copiado!' : 'Copiar Link'}
+            </button>
           ` : null}
         </div>
       </div>
