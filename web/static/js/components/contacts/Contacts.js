@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, toggleContactAI, getTags } from '../../services/api.js';
+import { getContacts, getContact, markAsRead, toggleContactAI, getTags, deleteContact, archiveContact } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -47,6 +47,30 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       }
     }
   }, [contactData]);
+
+  const handleArchive = useCallback(async (phone, archived) => {
+    const res = await archiveContact(phone, archived);
+    if (res.ok) {
+      setContacts(prev => prev.filter(c => c.phone !== phone));
+      if (selectedRef.current === phone) {
+        setSelected(null);
+        setContactData(null);
+        history.pushState(null, '', '/');
+      }
+    }
+  }, []);
+
+  const handleDelete = useCallback(async (phone) => {
+    const res = await deleteContact(phone);
+    if (res.ok) {
+      setContacts(prev => prev.filter(c => c.phone !== phone));
+      if (selectedRef.current === phone) {
+        setSelected(null);
+        setContactData(null);
+        history.pushState(null, '', '/');
+      }
+    }
+  }, []);
 
   // Push URL when selecting/deselecting a contact
   const selectContact = useCallback((phone) => {
@@ -403,6 +427,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           aiEnabled=${ctxMenu.aiEnabled}
           contactTags=${ctxMenu.tags}
           globalTags=${globalTags}
+          isArchived=${ctxMenu.isArchived}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => { openInfoAfterSelect.current = true; selectContact(phone); }}
           onTagsUpdate=${(phone, newTags) => {
@@ -412,6 +437,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
               setContactData(prev => prev ? { ...prev, tags: newTags } : prev);
             }
           }}
+          onArchive=${handleArchive}
+          onDelete=${handleDelete}
           onClose=${() => setCtxMenu(null)}
         />
       ` : null}

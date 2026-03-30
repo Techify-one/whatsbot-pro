@@ -67,6 +67,46 @@ def register_routes(app, deps):
             asyncio.create_task(_send_read_receipts(phone, msg_ids))
         return _ok(data)
 
+    @app.delete("/api/contacts/{phone}")
+    async def delete_contact(phone: str):
+        """Permanently delete a contact and all associated data."""
+        def _delete():
+            data = contact_repo.get_by_phone(phone)
+            if data is None:
+                return False
+            contact_repo.delete(data["id"])
+            # Clear in-memory cache
+            agent_handler._contacts.pop(phone, None)
+            return True
+        found = await asyncio.to_thread(_delete)
+        if not found:
+            return _err("Contato não encontrado.", status=404)
+        logger.info("[Contact] Deleted contact %s", phone)
+        await ws_manager.broadcast("contact_deleted", {"phone": phone})
+        return _ok({"message": "Contato apagado."})
+
+    @app.post("/api/contacts/{phone}/archive")
+    async def archive_contact(phone: str, body: dict):
+        """Archive or unarchive a contact (by app)."""
+        archived = body.get("archived")
+        if archived is None:
+            return _err("Campo 'archived' é obrigatório.")
+        def _archive():
+            data = contact_repo.get_by_phone(phone)
+            if data is None:
+                return None
+            contact_repo.set_archived(data["id"], bool(archived), by_app=True)
+            # Update in-memory cache
+            if phone in agent_handler._contacts:
+                agent_handler._contacts[phone].is_archived = bool(archived)
+            return bool(archived)
+        result = await asyncio.to_thread(_archive)
+        if result is None:
+            return _err("Contato não encontrado.", status=404)
+        logger.info("[Contact] %s contact %s", "Archived" if result else "Unarchived", phone)
+        await ws_manager.broadcast("contact_archived", {"phone": phone, "archived": result})
+        return _ok({"archived": result})
+
     @app.post("/api/contacts/{phone}/send")
     async def send_to_contact(phone: str, body: dict):
         """Send a manual message to a contact (operator-initiated, no LLM)."""

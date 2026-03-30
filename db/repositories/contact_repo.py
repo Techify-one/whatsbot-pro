@@ -30,11 +30,29 @@ def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
         "is_group": False,
         "group_name": "",
         "is_archived": False,
+        "archived_by_app": False,
         "unread_count": 0,
         "unread_ai_count": 0,
         "created_at": now,
         "updated_at": now,
     }
+
+
+def delete(contact_id: int) -> None:
+    """Delete a contact and all related data (CASCADE handles child tables)."""
+    conn = get_db()
+    conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    conn.commit()
+
+
+def set_archived(contact_id: int, archived: bool, by_app: bool = False) -> None:
+    """Set the archived status of a contact."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE contacts SET is_archived = ?, archived_by_app = ?, updated_at = ? WHERE id = ?",
+        (1 if archived else 0, 1 if (archived and by_app) else 0, time.time(), contact_id),
+    )
+    conn.commit()
 
 
 def get_by_phone(phone: str) -> dict | None:
@@ -212,6 +230,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             "is_group": is_group,
             "group_name": group_name,
             "is_archived": bool(row["is_archived"]),
+            "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
             "tags": tags,
             "updated_at": row["updated_at"],
         })
@@ -274,6 +293,7 @@ def _row_to_dict(row) -> dict:
         "is_group": bool(row["is_group"]),
         "group_name": row["group_name"],
         "is_archived": bool(row["is_archived"]),
+        "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
         "unread_count": row["unread_count"],
         "unread_ai_count": row["unread_ai_count"],
         "created_at": row["created_at"],

@@ -20,7 +20,18 @@ def init_db(db_path: Path) -> None:
     conn = get_db()
     conn.executescript(_SCHEMA_FILE.read_text(encoding="utf-8"))
     conn.commit()
+    _run_migrations(conn)
     logger.info("Database initialized at %s", db_path)
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply incremental schema migrations for existing databases."""
+    # Migration: add archived_by_app column to contacts
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(contacts)").fetchall()}
+    if "archived_by_app" not in cols:
+        conn.execute("ALTER TABLE contacts ADD COLUMN archived_by_app INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        logger.info("Migration: added archived_by_app column to contacts")
 
 
 def get_db() -> sqlite3.Connection:

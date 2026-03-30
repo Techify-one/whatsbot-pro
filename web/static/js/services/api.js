@@ -90,6 +90,14 @@ export async function getContact(phone) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}`);
 }
 
+export async function deleteContact(phone) {
+  return request('DELETE', `/api/contacts/${encodeURIComponent(phone)}`);
+}
+
+export async function archiveContact(phone, archived) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/archive`, { archived });
+}
+
 export async function sendMessage(phone, message) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, { message });
 }

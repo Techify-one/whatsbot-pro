@@ -50,7 +50,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${c.phone}
                   onClick=${() => onSelect(c.phone)}
-                  onContextMenu=${(e) => { e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false, tags: c.tags || [] }); }}
+                  onContextMenu=${(e) => { e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     selected === c.phone ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
@@ -70,6 +70,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                         ${c.is_group ? (c.group_name || c.name || c.phone) : ((c.name || '').replace(/^~/, '') || c.phone)}
                         ${!c.is_group && c.name && c.name.startsWith('~')
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] align-middle" title="Nome obtido do WhatsApp">WA</span>`
+                          : null
+                        }
+                        ${c.archived_by_app
+                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`
                           : null
                         }
                         ${c.ai_enabled === false
