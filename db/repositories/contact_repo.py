@@ -5,10 +5,36 @@ import time
 from db.connection import get_db
 
 
+def _br_phone_variants(phone: str) -> list[str]:
+    """Return phone number variants for Brazilian numbers.
+
+    BR mobile numbers can have 8 or 9 local digits:
+    - 13 digits: 55 + 2-digit DDD + 9 + 8 digits (user-typed format)
+    - 12 digits: 55 + 2-digit DDD + 8 digits (WhatsApp canonical format)
+    """
+    if not phone or not phone.startswith("55"):
+        return [phone]
+    if len(phone) == 13 and phone[4] == "9":
+        alt = phone[:4] + phone[5:]
+        return [phone, alt]
+    if len(phone) == 12:
+        alt = phone[:4] + "9" + phone[4:]
+        return [phone, alt]
+    return [phone]
+
+
 def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
-    """Get a contact by phone, creating it if it doesn't exist. Returns a dict."""
+    """Get a contact by phone, creating it if it doesn't exist.
+
+    For Brazilian numbers, checks both 12-digit and 13-digit variants
+    to prevent duplicate contacts.
+    """
     conn = get_db()
-    row = conn.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
+    variants = _br_phone_variants(phone)
+    placeholders = ",".join("?" for _ in variants)
+    row = conn.execute(
+        f"SELECT * FROM contacts WHERE phone IN ({placeholders})", variants
+    ).fetchone()
     if row is not None:
         return _row_to_dict(row)
     now = time.time()
@@ -56,9 +82,13 @@ def set_archived(contact_id: int, archived: bool, by_app: bool = False) -> None:
 
 
 def get_by_phone(phone: str) -> dict | None:
-    """Get a contact by phone number. Returns None if not found."""
+    """Get a contact by phone number. Checks BR phone variants. Returns None if not found."""
     conn = get_db()
-    row = conn.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
+    variants = _br_phone_variants(phone)
+    placeholders = ",".join("?" for _ in variants)
+    row = conn.execute(
+        f"SELECT * FROM contacts WHERE phone IN ({placeholders})", variants
+    ).fetchone()
     if row is None:
         return None
     return _row_to_dict(row)
@@ -251,7 +281,11 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
 def get_full_contact(phone: str) -> dict | None:
     """Get full contact data for API response (contact + info + observations)."""
     conn = get_db()
-    row = conn.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
+    variants = _br_phone_variants(phone)
+    placeholders = ",".join("?" for _ in variants)
+    row = conn.execute(
+        f"SELECT * FROM contacts WHERE phone IN ({placeholders})", variants
+    ).fetchone()
     if row is None:
         return None
 

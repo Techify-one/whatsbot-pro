@@ -126,11 +126,12 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
         return;
       }
 
-      // Number is valid — select it (auto-creates contact on GET)
+      // Number is valid — use canonical phone from API (avoids BR duplicates)
+      const canonicalPhone = res.data.phone || normalizedPhone;
       setCheckingPhone(false);
       setCheckPhoneError(null);
       setSearch('');
-      selectContact(normalizedPhone);
+      selectContact(canonicalPhone);
       fetchContacts();
     } catch (e) {
       setCheckPhoneError('Erro ao verificar número. Tente novamente.');

@@ -366,7 +366,11 @@ class GOWAClient:
     # ── Phone Check ────────────────────────────────────────────────
 
     def check_phone(self, phone: str) -> dict:
-        """Check if a phone number is registered on WhatsApp via GOWA GET /user/check."""
+        """Check if a phone number is registered on WhatsApp via GOWA GET /user/check.
+
+        Returns dict with keys: registered, jid, name, canonical_phone.
+        canonical_phone is the phone number WhatsApp uses internally (from /user/info devices).
+        """
         clean = self._clean_phone(phone)
         jid = f"{clean}@s.whatsapp.net"
         result = self._request("GET", f"/user/check?phone={jid}", raise_on_error=True)
@@ -375,34 +379,53 @@ class GOWAClient:
         results = result.get("results", result)
         if isinstance(results, dict):
             registered = bool(results.get("is_on_whatsapp", results.get("IsOnWhatsApp", False)))
-            data = {"registered": registered, "jid": jid, "name": ""}
+            data = {"registered": registered, "jid": jid, "name": "", "canonical_phone": clean}
             if registered:
-                # Fetch push name via /user/info
-                name = self._get_user_name(jid)
-                # BR numbers: if 13 digits (55+DDD+9digits), try without 9th digit
-                if not name and clean.startswith("55") and len(clean) == 13:
+                info = self._get_user_info(jid)
+                # BR numbers: if no canonical_phone from devices, try 12-digit variant
+                if not info.get("canonical_phone") and clean.startswith("55") and len(clean) == 13:
                     alt = clean[:4] + clean[5:]  # remove 9 after DDD
                     alt_jid = f"{alt}@s.whatsapp.net"
-                    name = self._get_user_name(alt_jid)
-                if name:
-                    data["name"] = name
+                    alt_info = self._get_user_info(alt_jid)
+                    if alt_info.get("canonical_phone"):
+                        info = alt_info
+                    elif alt_info.get("name") and not info.get("name"):
+                        info = alt_info
+                if info.get("name"):
+                    data["name"] = info["name"]
+                if info.get("canonical_phone"):
+                    data["canonical_phone"] = info["canonical_phone"]
             return data
         return {"registered": False}
 
-    def _get_user_name(self, jid: str) -> str:
-        """Get WhatsApp push name for a JID via GET /user/info."""
+    def _get_user_info(self, jid: str) -> dict:
+        """Get WhatsApp push name and canonical phone for a JID via GET /user/info.
+
+        Returns dict with optional keys: name, canonical_phone.
+        """
         try:
             result = self._request("GET", f"/user/info?phone={jid}")
             if not result or not isinstance(result, dict):
-                return ""
+                return {}
             results = result.get("results", {})
             data = results.get("data", [])
             if isinstance(data, list) and len(data) > 0:
-                return data[0].get("name", "") or ""
-            return ""
+                item = data[0]
+                info = {}
+                name = item.get("name", "") or ""
+                if name:
+                    info["name"] = name
+                # Extract canonical phone from devices
+                devices = item.get("devices", [])
+                if devices and isinstance(devices, list):
+                    user = str(devices[0].get("User", "") or "")
+                    if user:
+                        info["canonical_phone"] = user
+                return info
+            return {}
         except Exception as e:
-            logger.warning("_get_user_name failed for %s: %s", jid, e)
-            return ""
+            logger.warning("_get_user_info failed for %s: %s", jid, e)
+            return {}
 
     # ── Session ──────────────────────────────────────────────────────
 

@@ -59,20 +59,22 @@ def register_routes(app, deps):
 
         registered = result.get("registered", False)
         name = result.get("name", "")
+        # Use canonical phone from WhatsApp (avoids BR 12/13 digit duplicates)
+        canonical = result.get("canonical_phone", digits) if registered else digits
 
         # If registered, pre-create contact with WhatsApp name and AI setting
         if registered:
             ai_default = settings.get("default_ai_enabled", True)
             def _save():
-                contact_repo.get_or_create(digits, default_ai_enabled=ai_default)
+                contact_repo.get_or_create(canonical, default_ai_enabled=ai_default)
                 if name:
-                    c = contact_repo.get_by_phone(digits)
+                    c = contact_repo.get_by_phone(canonical)
                     if c and not c["name"]:
                         contact_repo.update(c["id"], name=f"~{name}")
             await asyncio.to_thread(_save)
 
         return _ok({
-            "phone": digits,
+            "phone": canonical,
             "registered": registered,
             "jid": result.get("jid", ""),
             "name": name,
