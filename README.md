@@ -84,6 +84,7 @@ Uma tela parecida com o WhatsApp Web onde você acompanha tudo o que está acont
 - **Mensagens não lidas** — contador verde mostra quantas mensagens do cliente você ainda não viu, e contador azul mostra quantas respostas a IA enviou que você ainda não conferiu. Ao abrir a conversa, ambos zeram e o WhatsApp marca as mensagens como lidas (✓✓ azul) automaticamente
 - **Reenviar mensagens com erro** — se uma mensagem falhar, você pode tentar enviar de novo com um clique
 - **Busca de contatos** — encontre qualquer contato rapidamente pela barra de pesquisa
+- **Iniciar conversa com número novo** — digite um número de telefone na barra de pesquisa (em qualquer formato: com espaços, parênteses, traços, código do país) e inicie uma conversa. O sistema verifica automaticamente se o número possui WhatsApp e já busca o nome do contato
 
 ---
 
