@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import File, Form, UploadFile
+from fastapi import File, Form, Request, UploadFile
 from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo
@@ -37,11 +37,57 @@ def register_routes(app, deps):
         results = await asyncio.to_thread(contact_repo.list_contacts, q, archived)
         return _ok(results)
 
+    @app.post("/api/contacts/check-phone")
+    async def check_phone(request: Request):
+        """Check if a phone number is registered on WhatsApp."""
+        body = await request.json()
+        phone = (body.get("phone") or "").strip()
+        if not phone:
+            return _err("Campo 'phone' é obrigatório.")
+
+        # Normalize: strip non-digits, ensure country code
+        digits = "".join(c for c in phone if c.isdigit())
+        if len(digits) < 10:
+            return _err("Número inválido. Informe DDD + número.")
+        if not digits.startswith("55"):
+            digits = "55" + digits
+
+        try:
+            result = await asyncio.to_thread(gowa_client.check_phone, digits)
+        except GOWASendError as e:
+            return _err(f"Erro ao verificar número: {e}")
+
+        registered = result.get("registered", False)
+        name = result.get("name", "")
+
+        # If registered, pre-create contact with WhatsApp name and AI setting
+        if registered:
+            ai_default = settings.get("default_ai_enabled", True)
+            def _save():
+                contact_repo.get_or_create(digits, default_ai_enabled=ai_default)
+                if name:
+                    c = contact_repo.get_by_phone(digits)
+                    if c and not c["name"]:
+                        contact_repo.update(c["id"], name=f"~{name}")
+            await asyncio.to_thread(_save)
+
+        return _ok({
+            "phone": digits,
+            "registered": registered,
+            "jid": result.get("jid", ""),
+            "name": name,
+        })
+
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str):
         """Return full contact data including conversation history."""
         def _load():
             data = contact_repo.get_full_contact(phone)
+            if data is None:
+                # Auto-create contact for verified phone numbers
+                ai_default = settings.get("default_ai_enabled", True)
+                contact_repo.get_or_create(phone, default_ai_enabled=ai_default)
+                data = contact_repo.get_full_contact(phone)
             if data is None:
                 return None, []
             contact_id = data["id"]

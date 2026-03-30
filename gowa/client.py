@@ -363,6 +363,47 @@ class GOWAClient:
                 return results
         return []
 
+    # ── Phone Check ────────────────────────────────────────────────
+
+    def check_phone(self, phone: str) -> dict:
+        """Check if a phone number is registered on WhatsApp via GOWA GET /user/check."""
+        clean = self._clean_phone(phone)
+        jid = f"{clean}@s.whatsapp.net"
+        result = self._request("GET", f"/user/check?phone={jid}", raise_on_error=True)
+        if not result or not isinstance(result, dict):
+            return {"registered": False}
+        results = result.get("results", result)
+        if isinstance(results, dict):
+            registered = bool(results.get("is_on_whatsapp", results.get("IsOnWhatsApp", False)))
+            data = {"registered": registered, "jid": jid, "name": ""}
+            if registered:
+                # Fetch push name via /user/info
+                name = self._get_user_name(jid)
+                # BR numbers: if 13 digits (55+DDD+9digits), try without 9th digit
+                if not name and clean.startswith("55") and len(clean) == 13:
+                    alt = clean[:4] + clean[5:]  # remove 9 after DDD
+                    alt_jid = f"{alt}@s.whatsapp.net"
+                    name = self._get_user_name(alt_jid)
+                if name:
+                    data["name"] = name
+            return data
+        return {"registered": False}
+
+    def _get_user_name(self, jid: str) -> str:
+        """Get WhatsApp push name for a JID via GET /user/info."""
+        try:
+            result = self._request("GET", f"/user/info?phone={jid}")
+            if not result or not isinstance(result, dict):
+                return ""
+            results = result.get("results", {})
+            data = results.get("data", [])
+            if isinstance(data, list) and len(data) > 0:
+                return data[0].get("name", "") or ""
+            return ""
+        except Exception as e:
+            logger.warning("_get_user_name failed for %s: %s", jid, e)
+            return ""
+
     # ── Session ──────────────────────────────────────────────────────
 
     def reset(self):

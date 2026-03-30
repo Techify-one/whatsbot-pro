@@ -241,9 +241,9 @@ check("GET /api/contacts/{phone} -> messages count", len(data["messages"]) == 4)
 check("GET /api/contacts/{phone} -> has tags", isinstance(data.get("tags"), list))
 check("GET /api/contacts/{phone} -> has observations", isinstance(data.get("info", {}).get("observations"), list))
 
-# Non-existent contact
+# Non-existent contact — auto-creates on GET
 r = client.get("/api/contacts/0000000000")
-check("GET /api/contacts/0000 -> 404", r.status_code == 404)
+check("GET /api/contacts/0000 -> auto-create 200", r.status_code == 200 and r.json()["ok"])
 
 # ═══════════════════════════════════════════════════════════════════
 #  7. Contact send message
@@ -395,9 +395,9 @@ r = client.put("/api/contacts/5511999990001/tags", json={"tags": ["vip", "lead"]
 check("PUT /contacts/{phone}/tags -> 200", r.status_code == 200)
 check("PUT /contacts/{phone}/tags -> set", set(r.json()["data"]["tags"]) == {"vip", "lead"})
 
-# Non-existent contact
-r = client.put("/api/contacts/0000000000/tags", json={"tags": ["vip"]})
-check("PUT /contacts/0000/tags -> 404", r.status_code == 404)
+# Non-existent contact (use different number not auto-created elsewhere)
+r = client.put("/api/contacts/9999999999/tags", json={"tags": ["vip"]})
+check("PUT /contacts/9999/tags -> 404", r.status_code == 404)
 
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage

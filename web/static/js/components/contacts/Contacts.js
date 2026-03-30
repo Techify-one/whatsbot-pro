@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, toggleContactAI, getTags, deleteContact, archiveContact } from '../../services/api.js';
+import { getContacts, getContact, markAsRead, toggleContactAI, getTags, deleteContact, archiveContact, checkPhone } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -26,6 +26,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
   const [showArchived, setShowArchived] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
+  const [checkingPhone, setCheckingPhone] = useState(false);
+  const [checkPhoneError, setCheckPhoneError] = useState(null);
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
@@ -85,6 +87,11 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     }
   }, []);
 
+  const handleSearchChange = useCallback((val) => {
+    setSearch(val);
+    setCheckPhoneError(null);
+  }, []);
+
   const showArchivedRef = useRef(false);
   useEffect(() => { showArchivedRef.current = showArchived; }, [showArchived]);
 
@@ -98,6 +105,38 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       setLoading(false);
     });
   }, []);
+
+  const handleStartConversation = useCallback(async (normalizedPhone) => {
+    if (!normalizedPhone || checkingPhone) return;
+
+    setCheckingPhone(true);
+    setCheckPhoneError(null);
+
+    try {
+      const res = await checkPhone(normalizedPhone);
+      if (!res.ok) {
+        setCheckPhoneError(res.error || 'Erro ao verificar número.');
+        setCheckingPhone(false);
+        return;
+      }
+
+      if (!res.data.registered) {
+        setCheckPhoneError('Este número não possui WhatsApp.');
+        setCheckingPhone(false);
+        return;
+      }
+
+      // Number is valid — select it (auto-creates contact on GET)
+      setCheckingPhone(false);
+      setCheckPhoneError(null);
+      setSearch('');
+      selectContact(normalizedPhone);
+      fetchContacts();
+    } catch (e) {
+      setCheckPhoneError('Erro ao verificar número. Tente novamente.');
+      setCheckingPhone(false);
+    }
+  }, [checkingPhone, selectContact, fetchContacts]);
 
   const handleToggleArchived = useCallback(() => {
     setShowArchived(prev => !prev);
@@ -363,7 +402,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           contacts=${contacts}
           loading=${loading}
           search=${search}
-          onSearchChange=${setSearch}
+          onSearchChange=${handleSearchChange}
           selected=${selected}
           onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
@@ -371,6 +410,9 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
+          onStartConversation=${handleStartConversation}
+          checkingPhone=${checkingPhone}
+          checkPhoneError=${checkPhoneError}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->

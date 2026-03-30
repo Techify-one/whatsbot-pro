@@ -19,6 +19,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   const [pendingMedia, setPendingMedia] = useState(null);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
+  const inputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const recordTimerRef = useRef(null);
   const presenceTimerRef = useRef(null);
@@ -28,6 +29,13 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }, [messages]);
 
   useEffect(() => { setInput(''); }, [phone]);
+
+  // Auto-focus message input when opening a chat
+  useEffect(() => {
+    if (phone && inputRef.current) {
+      setTimeout(() => inputRef.current?.focus(), 150);
+    }
+  }, [phone]);
 
   // Send typing presence to contact (debounced)
   function handleInputChange(e) {
@@ -553,6 +561,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           </button>
           <div class="flex-1 mx-[5px]">
             <input
+              ref=${inputRef}
               type="text"
               value=${input}
               onInput=${handleInputChange}

@@ -5,9 +5,26 @@ import { formatTime } from './utils.js';
 
 const html = htm.bind(h);
 
+function normalizePhone(input) {
+  const digits = input.replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  if (digits.startsWith('55')) return digits;
+  return '55' + digits;
+}
+
+function looksLikePhone(input) {
+  return input.replace(/\D/g, '').length >= 10;
+}
+
+function formatPhoneDisplay(phone) {
+  if (!phone || phone.length < 12) return phone;
+  // 55 85 97360559 → +55 (85) 97360-559
+  return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
+}
+
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags }) {
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError }) {
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
@@ -45,7 +62,30 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
         ${loading && contacts.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 animate-pulse-slow text-[14px]">Carregando...</div>`
           : contacts.length === 0
-            ? html`<div class="text-center text-wa-secondary py-8 text-[14px]">Nenhum contato encontrado</div>`
+            ? html`<div class="text-center py-8 px-4">
+                <div class="text-wa-secondary text-[14px]">Nenhum contato encontrado</div>
+                ${search && looksLikePhone(search) ? html`
+                  <div class="mt-4">
+                    ${checkingPhone
+                      ? html`<div class="text-wa-secondary text-[13px] animate-pulse-slow">
+                          Verificando se o número possui WhatsApp...
+                        </div>`
+                      : checkPhoneError
+                        ? html`<div class="text-red-400 text-[13px] mb-2">${checkPhoneError}</div>
+                               <button
+                                 onClick=${() => onStartConversation(normalizePhone(search))}
+                                 class="text-wa-teal text-[13px] hover:underline cursor-pointer"
+                               >Tentar novamente</button>`
+                        : html`<button
+                            onClick=${() => onStartConversation(normalizePhone(search))}
+                            class="mt-2 px-4 py-[6px] bg-wa-teal/10 text-wa-teal text-[13px] rounded-lg hover:bg-wa-teal/20 transition-colors cursor-pointer border border-wa-teal/30"
+                          >
+                            Iniciar conversa com ${formatPhoneDisplay(normalizePhone(search))}
+                          </button>`
+                    }
+                  </div>
+                ` : null}
+              </div>`
             : contacts.map(c => html`
                 <div
                   key=${c.phone}
