@@ -6,6 +6,19 @@ import { ModelSelect } from './ModelSelect.js';
 
 const html = htm.bind(h);
 
+function Section({ title, children }) {
+  return html`
+    <div class="bg-white rounded-xl p-5 border border-wa-border shadow-sm">
+      ${title ? html`
+        <h3 class="text-xs font-semibold text-wa-secondary uppercase tracking-wider mb-4">${title}</h3>
+      ` : null}
+      <div class="flex flex-col gap-4">
+        ${children}
+      </div>
+    </div>
+  `;
+}
+
 export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
@@ -131,129 +144,136 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   }
 
   return html`
-    <div class="bg-white rounded-xl p-5 flex flex-col gap-4 flex-1 border border-wa-border shadow-sm">
-      <!-- Auto Reply Toggle -->
-      <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
-        <input
-          type="checkbox"
-          checked=${autoReply}
-          onChange=${(e) => setAutoReply(e.target.checked)}
-          class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-        />
-        Ativar agente de IA para responder mensagens
-      </label>
+    <div class="flex flex-col gap-4 flex-1">
 
-      <!-- Default AI for new contacts -->
-      <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${defaultAiEnabled ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
-        <input
-          type="checkbox"
-          checked=${defaultAiEnabled}
-          onChange=${(e) => setDefaultAiEnabled(e.target.checked)}
-          class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-        />
-        IA ativada por padrão para novos contatos
-      </label>
-
-      <!-- API Key -->
-      <div>
-        <label class="block text-sm font-semibold text-wa-text mb-1">API Key OpenRouter</label>
-        <div class="flex gap-2">
+      <!-- Section: Automacao -->
+      <${Section} title="Automação">
+        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
           <input
-            type="password"
-            value=${apiKey}
-            onInput=${(e) => setApiKey(e.target.value)}
-            placeholder=${config.openrouter_api_key || 'sk-or-...'}
-            class="flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            type="checkbox"
+            checked=${autoReply}
+            onChange=${(e) => setAutoReply(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
           />
-          <button
-            onClick=${handleTestKey}
-            disabled=${testing}
-            class="px-4 py-2 bg-wa-panel hover:bg-wa-hover disabled:opacity-50 text-wa-text text-sm rounded-lg transition-colors whitespace-nowrap border border-wa-border"
-          >
-            ${testing ? '...' : 'Testar'}
-          </button>
-        </div>
-        ${testResult ? html`
-          <p class="text-xs mt-1 ${testResult.ok ? 'text-green-600' : 'text-red-500'}">
-            ${testResult.ok ? '\u2713' : '\u2717'} ${testResult.message}
-          </p>
-        ` : config.openrouter_api_key ? html`
-          <p class="text-xs mt-1 text-wa-secondary">Chave salva: ${config.openrouter_api_key}</p>
-        ` : null}
-      </div>
+          Ativar agente de IA para responder mensagens
+        </label>
 
-      <!-- Model -->
-      <div>
-        <label class="block text-sm font-semibold text-wa-text mb-1">Modelo de IA (chat)</label>
-        <${ModelSelect}
-          value=${model}
-          onChange=${setModel}
-          placeholder="openai/gpt-4o-mini"
-        />
-      </div>
+        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${defaultAiEnabled ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+          <input
+            type="checkbox"
+            checked=${defaultAiEnabled}
+            onChange=${(e) => setDefaultAiEnabled(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          IA ativada por padrão para novos contatos
+        </label>
+      <//>
 
-      <!-- Audio & Image models -->
-      <div class="grid grid-cols-2 gap-3">
+      <!-- Section: API e Modelos -->
+      <${Section} title="API e Modelos">
+        <!-- API Key -->
         <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">Modelo transcrição áudio</label>
-          <${ModelSelect}
-            value=${audioModel}
-            onChange=${setAudioModel}
-            filterModality="audio"
-            placeholder="google/gemini-2.0-flash-001"
-          />
-          <span class="text-xs text-wa-secondary">Modelo com suporte a áudio</span>
-          <label class="flex items-center gap-2 mt-2 cursor-pointer">
+          <label class="block text-sm font-semibold text-wa-text mb-1">API Key OpenRouter</label>
+          <div class="flex gap-2">
             <input
-              type="checkbox"
-              checked=${audioTranscriptionEnabled}
-              onChange=${(e) => setAudioTranscriptionEnabled(e.target.checked)}
-              class="accent-wa-teal w-4 h-4"
+              type="password"
+              value=${apiKey}
+              onInput=${(e) => setApiKey(e.target.value)}
+              placeholder=${config.openrouter_api_key || 'sk-or-...'}
+              class="flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
             />
-            <span class="text-sm text-wa-text">Ativar transcrição de áudio</span>
-          </label>
+            <button
+              onClick=${handleTestKey}
+              disabled=${testing}
+              class="px-4 py-2 bg-wa-panel hover:bg-wa-hover disabled:opacity-50 text-wa-text text-sm rounded-lg transition-colors whitespace-nowrap border border-wa-border"
+            >
+              ${testing ? '...' : 'Testar'}
+            </button>
+          </div>
+          ${testResult ? html`
+            <p class="text-xs mt-1 ${testResult.ok ? 'text-green-600' : 'text-red-500'}">
+              ${testResult.ok ? '\u2713' : '\u2717'} ${testResult.message}
+            </p>
+          ` : config.openrouter_api_key ? html`
+            <p class="text-xs mt-1 text-wa-secondary">Chave salva: ${config.openrouter_api_key}</p>
+          ` : null}
         </div>
-        <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">Modelo descrição imagem</label>
-          <${ModelSelect}
-            value=${imageModel}
-            onChange=${setImageModel}
-            filterModality="image"
-            placeholder="google/gemini-2.0-flash-001"
-          />
-          <span class="text-xs text-wa-secondary">Modelo com suporte a visão</span>
-          <label class="flex items-center gap-2 mt-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked=${imageTranscriptionEnabled}
-              onChange=${(e) => setImageTranscriptionEnabled(e.target.checked)}
-              class="accent-wa-teal w-4 h-4"
-            />
-            <span class="text-sm text-wa-text">Ativar transcrição de imagem</span>
-          </label>
-        </div>
-      </div>
 
-      <!-- System Prompt -->
-      <div class="flex-1 flex flex-col">
-        <div class="flex items-center justify-between mb-1">
-          <label class="block text-sm font-semibold text-wa-text">System Prompt</label>
-          <button
-            type="button"
-            onClick=${() => setPromptFullscreen(true)}
-            class="text-wa-secondary hover:text-wa-teal transition-colors p-1 rounded"
-            title="Abrir editor em tela cheia"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-          </button>
+        <!-- Model -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Modelo de IA (chat)</label>
+          <${ModelSelect}
+            value=${model}
+            onChange=${setModel}
+            placeholder="openai/gpt-4o-mini"
+          />
         </div>
-        <textarea
-          value=${systemPrompt}
-          onInput=${(e) => setSystemPrompt(e.target.value)}
-          rows="4"
-          class="w-full flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
-        ></textarea>
-      </div>
+
+        <!-- Audio & Image models -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-semibold text-wa-text mb-1">Modelo transcrição áudio</label>
+            <${ModelSelect}
+              value=${audioModel}
+              onChange=${setAudioModel}
+              filterModality="audio"
+              placeholder="google/gemini-2.0-flash-001"
+            />
+            <span class="text-xs text-wa-secondary">Modelo com suporte a áudio</span>
+            <label class="flex items-center gap-2 mt-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked=${audioTranscriptionEnabled}
+                onChange=${(e) => setAudioTranscriptionEnabled(e.target.checked)}
+                class="accent-wa-teal w-4 h-4"
+              />
+              <span class="text-sm text-wa-text">Ativar transcrição de áudio</span>
+            </label>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-wa-text mb-1">Modelo descrição imagem</label>
+            <${ModelSelect}
+              value=${imageModel}
+              onChange=${setImageModel}
+              filterModality="image"
+              placeholder="google/gemini-2.0-flash-001"
+            />
+            <span class="text-xs text-wa-secondary">Modelo com suporte a visão</span>
+            <label class="flex items-center gap-2 mt-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked=${imageTranscriptionEnabled}
+                onChange=${(e) => setImageTranscriptionEnabled(e.target.checked)}
+                class="accent-wa-teal w-4 h-4"
+              />
+              <span class="text-sm text-wa-text">Ativar transcrição de imagem</span>
+            </label>
+          </div>
+        </div>
+      <//>
+
+      <!-- Section: System Prompt -->
+      <${Section} title="System Prompt">
+        <div class="flex-1 flex flex-col">
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-semibold text-wa-text">Prompt</label>
+            <button
+              type="button"
+              onClick=${() => setPromptFullscreen(true)}
+              class="text-wa-secondary hover:text-wa-teal transition-colors p-1 rounded"
+              title="Abrir editor em tela cheia"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+            </button>
+          </div>
+          <textarea
+            value=${systemPrompt}
+            onInput=${(e) => setSystemPrompt(e.target.value)}
+            rows="4"
+            class="w-full flex-1 bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
+          ></textarea>
+        </div>
+      <//>
 
       <!-- Fullscreen Prompt Editor -->
       ${promptFullscreen ? html`
@@ -280,159 +300,167 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
         </div>
       ` : null}
 
-      <!-- Context & Batch Settings -->
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">Mensagens de contexto</label>
-          <input
-            type="number"
-            min="2"
-            max="100"
-            value=${maxContext}
-            onInput=${(e) => setMaxContext(e.target.value)}
-            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-          />
-          <span class="text-xs text-wa-secondary">Qtd de msgs enviadas ao LLM</span>
-        </div>
-        <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">Agrupar mensagens (s)</label>
-          <input
-            type="number"
-            min="0"
-            max="30"
-            step="0.5"
-            value=${batchDelay}
-            onInput=${(e) => setBatchDelay(e.target.value)}
-            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-          />
-          <span class="text-xs text-wa-secondary">Espera antes de responder</span>
-        </div>
-      </div>
-
-      <!-- Split Messages -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${splitMessages}
-            onChange=${(e) => setSplitMessages(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Mensagens picadas (dividir resposta)
-        </label>
-        <span class="text-xs text-wa-secondary">Divide a resposta da IA em várias mensagens curtas, como uma conversa natural</span>
-        ${splitMessages ? html`
-          <div class="mt-1">
-            <label class="block text-xs font-medium text-wa-text mb-1">Intervalo entre mensagens (s)</label>
+      <!-- Section: Comportamento -->
+      <${Section} title="Comportamento">
+        <!-- Context & Batch Settings -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-semibold text-wa-text mb-1">Mensagens de contexto</label>
+            <input
+              type="number"
+              min="2"
+              max="100"
+              value=${maxContext}
+              onInput=${(e) => setMaxContext(e.target.value)}
+              class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            />
+            <span class="text-xs text-wa-secondary">Qtd de msgs enviadas ao LLM</span>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-wa-text mb-1">Agrupar mensagens (s)</label>
             <input
               type="number"
               min="0"
-              max="10"
-              step="0.5"
-              value=${splitDelay}
-              onInput=${(e) => setSplitDelay(e.target.value)}
-              class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-            />
-          </div>
-        ` : null}
-      </div>
-
-      <!-- Transfer Alert -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${transferAlertEnabled}
-            onChange=${(e) => setTransferAlertEnabled(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Alerta sonoro ao transferir para humano
-        </label>
-        <span class="text-xs text-wa-secondary">Emite um alerta sonoro quando a IA transfere o atendimento para um humano</span>
-        ${transferAlertEnabled ? html`
-          <div class="mt-1">
-            <label class="block text-xs font-medium text-wa-text mb-1">Duração do alerta (segundos)</label>
-            <input
-              type="number"
-              min="1"
               max="30"
-              step="1"
-              value=${transferAlertDuration}
-              onInput=${(e) => setTransferAlertDuration(e.target.value)}
-              class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+              step="0.5"
+              value=${batchDelay}
+              onInput=${(e) => setBatchDelay(e.target.value)}
+              class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
             />
+            <span class="text-xs text-wa-secondary">Espera antes de responder</span>
           </div>
-        ` : null}
-      </div>
-
-      <!-- Max Executions -->
-      <div>
-        <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
-        <input
-          type="number"
-          min="10"
-          max="10000"
-          step="10"
-          value=${maxExecutions}
-          onInput=${(e) => setMaxExecutions(e.target.value)}
-          class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-        />
-        <span class="text-xs text-wa-secondary">Quantidade máxima de execuções e payloads mantidos no banco</span>
-      </div>
-
-      <!-- Panel Password -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <div class="flex items-center justify-between">
-          <label class="text-sm font-semibold text-wa-text">Senha do Painel</label>
-          ${config.has_password ? html`
-            <span class="text-xs bg-wa-teal text-white px-2 py-0.5 rounded-full">Ativa</span>
-          ` : html`
-            <span class="text-xs bg-wa-secondary/20 text-wa-secondary px-2 py-0.5 rounded-full">Desativada</span>
-          `}
         </div>
-        <span class="text-xs text-wa-secondary">Protege o acesso ao painel web com senha</span>
-        ${!removePassword ? html`
-          <input
-            type="password"
-            value=${webPassword}
-            onInput=${(e) => setWebPassword(e.target.value)}
-            placeholder=${config.has_password ? 'Nova senha (deixe vazio para manter)' : 'Definir senha'}
-            class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-          />
-          ${webPassword ? html`
-            <input
-              type="password"
-              value=${webPasswordConfirm}
-              onInput=${(e) => setWebPasswordConfirm(e.target.value)}
-              placeholder="Confirmar senha"
-              class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? 'border-red-400' : ''}"
-            />
-            ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? html`
-              <span class="text-xs text-red-500">As senhas não coincidem</span>
-            ` : null}
-          ` : null}
-        ` : null}
-        ${config.has_password ? html`
-          <label class="flex items-center gap-2 text-sm text-red-600 cursor-pointer mt-1">
+
+        <!-- Split Messages -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
             <input
               type="checkbox"
-              checked=${removePassword}
-              onChange=${(e) => { setRemovePassword(e.target.checked); if (e.target.checked) { setWebPassword(''); setWebPasswordConfirm(''); } }}
-              class="w-4 h-4 rounded border-wa-border accent-red-600"
+              checked=${splitMessages}
+              onChange=${(e) => setSplitMessages(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
             />
-            Remover senha
+            Mensagens picadas (dividir resposta)
           </label>
-        ` : null}
-      </div>
+          <span class="text-xs text-wa-secondary">Divide a resposta da IA em várias mensagens curtas, como uma conversa natural</span>
+          ${splitMessages ? html`
+            <div class="mt-1">
+              <label class="block text-xs font-medium text-wa-text mb-1">Intervalo entre mensagens (s)</label>
+              <input
+                type="number"
+                min="0"
+                max="10"
+                step="0.5"
+                value=${splitDelay}
+                onInput=${(e) => setSplitDelay(e.target.value)}
+                class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+              />
+            </div>
+          ` : null}
+        </div>
 
-      <!-- Save Button -->
-      <button
-        onClick=${handleSave}
-        disabled=${saving}
-        class="w-full py-2.5 ${saveSuccess ? 'bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark'} disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
-      >
-        ${saving ? 'Salvando...' : saveSuccess ? '\u2713 Salvo!' : 'Salvar Configurações'}
-      </button>
+        <!-- Transfer Alert -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${transferAlertEnabled}
+              onChange=${(e) => setTransferAlertEnabled(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Alerta sonoro ao transferir para humano
+          </label>
+          <span class="text-xs text-wa-secondary">Emite um alerta sonoro quando a IA transfere o atendimento para um humano</span>
+          ${transferAlertEnabled ? html`
+            <div class="mt-1">
+              <label class="block text-xs font-medium text-wa-text mb-1">Duração do alerta (segundos)</label>
+              <input
+                type="number"
+                min="1"
+                max="30"
+                step="1"
+                value=${transferAlertDuration}
+                onInput=${(e) => setTransferAlertDuration(e.target.value)}
+                class="w-32 bg-white text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+              />
+            </div>
+          ` : null}
+        </div>
+      <//>
+
+      <!-- Section: Avancado -->
+      <${Section} title="Avançado">
+        <!-- Max Executions -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
+          <input
+            type="number"
+            min="10"
+            max="10000"
+            step="10"
+            value=${maxExecutions}
+            onInput=${(e) => setMaxExecutions(e.target.value)}
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+          />
+          <span class="text-xs text-wa-secondary">Quantidade máxima de execuções e payloads mantidos no banco</span>
+        </div>
+
+        <!-- Panel Password -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <div class="flex items-center justify-between">
+            <label class="text-sm font-semibold text-wa-text">Senha do Painel</label>
+            ${config.has_password ? html`
+              <span class="text-xs bg-wa-teal text-white px-2 py-0.5 rounded-full">Ativa</span>
+            ` : html`
+              <span class="text-xs bg-wa-secondary/20 text-wa-secondary px-2 py-0.5 rounded-full">Desativada</span>
+            `}
+          </div>
+          <span class="text-xs text-wa-secondary">Protege o acesso ao painel web com senha</span>
+          ${!removePassword ? html`
+            <input
+              type="password"
+              value=${webPassword}
+              onInput=${(e) => setWebPassword(e.target.value)}
+              placeholder=${config.has_password ? 'Nova senha (deixe vazio para manter)' : 'Definir senha'}
+              class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            />
+            ${webPassword ? html`
+              <input
+                type="password"
+                value=${webPasswordConfirm}
+                onInput=${(e) => setWebPasswordConfirm(e.target.value)}
+                placeholder="Confirmar senha"
+                class="w-full bg-white text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? 'border-red-400' : ''}"
+              />
+              ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? html`
+                <span class="text-xs text-red-500">As senhas não coincidem</span>
+              ` : null}
+            ` : null}
+          ` : null}
+          ${config.has_password ? html`
+            <label class="flex items-center gap-2 text-sm text-red-600 cursor-pointer mt-1">
+              <input
+                type="checkbox"
+                checked=${removePassword}
+                onChange=${(e) => { setRemovePassword(e.target.checked); if (e.target.checked) { setWebPassword(''); setWebPasswordConfirm(''); } }}
+                class="w-4 h-4 rounded border-wa-border accent-red-600"
+              />
+              Remover senha
+            </label>
+          ` : null}
+        </div>
+      <//>
+
+      <!-- Save Button (sticky) -->
+      <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">
+        <button
+          onClick=${handleSave}
+          disabled=${saving}
+          class="w-full py-2.5 ${saveSuccess ? 'bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark'} disabled:opacity-50 text-white font-medium rounded-lg transition-colors shadow-sm"
+        >
+          ${saving ? 'Salvando...' : saveSuccess ? '\u2713 Salvo!' : 'Salvar Configurações'}
+        </button>
+      </div>
     </div>
   `;
 }
