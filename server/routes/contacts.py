@@ -148,6 +148,7 @@ def register_routes(app, deps):
             # Update in-memory cache
             if phone in agent_handler._contacts:
                 agent_handler._contacts[phone].is_archived = bool(archived)
+                agent_handler._contacts[phone].archived_by_app = bool(archived)
             return bool(archived)
         result = await asyncio.to_thread(_archive)
         if result is None:

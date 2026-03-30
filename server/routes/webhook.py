@@ -646,15 +646,18 @@ def register_routes(app, deps):
                         media_type.capitalize() if media_type else "Message",
                         phone, text[:80] if text else f"[{media_type}]")
 
-        # Check/update archive status from GOWA
+        # Check/update archive status from GOWA (skip if archived by app)
         try:
-            archived = await asyncio.to_thread(gowa_client.is_chat_archived, chat_jid)
-            logger.info("[Webhook] Archive check: %s (jid=%s) -> archived=%s", phone, chat_jid, archived)
             contact = agent_handler._get_contact(phone)
-            if contact.is_archived != archived:
-                contact.is_archived = archived
-                contact.save()
-                logger.info("[Webhook] Archive status updated: %s -> %s", phone, archived)
+            if not contact.archived_by_app:
+                archived = await asyncio.to_thread(gowa_client.is_chat_archived, chat_jid)
+                logger.info("[Webhook] Archive check: %s (jid=%s) -> archived=%s", phone, chat_jid, archived)
+                if contact.is_archived != archived:
+                    contact.is_archived = archived
+                    contact.save()
+                    logger.info("[Webhook] Archive status updated: %s -> %s", phone, archived)
+            else:
+                logger.info("[Webhook] Skipping archive check for %s (archived by app)", phone)
         except Exception as e:
             logger.warning("[Webhook] Failed to check archive status for %s: %s", phone, e)
 
