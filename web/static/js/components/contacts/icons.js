@@ -29,7 +29,26 @@ export function BackArrowIcon() {
   `;
 }
 
-export function DefaultAvatar({ size = 49 }) {
+export function DefaultAvatar({ size = 49, avatarUrl }) {
+  if (avatarUrl) {
+    return html`
+      <img
+        src=${avatarUrl}
+        width="${size}" height="${size}"
+        class="w-full h-full object-cover"
+        style="display:block;"
+        onError=${(e) => {
+          // Replace with SVG fallback on error
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('viewBox', '0 0 212 212');
+          svg.setAttribute('width', size);
+          svg.setAttribute('height', size);
+          svg.innerHTML = '<path fill="#DFE5E7" d="M106.251.5C164.653.5 212 47.846 212 106.25S164.653 212 106.25 212C47.846 212 .5 164.654.5 106.25S47.846.5 106.251.5z"/><path fill="#FFF" d="M173.561 171.615a62.767 62.767 0 00-16.06-22.06 62.91 62.91 0 00-22.794-14.132 17.694 17.694 0 001.883-1.467c7.87-7.168 12.762-17.434 12.762-28.812s-4.893-21.644-12.762-28.812c-7.869-7.168-18.753-11.597-30.84-11.597s-22.971 4.43-30.84 11.597c-7.87 7.168-12.762 17.434-12.762 28.812s4.892 21.644 12.762 28.812a17.71 17.71 0 001.883 1.467 62.91 62.91 0 00-22.794 14.131 62.769 62.769 0 00-16.06 22.06A105.752 105.752 0 01.5 106.25C.5 47.846 47.846.5 106.251.5S212 47.846 212 106.25a105.754 105.754 0 01-38.439 65.365z"/>';
+          e.target.replaceWith(svg);
+        }}
+      />
+    `;
+  }
   return html`
     <svg viewBox="0 0 212 212" width="${size}" height="${size}">
       <path fill="#DFE5E7" d="M106.251.5C164.653.5 212 47.846 212 106.25S164.653 212 106.25 212C47.846 212 .5 164.654.5 106.25S47.846.5 106.251.5z"/>
@@ -38,7 +57,25 @@ export function DefaultAvatar({ size = 49 }) {
   `;
 }
 
-export function GroupAvatar({ size = 49 }) {
+export function GroupAvatar({ size = 49, avatarUrl }) {
+  if (avatarUrl) {
+    return html`
+      <img
+        src=${avatarUrl}
+        width="${size}" height="${size}"
+        class="w-full h-full object-cover"
+        style="display:block;"
+        onError=${(e) => {
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('viewBox', '0 0 212 212');
+          svg.setAttribute('width', size);
+          svg.setAttribute('height', size);
+          svg.innerHTML = '<path fill="#DFE5E7" d="M106.251.5C164.653.5 212 47.846 212 106.25S164.653 212 106.25 212C47.846 212 .5 164.654.5 106.25S47.846.5 106.251.5z"/><path fill="#FFF" d="M82 108c-8.284 0-15-6.716-15-15s6.716-15 15-15 15 6.716 15 15-6.716 15-15 15zm48 0c-8.284 0-15-6.716-15-15s6.716-15 15-15 15 6.716 15 15-6.716 15-15 15zM82 118c-13.255 0-25 8.745-25 22v5h50v-5c0-13.255-11.745-22-25-22zm48 0c-2.08 0-4.08.254-6 .72 5.268 4.75 8.5 11.568 8.5 19.28v5h22.5v-5c0-13.255-11.745-20-25-20z"/>';
+          e.target.replaceWith(svg);
+        }}
+      />
+    `;
+  }
   return html`
     <svg viewBox="0 0 212 212" width="${size}" height="${size}">
       <path fill="#DFE5E7" d="M106.251.5C164.653.5 212 47.846 212 106.25S164.653 212 106.25 212C47.846 212 .5 164.654.5 106.25S47.846.5 106.251.5z"/>

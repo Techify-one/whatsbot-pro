@@ -5,7 +5,8 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import File, Form, Request, UploadFile
+from fastapi import File, Form, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo
@@ -394,6 +395,28 @@ def register_routes(app, deps):
             "ai_enabled": result,
         })
         return _ok({"ai_enabled": result})
+
+    @app.get("/api/contacts/{phone}/avatar")
+    async def get_contact_avatar(phone: str):
+        """Return contact's WhatsApp profile photo (cached on disk)."""
+        avatars_dir = statics_senditems_dir.parent / "avatars"
+        avatars_dir.mkdir(parents=True, exist_ok=True)
+        avatar_path = avatars_dir / f"{phone}.jpg"
+
+        if avatar_path.exists():
+            return FileResponse(str(avatar_path), media_type="image/jpeg")
+
+        # Fetch from GOWA on-demand
+        try:
+            data = await asyncio.to_thread(gowa_client.get_avatar, phone)
+        except Exception:
+            data = None
+
+        if data and isinstance(data, bytes):
+            avatar_path.write_bytes(data)
+            return FileResponse(str(avatar_path), media_type="image/jpeg")
+
+        return Response(status_code=204)
 
     @app.put("/api/contacts/{phone}/info")
     async def update_contact_info(phone: str, body: dict):

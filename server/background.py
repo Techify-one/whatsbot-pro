@@ -3,6 +3,9 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
+
+from db.repositories import contact_repo
 
 logger = logging.getLogger(__name__)
 
@@ -126,3 +129,61 @@ async def qr_poll_loop(deps):
             logger.error("QR poll error: %s", e)
         # Poll faster when we don't have a QR yet (waiting for first one)
         await asyncio.sleep(2 if state.qr_data is None and not state.connected else 5)
+
+
+async def avatar_fetch_task(deps):
+    """Fetch WhatsApp profile photos for all existing contacts once connected."""
+    gowa_client = deps.gowa_client
+    state = deps.state
+    settings = deps.settings
+    avatars_dir = settings.data_dir / "statics" / "avatars"
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+
+    # Wait until WhatsApp is connected
+    while not state.stop_event.is_set():
+        if state.connected:
+            break
+        await asyncio.sleep(3)
+
+    if state.stop_event.is_set():
+        return
+
+    # Give GOWA a moment to stabilize after connection
+    await asyncio.sleep(5)
+
+    try:
+        contacts = await asyncio.to_thread(contact_repo.list_contacts, "", False)
+        archived = await asyncio.to_thread(contact_repo.list_contacts, "", True)
+        all_contacts = contacts + archived
+    except Exception as e:
+        logger.error("[Avatar] Failed to load contacts: %s", e)
+        return
+
+    fetched = 0
+    skipped = 0
+    for c in all_contacts:
+        if state.stop_event.is_set():
+            break
+        phone = c.get("phone", "")
+        if not phone:
+            continue
+        avatar_path = avatars_dir / f"{phone}.jpg"
+        if avatar_path.exists():
+            skipped += 1
+            continue
+        try:
+            data = await asyncio.to_thread(gowa_client.get_avatar, phone)
+            if data and isinstance(data, bytes):
+                avatar_path.write_bytes(data)
+                fetched += 1
+                logger.info("[Avatar] Fetched avatar for %s", phone)
+            else:
+                skipped += 1
+        except Exception as e:
+            logger.debug("[Avatar] Failed for %s: %s", phone, e)
+            skipped += 1
+        # Rate limit to avoid overwhelming GOWA
+        await asyncio.sleep(0.5)
+
+    logger.info("[Avatar] Done: %d fetched, %d skipped (of %d total)",
+                fetched, skipped, len(all_contacts))

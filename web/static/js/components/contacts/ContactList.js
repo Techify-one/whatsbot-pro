@@ -120,8 +120,8 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   <!-- Avatar -->
                   <div class="w-[49px] h-[49px] rounded-full overflow-hidden shrink-0 mr-[13px]">
                     ${c.is_group
-                      ? html`<${GroupAvatar} size=${49} />`
-                      : html`<${DefaultAvatar} size=${49} />`
+                      ? html`<${GroupAvatar} size=${49} avatarUrl=${"/statics/avatars/" + c.phone + ".jpg"} />`
+                      : html`<${DefaultAvatar} size=${49} avatarUrl=${"/statics/avatars/" + c.phone + ".jpg"} />`
                     }
                   </div>
 

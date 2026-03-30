@@ -427,6 +427,35 @@ class GOWAClient:
             logger.warning("_get_user_info failed for %s: %s", jid, e)
             return {}
 
+    # ── Avatar ───────────────────────────────────────────────────────
+
+    def get_avatar(self, phone: str, is_preview: bool = True) -> bytes | None:
+        """Fetch a contact's WhatsApp profile picture. Returns image bytes or None."""
+        if self._is_group_jid(phone):
+            jid = phone
+        else:
+            jid = f"{self._clean_phone(phone)}@s.whatsapp.net"
+        preview = "true" if is_preview else "false"
+        try:
+            data = self._request("GET", f"/user/avatar?phone={jid}&is_preview={preview}")
+            if data and isinstance(data, bytes) and len(data) > 100:
+                return data
+            # GOWA returns JSON with a URL pointing to the image on WhatsApp CDN
+            if data and isinstance(data, dict):
+                results = data.get("results", data)
+                url = results.get("url", results.get("profile_picture", ""))
+                if url and url.startswith("http"):
+                    # Download directly from external URL (not via GOWA)
+                    with httpx.Client(timeout=15.0) as client:
+                        resp = client.get(url)
+                        resp.raise_for_status()
+                        if resp.content and len(resp.content) > 100:
+                            return resp.content
+            return None
+        except Exception as e:
+            logger.debug("get_avatar failed for %s: %s", phone, e)
+            return None
+
     # ── Session ──────────────────────────────────────────────────────
 
     def reset(self):

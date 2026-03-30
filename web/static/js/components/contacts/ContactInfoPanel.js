@@ -145,8 +145,8 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
           <div class="flex flex-col items-center py-7 bg-wa-panel">
             <div class="w-[200px] h-[200px] rounded-full overflow-hidden mb-3">
               ${isGroup
-                ? html`<${GroupAvatar} size=${200} />`
-                : html`<${DefaultAvatar} size=${200} />`
+                ? html`<${GroupAvatar} size=${200} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
+                : html`<${DefaultAvatar} size=${200} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
               }
             </div>
             <div class="text-wa-text text-[22px] font-light">${isGroup ? (groupName || phone) : (form.name || phone)}</div>

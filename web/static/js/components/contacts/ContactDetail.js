@@ -344,8 +344,8 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         </button>
         <div onClick=${onAvatarClick} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] cursor-pointer">
           ${isGroup
-            ? html`<${GroupAvatar} size=${40} />`
-            : html`<${DefaultAvatar} size=${40} />`
+            ? html`<${GroupAvatar} size=${40} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
+            : html`<${DefaultAvatar} size=${40} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
           }
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
