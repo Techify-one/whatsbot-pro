@@ -5,6 +5,7 @@ import { sendMessage, retrySend, sendImage, sendAudio, sendPresence } from '../.
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
 import { formatBubbleTime } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
+import { AudioPlayer } from './AudioPlayer.js';
 
 const html = htm.bind(h);
 
@@ -472,16 +473,12 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         onClick=${() => window.open(m._isLocalBlob ? m.media_path : '/' + m.media_path, '_blank')}
                         loading="lazy"
                       />
-                      ${m.content && m.content !== '[Imagem enviada pelo contato]'
+                      ${m.content && m.content !== '[Imagem enviada pelo contato]' && !m.content.startsWith('[Descrição da imagem]')
                         ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`
                         : null}
                     ` : m.media_type === 'audio' ? html`
-                      <audio controls preload="metadata" class="max-w-full mb-1" style="min-width:240px">
-                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/wav" />
-                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/ogg" />
-                        <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
-                      </audio>
-                      ${m.content && m.content !== '[Áudio recebido]' && m.content !== '[Áudio]'
+                      <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} />
+                      ${m.content && m.content !== '[Áudio recebido]' && m.content !== '[Áudio]' && !m.content.startsWith('[Transcrição do áudio]')
                         ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`
                         : null}
                     ` : html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`}
@@ -514,10 +511,9 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           ${pendingMedia.type === 'image' ? html`
             <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
           ` : html`
-            <audio controls preload="auto" class="w-full max-w-[320px]">
-              <source src=${pendingMedia.previewUrl} type="audio/wav" />
-              <source src=${pendingMedia.previewUrl} type="audio/ogg" />
-            </audio>
+            <div class="w-full max-w-[320px]">
+              <${AudioPlayer} src=${pendingMedia.previewUrl} isLocalBlob=${true} />
+            </div>
           `}
           <div class="flex gap-[12px]">
             <button

@@ -141,6 +141,7 @@ class AgentHandler:
             client = self._get_client()
             response = client.chat.completions.create(
                 model=self.audio_model,
+                timeout=60,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -188,6 +189,7 @@ class AgentHandler:
             client = self._get_client()
             response = client.chat.completions.create(
                 model=self.image_model,
+                timeout=60,
                 messages=[{
                     "role": "user",
                     "content": [
