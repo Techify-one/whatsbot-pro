@@ -14,7 +14,7 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update
 
 logger = logging.getLogger(__name__)
 
@@ -188,5 +188,6 @@ def create_app(
     contacts.register_routes(app, deps)
     tags.register_routes(app, deps)
     executions.register_routes(app, deps)
+    update.register_routes(app, deps)
 
     return app

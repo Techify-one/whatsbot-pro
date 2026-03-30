@@ -225,6 +225,16 @@ export async function getUsageContactDetail(phone, params = {}) {
   return request('GET', `/api/usage/contact/${encodeURIComponent(phone)}${qs ? '?' + qs : ''}`);
 }
 
+// ── Update ────────────────────────────────────────────────────────
+
+export async function checkForUpdates() {
+  return request('GET', '/api/update/check');
+}
+
+export async function performUpdate() {
+  return request('POST', '/api/update');
+}
+
 // ── Auth ──────────────────────────────────────────────────────────
 
 export async function login(password) {
