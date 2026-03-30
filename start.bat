@@ -24,5 +24,4 @@ set NO_COLOR=1
 :: Abrir browser apos 3s (apenas no start manual, nao no hot-reload)
 start "" cmd /c "timeout /t 3 /nobreak >nul & start http://127.0.0.1:8080"
 
-uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --log-level warning
-pause
+powershell -Command "Start-Process cmd -ArgumentList '/c call venv\Scripts\activate.bat && uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --log-level warning' -WindowStyle Hidden"
