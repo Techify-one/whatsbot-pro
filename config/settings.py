@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "group_reply_mode": "mention_only",
     "bot_phone": "",
     "bot_name": "",
+    "default_ai_enabled": True,
     "web_password_hash": "",
     "web_password_salt": "",
 }

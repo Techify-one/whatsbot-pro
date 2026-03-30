@@ -63,8 +63,9 @@ class ContactMemory:
     Messages and usage are stored directly in SQLite (not cached in memory).
     """
 
-    def __init__(self, phone: str):
+    def __init__(self, phone: str, default_ai_enabled: bool = True):
         self.phone = phone
+        self._default_ai_enabled = default_ai_enabled
         self.id: int | None = None
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
         self.tags: list[str] = []
@@ -79,7 +80,7 @@ class ContactMemory:
         self._load()
 
     def _load(self):
-        data = contact_repo.get_or_create(self.phone)
+        data = contact_repo.get_or_create(self.phone, default_ai_enabled=self._default_ai_enabled)
         self.id = data["id"]
         self.ai_enabled = data["ai_enabled"]
         self.is_group = data["is_group"]

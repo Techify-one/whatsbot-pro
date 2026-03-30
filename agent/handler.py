@@ -38,6 +38,7 @@ class AgentHandler:
         audio_model: str = "google/gemini-2.0-flash-001",
         image_model: str = "google/gemini-2.0-flash-001",
         pricing_fn=None,
+        default_ai_enabled: bool = True,
     ):
         self.api_key = api_key
         self.system_prompt = system_prompt
@@ -46,6 +47,7 @@ class AgentHandler:
         self.model = model
         self.audio_model = audio_model
         self.image_model = image_model
+        self.default_ai_enabled = default_ai_enabled
         self._contacts: dict[str, ContactMemory] = {}
         self._client: OpenAI | None = None
         self.pricing_fn = pricing_fn
@@ -90,6 +92,7 @@ class AgentHandler:
         audio_model: str | None = None,
         image_model: str | None = None,
         split_messages: bool | None = None,
+        default_ai_enabled: bool | None = None,
     ):
         if api_key is not None:
             self.api_key = api_key
@@ -108,6 +111,8 @@ class AgentHandler:
             self.image_model = image_model
         if split_messages is not None:
             self.split_messages = split_messages
+        if default_ai_enabled is not None:
+            self.default_ai_enabled = default_ai_enabled
 
     def transcribe_audio(self, audio_path: str, phone: str = "") -> str:
         """Transcribe an audio file using the configured audio model."""
@@ -214,7 +219,7 @@ class AgentHandler:
 
     def _get_contact(self, phone: str) -> ContactMemory:
         if phone not in self._contacts:
-            self._contacts[phone] = ContactMemory(phone)
+            self._contacts[phone] = ContactMemory(phone, default_ai_enabled=self.default_ai_enabled)
         return self._contacts[phone]
 
     def _build_system_prompt(self, contact: ContactMemory) -> str:

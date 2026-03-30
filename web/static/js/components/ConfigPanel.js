@@ -22,6 +22,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [transferAlertEnabled, setTransferAlertEnabled] = useState(true);
   const [transferAlertDuration, setTransferAlertDuration] = useState(5);
   const [maxExecutions, setMaxExecutions] = useState(200);
+  const [defaultAiEnabled, setDefaultAiEnabled] = useState(true);
   const [testing, setTesting] = useState(false);
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
@@ -48,6 +49,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setTransferAlertEnabled(config.transfer_alert_enabled ?? true);
       setTransferAlertDuration(config.transfer_alert_duration ?? 5);
       setMaxExecutions(config.max_executions ?? 200);
+      setDefaultAiEnabled(config.default_ai_enabled ?? true);
     }
   }, [config]);
 
@@ -97,6 +99,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       transfer_alert_enabled: transferAlertEnabled,
       transfer_alert_duration: parseInt(transferAlertDuration, 10) || 5,
       max_executions: parseInt(maxExecutions, 10) || 200,
+      default_ai_enabled: defaultAiEnabled,
     };
     // Only include api_key if user typed a new one
     if (apiKey.trim()) {
@@ -138,6 +141,17 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           class="w-4 h-4 rounded border-wa-border accent-wa-teal"
         />
         Ativar agente de IA para responder mensagens
+      </label>
+
+      <!-- Default AI for new contacts -->
+      <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${defaultAiEnabled ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+        <input
+          type="checkbox"
+          checked=${defaultAiEnabled}
+          onChange=${(e) => setDefaultAiEnabled(e.target.checked)}
+          class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+        />
+        IA ativada por padrão para novos contatos
       </label>
 
       <!-- API Key -->

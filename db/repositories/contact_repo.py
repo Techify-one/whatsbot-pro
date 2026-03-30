@@ -5,7 +5,7 @@ import time
 from db.connection import get_db
 
 
-def get_or_create(phone: str) -> dict:
+def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
     """Get a contact by phone, creating it if it doesn't exist. Returns a dict."""
     conn = get_db()
     row = conn.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
@@ -13,9 +13,9 @@ def get_or_create(phone: str) -> dict:
         return _row_to_dict(row)
     now = time.time()
     cur = conn.execute(
-        """INSERT INTO contacts (phone, created_at, updated_at)
-           VALUES (?, ?, ?)""",
-        (phone, now, now),
+        """INSERT INTO contacts (phone, ai_enabled, created_at, updated_at)
+           VALUES (?, ?, ?, ?)""",
+        (phone, 1 if default_ai_enabled else 0, now, now),
     )
     conn.commit()
     return {
@@ -26,7 +26,7 @@ def get_or_create(phone: str) -> dict:
         "profession": "",
         "company": "",
         "address": "",
-        "ai_enabled": True,
+        "ai_enabled": default_ai_enabled,
         "is_group": False,
         "group_name": "",
         "is_archived": False,

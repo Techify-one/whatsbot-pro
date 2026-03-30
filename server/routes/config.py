@@ -46,6 +46,7 @@ def register_routes(app, deps):
             "transfer_alert_enabled": settings.get("transfer_alert_enabled", True),
             "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
             "max_executions": settings.get("max_executions", 200),
+            "default_ai_enabled": settings.get("default_ai_enabled", True),
             "has_password": bool(settings.get("web_password_hash", "")),
         })
 
@@ -59,7 +60,7 @@ def register_routes(app, deps):
             "split_messages", "split_message_delay",
             "transfer_alert_enabled", "transfer_alert_duration",
             "group_reply_mode", "bot_phone", "bot_name",
-            "max_executions",
+            "max_executions", "default_ai_enabled",
         }
         for key, value in body.items():
             if key in allowed_keys:
@@ -88,6 +89,7 @@ def register_routes(app, deps):
             image_model=settings.get("image_model", "google/gemini-2.0-flash-001"),
             max_context_messages=settings.get("max_context_messages", 10),
             split_messages=settings.get("split_messages", True),
+            default_ai_enabled=settings.get("default_ai_enabled", True),
         )
 
         await ws_manager.broadcast("config_saved", {})
