@@ -476,7 +476,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`
                         : null}
                     ` : m.media_type === 'audio' ? html`
-                      <audio controls preload="none" class="max-w-full mb-1" style="min-width:240px">
+                      <audio controls preload="metadata" class="max-w-full mb-1" style="min-width:240px">
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/wav" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/ogg" />
                         <source src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}" type="audio/mpeg" />
