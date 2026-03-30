@@ -6,18 +6,15 @@ Crie uma nova release do WhatsBot no GitHub seguindo estes passos:
 4. Se houver mudanças pendentes, faça commit primeiro (git add + commit com mensagem descritiva)
 5. Push para origin e upstream na branch main
 6. Gere o changelog automático: liste os commits desde a última tag de release (`git log <última_tag>..HEAD --oneline --no-merges`). Se não houver tag anterior, use os últimos 20 commits
-7. Crie a tag anotada e faça push dela:
+7. Crie a release no GitHub via `gh release create`:
    ```bash
-   git tag -a v{nova_versão} -m "v{nova_versão}
-
-   ## O que mudou
+   gh release create v{nova_versão} --title "v{nova_versão}" --notes "## O que mudou
 
    - descrição do commit 1
    - descrição do commit 2
-   ..."
-   git push origin v{nova_versão}
+   ..." --latest
    ```
-   O GitHub cria automaticamente uma release a partir da tag anotada.
-8. Mostre o link do release: `https://github.com/Techify-one/whatsbot/releases/tag/v{nova_versão}`
+   Isso cria a tag, a release e marca como latest automaticamente.
+8. Mostre o link do release retornado pelo `gh`
 
 Argumento recebido: $ARGUMENTS
