@@ -30,6 +30,7 @@ export function createWebSocket(handlers) {
     };
 
     ws.onclose = () => {
+      if (handlers.onDisconnect) handlers.onDisconnect();
       if (!closed) {
         reconnectTimer = setTimeout(connect, 3000);
       }

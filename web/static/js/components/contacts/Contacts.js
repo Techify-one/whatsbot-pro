@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId, wsConnected }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -414,6 +414,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           onStartConversation=${handleStartConversation}
           checkingPhone=${checkingPhone}
           checkPhoneError=${checkPhoneError}
+          wsConnected=${wsConnected}
         />
       </div>
       <!-- Toggle sidebar button (desktop only) -->

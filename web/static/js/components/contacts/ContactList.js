@@ -24,11 +24,12 @@ function formatPhoneDisplay(phone) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError }) {
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError, wsConnected }) {
+  const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
       <!-- Green header bar -->
-      <div class="h-[59px] flex items-center justify-between px-4 ${showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal'} shrink-0 transition-colors">
+      <div class="h-[59px] flex items-center justify-between px-4 ${headerBg} shrink-0 transition-colors">
         <div class="flex items-center gap-3">
           <button
             onClick=${onToggleArchived}
@@ -39,7 +40,13 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           </button>
         </div>
         <div class="flex items-center gap-2">
-          <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot'}</span>
+          ${wsConnected === false ? html`
+            <span class="text-white/80 text-[13px] animate-pulse">Sem conexão</span>
+            <span class="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" title="Offline"></span>
+          ` : html`
+            <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot'}</span>
+            <span class="inline-block w-2 h-2 rounded-full bg-green-400" title="Online"></span>
+          `}
         </div>
       </div>
 
