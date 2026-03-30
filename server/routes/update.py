@@ -1,6 +1,7 @@
-"""WhatsBot — self-update endpoint (downloads latest code from GitHub)."""
+"""WhatsBot — self-update endpoint (uses GitHub Releases API for versioning)."""
 
 import asyncio
+import json
 import logging
 import shutil
 import tempfile
@@ -12,8 +13,9 @@ from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
 
-GITHUB_ZIP_URL = "https://github.com/Techify-one/whatsbot/archive/refs/heads/main.zip"
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/Techify-one/whatsbot/main/VERSION"
+GITHUB_REPO = "Techify-one/whatsbot"
+GITHUB_ZIP_URL = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/main.zip"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 PRESERVE_DIRS = {"storages", "statics", "logs", "venv", ".git", "bin"}
 PRESERVE_FILES = {".env"}
@@ -24,19 +26,31 @@ def _get_project_root(settings) -> Path:
 
 
 def _read_local_version(project_root: Path) -> str:
-    """Read VERSION file from local installation."""
-    version_file = project_root / "VERSION"
-    if version_file.exists():
-        return version_file.read_text(encoding="utf-8").strip()
-    return "desconhecida"
+    """Read version from git tags (latest tag matching v*)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0", "--match", "v*"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().lstrip("v")
+    except Exception as exc:
+        logger.debug("git describe failed: %s", exc)
+    return "0.0.0"
 
 
 def _fetch_remote_version() -> str:
-    """Fetch VERSION file from GitHub (lightweight, no ZIP download)."""
+    """Fetch latest release version from GitHub Releases API."""
     try:
-        req = urllib.request.Request(GITHUB_VERSION_URL)
+        req = urllib.request.Request(
+            GITHUB_RELEASES_API,
+            headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "WhatsBot"},
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read().decode("utf-8").strip()
+            data = json.loads(resp.read().decode("utf-8"))
+            tag = data.get("tag_name", "")
+            return tag.lstrip("v")
     except Exception as exc:
         logger.warning("Failed to fetch remote version: %s", exc)
         return ""
@@ -111,7 +125,6 @@ def _perform_update(project_root: Path) -> str:
             shutil.copy2(src_file, dest)
             copied += 1
 
-        # Read the new version after update
         new_version = _read_local_version(project_root)
         logger.info("Update applied: %d files updated. New version: %s", copied, new_version)
         return f"Atualizado para v{new_version} — {copied} arquivos atualizados. Reinicie o servidor para aplicar."
