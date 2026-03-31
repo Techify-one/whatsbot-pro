@@ -456,7 +456,7 @@ def register_routes(app, deps):
         is_from_me = data.get("is_from_me", data.get("from_me", data.get("FromMe", False)))
 
         # Capture bot's own phone from outgoing messages (for @mention detection)
-        if is_from_me and not state.bot_phone:
+        if is_from_me:
             own_jid = (data.get("sender_jid", "") or data.get("from", "")
                        or data.get("sender", ""))
             if own_jid and "@s.whatsapp.net" in own_jid:

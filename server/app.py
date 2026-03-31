@@ -83,6 +83,8 @@ def create_app(
         gowa_client.reset()
         state.qr_data = None
         state.qr_fetched_at = 0
+        state.bot_phone = ""
+        state.bot_name = ""
 
     gowa_manager._on_restart = _on_gowa_restart
 

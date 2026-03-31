@@ -38,6 +38,8 @@ def register_routes(app, deps):
         state.qr_data = None
         state.qr_fetched_at = 0
         state.connected = False
+        state.bot_phone = ""
+        state.bot_name = ""
         state.notification = "Reconectando..."
         await ws_manager.broadcast("gowa_status", {"message": state.notification})
         return _ok({"message": "Reconectando..."})
@@ -48,6 +50,8 @@ def register_routes(app, deps):
         state.qr_data = None
         state.qr_fetched_at = 0
         state.connected = False
+        state.bot_phone = ""
+        state.bot_name = ""
         state.notification = "Desconectado."
         await ws_manager.broadcast("status", {
             "connected": False,
