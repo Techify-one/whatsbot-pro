@@ -8,8 +8,9 @@ import re
 import time
 import uuid
 
-from gowa.client import GOWASendError
+from gowa.client import GOWASendError, extract_msg_id
 
+from db.repositories import contact_repo, message_repo
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok
 
@@ -90,6 +91,7 @@ def register_routes(app, deps):
         delay_max = settings.get("response_delay_max", 3.0)
         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
+        sent_parts = []  # collect (part_text, msg_id) for saving after send
         for i, part in enumerate(parts):
             if i > 0:
                 # Inter-message delay with ±0.5s variation
@@ -106,8 +108,9 @@ def register_routes(app, deps):
             sent_key = f"{phone}:{part[:120]}"
             state.recently_sent[sent_key] = time.time()
 
+            send_result = None
             try:
-                await asyncio.to_thread(gowa_client.send_message, phone, part)
+                send_result = await asyncio.to_thread(gowa_client.send_message, phone, part)
                 await atrack_step("gowa_send", {"phone": phone, "part": i + 1, "total_parts": len(parts)})
             except GOWASendError as e:
                 logger.error("[Batch] Send failed for %s (part %d/%d): %s", phone, i + 1, len(parts), e)
@@ -121,16 +124,21 @@ def register_routes(app, deps):
                 })
                 return
 
+            part_msg_id = extract_msg_id(send_result)
+            sent_parts.append((part, part_msg_id))
+
             # Broadcast each part to frontend individually
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
-                "message": {"role": "assistant", "content": part, "ts": time.time()},
+                "message": {"role": "assistant", "content": part, "ts": time.time(),
+                            "status": "sent", "msg_id": part_msg_id},
             })
 
         # Save each part as a separate message to preserve split across page refresh
-        for part in parts:
+        for part, part_msg_id in sent_parts:
             try:
-                await asyncio.to_thread(agent_handler.save_assistant_message, phone, part)
+                await asyncio.to_thread(agent_handler.save_assistant_message, phone, part,
+                                        msg_id=part_msg_id, status="sent")
                 # Increment unread AI count (operator hasn't seen this reply yet)
                 contact = agent_handler._contacts.get(phone)
                 if contact:
@@ -430,19 +438,63 @@ def register_routes(app, deps):
                 })
             return _ok({"status": "presence"})
 
-        # Handle message.ack events (read receipts from WhatsApp mobile)
+        # Handle message.ack events (delivery + read receipts from WhatsApp)
         if event == "message.ack":
             receipt_type = data.get("receipt_type", "")
-            if receipt_type in ("read", "read-self"):
-                msg_ids = data.get("ids", [])
-                # Find which contact these message IDs belong to
+            msg_ids = data.get("ids", [])
+
+            # Extract phone from ack payload (try multiple fields, GOWA is inconsistent)
+            ack_phone = ""
+            for field in ("chat_id", "from", "jid", "phone"):
+                val = data.get(field, "")
+                if val and "@" in val:
+                    ack_phone = val.split("@")[0]
+                    break
+                elif val and not ack_phone:
+                    ack_phone = val
+
+            # Fallback: look up phone from the message in DB
+            if not ack_phone and msg_ids:
+                cid = await asyncio.to_thread(message_repo.get_contact_id_by_msg_id, msg_ids[0])
+                if cid:
+                    for phone_key, contact in agent_handler._contacts.items():
+                        if contact.id == cid:
+                            ack_phone = phone_key
+                            break
+
+            if receipt_type == "delivered" and msg_ids:
+                # Update outgoing message status to "delivered"
+                for mid in msg_ids:
+                    await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "delivered")
+                logger.info("[Webhook] message.ack delivered for %s (ids=%s)", ack_phone, msg_ids)
+                if ack_phone:
+                    await ws_manager.broadcast("message_status", {
+                        "phone": ack_phone,
+                        "msg_ids": msg_ids,
+                        "status": "delivered",
+                    })
+
+            elif receipt_type in ("read", "read-self") and msg_ids:
+                # Update outgoing message status to "read"
+                for mid in msg_ids:
+                    await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "read")
+                logger.info("[Webhook] message.ack read for %s (ids=%s)", ack_phone, msg_ids)
+                if ack_phone:
+                    await ws_manager.broadcast("message_status", {
+                        "phone": ack_phone,
+                        "msg_ids": msg_ids,
+                        "status": "read",
+                    })
+
+                # Existing unread tracking logic (for incoming messages read by us)
                 for phone_key, contact in agent_handler._contacts.items():
                     unread_ids = contact.get_unread_msg_ids()
                     matched = [mid for mid in msg_ids if mid in unread_ids]
                     if matched:
-                        logger.info("[Webhook] message.ack read for %s (ids=%s)", phone_key, matched)
+                        logger.info("[Webhook] message.ack unread cleared for %s (ids=%s)", phone_key, matched)
                         contact.mark_as_read()
                         await ws_manager.broadcast("messages_read", {"phone": phone_key})
+
             return _ok({"status": "ack"})
 
         # Only process incoming messages

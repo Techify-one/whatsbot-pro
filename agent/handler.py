@@ -443,23 +443,27 @@ class AgentHandler:
         except Exception as e:
             return False, f"Erro: {e}"
 
-    def save_assistant_message(self, phone: str, text: str) -> dict:
+    def save_assistant_message(self, phone: str, text: str, *,
+                               msg_id: str | None = None,
+                               status: str = "sent") -> dict:
         """Save an assistant (bot) message to contact memory after successful send."""
         contact = self._get_contact(phone)
-        contact.add_message("assistant", text)
+        contact.add_message("assistant", text, msg_id=msg_id, status=status)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
-    def save_operator_message(self, phone: str, text: str,
-                              status: str | None = None) -> dict:
+    def save_operator_message(self, phone: str, text: str, *,
+                              status: str | None = None,
+                              msg_id: str | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing."""
         contact = self._get_contact(phone)
-        contact.add_message("assistant", text, status=status)
+        contact.add_message("assistant", text, status=status, msg_id=msg_id)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
-    def mark_message_sent(self, phone: str, content: str) -> dict | None:
+    def mark_message_sent(self, phone: str, content: str,
+                          msg_id: str | None = None) -> dict | None:
         """Find the most recent failed message with matching content and mark as sent."""
         contact = self._get_contact(phone)
-        message_repo.update_status(contact.id, content, None)
+        message_repo.update_status(contact.id, content, "sent", msg_id=msg_id)
         return {"content": content}
 
     def update_last_user_message_content(self, phone: str, new_content: str) -> None:

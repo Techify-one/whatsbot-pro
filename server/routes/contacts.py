@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from gowa.client import GOWASendError
+from gowa.client import GOWASendError, extract_msg_id
 
 from db.repositories import contact_repo, message_repo
 from server.helpers import _ok, _err
@@ -170,8 +170,9 @@ def register_routes(app, deps):
         # Try to send via GOWA — always save message (with status on failure)
         send_failed = False
         error_msg = ""
+        send_result = None
         try:
-            await asyncio.to_thread(gowa_client.send_message, phone, message)
+            send_result = await asyncio.to_thread(gowa_client.send_message, phone, message)
         except GOWASendError as e:
             logger.error("[Send] Failed to send message to %s: %s", phone, e)
             send_failed = True
@@ -181,11 +182,14 @@ def register_routes(app, deps):
             send_failed = True
             error_msg = str(e)
 
+        msg_id = extract_msg_id(send_result) if not send_failed else None
+
         # Always save to contact memory (with status="failed" if send failed)
         try:
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message,
-                status="failed" if send_failed else None,
+                status="failed" if send_failed else "sent",
+                msg_id=msg_id,
             )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
@@ -211,7 +215,7 @@ def register_routes(app, deps):
             "message": msg_data,
         })
 
-        return _ok({"message": "Mensagem enviada."})
+        return _ok({"message": "Mensagem enviada.", "msg_id": msg_id})
 
     @app.post("/api/contacts/{phone}/retry-send")
     async def retry_send_to_contact(phone: str, body: dict):
@@ -223,8 +227,9 @@ def register_routes(app, deps):
         # Track for echo-back filtering
         state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
 
+        send_result = None
         try:
-            await asyncio.to_thread(gowa_client.send_message, phone, message)
+            send_result = await asyncio.to_thread(gowa_client.send_message, phone, message)
         except GOWASendError as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -248,9 +253,11 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao reenviar: {e}", status=500)
 
-        # Mark the existing failed message as sent (remove status)
+        msg_id = extract_msg_id(send_result)
+
+        # Mark the existing failed message as sent
         try:
-            await asyncio.to_thread(agent_handler.mark_message_sent, phone, message)
+            await asyncio.to_thread(agent_handler.mark_message_sent, phone, message, msg_id)
         except Exception as e:
             logger.error("[Retry] Failed to update message status for %s: %s", phone, e)
 
@@ -270,8 +277,9 @@ def register_routes(app, deps):
         content = await image.read()
         dest.write_bytes(content)
 
+        send_result = None
         try:
-            await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
+            send_result = await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
         except GOWASendError as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -295,6 +303,8 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao enviar imagem: {e}", status=500)
 
+        msg_id = extract_msg_id(send_result)
+
         # Relative path for storage and frontend
         rel_path = f"statics/senditems/{dest.name}"
         msg_data = {
@@ -303,9 +313,12 @@ def register_routes(app, deps):
             "ts": time.time(),
             "media_type": "image",
             "media_path": rel_path,
+            "status": "sent",
+            "msg_id": msg_id,
         }
         contact = agent_handler._get_contact(phone)
-        contact.add_message("assistant", caption, media_type="image", media_path=rel_path)
+        contact.add_message("assistant", caption, media_type="image", media_path=rel_path,
+                            status="sent", msg_id=msg_id)
 
         await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
         logger.info("[Send] Image sent to %s", phone)
@@ -322,8 +335,9 @@ def register_routes(app, deps):
         content = await audio.read()
         dest.write_bytes(content)
 
+        send_result = None
         try:
-            await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
+            send_result = await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
         except GOWASendError as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -347,6 +361,8 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao enviar áudio: {e}", status=500)
 
+        msg_id = extract_msg_id(send_result)
+
         rel_path = f"statics/senditems/{dest.name}"
         msg_data = {
             "role": "assistant",
@@ -354,9 +370,12 @@ def register_routes(app, deps):
             "ts": time.time(),
             "media_type": "audio",
             "media_path": rel_path,
+            "status": "sent",
+            "msg_id": msg_id,
         }
         contact = agent_handler._get_contact(phone)
-        contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path)
+        contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path,
+                            status="sent", msg_id=msg_id)
 
         await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
         logger.info("[Send] Audio sent to %s", phone)

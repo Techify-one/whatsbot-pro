@@ -11,7 +11,7 @@ const html = htm.bind(h);
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, initialContactId, wsConnected, config, onConfigSave }) {
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, initialContactId, wsConnected, config, onConfigSave }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -312,6 +312,26 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     ));
   }, [messagesRead]);
 
+  // Handle delivery/read status updates for outgoing messages
+  useEffect(() => {
+    if (!messageStatus) return;
+    const { msg_ids, status } = messageStatus;
+    if (!msg_ids || !status) return;
+    // Always try to update messages by msg_id in the current detail view
+    setContactData(prev => {
+      if (!prev || !prev.messages) return prev;
+      let changed = false;
+      const updated = prev.messages.map(m => {
+        if (m.msg_id && msg_ids.includes(m.msg_id) && m.status !== status) {
+          changed = true;
+          return { ...m, status };
+        }
+        return m;
+      });
+      return changed ? { ...prev, messages: updated } : prev;
+    });
+  }, [messageStatus]);
+
   // Handle real-time messages from WebSocket
   useEffect(() => {
     if (!newMessage) return;
@@ -334,10 +354,20 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           return prev;
         }
         // Deduplicate by ts + role, or by content + role (within 30s window)
-        if (prev.messages && prev.messages.some(m =>
+        const dupIdx = prev.messages ? prev.messages.findIndex(m =>
           (m.ts === message.ts && m.role === message.role) ||
           (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
-        )) {
+        ) : -1;
+        if (dupIdx !== -1) {
+          // Merge msg_id and status from server into existing message
+          if (message.msg_id || message.status) {
+            const updated = [...prev.messages];
+            updated[dupIdx] = { ...updated[dupIdx],
+              ...(message.msg_id ? { msg_id: message.msg_id } : {}),
+              ...(message.status && !updated[dupIdx]._status ? { status: message.status } : {}),
+            };
+            return { ...prev, messages: updated };
+          }
           return prev;
         }
         return {

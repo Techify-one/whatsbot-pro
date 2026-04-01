@@ -12,6 +12,29 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DEVICE_NAME = "whatsbot"
 
 
+def extract_msg_id(response: dict | None) -> str | None:
+    """Extract the message ID from a GOWA send response.
+
+    Tries multiple known field paths since the GOWA API is not 100% consistent.
+    Returns None if not found (graceful fallback).
+    """
+    if not response or not isinstance(response, dict):
+        return None
+    results = response.get("results", {})
+    if isinstance(results, dict):
+        for key in ("message_id", "id"):
+            val = results.get(key)
+            if val:
+                return str(val)
+    for key in ("message_id", "id"):
+        val = response.get(key)
+        if val:
+            return str(val)
+    logger.warning("extract_msg_id: could not find msg_id in GOWA response. keys=%s",
+                   list(response.keys()))
+    return None
+
+
 class GOWASendError(Exception):
     """Raised when sending a message via GOWA fails."""
 

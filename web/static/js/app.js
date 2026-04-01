@@ -126,6 +126,7 @@ function App({ onLogout, hasPassword }) {
   const [contactTagsUpdated, setContactTagsUpdated] = useState(null);
   const [contactAiToggled, setContactAiToggled] = useState(null);
   const [messagesRead, setMessagesRead] = useState(null);
+  const [messageStatus, setMessageStatus] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
 
   const setTab = useCallback((t) => {
@@ -169,6 +170,7 @@ function App({ onLogout, hasPassword }) {
     }, []),
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),
     onMessagesRead: useCallback((data) => setMessagesRead(data), []),
+    onMessageStatus: useCallback((data) => setMessageStatus(data), []),
     onWsConnect: useCallback(() => setWsConnected(true), []),
     onWsDisconnect: useCallback(() => setWsConnected(false), []),
   });
@@ -209,7 +211,7 @@ function App({ onLogout, hasPassword }) {
               />
             </div>`
           : tab === 'contacts'
-            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} initialContactId=${initialContactId} wsConnected=${wsConnected} config=${config} onConfigSave=${save} />`
+            ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} initialContactId=${initialContactId} wsConnected=${wsConnected} config=${config} onConfigSave=${save} />`
             : tab === 'costs'
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />

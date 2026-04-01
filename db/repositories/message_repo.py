@@ -88,7 +88,8 @@ def update_content(message_id: int, content: str) -> None:
     conn.commit()
 
 
-def update_status(contact_id: int, content: str, new_status: str | None) -> None:
+def update_status(contact_id: int, content: str, new_status: str | None,
+                   msg_id: str | None = None) -> None:
     """Update status of the most recent message matching content (for retry-send)."""
     conn = get_db()
     row = conn.execute(
@@ -98,11 +99,54 @@ def update_status(contact_id: int, content: str, new_status: str | None) -> None
         (contact_id, content),
     ).fetchone()
     if row:
-        conn.execute(
-            "UPDATE messages SET status = ? WHERE id = ?",
-            (new_status, row["id"]),
-        )
+        if msg_id:
+            conn.execute(
+                "UPDATE messages SET status = ?, msg_id = ? WHERE id = ?",
+                (new_status, msg_id, row["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE messages SET status = ? WHERE id = ?",
+                (new_status, row["id"]),
+            )
         conn.commit()
+
+
+def update_status_by_msg_id(msg_id: str, new_status: str) -> bool:
+    """Update delivery status by GOWA msg_id. Forward-only: sent → delivered → read.
+
+    Does not overwrite 'operator' or 'failed' statuses.
+    """
+    conn = get_db()
+    cur = conn.execute(
+        """UPDATE messages SET status = ?
+           WHERE msg_id = ?
+             AND status IS NOT NULL
+             AND status IN ('sent', 'delivered')""",
+        (new_status, msg_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_contact_id_by_msg_id(msg_id: str) -> int | None:
+    """Look up the contact_id for a given GOWA msg_id."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT contact_id FROM messages WHERE msg_id = ? LIMIT 1",
+        (msg_id,),
+    ).fetchone()
+    return row["contact_id"] if row else None
+
+
+def update_msg_id_and_status(message_id: int, msg_id: str, status: str) -> None:
+    """Set msg_id and status on a message (used after retry-send)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE messages SET msg_id = ?, status = ? WHERE id = ?",
+        (msg_id, status, message_id),
+    )
+    conn.commit()
 
 
 def delete_all(contact_id: int) -> None:
@@ -117,15 +161,13 @@ def _row_to_dict(row) -> dict:
         "role": row["role"],
         "content": row["content"],
         "ts": row["ts"],
+        "status": row["status"],
+        "msg_id": row["msg_id"],
     }
     if row["media_type"]:
         d["media_type"] = row["media_type"]
     if row["media_path"]:
         d["media_path"] = row["media_path"]
-    if row["status"]:
-        d["status"] = row["status"]
-    if row["msg_id"]:
-        d["msg_id"] = row["msg_id"]
     # Include DB id for internal use (update_content etc)
     d["_id"] = row["id"]
     return d

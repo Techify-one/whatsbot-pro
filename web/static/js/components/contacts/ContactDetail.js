@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { sendMessage, retrySend, sendImage, sendAudio, sendPresence } from '../../services/api.js';
-import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
+import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
 import { formatBubbleTime } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
@@ -85,14 +85,13 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text) return;
 
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
     sendPresence(phone, 'stop').catch(() => {});
 
-    setSending(true);
     setInput('');
 
     // Add message optimistically
@@ -109,7 +108,8 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     try {
       const res = await sendMessage(phone, text);
       if (res.ok) {
-        updateMsgByLocalId(localId, () => ({ _status: null }));
+        const msgId = res.data?.msg_id || null;
+        updateMsgByLocalId(localId, () => ({ _status: null, status: 'sent', msg_id: msgId }));
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
       }
@@ -117,7 +117,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       console.error('Send error:', err);
       updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
-    setSending(false);
+    inputRef.current?.focus();
   }
 
   async function handleRetry(localId, text) {
@@ -125,7 +125,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     try {
       const res = await retrySend(phone, text);
       if (res.ok) {
-        updateMsgByLocalId(localId, () => ({ _status: null, status: null }));
+        updateMsgByLocalId(localId, () => ({ _status: null, status: 'sent' }));
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed', status: 'failed' }));
       }
@@ -188,7 +188,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       } : prev);
       try {
         const res = await sendImage(phone, media.file);
-        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed' }));
+        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed', status: res.ok ? 'sent' : 'failed' }));
       } catch (err) {
         console.error('Send image error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
@@ -204,7 +204,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       } : prev);
       try {
         const res = await sendAudio(phone, media.blob, media.filename);
-        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed' }));
+        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed', status: res.ok ? 'sent' : 'failed' }));
       } catch (err) {
         console.error('Send audio error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
@@ -483,11 +483,16 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         : null}
                     ` : html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>`}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
-                      ${!isUser ? (
-                        isFailed ? html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}` :
-                        isSending ? html`<${ClockIcon} />` :
-                        html`<${DoubleCheckIcon} />`
-                      ) : ''}${formatBubbleTime(m.ts)}
+                      ${!isUser ? (() => {
+                        if (isFailed) return html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}`;
+                        if (isSending) return html`<${ClockIcon} />`;
+                        const st = m.status || m._status;
+                        if (st === 'sent') return html`<${SingleCheckIcon} />`;
+                        if (st === 'delivered') return html`<${DoubleCheckIcon} color="#92a58c" />`;
+                        if (st === 'read') return html`<${DoubleCheckIcon} />`;
+                        if (st === 'operator') return html`<${DoubleCheckIcon} color="#92a58c" />`;
+                        return html`<${DoubleCheckIcon} />`;
+                      })() : ''}${formatBubbleTime(m.ts)}
                     </span>
                   </div>
                 </div>
@@ -563,15 +568,13 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               onInput=${handleInputChange}
               onPaste=${handlePaste}
               placeholder="Digite uma mensagem"
-              disabled=${sending}
-              class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary disabled:opacity-50"
+              class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary"
             />
           </div>
           ${hasText ? html`
             <button
               type="submit"
-              disabled=${sending}
-              class="p-[8px] shrink-0 text-wa-iconActive transition-colors disabled:opacity-50"
+              class="p-[8px] shrink-0 text-wa-iconActive transition-colors"
             >
               <${SendIcon} />
             </button>
