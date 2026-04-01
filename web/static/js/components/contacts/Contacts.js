@@ -33,10 +33,27 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const typingTimers = useRef({});
   const contactsRef = useRef([]);
   const lastResolvedId = useRef(null);
+  const pageVisibleRef = useRef(!document.hidden);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+
+  // Track page visibility — mark selected contact as read when tab becomes visible
+  useEffect(() => {
+    const handler = () => {
+      const visible = !document.hidden;
+      pageVisibleRef.current = visible;
+      if (visible && selectedRef.current) {
+        markAsRead(selectedRef.current);
+        setContacts(prev => prev.map(c =>
+          c.phone === selectedRef.current ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
+        ));
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
 
   const handleToggleAI = useCallback(async (phone, enabled) => {
     const res = await toggleContactAI(phone, enabled);
@@ -195,11 +212,14 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     // but reset the accumulator for new messages arriving during fetch
     const preFetchBuffer = pendingWsMessages.current[selected] || [];
     pendingWsMessages.current[selected] = [];
-    // Clear unread badges immediately in local state
-    setContacts(prev => prev.map(c =>
-      c.phone === selected ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
-    ));
-    getContact(selected).then(res => {
+    // Clear unread badges immediately in local state (only if page is visible)
+    const isPageVisible = pageVisibleRef.current;
+    if (isPageVisible) {
+      setContacts(prev => prev.map(c =>
+        c.phone === selected ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
+      ));
+    }
+    getContact(selected, isPageVisible).then(res => {
       if (res.ok) {
         const data = res.data;
         // Merge buffered messages: pre-fetch (arrived before click) + during-fetch (arrived during loading)
@@ -302,13 +322,15 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     }
   }, [contactTagsUpdated]);
 
-  // Handle messages read on WhatsApp mobile (message.ack from GOWA)
+  // Handle messages read (WhatsApp mobile ack or AI auto-read)
   useEffect(() => {
     if (!messagesRead) return;
-    const { phone } = messagesRead;
+    const { phone, only_user } = messagesRead;
     if (!phone) return;
     setContacts(prev => prev.map(c =>
-      c.phone === phone ? { ...c, unread_count: 0, unread_ai_count: 0 } : c
+      c.phone === phone
+        ? { ...c, unread_count: 0, ...(only_user ? {} : { unread_ai_count: 0 }) }
+        : c
     ));
   }, [messagesRead]);
 
@@ -376,7 +398,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           updated_at: message.ts,
         };
       });
-      if (message.role === 'user') markAsRead(phone);
+      if (message.role === 'user' && pageVisibleRef.current) markAsRead(phone);
     } else {
       // Contact NOT selected — buffer for when it's opened
       const buf = pendingWsMessages.current[phone] || [];
@@ -396,7 +418,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       if (idx >= 0) {
         const updated = [...prev];
         const isUserMsg = message.role === 'user';
-        const isViewing = phone === selectedRef.current;
+        const isViewing = phone === selectedRef.current && pageVisibleRef.current;
         let lastPreview = (message.content || '').substring(0, 80);
         if (message.media_type === 'image') lastPreview = message.content || '📷 Imagem';
         if (message.media_type === 'audio') lastPreview = '🎤 Áudio';

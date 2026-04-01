@@ -86,8 +86,9 @@ export async function getContacts(q = '', archived = false) {
   return request('GET', `/api/contacts${query}`);
 }
 
-export async function getContact(phone) {
-  return request('GET', `/api/contacts/${encodeURIComponent(phone)}`);
+export async function getContact(phone, markRead = true) {
+  const qs = markRead ? '' : '?mark_read=false';
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
 export async function deleteContact(phone) {

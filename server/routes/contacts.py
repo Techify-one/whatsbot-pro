@@ -82,7 +82,7 @@ def register_routes(app, deps):
         })
 
     @app.get("/api/contacts/{phone}")
-    async def get_contact(phone: str):
+    async def get_contact(phone: str, mark_read: bool = True):
         """Return full contact data including conversation history."""
         def _load():
             data = contact_repo.get_full_contact(phone)
@@ -94,9 +94,9 @@ def register_routes(app, deps):
             if data is None:
                 return None, []
             contact_id = data["id"]
-            # Mark as read when viewing contact
+            # Mark as read when viewing contact (skip if mark_read=false)
             msg_ids = []
-            if data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0:
+            if mark_read and (data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0):
                 msg_ids = contact_repo.mark_as_read(contact_id)
                 data["unread_count"] = 0
                 data["unread_ai_count"] = 0

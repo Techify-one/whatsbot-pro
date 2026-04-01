@@ -256,6 +256,18 @@ def register_routes(app, deps):
                 "combined_preview": "\n".join(t for t in text_parts if t)[:200],
             })
 
+            # AI is active — mark user messages as read before processing
+            # (preserves unread_ai_count so operator sees AI replied)
+            if contact.ai_enabled and settings.get("auto_reply", True):
+                msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
+                if msg_ids:
+                    for mid in msg_ids:
+                        try:
+                            await asyncio.to_thread(gowa_client.mark_as_read, mid, phone)
+                        except Exception:
+                            pass
+                    await ws_manager.broadcast("messages_read", {"phone": phone, "only_user": True})
+
             # Process combined text messages first
             if text_parts:
                 combined = "\n".join(t for t in text_parts if t)

@@ -165,6 +165,12 @@ class ContactMemory:
         self.unread_ai_count = 0
         return msg_ids
 
+    def mark_user_messages_as_read(self) -> list[str]:
+        """Reset only unread_count (user messages), preserving unread_ai_count."""
+        msg_ids = contact_repo.mark_user_messages_as_read(self.id)
+        self.unread_count = 0
+        return msg_ids
+
     def set_ai_enabled(self, enabled: bool):
         self.ai_enabled = enabled
         contact_repo.update(self.id, ai_enabled=1 if enabled else 0)

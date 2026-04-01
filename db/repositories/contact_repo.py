@@ -147,6 +147,26 @@ def mark_as_read(contact_id: int) -> list[str]:
     return msg_ids
 
 
+def mark_user_messages_as_read(contact_id: int) -> list[str]:
+    """Reset only unread_count (user messages) and return msg_ids for read receipts.
+
+    Unlike mark_as_read(), this preserves unread_ai_count so the operator
+    still sees that the AI replied while they were away.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT msg_id FROM unread_msg_ids WHERE contact_id = ?", (contact_id,)
+    ).fetchall()
+    msg_ids = [r["msg_id"] for r in rows]
+    conn.execute("DELETE FROM unread_msg_ids WHERE contact_id = ?", (contact_id,))
+    conn.execute(
+        "UPDATE contacts SET unread_count = 0, updated_at = ? WHERE id = ?",
+        (time.time(), contact_id),
+    )
+    conn.commit()
+    return msg_ids
+
+
 def get_observations(contact_id: int) -> list[str]:
     """Return all observations for a contact."""
     conn = get_db()
