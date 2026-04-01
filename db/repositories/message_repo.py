@@ -112,12 +112,20 @@ def update_status(contact_id: int, content: str, new_status: str | None,
         conn.commit()
 
 
-def update_status_by_msg_id(msg_id: str, new_status: str) -> bool:
+def update_status_by_msg_id(msg_id: str, new_status: str) -> list[str]:
     """Update delivery status by GOWA msg_id. Forward-only: sent → delivered → read.
 
     Does not overwrite 'operator' or 'failed' statuses.
+    Also cascades the status to all prior outgoing messages for the same contact,
+    because if message N was delivered/read, all earlier messages were too.
+
+    Returns the list of ALL msg_ids that were updated (including cascaded ones),
+    so the caller can broadcast them to the frontend.
     """
     conn = get_db()
+    updated_msg_ids = []
+
+    # Update the specific message
     cur = conn.execute(
         """UPDATE messages SET status = ?
            WHERE msg_id = ?
@@ -125,8 +133,37 @@ def update_status_by_msg_id(msg_id: str, new_status: str) -> bool:
              AND status IN ('sent', 'delivered')""",
         (new_status, msg_id),
     )
+    if cur.rowcount > 0:
+        updated_msg_ids.append(msg_id)
+
+    # Cascade: find and update all prior outgoing messages with a lesser status
+    row = conn.execute(
+        "SELECT contact_id, ts FROM messages WHERE msg_id = ?",
+        (msg_id,),
+    ).fetchone()
+    if row:
+        prior_statuses = ('sent',) if new_status == 'delivered' else ('sent', 'delivered')
+        placeholders = ','.join('?' for _ in prior_statuses)
+        # Find msg_ids of prior messages that will be cascaded
+        prior_rows = conn.execute(
+            f"""SELECT msg_id FROM messages
+                WHERE contact_id = ? AND role = 'assistant'
+                  AND ts <= ? AND status IN ({placeholders})
+                  AND msg_id IS NOT NULL AND msg_id != ?""",
+            (row["contact_id"], row["ts"], *prior_statuses, msg_id),
+        ).fetchall()
+        cascaded_ids = [r["msg_id"] for r in prior_rows]
+        if cascaded_ids:
+            conn.execute(
+                f"""UPDATE messages SET status = ?
+                    WHERE contact_id = ? AND role = 'assistant'
+                      AND ts <= ? AND status IN ({placeholders})""",
+                (new_status, row["contact_id"], row["ts"], *prior_statuses),
+            )
+            updated_msg_ids.extend(cascaded_ids)
+
     conn.commit()
-    return cur.rowcount > 0
+    return updated_msg_ids
 
 
 def get_contact_id_by_msg_id(msg_id: str) -> int | None:

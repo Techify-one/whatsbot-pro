@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     group_name      TEXT    NOT NULL DEFAULT '',
     is_archived     INTEGER NOT NULL DEFAULT 0,
     archived_by_app INTEGER NOT NULL DEFAULT 0,
+    can_send        INTEGER NOT NULL DEFAULT 1,
     unread_count    INTEGER NOT NULL DEFAULT 0,
     unread_ai_count INTEGER NOT NULL DEFAULT 0,
     created_at      REAL    NOT NULL,

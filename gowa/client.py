@@ -345,22 +345,52 @@ class GOWAClient:
                 return results
         return []
 
-    def get_group_name(self, group_jid: str) -> str:
-        """Get a group's name/subject via GOWA group info endpoint."""
+    def get_group_info(self, group_jid: str) -> dict | None:
+        """Get full group metadata including announce mode and participants."""
         try:
             result = self._request("GET", f"/group/info?group_id={group_jid}")
             if result and isinstance(result, dict):
-                results = result.get("results", result)
-                if isinstance(results, dict):
-                    name = (results.get("Name", "")
-                            or results.get("name", "")
-                            or results.get("subject", "")
-                            or results.get("Topic", ""))
-                    if name:
-                        return name
+                return result.get("results", result)
         except Exception as e:
-            logger.warning("[GOWA] get_group_name failed for %s: %s", group_jid, e)
+            logger.warning("[GOWA] get_group_info failed for %s: %s", group_jid, e)
+        return None
+
+    def get_group_name(self, group_jid: str) -> str:
+        """Get a group's name/subject via GOWA group info endpoint."""
+        info = self.get_group_info(group_jid)
+        if info and isinstance(info, dict):
+            name = (info.get("Name", "")
+                    or info.get("name", "")
+                    or info.get("subject", "")
+                    or info.get("Topic", ""))
+            if name:
+                return name
         return ""
+
+    def can_bot_send_in_group(self, group_jid: str, bot_phone: str) -> bool:
+        """Check if bot can send messages in a group.
+
+        Returns False only if the group is in announce mode and bot is not admin.
+        Defaults to True on any API failure to avoid false lockouts.
+        """
+        info = self.get_group_info(group_jid)
+        if not info:
+            return True
+
+        if not info.get("IsAnnounce", False):
+            return True
+
+        # Announce mode: check if bot is admin
+        participants = info.get("Participants", [])
+        if not participants:
+            return True
+
+        for p in participants:
+            phone_number = p.get("PhoneNumber", "")
+            if bot_phone in phone_number:
+                return bool(p.get("IsAdmin", False) or p.get("IsSuperAdmin", False))
+
+        return False
 
     def is_chat_archived(self, jid: str) -> bool:
         """Check if a specific chat is archived in WhatsApp."""

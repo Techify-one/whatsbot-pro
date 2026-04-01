@@ -57,6 +57,7 @@ def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
         "group_name": "",
         "is_archived": False,
         "archived_by_app": False,
+        "can_send": True,
         "unread_count": 0,
         "unread_ai_count": 0,
         "created_at": now,
@@ -281,6 +282,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             "group_name": group_name,
             "is_archived": bool(row["is_archived"]),
             "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
+            "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
             "tags": tags,
             "updated_at": row["updated_at"],
         })
@@ -348,6 +350,7 @@ def _row_to_dict(row) -> dict:
         "group_name": row["group_name"],
         "is_archived": bool(row["is_archived"]),
         "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
+        "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
         "unread_count": row["unread_count"],
         "unread_ai_count": row["unread_ai_count"],
         "created_at": row["created_at"],

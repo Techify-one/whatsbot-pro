@@ -331,6 +331,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }
 
   const isGroup = contact && contact.is_group;
+  const canSend = contact ? (contact.can_send !== false) : true;
   const rawName = info && info.name;
   const isAutoName = !isGroup && rawName && rawName.startsWith('~');
   const displayName = isGroup ? (contact.group_name || phone) : (rawName ? rawName.replace(/^~/, '') : phone);
@@ -511,7 +512,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       />
 
       <!-- Media confirmation overlay -->
-      ${pendingMedia ? html`
+      ${pendingMedia && canSend ? html`
         <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
           ${pendingMedia.type === 'image' ? html`
             <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
@@ -537,7 +538,16 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       ` : ''}
 
       <!-- Input area -->
-      ${pendingMedia ? '' : recording ? html`
+      ${!canSend ? html`
+        <div class="flex items-center justify-center px-[10px] py-[14px] bg-wa-panel min-h-[62px] shrink-0 border-t border-wa-border">
+          <span class="text-wa-secondary text-[14px] flex items-center gap-[6px]">
+            <svg class="w-[16px] h-[16px]" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/>
+            </svg>
+            Você não pode enviar mensagens neste grupo
+          </span>
+        </div>
+      ` : pendingMedia ? '' : recording ? html`
         <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
           <div class="flex-1 flex items-center gap-3 mx-[5px]">
             <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>

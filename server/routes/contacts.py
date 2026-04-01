@@ -114,6 +114,19 @@ def register_routes(app, deps):
             return _err("Contato não encontrado.", status=404)
         if msg_ids:
             asyncio.create_task(_send_read_receipts(phone, msg_ids))
+        # Check group send permissions (fresh check on every contact load)
+        if data.get("is_group") and state.bot_phone:
+            try:
+                can_send = await asyncio.to_thread(
+                    gowa_client.can_bot_send_in_group, phone, state.bot_phone)
+                if data.get("can_send", True) != can_send:
+                    await asyncio.to_thread(
+                        contact_repo.update, data["id"], can_send=1 if can_send else 0)
+                    data["can_send"] = can_send
+                    if phone in agent_handler._contacts:
+                        agent_handler._contacts[phone].can_send = can_send
+            except Exception as e:
+                logger.warning("[Contact] Failed to check group send permission: %s", e)
         return _ok(data)
 
     @app.delete("/api/contacts/{phone}")

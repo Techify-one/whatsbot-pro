@@ -74,6 +74,7 @@ class ContactMemory:
         self.group_name: str = ""
         self.is_archived: bool = False
         self.archived_by_app: bool = False
+        self.can_send: bool = True
         self.unread_count: int = 0
         self.unread_ai_count: int = 0
         self.created_at: float = time.time()
@@ -88,6 +89,7 @@ class ContactMemory:
         self.group_name = data["group_name"]
         self.is_archived = data["is_archived"]
         self.archived_by_app = data["archived_by_app"]
+        self.can_send = data.get("can_send", True)
         self.unread_count = data["unread_count"]
         self.unread_ai_count = data["unread_ai_count"]
         self.created_at = data["created_at"]
@@ -126,6 +128,7 @@ class ContactMemory:
             is_group=1 if self.is_group else 0,
             group_name=self.group_name,
             is_archived=1 if self.is_archived else 0,
+            can_send=1 if self.can_send else 0,
             unread_count=self.unread_count,
             unread_ai_count=self.unread_ai_count,
         )

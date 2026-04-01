@@ -33,6 +33,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("Migration: added archived_by_app column to contacts")
 
+    if "can_send" not in cols:
+        conn.execute("ALTER TABLE contacts ADD COLUMN can_send INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+        logger.info("Migration: added can_send column to contacts")
+
 
 def get_db() -> sqlite3.Connection:
     """Return a thread-local SQLite connection (created on first access)."""

@@ -475,26 +475,35 @@ def register_routes(app, deps):
                             break
 
             if receipt_type == "delivered" and msg_ids:
-                # Update outgoing message status to "delivered"
+                # Update outgoing message status to "delivered" (with cascade to prior msgs)
+                all_updated = []
                 for mid in msg_ids:
-                    await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "delivered")
-                logger.info("[Webhook] message.ack delivered for %s (ids=%s)", ack_phone, msg_ids)
-                if ack_phone:
+                    updated = await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "delivered")
+                    all_updated.extend(updated)
+                # Deduplicate
+                all_updated = list(dict.fromkeys(all_updated))
+                logger.info("[Webhook] message.ack delivered for %s (ids=%s, cascaded=%d)",
+                            ack_phone, msg_ids, len(all_updated))
+                if ack_phone and all_updated:
                     await ws_manager.broadcast("message_status", {
                         "phone": ack_phone,
-                        "msg_ids": msg_ids,
+                        "msg_ids": all_updated,
                         "status": "delivered",
                     })
 
             elif receipt_type in ("read", "read-self") and msg_ids:
-                # Update outgoing message status to "read"
+                # Update outgoing message status to "read" (with cascade to prior msgs)
+                all_updated = []
                 for mid in msg_ids:
-                    await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "read")
-                logger.info("[Webhook] message.ack read for %s (ids=%s)", ack_phone, msg_ids)
-                if ack_phone:
+                    updated = await asyncio.to_thread(message_repo.update_status_by_msg_id, mid, "read")
+                    all_updated.extend(updated)
+                all_updated = list(dict.fromkeys(all_updated))
+                logger.info("[Webhook] message.ack read for %s (ids=%s, cascaded=%d)",
+                            ack_phone, msg_ids, len(all_updated))
+                if ack_phone and all_updated:
                     await ws_manager.broadcast("message_status", {
                         "phone": ack_phone,
-                        "msg_ids": msg_ids,
+                        "msg_ids": all_updated,
                         "status": "read",
                     })
 
@@ -685,6 +694,18 @@ def register_routes(app, deps):
                 else:
                     logger.warning("[Webhook] Could not resolve group name for %s", phone)
                 contact.save()
+
+            # Check if bot can send in this group
+            if state.bot_phone:
+                try:
+                    can_send = await asyncio.to_thread(
+                        gowa_client.can_bot_send_in_group, phone, state.bot_phone)
+                    if contact.can_send != can_send:
+                        contact.can_send = can_send
+                        contact.save()
+                        logger.info("[Webhook] Group %s can_send updated: %s", phone, can_send)
+                except Exception as e:
+                    logger.warning("[Webhook] Failed to check group send permission: %s", e)
 
             # Prefix message with sender name for group context
             sender_label = from_name or individual_phone
