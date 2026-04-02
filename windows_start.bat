@@ -10,13 +10,10 @@ cd /d "%~dp0"
 :: Matar processos anteriores que podem estar pendurados
 taskkill /F /IM gowa.exe >nul 2>&1
 powershell -Command ^
-  "$procs = Get-CimInstance Win32_Process -Filter \"name='python.exe'\"; " ^
-  "$allPids = $procs | ForEach-Object { $_.ProcessId }; " ^
-  "foreach ($p in $procs) { " ^
-  "  $kill = $false; " ^
-  "  if ($p.CommandLine -like '*whatsbot*' -or $p.CommandLine -like '*server.dev*') { $kill = $true } " ^
-  "  if ($p.CommandLine -like '*multiprocessing*' -and $p.ParentProcessId -notin $allPids) { $kill = $true } " ^
-  "  if ($kill) { taskkill /F /PID $p.ProcessId 2>&1 | Out-Null } " ^
+  "$pids = @(netstat -ano | Select-String 'LISTENING' | Select-String ':8080 ' | ForEach-Object { ($_ -split '\s+')[-1] } | Select-Object -Unique); " ^
+  "foreach ($p in $pids) { " ^
+  "  Get-CimInstance Win32_Process -Filter \"ParentProcessId=$p\" | ForEach-Object { taskkill /F /PID $_.ProcessId 2>&1 | Out-Null }; " ^
+  "  taskkill /F /PID $p 2>&1 | Out-Null " ^
   "}" >nul 2>&1
 
 echo.
@@ -183,16 +180,8 @@ if not exist "bin\gowa.exe" (
 )
 echo [OK] gowa.exe encontrado.
 
-:: ===== 5. VERIFICAR PORTAS (apenas aviso) =====
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":8080 " >nul 2>&1
-if %ERRORLEVEL%==0 (
-    echo [AVISO] A porta 8080 ja esta em uso. O WhatsBot pode nao iniciar corretamente.
-)
-
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":64999 " >nul 2>&1
-if %ERRORLEVEL%==0 (
-    echo [AVISO] A porta 64999 ja esta em uso. O GOWA pode nao iniciar corretamente.
-)
+:: ===== 5. VERIFICAR PORTAS =====
+:: (processos anteriores ja foram encerrados no inicio do script)
 
 :: ===== 6. CONFIGURAR AMBIENTE =====
 if not exist "venv" (
@@ -203,6 +192,7 @@ if not exist "venv" (
     "!PYTHON_CMD!" -m venv venv
 )
 call venv\Scripts\activate.bat
+echo Verificando dependencias...
 pip install -q -r requirements.txt
 
 echo.

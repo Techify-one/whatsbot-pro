@@ -3,16 +3,12 @@ echo Stopping WhatsBot...
 
 taskkill /F /IM gowa.exe >nul 2>&1
 
-:: Matar processos python do WhatsBot (commandline contendo "whatsbot" ou "server.dev")
-:: e processos python orfaos de multiprocessing (pai ja morreu)
+:: Achar todos os processos na porta 8080, matar filhos e depois os pais
 powershell -Command ^
-  "$procs = Get-CimInstance Win32_Process -Filter \"name='python.exe'\"; " ^
-  "$allPids = $procs | ForEach-Object { $_.ProcessId }; " ^
-  "foreach ($p in $procs) { " ^
-  "  $kill = $false; " ^
-  "  if ($p.CommandLine -like '*whatsbot*' -or $p.CommandLine -like '*server.dev*') { $kill = $true } " ^
-  "  if ($p.CommandLine -like '*multiprocessing*' -and $p.ParentProcessId -notin $allPids) { $kill = $true } " ^
-  "  if ($kill) { taskkill /F /PID $p.ProcessId 2>&1 | Out-Null } " ^
+  "$pids = @(netstat -ano | Select-String 'LISTENING' | Select-String ':8080 ' | ForEach-Object { ($_ -split '\s+')[-1] } | Select-Object -Unique); " ^
+  "foreach ($p in $pids) { " ^
+  "  Get-CimInstance Win32_Process -Filter \"ParentProcessId=$p\" | ForEach-Object { taskkill /F /PID $_.ProcessId 2>&1 | Out-Null }; " ^
+  "  taskkill /F /PID $p 2>&1 | Out-Null " ^
   "}" >nul 2>&1
 
 echo WhatsBot stopped.
