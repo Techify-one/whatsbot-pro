@@ -436,7 +436,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
             : updated[idx].unread_ai_count || 0,
           updated_at: message.ts,
         };
-        updated.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+        updated.sort((a, b) => (b.last_message_ts || b.updated_at || 0) - (a.last_message_ts || a.updated_at || 0));
         return updated;
       }
       fetchContacts(search);

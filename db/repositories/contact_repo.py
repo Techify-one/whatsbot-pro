@@ -234,7 +234,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             ) m2 ON m1.contact_id = m2.contact_id AND m1.ts = m2.max_ts
         ) lm ON lm.contact_id = c.id
         WHERE c.is_archived = ?
-        ORDER BY c.updated_at DESC
+        ORDER BY COALESCE(lm.ts, c.updated_at) DESC
         """,
         (1 if archived else 0,),
     ).fetchall()
