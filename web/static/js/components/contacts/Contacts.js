@@ -352,7 +352,39 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       });
       return changed ? { ...prev, messages: updated } : prev;
     });
+    // Update sidebar last message status (forward-only: sent → delivered → read)
+    const { phone } = messageStatus;
+    if (phone) {
+      const STATUS_ORDER = { sent: 1, delivered: 2, read: 3 };
+      setContacts(prev => prev.map(c => {
+        if (c.phone === phone && c.last_message_role === 'assistant'
+            && (STATUS_ORDER[status] || 0) > (STATUS_ORDER[c.last_message_status] || 0)) {
+          return { ...c, last_message_status: status };
+        }
+        return c;
+      }));
+    }
   }, [messageStatus]);
+
+  // Sync last assistant message status from chat detail → sidebar
+  // Covers both WS updates and fresh data from API fetch
+  useEffect(() => {
+    if (!contactData || !contactData.messages || !selected) return;
+    const msgs = contactData.messages;
+    // Find the last visible (non-transcription/system) assistant message
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === 'assistant' && m.status) {
+        setContacts(prev => prev.map(c => {
+          if (c.phone === selected && c.last_message_role === 'assistant' && m.status !== c.last_message_status) {
+            return { ...c, last_message_status: m.status };
+          }
+          return c;
+        }));
+        break;
+      }
+    }
+  }, [contactData, selected]);
 
   // Handle real-time messages from WebSocket
   useEffect(() => {
@@ -427,6 +459,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           last_message: lastPreview,
           last_message_role: message.role,
           last_message_ts: message.ts,
+          last_message_status: message.status || '',
+          last_message_msg_id: message.msg_id || '',
           msg_count: updated[idx].msg_count + 1,
           unread_count: isUserMsg && !isViewing
             ? (updated[idx].unread_count || 0) + 1

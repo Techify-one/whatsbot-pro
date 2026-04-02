@@ -1,6 +1,6 @@
 import { h } from 'preact';
 import htm from 'htm';
-import { SearchIcon, DefaultAvatar, GroupAvatar, DoubleCheckIcon, ArchiveIcon } from './icons.js';
+import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime } from './utils.js';
 
 const html = htm.bind(h);
@@ -165,7 +165,13 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             ${typingState[c.phone] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
                         : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
-                            ${c.last_message_role === 'assistant' ? html`<${DoubleCheckIcon} />` : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
+                            ${c.last_message_role === 'assistant' ? (() => {
+                              const st = c.last_message_status;
+                              if (st === 'sent') return html`<${SingleCheckIcon} />`;
+                              if (st === 'delivered' || st === 'operator') return html`<${DoubleCheckIcon} color="#92a58c" />`;
+                              if (st === 'read') return html`<${DoubleCheckIcon} />`;
+                              return html`<${DoubleCheckIcon} color="#92a58c" />`;
+                            })() : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
                       ${(c.unread_ai_count > 0 || c.unread_count > 0) ? html`

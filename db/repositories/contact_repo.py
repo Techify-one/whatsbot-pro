@@ -221,10 +221,12 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                lm.role      AS last_msg_role,
                lm.ts        AS last_msg_ts,
                lm.media_type AS last_msg_media_type,
+               lm.status    AS last_msg_status,
+               lm.msg_id    AS last_msg_id,
                (SELECT COUNT(*) FROM messages WHERE contact_id = c.id) AS msg_count
         FROM contacts c
         LEFT JOIN (
-            SELECT m1.contact_id, m1.content, m1.role, m1.ts, m1.media_type
+            SELECT m1.contact_id, m1.content, m1.role, m1.ts, m1.media_type, m1.status, m1.msg_id
             FROM messages m1
             INNER JOIN (
                 SELECT contact_id, MAX(ts) AS max_ts
@@ -274,6 +276,8 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             "last_message": last_content,
             "last_message_role": row["last_msg_role"] or "",
             "last_message_ts": row["last_msg_ts"] or 0,
+            "last_message_status": row["last_msg_status"] or "",
+            "last_message_msg_id": row["last_msg_id"] or "",
             "msg_count": row["msg_count"] or 0,
             "unread_count": row["unread_count"],
             "unread_ai_count": row["unread_ai_count"],
