@@ -213,91 +213,50 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     setSending(false);
   }
 
-  // Convert a WebM/Opus blob to WAV so GOWA accepts it (audio/wav is allowed)
-  async function convertToWav(webmBlob) {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    try {
-      const arrayBuf = await webmBlob.arrayBuffer();
-      const audioBuf = await ctx.decodeAudioData(arrayBuf);
-      const numCh = audioBuf.numberOfChannels;
-      const rate = audioBuf.sampleRate;
-      const length = audioBuf.length;
-      const bytesPerSample = 2; // 16-bit
-      const blockAlign = numCh * bytesPerSample;
-      const dataLen = length * blockAlign;
-      const buf = new ArrayBuffer(44 + dataLen);
-      const v = new DataView(buf);
-      // RIFF header
-      const w = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
-      w(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true);
-      w(8, 'WAVE'); w(12, 'fmt ');
-      v.setUint32(16, 16, true); v.setUint16(20, 1, true); // PCM
-      v.setUint16(22, numCh, true); v.setUint32(24, rate, true);
-      v.setUint32(28, rate * blockAlign, true); v.setUint16(32, blockAlign, true);
-      v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, dataLen, true);
-      // Interleaved PCM samples
-      const channels = [];
-      for (let c = 0; c < numCh; c++) channels.push(audioBuf.getChannelData(c));
-      let off = 44;
-      for (let i = 0; i < length; i++) {
-        for (let c = 0; c < numCh; c++) {
-          const s = Math.max(-1, Math.min(1, channels[c][i]));
-          v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-          off += 2;
-        }
-      }
-      return new Blob([buf], { type: 'audio/wav' });
-    } finally {
-      ctx.close();
-    }
-  }
-
   async function handleMicClick() {
     if (recording) {
       // Stop recording
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      if (mediaRecorderRef.current) {
         mediaRecorderRef.current.stop();
       }
       return;
     }
 
-    // Start recording — prefer OGG/Opus (accepted by GOWA), fallback to WebM then convert to WAV
+    // Start recording — uses opus-recorder to produce real OGG/Opus accepted by WhatsApp
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const chunks = [];
-      const useOgg = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus');
-      const mimeType = useOgg ? 'audio/ogg;codecs=opus' : 'audio/webm;codecs=opus';
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new window.Recorder({
+        encoderPath: '/static/vendor/opus-recorder/encoderWorker.min.js',
+        encoderApplication: 2048, // VOIP
+        encoderSampleRate: 48000,
+        numberOfChannels: 1,
+      });
       mediaRecorderRef.current = recorder;
 
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
+      recorder.onstart = () => {
+        setRecording(true);
+        setRecordDuration(0);
+        recordTimerRef.current = setInterval(() => setRecordDuration(d => d + 1), 1000);
+      };
+
+      recorder.ondataavailable = (blob) => {
         setRecording(false);
         clearInterval(recordTimerRef.current);
         setRecordDuration(0);
 
-        if (chunks.length === 0) return;
+        if (!blob || blob.size === 0) return;
 
-        // Prepare audio blob in a format GOWA accepts
-        let audioBlob, audioFilename;
-        if (useOgg) {
-          audioBlob = new Blob(chunks, { type: 'audio/ogg' });
-          audioFilename = 'voice.ogg';
-        } else {
-          const webmBlob = new Blob(chunks, { type: 'audio/webm' });
-          audioBlob = await convertToWav(webmBlob);
-          audioFilename = 'voice.wav';
-        }
-
+        const audioBlob = new Blob([blob], { type: 'audio/ogg' });
         const previewUrl = URL.createObjectURL(audioBlob);
-        setPendingMedia({ type: 'audio', blob: audioBlob, filename: audioFilename, previewUrl });
+        setPendingMedia({ type: 'audio', blob: audioBlob, filename: 'voice.ogg', previewUrl });
       };
 
-      recorder.start();
-      setRecording(true);
-      setRecordDuration(0);
-      recordTimerRef.current = setInterval(() => setRecordDuration(d => d + 1), 1000);
+      recorder.onstop = () => {
+        setRecording(false);
+        clearInterval(recordTimerRef.current);
+        setRecordDuration(0);
+      };
+
+      await recorder.start();
     } catch (err) {
       console.error('Microphone access error:', err);
     }

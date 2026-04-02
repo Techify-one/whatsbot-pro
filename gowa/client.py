@@ -280,7 +280,7 @@ class GOWAClient:
             with httpx.Client(timeout=30.0) as client:
                 with open(audio_path, "rb") as f:
                     files = {"audio": (Path(audio_path).name, f, mime)}
-                    data = {"phone": phone}
+                    data = {"phone": phone, "ptt": "true"}
                     resp = client.post(url, headers=self._headers, data=data, files=files)
                     resp.raise_for_status()
                     return resp.json() if resp.text else {}
