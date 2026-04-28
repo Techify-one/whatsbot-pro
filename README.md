@@ -213,3 +213,7 @@ Sim! O WhatsBot é um projeto de código aberto. Contribuições são bem-vindas
 ## Licença
 
 Projeto de código aberto. Livre para uso pessoal e comercial.
+
+---
+
+Mantido por [Techify](https://github.com/Techify-one) — leia mais em [techify.one/blog](https://techify.one/blog).
