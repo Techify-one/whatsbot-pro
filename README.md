@@ -8,6 +8,8 @@ Baixou, instalou, colocou sua chave, escreveu como a IA deve se comportar, escan
 
 100% gratuito, código aberto, tudo roda no seu computador.
 
+**Tutorial completo no blog da Techify:** [WhatsBot: Chatbot WhatsApp com IA grátis em 2026](https://techify.one/blog/whatsbot-chatbot-whatsapp-com-ia-gratis-em-2026)
+
 ---
 
 ## Para quem é o WhatsBot?
