@@ -82,6 +82,23 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     });
   }
 
+  function handleKeyDown(e) {
+    // Enter sends; Shift+Enter inserts a line break (default behavior).
+    // Ignore while IME composition is in progress.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.repeat) {
+      e.preventDefault();
+      handleSend(e);
+    }
+  }
+
+  // Auto-resize textarea up to ~6 lines, then scroll
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }, [input]);
+
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
@@ -530,15 +547,16 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
             <${AttachIcon} />
           </button>
           <div class="flex-1 mx-[5px]">
-            <input
+            <textarea
               ref=${inputRef}
-              type="text"
+              rows="1"
               value=${input}
               onInput=${handleInputChange}
+              onKeyDown=${handleKeyDown}
               onPaste=${handlePaste}
               placeholder="Digite uma mensagem"
-              class="w-full bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary"
-            />
+              class="w-full block bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px] align-middle"
+            ></textarea>
           </div>
           ${hasText ? html`
             <button
