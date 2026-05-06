@@ -551,6 +551,8 @@ def register_routes(app, deps):
         # Extract media paths from GOWA payload
         image_path: str | None = None
         audio_path: str | None = None
+        document_path: str | None = None
+        document_name: str | None = None
 
         raw_image = data.get("image")
         if raw_image:
@@ -576,6 +578,16 @@ def register_routes(app, deps):
             elif isinstance(raw_vn, dict):
                 audio_path = raw_vn.get("path", "")
 
+        raw_doc = data.get("document")
+        if raw_doc:
+            if isinstance(raw_doc, str):
+                document_path = raw_doc
+            elif isinstance(raw_doc, dict):
+                document_path = raw_doc.get("path", "")
+                document_name = raw_doc.get("file_name") or raw_doc.get("filename") or ""
+                if not text:
+                    text = (raw_doc.get("caption", "") or "").strip()
+
         # For audio without text, set a placeholder
         if audio_path and not text:
             text = "[Áudio recebido]" if not is_from_me else "[Áudio enviado]"
@@ -583,6 +595,11 @@ def register_routes(app, deps):
         # For image without text, set a placeholder for outgoing
         if image_path and not text and is_from_me:
             text = "[Imagem enviada]"
+
+        # For document without text, set a placeholder
+        if document_path and not text:
+            label = document_name or "documento"
+            text = f"[Documento recebido: {label}]" if not is_from_me else f"[Documento enviado: {label}]"
 
         # Extract chat and sender separately for group support
         chat_jid = (data.get("chat_jid", "") or data.get("chat_id", "")
@@ -603,10 +620,13 @@ def register_routes(app, deps):
             individual_phone = phone
             from_name = data.get("from_name", "") or data.get("pushName", "") or data.get("notify", "")
 
-        if not phone or (not text and not image_path and not audio_path):
+        if not phone or (not text and not image_path and not audio_path and not document_path):
+            media_kind = ("image" if image_path
+                          else "audio" if audio_path
+                          else "document" if document_path
+                          else "none")
             logger.info("[Webhook] Skipping: text=%r phone=%r media=%s keys=%s payload=%s",
-                        text[:50] if text else "", phone,
-                        "image" if image_path else ("audio" if audio_path else "none"),
+                        text[:50] if text else "", phone, media_kind,
                         list(data.keys()), str(data)[:1000])
             return _ok({"status": "ignored"})
 
@@ -631,6 +651,9 @@ def register_routes(app, deps):
             elif audio_path:
                 media_type = "audio"
                 media_path = audio_path
+            elif document_path:
+                media_type = "document"
+                media_path = document_path
 
             logger.info("[Webhook] Syncing outgoing %s to %s: %s",
                         media_type or "message", phone,
@@ -665,6 +688,9 @@ def register_routes(app, deps):
         elif audio_path:
             media_type = "audio"
             media_path = audio_path
+        elif document_path:
+            media_type = "document"
+            media_path = document_path
 
         # For groups: prefix text with sender name and check @mention
         display_text = text

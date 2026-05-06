@@ -6,7 +6,7 @@ Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
 
 - **Python 3.11+** — linguagem principal
 - **SQLite** — banco de dados local (WAL mode, stdlib `sqlite3`)
-- **GOWA** (go-whatsapp-web-multidevice v8.3.3) — bridge WhatsApp via REST, roda como subprocess
+- **GOWA** (go-whatsapp-web-multidevice v8.5.0) — bridge WhatsApp via REST, roda como subprocess
 - **OpenRouter** — LLM provider (API compatível com OpenAI)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
 - **Preact + HTM + Tailwind CSS** — frontend web (sem build step, vendorizado local)
@@ -129,9 +129,9 @@ Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
 Eventos WebSocket: `{"event": "status|qr_update|gowa_status|config_saved", "data": {...}}`
 
-## GOWA REST API (endpoints reais — v8.3.3 multi-device)
+## GOWA REST API (endpoints reais — v8.5.0 multi-device)
 
-IMPORTANTE: O GOWA v8.3.3 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
+IMPORTANTE: O GOWA v8.5.0 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
 
 | Operação | Método | Endpoint | Notas |
 |---|---|---|---|
