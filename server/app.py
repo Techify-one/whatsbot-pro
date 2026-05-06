@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -116,7 +117,14 @@ def create_app(
 
     # ── FastAPI App ───────────────────────────────────────────────────
 
-    app = FastAPI(title="WhatsBot", lifespan=lifespan)
+    _docs_enabled = os.getenv("WHATSBOT_ENABLE_DOCS", "0") == "1"
+    app = FastAPI(
+        title="WhatsBot",
+        lifespan=lifespan,
+        docs_url="/docs" if _docs_enabled else None,
+        redoc_url="/redoc" if _docs_enabled else None,
+        openapi_url="/openapi.json" if _docs_enabled else None,
+    )
 
     # Mount static files (frontend assets)
     static_dir = web_dir / "static"
@@ -129,7 +137,8 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/health")
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/auth/")
+    _AUTH_EXEMPT_EXACT = {"/api/webhook", "/health"}
     _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs", "/executions"}
 
     @app.middleware("http")
@@ -138,6 +147,8 @@ def create_app(
 
         # SPA pages, static assets, webhook, and auth endpoints are always open
         if path in _SPA_PATHS or path.startswith(("/contacts/",)):
+            return await call_next(request)
+        if path in _AUTH_EXEMPT_EXACT:
             return await call_next(request)
         for prefix in _AUTH_EXEMPT_PREFIXES:
             if path.startswith(prefix):
@@ -156,6 +167,24 @@ def create_app(
                 )
 
         return await call_next(request)
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'"
+        )
+        return resp
 
     # ── Health endpoint (always open, used by Docker healthcheck) ──────
 

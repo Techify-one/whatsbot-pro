@@ -94,3 +94,5 @@ class AppState:
         self.bot_name: str = ""
         # Last 50 raw webhook payloads for debugging
         self.webhook_payloads: deque[dict] = deque(maxlen=50)
+        # Login attempts per IP for brute-force protection
+        self.login_attempts: dict[str, deque[float]] = {}
