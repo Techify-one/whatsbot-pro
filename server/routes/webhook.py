@@ -604,9 +604,10 @@ def register_routes(app, deps):
             from_name = data.get("from_name", "") or data.get("pushName", "") or data.get("notify", "")
 
         if not phone or (not text and not image_path and not audio_path):
-            logger.info("[Webhook] Skipping: text=%r phone=%r media=%s",
+            logger.info("[Webhook] Skipping: text=%r phone=%r media=%s keys=%s payload=%s",
                         text[:50] if text else "", phone,
-                        "image" if image_path else ("audio" if audio_path else "none"))
+                        "image" if image_path else ("audio" if audio_path else "none"),
+                        list(data.keys()), str(data)[:1000])
             return _ok({"status": "ignored"})
 
         state.processed_messages.add(msg_id)
