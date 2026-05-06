@@ -1,9 +1,31 @@
 """Log endpoints."""
 
 import asyncio
+import os
+from collections import deque
+from pathlib import Path
 
 from db.repositories import execution_repo
 from server.helpers import _ok
+
+
+def _gowa_log_path() -> Path:
+    base = Path(__file__).resolve().parent.parent.parent
+    return base / "logs" / "gowa.log"
+
+
+def _read_tail(path: Path, max_lines: int) -> list[str]:
+    """Return last max_lines of file (best-effort, plain decode)."""
+    if not path.exists():
+        return []
+    try:
+        with path.open("rb") as f:
+            return [
+                line.decode("utf-8", errors="replace").rstrip("\r\n")
+                for line in deque(f, maxlen=max_lines)
+            ]
+    except OSError:
+        return []
 
 
 def register_routes(app, deps):
@@ -32,3 +54,23 @@ def register_routes(app, deps):
         # Fallback to in-memory deque
         entries = list(state.webhook_payloads)
         return _ok(entries[-limit:])
+
+    @app.get("/api/gowa-logs")
+    async def get_gowa_logs(limit: int = 500):
+        """Return last N lines of the GOWA stdout/stderr debug log.
+
+        Active only when WHATSBOT_GOWA_DEBUG=1 is set in the environment.
+        """
+        limit = max(1, min(limit, 5000))
+        path = _gowa_log_path()
+        debug_on = os.environ.get("WHATSBOT_GOWA_DEBUG", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        lines = await asyncio.to_thread(_read_tail, path, limit)
+        return _ok({
+            "debug_enabled": debug_on,
+            "log_path": str(path),
+            "exists": path.exists(),
+            "size": path.stat().st_size if path.exists() else 0,
+            "lines": lines,
+        })

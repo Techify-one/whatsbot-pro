@@ -588,6 +588,34 @@ def register_routes(app, deps):
                 if not text:
                     text = (raw_doc.get("caption", "") or "").strip()
 
+        # Contact / vCard messages (GOWA v8.5.0+)
+        if not text:
+            shared_contacts: list[tuple[str, str]] = []
+            single = data.get("contact")
+            if isinstance(single, dict):
+                name = (single.get("displayName") or single.get("display_name")
+                        or single.get("name") or "").strip()
+                ph = (single.get("phone_number") or single.get("phoneNumber") or "").strip()
+                shared_contacts.append((name, ph))
+            arr = data.get("contacts_array") or data.get("contactsArray")
+            if isinstance(arr, list):
+                for c in arr:
+                    if not isinstance(c, dict):
+                        continue
+                    name = (c.get("displayName") or c.get("display_name")
+                            or c.get("name") or "").strip()
+                    ph = (c.get("phone_number") or c.get("phoneNumber") or "").strip()
+                    shared_contacts.append((name, ph))
+            if shared_contacts:
+                if len(shared_contacts) == 1:
+                    name, ph = shared_contacts[0]
+                    label = name or ph or "sem nome"
+                    suffix = f" ({ph})" if ph and name else ""
+                    text = f"[Contato compartilhado: {label}{suffix}]"
+                else:
+                    names = ", ".join(n or p or "?" for n, p in shared_contacts)
+                    text = f"[Contatos compartilhados ({len(shared_contacts)}): {names}]"
+
         # For audio without text, set a placeholder
         if audio_path and not text:
             text = "[Áudio recebido]" if not is_from_me else "[Áudio enviado]"
