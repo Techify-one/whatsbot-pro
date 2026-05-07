@@ -223,6 +223,14 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     }
 
     // Start recording — uses opus-recorder to produce real OGG/Opus accepted by WhatsApp
+    if (typeof window.Recorder !== 'function') {
+      alert('Gravador de áudio indisponível: a biblioteca opus-recorder não foi carregada. Recarregue a página (Ctrl+F5) e tente novamente.');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('Seu navegador não permite acesso ao microfone neste contexto. Abra o WhatsBot via HTTPS (ou http://localhost) para gravar áudios.');
+      return;
+    }
     try {
       const recorder = new window.Recorder({
         encoderPath: '/static/vendor/opus-recorder/encoderWorker.min.js',
@@ -259,6 +267,13 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       await recorder.start();
     } catch (err) {
       console.error('Microphone access error:', err);
+      setRecording(false);
+      clearInterval(recordTimerRef.current);
+      setRecordDuration(0);
+      const msg = (err && err.name === 'NotAllowedError')
+        ? 'Permissão para o microfone foi negada. Habilite o acesso nas configurações do navegador.'
+        : `Não foi possível iniciar a gravação: ${err && err.message ? err.message : err}`;
+      alert(msg);
     }
   }
 
