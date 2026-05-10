@@ -48,3 +48,11 @@ def set_many(data: dict) -> None:
         [(k, json.dumps(v, ensure_ascii=False)) for k, v in data.items()],
     )
     conn.commit()
+
+
+def delete_prefix(prefix: str) -> int:
+    """Delete every config key starting with ``prefix``. Returns row count."""
+    conn = get_db()
+    cur = conn.execute("DELETE FROM config WHERE key LIKE ?", (prefix + "%",))
+    conn.commit()
+    return cur.rowcount or 0

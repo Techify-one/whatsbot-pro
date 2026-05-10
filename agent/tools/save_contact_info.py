@@ -1,5 +1,10 @@
 """Tool: save_contact_info — saves personal data mentioned by the contact."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 SAVE_CONTACT_INFO_TOOL = {
     "type": "function",
     "function": {
@@ -43,3 +48,15 @@ SAVE_CONTACT_INFO_TOOL = {
         },
     },
 }
+
+
+def execute(ctx, args: dict) -> str | None:
+    """Persist contact info from an LLM tool call.
+
+    Returns ``None`` so the handler uses its default follow-up message.
+    """
+    try:
+        ctx.contact.update_info(**args)
+    except Exception as e:
+        logger.warning("save_contact_info failed for %s: %s", ctx.contact.phone, e)
+    return None

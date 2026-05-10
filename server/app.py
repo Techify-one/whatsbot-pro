@@ -15,7 +15,8 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, plugins as plugins_routes
+from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class ServerDeps:
     state: AppState
     memory_log_handler: MemoryLogHandler
     statics_senditems_dir: Path
+    plugins_dir: Path = None
+    plugins_registry: PluginRegistry = None
     # Dynamically set by webhook route for cross-module access
     broadcast_tool_calls: object = None
 
@@ -68,6 +71,21 @@ def create_app(
     statics_media_dir.mkdir(parents=True, exist_ok=True)
     statics_senditems_dir.mkdir(parents=True, exist_ok=True)
 
+    # Plugin discovery + load. Runs synchronously before route registration so
+    # plugin routes/tools/prompts are wired into the app before the first request.
+    plugins_dir = settings.data_dir / "storages" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    bootstrap_initial_plugins(
+        plugins_dir,
+        settings.data_dir / "assets" / "plugin_examples",
+    )
+    registry = discover_and_load(plugins_dir)
+    for loaded in registry.loaded.values():
+        if loaded.tools:
+            agent_handler.register_plugin_tools(loaded.id, loaded.tools)
+        if loaded.prompt_fragments:
+            agent_handler.register_plugin_prompts(loaded.id, loaded.prompt_fragments)
+
     deps = ServerDeps(
         settings=settings,
         gowa_manager=gowa_manager,
@@ -77,6 +95,8 @@ def create_app(
         state=state,
         memory_log_handler=_memory_log_handler,
         statics_senditems_dir=statics_senditems_dir,
+        plugins_dir=plugins_dir,
+        plugins_registry=registry,
     )
 
     # ── GOWA restart callback ──────────────────────────────────────────
@@ -137,9 +157,18 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/auth/")
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/plugins/", "/api/auth/")
     _AUTH_EXEMPT_EXACT = {"/api/webhook", "/health"}
-    _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs", "/executions"}
+    _PLUGIN_SPA_PATHS = {
+        s["path"]
+        for loaded in registry.loaded.values()
+        for s in loaded.manifest.screens
+        if s.get("path", "").startswith("/")
+    }
+    _SPA_PATHS = (
+        {"/", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins"}
+        | _PLUGIN_SPA_PATHS
+    )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -200,12 +229,24 @@ def create_app(
     @app.get("/sandbox")
     @app.get("/costs")
     @app.get("/executions")
+    @app.get("/plugins")
     @app.get("/contacts/{contact_id:int}")
     async def index(contact_id: int | None = None):
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
         return JSONResponse({"error": "Frontend not found"}, status_code=404)
+
+    # Register dynamic SPA paths declared by plugin manifests so the frontend
+    # router gets the same index.html on hard reload of those URLs.
+    async def _plugin_spa_index():
+        index_file = web_dir / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return JSONResponse({"error": "Frontend not found"}, status_code=404)
+
+    for _spa_path in _PLUGIN_SPA_PATHS:
+        app.add_api_route(_spa_path, _plugin_spa_index, methods=["GET"])
 
     # ── Register route modules ─────────────────────────────────────────
     # Order matters: webhook must be registered before sandbox so
@@ -222,5 +263,17 @@ def create_app(
     tags.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
+    plugins_routes.register_routes(app, deps)
+
+    # ── Plugin routers and static assets ──────────────────────────────
+    for loaded in registry.loaded.values():
+        if loaded.router is not None:
+            app.include_router(loaded.router, prefix=f"/api/plugins/{loaded.id}")
+        if loaded.static_dir is not None:
+            app.mount(
+                f"/plugins/{loaded.id}/static",
+                StaticFiles(directory=str(loaded.static_dir)),
+                name=f"plugin_{loaded.id}_static",
+            )
 
     return app

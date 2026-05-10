@@ -27,9 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code only
 COPY agent/ agent/
+COPY assets/ assets/
 COPY config/ config/
 COPY gowa/ gowa/
 COPY db/ db/
+COPY plugins/ plugins/
 COPY server/ server/
 COPY web/ web/
 COPY main.py .
