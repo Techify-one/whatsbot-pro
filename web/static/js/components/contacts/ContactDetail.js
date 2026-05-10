@@ -92,11 +92,12 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }
 
   // Auto-resize textarea up to ~6 lines, then scroll
+  const INPUT_MAX_HEIGHT = 120;
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    el.style.height = Math.min(el.scrollHeight, INPUT_MAX_HEIGHT) + 'px';
   }, [input]);
 
   async function handleSend(e) {
@@ -555,7 +556,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               onKeyDown=${handleKeyDown}
               onPaste=${handlePaste}
               placeholder="Digite uma mensagem"
-              class="w-full block bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px] align-middle"
+              class="w-full block bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
             ></textarea>
           </div>
           ${hasText ? html`
