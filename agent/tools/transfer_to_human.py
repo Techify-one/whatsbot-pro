@@ -1,7 +1,13 @@
 """Tool: transfer_to_human — transfers the conversation to a human agent."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 TRANSFER_TO_HUMAN_TOOL = {
     "type": "function",
+    "display_label": "Transferir para Humano",
     "function": {
         "name": "transfer_to_human",
         "description": (
@@ -26,3 +32,27 @@ TRANSFER_TO_HUMAN_TOOL = {
         },
     },
 }
+
+
+_TRANSFER_FEEDBACK = (
+    "Transferência realizada. Responda ao cliente de forma curta e natural, "
+    "apenas confirmando que já vai ser atendido pela pessoa solicitada. "
+    "NÃO mencione 'humano', 'atendente' nem 'transferência'."
+)
+
+
+def execute(ctx, args: dict) -> str | None:
+    """Disable AI for the contact and tag the conversation as transferred.
+
+    Returns a feedback string that the handler will inject as the tool reply
+    when the model issues only the tool call (no inline text).
+    """
+    try:
+        ctx.contact.set_ai_enabled(False)
+        ctx.tag_registry.create("transferido_atendente", "#ef4444")
+        ctx.contact.add_tag("transferido_atendente")
+        ctx.contact.save()
+        logger.info("Transfer to human for %s: %s", ctx.contact.phone, args.get("reason", ""))
+    except Exception as e:
+        logger.warning("transfer_to_human failed for %s: %s", ctx.contact.phone, e)
+    return _TRANSFER_FEEDBACK

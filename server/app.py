@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, plugins as plugins_routes, tools as tools_routes
+from db.repositories import tool_override_repo
+from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
+from plugins.context import set_runtime as _set_plugin_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,8 @@ class ServerDeps:
     state: AppState
     memory_log_handler: MemoryLogHandler
     statics_senditems_dir: Path
+    plugins_dir: Path = None
+    plugins_registry: PluginRegistry = None
     # Dynamically set by webhook route for cross-module access
     broadcast_tool_calls: object = None
 
@@ -67,6 +73,32 @@ def create_app(
     statics_media_dir.mkdir(parents=True, exist_ok=True)
     statics_senditems_dir.mkdir(parents=True, exist_ok=True)
 
+    # Plugin discovery + load. Runs synchronously before route registration so
+    # plugin routes/tools/prompts are wired into the app before the first request.
+    plugins_dir = settings.data_dir / "storages" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    bootstrap_initial_plugins(
+        plugins_dir,
+        settings.data_dir / "assets" / "plugin_examples",
+    )
+    registry = discover_and_load(plugins_dir)
+    for loaded in registry.loaded.values():
+        if loaded.tools:
+            agent_handler.register_plugin_tools(loaded.id, loaded.tools)
+        if loaded.prompt_fragments:
+            agent_handler.register_plugin_prompts(loaded.id, loaded.prompt_fragments)
+
+    # Tool override cleanup: drop rows for tools that no longer exist (renamed
+    # in core, or belonging to a plugin that was removed). Then build the
+    # effective tool list applied to the LLM.
+    try:
+        dropped = tool_override_repo.delete_orphans(agent_handler.known_tool_names())
+        if dropped:
+            logger.info("Removed %d orphan tool_overrides rows", dropped)
+    except Exception as e:
+        logger.warning("tool_overrides orphan cleanup failed: %s", e)
+    agent_handler.refresh_tool_overrides()
+
     deps = ServerDeps(
         settings=settings,
         gowa_manager=gowa_manager,
@@ -76,6 +108,8 @@ def create_app(
         state=state,
         memory_log_handler=_memory_log_handler,
         statics_senditems_dir=statics_senditems_dir,
+        plugins_dir=plugins_dir,
+        plugins_registry=registry,
     )
 
     # ── GOWA restart callback ──────────────────────────────────────────
@@ -93,6 +127,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         state.stop_event.clear()
+        _set_plugin_runtime(ws_manager, asyncio.get_running_loop())
         tasks = [
             asyncio.create_task(start_gowa_task(deps)),
             asyncio.create_task(status_poll_loop(deps)),
@@ -116,7 +151,14 @@ def create_app(
 
     # ── FastAPI App ───────────────────────────────────────────────────
 
-    app = FastAPI(title="WhatsBot", lifespan=lifespan)
+    _docs_enabled = os.getenv("WHATSBOT_ENABLE_DOCS", "0") == "1"
+    app = FastAPI(
+        title="WhatsBot",
+        lifespan=lifespan,
+        docs_url="/docs" if _docs_enabled else None,
+        redoc_url="/redoc" if _docs_enabled else None,
+        openapi_url="/openapi.json" if _docs_enabled else None,
+    )
 
     # Mount static files (frontend assets)
     static_dir = web_dir / "static"
@@ -129,8 +171,18 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/api/webhook", "/api/auth/", "/health")
-    _SPA_PATHS = {"/", "/dashboard", "/sandbox", "/costs", "/executions"}
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/plugins/", "/api/auth/")
+    _AUTH_EXEMPT_EXACT = {"/api/webhook", "/health"}
+    _PLUGIN_SPA_PATHS = {
+        s["path"]
+        for loaded in registry.loaded.values()
+        for s in loaded.manifest.screens
+        if s.get("path", "").startswith("/")
+    }
+    _SPA_PATHS = (
+        {"/", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/tools"}
+        | _PLUGIN_SPA_PATHS
+    )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -138,6 +190,8 @@ def create_app(
 
         # SPA pages, static assets, webhook, and auth endpoints are always open
         if path in _SPA_PATHS or path.startswith(("/contacts/",)):
+            return await call_next(request)
+        if path in _AUTH_EXEMPT_EXACT:
             return await call_next(request)
         for prefix in _AUTH_EXEMPT_PREFIXES:
             if path.startswith(prefix):
@@ -157,6 +211,25 @@ def create_app(
 
         return await call_next(request)
 
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+            "worker-src 'self' blob:; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'"
+        )
+        return resp
+
     # ── Health endpoint (always open, used by Docker healthcheck) ──────
 
     @app.get("/health")
@@ -170,12 +243,25 @@ def create_app(
     @app.get("/sandbox")
     @app.get("/costs")
     @app.get("/executions")
+    @app.get("/plugins")
+    @app.get("/tools")
     @app.get("/contacts/{contact_id:int}")
     async def index(contact_id: int | None = None):
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
         return JSONResponse({"error": "Frontend not found"}, status_code=404)
+
+    # Register dynamic SPA paths declared by plugin manifests so the frontend
+    # router gets the same index.html on hard reload of those URLs.
+    async def _plugin_spa_index():
+        index_file = web_dir / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return JSONResponse({"error": "Frontend not found"}, status_code=404)
+
+    for _spa_path in _PLUGIN_SPA_PATHS:
+        app.add_api_route(_spa_path, _plugin_spa_index, methods=["GET"])
 
     # ── Register route modules ─────────────────────────────────────────
     # Order matters: webhook must be registered before sandbox so
@@ -192,5 +278,18 @@ def create_app(
     tags.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
+    plugins_routes.register_routes(app, deps)
+    tools_routes.register_routes(app, deps)
+
+    # ── Plugin routers and static assets ──────────────────────────────
+    for loaded in registry.loaded.values():
+        if loaded.router is not None:
+            app.include_router(loaded.router, prefix=f"/api/plugins/{loaded.id}")
+        if loaded.static_dir is not None:
+            app.mount(
+                f"/plugins/{loaded.id}/static",
+                StaticFiles(directory=str(loaded.static_dir)),
+                name=f"plugin_{loaded.id}_static",
+            )
 
     return app

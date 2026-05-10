@@ -12,7 +12,7 @@ from gowa.client import GOWASendError, extract_msg_id
 
 from db.repositories import contact_repo, message_repo
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
-from server.helpers import _ok
+from server.helpers import _ok, parse_split_reply
 
 logger = logging.getLogger(__name__)
 
@@ -59,30 +59,12 @@ def register_routes(app, deps):
 
     # ── Reply Splitting & Sending ─────────────────────────────────
 
-    def _parse_split_reply(reply: str) -> list[str]:
-        """Parse LLM reply as JSON array of strings. Fallback to single message."""
-        text = reply.strip()
-        # Strip markdown code block if LLM wraps in ```json ... ```
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1]).strip()
-        if text.startswith("["):
-            try:
-                parts = json.loads(text)
-                if isinstance(parts, list) and all(isinstance(p, str) for p in parts):
-                    filtered = [p.strip() for p in parts if p.strip()]
-                    if filtered:
-                        return filtered
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return [reply]
-
     async def _send_reply(phone: str, reply: str):
         """Send reply (possibly split into multiple parts) and broadcast."""
         split_enabled = settings.get("split_messages", True)
 
         if split_enabled:
-            parts = _parse_split_reply(reply)
+            parts = parse_split_reply(reply)
         else:
             parts = [reply]
 
@@ -551,6 +533,8 @@ def register_routes(app, deps):
         # Extract media paths from GOWA payload
         image_path: str | None = None
         audio_path: str | None = None
+        document_path: str | None = None
+        document_name: str | None = None
 
         raw_image = data.get("image")
         if raw_image:
@@ -576,6 +560,44 @@ def register_routes(app, deps):
             elif isinstance(raw_vn, dict):
                 audio_path = raw_vn.get("path", "")
 
+        raw_doc = data.get("document")
+        if raw_doc:
+            if isinstance(raw_doc, str):
+                document_path = raw_doc
+            elif isinstance(raw_doc, dict):
+                document_path = raw_doc.get("path", "")
+                document_name = raw_doc.get("file_name") or raw_doc.get("filename") or ""
+                if not text:
+                    text = (raw_doc.get("caption", "") or "").strip()
+
+        # Contact / vCard messages (GOWA v8.5.0+)
+        if not text:
+            shared_contacts: list[tuple[str, str]] = []
+            single = data.get("contact")
+            if isinstance(single, dict):
+                name = (single.get("displayName") or single.get("display_name")
+                        or single.get("name") or "").strip()
+                ph = (single.get("phone_number") or single.get("phoneNumber") or "").strip()
+                shared_contacts.append((name, ph))
+            arr = data.get("contacts_array") or data.get("contactsArray")
+            if isinstance(arr, list):
+                for c in arr:
+                    if not isinstance(c, dict):
+                        continue
+                    name = (c.get("displayName") or c.get("display_name")
+                            or c.get("name") or "").strip()
+                    ph = (c.get("phone_number") or c.get("phoneNumber") or "").strip()
+                    shared_contacts.append((name, ph))
+            if shared_contacts:
+                if len(shared_contacts) == 1:
+                    name, ph = shared_contacts[0]
+                    label = name or ph or "sem nome"
+                    suffix = f" ({ph})" if ph and name else ""
+                    text = f"[Contato compartilhado: {label}{suffix}]"
+                else:
+                    names = ", ".join(n or p or "?" for n, p in shared_contacts)
+                    text = f"[Contatos compartilhados ({len(shared_contacts)}): {names}]"
+
         # For audio without text, set a placeholder
         if audio_path and not text:
             text = "[Áudio recebido]" if not is_from_me else "[Áudio enviado]"
@@ -583,6 +605,11 @@ def register_routes(app, deps):
         # For image without text, set a placeholder for outgoing
         if image_path and not text and is_from_me:
             text = "[Imagem enviada]"
+
+        # For document without text, set a placeholder
+        if document_path and not text:
+            label = document_name or "documento"
+            text = f"[Documento recebido: {label}]" if not is_from_me else f"[Documento enviado: {label}]"
 
         # Extract chat and sender separately for group support
         chat_jid = (data.get("chat_jid", "") or data.get("chat_id", "")
@@ -603,10 +630,14 @@ def register_routes(app, deps):
             individual_phone = phone
             from_name = data.get("from_name", "") or data.get("pushName", "") or data.get("notify", "")
 
-        if not phone or (not text and not image_path and not audio_path):
-            logger.info("[Webhook] Skipping: text=%r phone=%r media=%s",
-                        text[:50] if text else "", phone,
-                        "image" if image_path else ("audio" if audio_path else "none"))
+        if not phone or (not text and not image_path and not audio_path and not document_path):
+            media_kind = ("image" if image_path
+                          else "audio" if audio_path
+                          else "document" if document_path
+                          else "none")
+            logger.info("[Webhook] Skipping: text=%r phone=%r media=%s keys=%s payload=%s",
+                        text[:50] if text else "", phone, media_kind,
+                        list(data.keys()), str(data)[:1000])
             return _ok({"status": "ignored"})
 
         state.processed_messages.add(msg_id)
@@ -630,6 +661,9 @@ def register_routes(app, deps):
             elif audio_path:
                 media_type = "audio"
                 media_path = audio_path
+            elif document_path:
+                media_type = "document"
+                media_path = document_path
 
             logger.info("[Webhook] Syncing outgoing %s to %s: %s",
                         media_type or "message", phone,
@@ -644,7 +678,8 @@ def register_routes(app, deps):
 
             # Broadcast to frontend
             broadcast_msg: dict = {"role": "assistant", "content": text,
-                                   "ts": time.time(), "msg_id": msg_id}
+                                   "ts": time.time(), "msg_id": msg_id,
+                                   "status": "operator"}
             if media_type:
                 broadcast_msg["media_type"] = media_type
                 broadcast_msg["media_path"] = media_path
@@ -664,6 +699,9 @@ def register_routes(app, deps):
         elif audio_path:
             media_type = "audio"
             media_path = audio_path
+        elif document_path:
+            media_type = "document"
+            media_path = document_path
 
         # For groups: prefix text with sender name and check @mention
         display_text = text

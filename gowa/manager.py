@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -7,12 +8,26 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+GOWA_LOG_MAX_BYTES = 10 * 1024 * 1024  # truncate above ~10 MB
+
 
 def _get_gowa_binary() -> Path:
     """Locate the GOWA binary."""
     base = Path(__file__).resolve().parent.parent
     binary = base / "bin" / ("gowa.exe" if sys.platform == "win32" else "gowa")
     return binary
+
+
+def _gowa_log_path() -> Path:
+    """Return path to the GOWA debug log file (created lazily)."""
+    base = Path(__file__).resolve().parent.parent
+    logs_dir = base / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir / "gowa.log"
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("WHATSBOT_GOWA_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class GOWAManager:
@@ -63,15 +78,37 @@ class GOWAManager:
         cmd.extend(["--presence-on-connect", "available"])
         cmd.extend(["--os", "Techify - WhatsBot"])
 
-        logger.info("Starting GOWA: %s", " ".join(cmd))
+        debug_on = _debug_enabled()
+        if debug_on:
+            cmd.extend(["--debug=true"])
+
+        logger.info("Starting GOWA (debug=%s): %s", debug_on, " ".join(cmd))
         creation_flags = 0
         if sys.platform == "win32":
             creation_flags = subprocess.CREATE_NO_WINDOW
 
+        if debug_on:
+            log_path = _gowa_log_path()
+            # Rotate if too large
+            try:
+                if log_path.exists() and log_path.stat().st_size > GOWA_LOG_MAX_BYTES:
+                    log_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Could not rotate gowa.log: %s", e)
+            log_fh = open(log_path, "ab", buffering=0)
+            self._log_fh = log_fh
+            stdout_target = log_fh
+            stderr_target = subprocess.STDOUT
+            logger.info("GOWA debug logs -> %s", log_path)
+        else:
+            self._log_fh = None
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         self._process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stdout_target,
+            stderr=stderr_target,
             creationflags=creation_flags,
         )
         self._running = True
@@ -101,6 +138,12 @@ class GOWAManager:
             logger.error("Error stopping GOWA: %s", e)
         finally:
             self._process = None
+            if getattr(self, "_log_fh", None):
+                try:
+                    self._log_fh.close()
+                except Exception:
+                    pass
+                self._log_fh = None
             logger.info("GOWA stopped.")
 
     def restart(self):

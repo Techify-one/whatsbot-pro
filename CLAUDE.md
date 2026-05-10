@@ -6,7 +6,7 @@ Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
 
 - **Python 3.11+** — linguagem principal
 - **SQLite** — banco de dados local (WAL mode, stdlib `sqlite3`)
-- **GOWA** (go-whatsapp-web-multidevice v8.3.3) — bridge WhatsApp via REST, roda como subprocess
+- **GOWA** (go-whatsapp-web-multidevice v8.5.0) — bridge WhatsApp via REST, roda como subprocess
 - **OpenRouter** — LLM provider (API compatível com OpenAI)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
 - **Preact + HTM + Tailwind CSS** — frontend web (sem build step, vendorizado local)
@@ -21,18 +21,28 @@ gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
 agent/handler.py     → processa mensagens com LLM via OpenRouter (tool calling)
 agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no SQLite via repos)
-agent/tools/         → definições de tools do LLM (uma tool por arquivo, exportadas em __init__.py)
+agent/tools/         → tools core do LLM (uma tool por arquivo, agregadas em CORE_TOOLS)
 config/settings.py   → load/save config na tabela `config` do SQLite
 db/                  → módulo de banco de dados
   connection.py      → thread-local connection pool, init_db(), PRAGMAs
-  schema.sql         → CREATE TABLE statements (9 tabelas)
+  schema.sql         → CREATE TABLE statements (11 tabelas, incluindo plugins)
   migrate_json.py    → migração one-time de JSON legado → SQLite
   repositories/      → data access layer (um arquivo por domínio)
-    config_repo.py   → get_all(), get(), set(), set_many()
+    config_repo.py   → get_all(), get(), set(), set_many(), delete_prefix()
     contact_repo.py  → get_or_create(), update(), list_contacts(), get_full_contact()
     message_repo.py  → add(), get_all(), get_context(), get_last(), delete_all()
     usage_repo.py    → add(), global_summary(), by_contact(), detail()
     tag_repo.py      → get_all(), create(), update(), delete(), set_contact_tags()
+    plugin_repo.py   → list_all(), upsert(), set_enabled(), applied_migrations()
+plugins/             → sistema de plugins (core, não confundir com storages/plugins)
+  loader.py          → PluginRegistry, descoberta + importlib + bootstrap
+  manifest.py        → parser plugin.yaml + validação semver
+  migrator.py        → runner SQL com prefixo plugin_<id>_ obrigatório
+  context.py         → ToolContext, PromptContext (passados aos plugins)
+  restart.py         → schedule_restart() — touch sentinela + os._exit
+assets/              → recursos não-código (templates copiados em runtime)
+  plugin_examples/   → plugins de referência (copiados pra storages/plugins/ no 1º boot)
+storages/plugins/    → user-writable, ignorado por .gitignore (preservado em updates)
 web/index.html       → entry point do frontend (HTML + import map)
 web/static/js/       → componentes Preact + HTM (sem build step)
 web/static/vendor/   → libs JS vendorizadas (preact, htm, tailwind)
@@ -61,7 +71,7 @@ Todos os dados persistentes ficam em um único arquivo SQLite: `storages/whatsbo
 
 | Tabela | Descrição |
 |--------|-----------|
-| `config` | Configurações do app (key-value, valores JSON-encoded) |
+| `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
 | `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags) |
 | `observations` | Notas/observações por contato (texto livre) |
 | `messages` | Histórico completo de mensagens (role, content, ts, media) |
@@ -69,6 +79,12 @@ Todos os dados persistentes ficam em um único arquivo SQLite: `storages/whatsbo
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
 | `unread_msg_ids` | IDs de mensagens não lidas por contato |
+| `executions` | Tracking de execuções (webhook → resposta) |
+| `execution_steps` | Passos de cada execução (tool calls, llm_request, etc.) |
+| `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
+| `plugin_migrations` | Versões de SQL migrations já aplicadas, por plugin |
+| `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |
+| `tool_overrides` | Override por-tool (enabled, description, display_label). Row criada automaticamente para cada tool registrada (core + plugin) |
 
 ### Configuração do SQLite
 
@@ -123,15 +139,28 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 | POST | `/api/webhook` | Recebe mensagens do GOWA (webhook) |
 | GET | `/api/contacts?archived=true` | Lista apenas contatos/grupos arquivados |
 | GET | `/api/webhook-payloads?limit=N` | Últimos N payloads raw do webhook (debug, max 50) |
+| GET | `/api/gowa-logs?limit=N` | Tail do `logs/gowa.log` (stdout/stderr do subprocess GOWA, só populado com `WHATSBOT_GOWA_DEBUG=1`) |
+| GET | `/api/tools` | Lista todas as tools registradas (core + plugin) com estado de override |
+| PUT | `/api/tools/{name}` | Atualiza override `{enabled?, description?, display_label?}`; `description=null` reseta |
+| GET | `/api/plugins` | Lista todos os plugins descobertos com status (ativo/inativo/erro) |
+| GET | `/api/plugins/manifest` | Manifest público dos plugins ativos (pro frontend dinâmico) |
+| POST | `/api/plugins/{id}/enable` | Ativa o plugin e dispara restart |
+| POST | `/api/plugins/{id}/disable` | Desativa o plugin e dispara restart |
+| GET/PUT | `/api/plugins/{id}/settings` | Schema Pydantic + values do plugin (settings declarativas) |
+| GET | `/api/plugins/{id}/export` | Baixa o plugin como `.zip` |
+| POST | `/api/plugins/import` | Importa um plugin via upload de `.zip` |
+| DELETE | `/api/plugins/{id}` | Remove a pasta + tabelas `plugin_<id>_*` + settings namespaceadas |
+| POST | `/api/plugins/restart` | Restart manual do servidor |
+| `*` | `/api/plugins/{id}/*` | Endpoints REST mountados pelo plugin (router próprio) |
 | WS | `/ws` | WebSocket para eventos real-time |
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
 Eventos WebSocket: `{"event": "status|qr_update|gowa_status|config_saved", "data": {...}}`
 
-## GOWA REST API (endpoints reais — v8.3.3 multi-device)
+## GOWA REST API (endpoints reais — v8.5.0 multi-device)
 
-IMPORTANTE: O GOWA v8.3.3 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
+IMPORTANTE: O GOWA v8.5.0 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
 
 | Operação | Método | Endpoint | Notas |
 |---|---|---|---|
@@ -157,8 +186,10 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
-- **Tools do LLM**: sempre criar em `agent/tools/`, um arquivo por tool, e exportar em `agent/tools/__init__.py` na lista `ALL_TOOLS`. Nunca definir tools inline no handler
-- **Acesso a dados**: sempre via repositórios em `db/repositories/`. Nunca usar `sqlite3` diretamente fora do módulo `db/`
+- **Tools do LLM (core)**: criar em `agent/tools/<name>.py` com (a) o schema dict (`<NAME>_TOOL = {"type": "function", ...}`) e (b) função `execute(ctx, args) -> str | None`. Adicionar a tupla `(SCHEMA, execute)` em `CORE_TOOLS` em `agent/tools/__init__.py`. O dispatch é genérico via registry em `AgentHandler` — nunca adicionar `if/elif` por nome de tool
+- **Tools de plugin**: viver em `storages/plugins/<id>/tools.py` no formato `CORE_TOOLS = [(schema, executor), ...]` e ser declaradas no manifest. NÃO mexer em `agent/tools/` ou no handler
+- **Contrato de tool (core OU plugin)**: toda tool registrada vira row em `tool_overrides` automaticamente (via `tool_override_repo.ensure` no `_register_tool`). O usuário pode customizar `description` e `display_label` na tela `/tools`. O `name` da tool é IDENTIDADE e NÃO deve ser renomeado depois de release — quebra histórico de `usage` (`call_type=<name>`) e overrides do usuário. Description em código é o **default**: escreva como instrução clara pro LLM, deve funcionar sem customização. O schema também aceita `"display_label": "..."` no dict raiz (fora de `function`) — o handler retira antes de mandar pro LLM, e o valor vira o default mostrado na UI
+- **Acesso a dados**: sempre via repositórios em `db/repositories/`. Nunca usar `sqlite3` diretamente fora do módulo `db/` ou da pasta de um plugin
 
 ## Dados do projeto
 
@@ -169,6 +200,68 @@ Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
 - `statics/senditems/` — mídia enviada pelo operador
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
 - **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` na tabela `contacts`. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
+
+## Sistema de plugins
+
+Plugins são extensões opcionais isoladas em `storages/plugins/<id>/` (volume Docker / pasta separada no Windows, ignorada por updates). Um plugin pode agregar:
+
+- **Tools** para o agente LLM (registradas no mesmo registry das tools core)
+- **Prompt fragments** injetados dinamicamente no system prompt
+- **Endpoints REST** sob `/api/plugins/<id>/...`
+- **Tela Preact** carregada via `import()` ES dinâmico
+- **Migrations SQL** com prefixo `plugin_<id>_` obrigatório
+- **Settings declarativas** via Pydantic (form auto-gerado pela UI)
+- **Broadcast WebSocket** via `from plugins.context import broadcast; broadcast("evento", {...})` — thread-safe, fire-and-forget, ws_manager + loop são injetados no startup do server. Use pra empurrar atualizações em tempo real à tela do plugin (a tela escuta `/ws` e filtra pelo nome do evento).
+
+### Layout de um plugin
+
+```
+storages/plugins/<id>/
+├── plugin.yaml              # manifest (id, name, version, whatsbot_api_version, entry, screens)
+├── __init__.py
+├── tools.py                 # CORE_TOOLS = [(schema, executor), ...]   (opcional)
+├── prompts.py               # PROMPT_FRAGMENTS = [callable, ...]        (opcional)
+├── routes.py                # router = APIRouter()                       (opcional)
+├── settings.py              # class Settings(BaseModel) — Pydantic       (opcional)
+├── migrations/
+│   └── 001_initial.sql      # tabelas com prefixo plugin_<id>_
+└── static/
+    └── <id>.js              # default-export componente Preact
+```
+
+### Lifecycle
+
+1. **Bootstrap**: na 1ª execução, `plugins.loader.bootstrap_initial_plugins()` copia `assets/plugin_examples/*` para `storages/plugins/` se a pasta estiver vazia (Windows e Docker).
+2. **Discovery**: `discover_and_load(plugins_dir)` escaneia o filesystem, parseia cada manifest, faz `upsert` na tabela `plugins`.
+3. **Migrations**: para plugins com `enabled=1`, `run_pending_migrations` aplica SQL files em ordem numérica. Naming `NNN_descricao.sql`. O migrator valida regex que toda `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX` use prefixo `plugin_<id>_`.
+4. **Import**: `importlib.spec_from_file_location` registra o pacote como `whatsbot_plugins.<id>`. Submódulos declarados no `entry:` são importados sob demanda.
+5. **Wiring**: `agent_handler.register_plugin_tools/prompts` adicionam ao registry. `app.include_router` monta o router em `/api/plugins/<id>`. `app.mount` serve `static/` em `/plugins/<id>/static`. `screens[].path` é registrado como rota SPA dinâmica.
+6. **Toggle**: enable/disable atualiza a tabela `plugins` e dispara `schedule_restart` (`os._exit(0)` após delay; supervisor relança — Coolify/Docker `restart: unless-stopped` ou launcher do EXE).
+
+### Settings declarativas (Pydantic Valves)
+
+Plugin declara `class Settings(BaseModel)` em `settings.py`. O endpoint `GET /api/plugins/<id>/settings` retorna `model_json_schema()` + valores atuais; `PUT` valida via Pydantic e persiste em `config_repo` com prefixo `plugin.<id>.<field>`. Frontend (`PluginSettingsForm.js`) renderiza form genérico para string/int/float/bool/enum.
+
+### Frontend dinâmico
+
+`/api/plugins/manifest` retorna apenas plugins carregados com seus `screens[]`. `app.js` faz fetch no boot, popula `pluginScreens`, mostra entradas no `GearMenu` e renderiza via `PluginScreen` que faz `import(screen.component)` dinâmico. Plugin component recebe `apiBase = "/api/plugins/<id>"` como prop. Importmap em `web/index.html` cobre `preact`, `preact/hooks`, `htm` — plugin usa os mesmos sem bundle.
+
+### Convenções obrigatórias
+
+- **`id`**: snake_case, regex `^[a-z][a-z0-9_]{0,31}$`. Vira o prefixo de tabela e o nome do pacote Python.
+- **Tabelas**: SEMPRE `plugin_<id>_<nome>`. O migrator rejeita o contrário com erro claro.
+- **`whatsbot_api_version`**: range semver no manifest (ex: `">=1.0,<2.0"`). Versão atual em `plugins/manifest.WHATSBOT_API_VERSION`.
+- **Permissions**: declaradas no manifest mas **não enforced no MVP** — informativo apenas.
+- **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
+
+### Criar um plugin novo
+
+Use o slash command `/new-plugin` no Claude Code. O comando lê os arquivos de referência, pergunta requisitos (id, telas, tools, tabelas, settings) e gera a estrutura completa em `storages/plugins/<id>/` sem tocar no core. Veja `.claude/commands/new-plugin.md`.
+
+### Importar/exportar
+
+- Export: `GET /api/plugins/<id>/export` retorna um `.zip` da pasta (excluindo `__pycache__/` e arquivos `.db`).
+- Import: `POST /api/plugins/import` (multipart) valida o `plugin.yaml` na raiz, checa colisão de `id` e path traversal, extrai em `storages/plugins/<id>/`. Plugin importado fica `enabled=0` — usuário ativa pela UI.
 
 ## Migração de dados legados
 
@@ -252,5 +345,13 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **run_dev.bat mata processos**: o bat já executa `taskkill` para gowa.exe e uvicorn.exe antes de iniciar
 - **GOWA `/chats` limit máximo**: `GET /chats?limit=N` retorna HTTP 400 para valores acima de ~200. Usar `limit=100` como máximo seguro
 - **Archive status é chat-level**: o webhook do GOWA **não** inclui campo de archive no payload. Para saber se um chat é arquivado, consultar `GET /chats` e verificar o campo `archived` no item com o `jid` correspondente
+- **Debug do subprocess GOWA**: por padrão o stdout/stderr do GOWA vão para `DEVNULL` (sem custo). Para diagnosticar mensagens descartadas (payloads vazios, tipos não decodificados, templates HSM da Cloud API, etc.), setar a env `WHATSBOT_GOWA_DEBUG=1` (no Coolify ou outro ambiente) e reiniciar o container. Com a flag ativa, o GOWA é iniciado com `--debug=true` e os logs são gravados em `logs/gowa.log` (truncado quando passa de ~10 MB). Acessível via `GET /api/gowa-logs?limit=N` (default 500, max 5000). A resposta inclui `debug_enabled`, `log_path`, `size` e `lines[]`. Desligar setando `WHATSBOT_GOWA_DEBUG=0` ou removendo a variável + reiniciando
+- **Mensagens HSM via Cloud API (linked device limitation)**: contas Business via WhatsApp Cloud API enviam mensagens template (`<hsm tag="..."/>`, ex: Mercado Livre, OTP, notificações). Por design do WhatsApp, esses templates **não são entregues com conteúdo para linked devices** — só para o device primário. O GOWA recebe um `placeholderMessage` com `type: MASK_LINKED_DEVICES` (sem body/media), e o webhook chega só com metadata (`chat_id`, `from`, `id`, `timestamp`). Não é bug — é limitação estrutural. Para confirmar, ativar `WHATSBOT_GOWA_DEBUG=1` e procurar `placeholderMessage` ou `<hsm tag=` em `/api/gowa-logs`
 - **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
 - **Auto-criação do banco**: se `storages/whatsbot.db` não existir, é criado automaticamente na inicialização com o schema completo
+- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Hoje o único bundled é `lembretes`.
+- **Restart de plugin requer supervisor**: `enable`/`disable` chama `os._exit(0)` após um delay curto. Em Docker, `restart: unless-stopped` (compose) faz o container relançar; em dev, `restart.py` toca `server/_reload_trigger.py` (`.py` dentro de um `--reload-dir`, casa com o include default `*.py` do uvicorn) — o watchfiles reinicia o worker antes do `os._exit` rodar. O arquivo é regenerado em runtime e está no `.gitignore`. Em EXE Windows, o `update.py` relança. Sem supervisor, o servidor cai e não volta sozinho.
+- **Prefixo de tabela enforced**: o migrator usa regex em `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX`/`DROP TABLE`/`DROP INDEX` e RECUSA migration que tente criar objeto fora do prefixo `plugin_<id>_`. Erro mostra qual nome violou. Usar comentários SQL `--` ou `/* */` é OK; o migrator os strip-a antes da validação.
+- **Tool name é global**: se um plugin registra uma tool com nome já existente (core ou outro plugin), o registry loga warning e ignora a duplicata. Convenção: nomes específicos como `<id>_<verbo>` (ex: `orders_create`).
+- **Import dinâmico de plugin JS**: o componente é carregado via `import(screen.component)` ES nativo. O path no manifest precisa começar com `/plugins/<id>/static/...` (servido pelo mount estático). CSP em `server/app.py` permite `'self'`, então funciona sem mudança.
+- **Plugin com erro de carga**: se importação falha, o erro vai pra coluna `load_error` na tabela `plugins`, aparece no card da UI, e o plugin é pulado — o app sobe normalmente. Não há crash em cascata.

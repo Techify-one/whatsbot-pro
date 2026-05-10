@@ -101,3 +101,29 @@ CREATE TABLE IF NOT EXISTS execution_steps (
     ts           REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_step_exec ON execution_steps(execution_id);
+
+CREATE TABLE IF NOT EXISTS plugins (
+    id            TEXT    PRIMARY KEY,
+    version       TEXT    NOT NULL DEFAULT '',
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    installed_at  REAL    NOT NULL,
+    updated_at    REAL    NOT NULL,
+    load_error    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS plugin_migrations (
+    plugin_id  TEXT    NOT NULL,
+    version    INTEGER NOT NULL,
+    applied_at REAL    NOT NULL,
+    PRIMARY KEY (plugin_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS tool_overrides (
+    name           TEXT    PRIMARY KEY,
+    plugin_id      TEXT,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    description    TEXT,
+    display_label  TEXT,
+    updated_at     REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_overrides_plugin ON tool_overrides(plugin_id);

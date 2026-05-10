@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-ARG GOWA_VERSION=8.3.3
+ARG GOWA_VERSION=8.5.0
 ARG TARGETARCH=amd64
 
 ENV WHATSBOT_DOCKER=1
@@ -27,9 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code only
 COPY agent/ agent/
+COPY assets/ assets/
 COPY config/ config/
 COPY gowa/ gowa/
 COPY db/ db/
+COPY plugins/ plugins/
 COPY server/ server/
 COPY web/ web/
 COPY main.py .

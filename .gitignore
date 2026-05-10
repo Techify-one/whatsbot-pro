@@ -25,3 +25,7 @@ build/
 
 # Docker persistent data
 data/
+
+# Plugin restart trigger (touched by plugins.restart at runtime)
+server/_reload_trigger.py
+.reload_sentinel

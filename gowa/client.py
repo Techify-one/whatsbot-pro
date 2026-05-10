@@ -44,7 +44,7 @@ class GOWASendError(Exception):
 
 
 class GOWAClient:
-    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.3.3)."""
+    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.5.0)."""
 
     def __init__(self, port: int = 3000, timeout: float = 15.0):
         self.base_url = f"http://127.0.0.1:{port}"
@@ -180,7 +180,7 @@ class GOWAClient:
     def get_qr_code(self) -> bytes | None:
         """Get QR code image for WhatsApp login.
 
-        GOWA v8.3.3 returns JSON with a qr_link URL pointing to a PNG image.
+        GOWA v8.5.0 returns JSON with a qr_link URL pointing to a PNG image.
         Returns None if already logged in or on error.
         """
         if not self._device_ready:
@@ -337,7 +337,7 @@ class GOWAClient:
         """Get list of chats."""
         result = self._request("GET", f"/chats?limit={limit}")
         if result and isinstance(result, dict):
-            # v8.3.3 nests list under results.data
+            # v8.5.0 nests list under results.data
             results = result.get("results", {})
             if isinstance(results, dict):
                 return results.get("data", []) or []

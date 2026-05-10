@@ -201,11 +201,16 @@ class ContactMemory:
         """
         recent = message_repo.get_context(self.id, limit)
 
-        # Find the index of the last user image message
+        # Find the index of the last user image message that still needs the
+        # binary inlined.  If the content already has a textual description
+        # (added by the image_transcription pipeline), keep it as text — the
+        # main LLM may not support image input.
         last_image_idx = -1
         for i in range(len(recent) - 1, -1, -1):
-            if recent[i].get("media_type") == "image" and recent[i]["role"] == "user":
-                last_image_idx = i
+            m = recent[i]
+            if m.get("media_type") == "image" and m["role"] == "user":
+                if "[Descrição da imagem]:" not in (m.get("content") or ""):
+                    last_image_idx = i
                 break
 
         result: list[dict] = []
