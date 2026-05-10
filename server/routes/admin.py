@@ -19,6 +19,7 @@ from db import engine as engine_module
 from db.migration_postgres import (
     MigrationProgress,
     migrate_sqlite_to_postgres,
+    repair_postgres_sequences,
 )
 from plugins.restart import schedule_restart
 from server.helpers import _err, _ok
@@ -134,6 +135,19 @@ def register_routes(app, deps):
     async def migrate_status():
         """Polling fallback for clients that don't have a live WebSocket."""
         return _ok(_migration_state)
+
+    @app.post("/api/admin/repair-sequences")
+    async def repair_sequences():
+        """Re-anchor every Postgres sequence to MAX(<pk>). No-op on SQLite.
+
+        Useful when data was imported via tools that don't bump sequences
+        (the migration helper already runs this, but it's exposed as a
+        manual button for recovery scenarios).
+        """
+        if not engine_module.is_postgres():
+            return _err("Banco atual não é Postgres — sequências são exclusivas dele.", status=400)
+        fixed = await asyncio.to_thread(repair_postgres_sequences, engine_module.get_engine())
+        return _ok({"repaired": fixed, "count": len(fixed)})
 
 
 def _redact(url: str) -> str:
