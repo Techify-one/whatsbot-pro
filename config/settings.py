@@ -25,6 +25,11 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "WHATSBOT_BATCH_DELAY": ("message_batch_delay", float),
 }
 
+# Reverse lookup: config_key -> (env_key, cast). Used by get() to apply env overrides on-demand.
+_ENV_OVERRIDES_BY_KEY: dict[str, tuple[str, Callable[[str], Any]]] = {
+    cfg_key: (env_key, cast) for env_key, (cfg_key, cast) in _ENV_OVERRIDES.items()
+}
+
 DEFAULT_CONFIG = {
     "openrouter_api_key": "",
     "model": "deepseek/deepseek-v4-pro",
@@ -60,54 +65,73 @@ DEFAULT_CONFIG = {
 }
 
 
+_MISSING = object()
+
+
 class Settings:
     def __init__(self):
         self.data_dir = get_data_dir()
         self.logs_dir = self.data_dir / "logs"
         self.logs_dir.mkdir(exist_ok=True)
-        self._config: dict = {}
         self.load()
 
     def load(self):
-        self._config = config_repo.get_all()
+        """Seed missing defaults into the DB. No in-memory cache is kept — reads are write-through to config_repo."""
+        current = config_repo.get_all()
         # Migrate legacy audio_transcription_enabled → audio_transcription_mode
-        if "audio_transcription_enabled" in self._config:
-            legacy_enabled = self._config.pop("audio_transcription_enabled")
-            if "audio_transcription_mode" not in self._config:
-                self._config["audio_transcription_mode"] = "received" if legacy_enabled else "off"
+        if "audio_transcription_enabled" in current:
+            legacy_enabled = current.pop("audio_transcription_enabled")
+            if "audio_transcription_mode" not in current:
+                migrated = "received" if legacy_enabled else "off"
+                config_repo.set("audio_transcription_mode", migrated)
+                current["audio_transcription_mode"] = migrated
             config_repo.delete_prefix("audio_transcription_enabled")
-        # Merge defaults for missing keys
-        added = False
-        for key, value in DEFAULT_CONFIG.items():
-            if key not in self._config:
-                self._config[key] = value
-                added = True
-        # Persist on first run or when new defaults were added
-        if added or not self._config:
-            self.save()
-        self._apply_env_overrides()
+        # Persist defaults for any key missing in the DB
+        missing = {k: v for k, v in DEFAULT_CONFIG.items() if k not in current}
+        if missing:
+            config_repo.set_many(missing)
 
-    def _apply_env_overrides(self):
-        """Override config values with environment variables when present."""
-        for env_key, (config_key, cast) in _ENV_OVERRIDES.items():
-            value = os.environ.get(env_key)
-            if value:
-                try:
-                    self._config[config_key] = cast(value)
-                except (ValueError, TypeError):
-                    pass
+    @staticmethod
+    def _env_override(key: str):
+        """Return env-overridden value for ``key`` if present, else ``_MISSING``."""
+        mapping = _ENV_OVERRIDES_BY_KEY.get(key)
+        if mapping is None:
+            return _MISSING
+        env_key, cast = mapping
+        raw = os.environ.get(env_key)
+        if not raw:
+            return _MISSING
+        try:
+            return cast(raw)
+        except (ValueError, TypeError):
+            return _MISSING
 
     def save(self):
-        config_repo.set_many(self._config)
+        """No-op. Kept for backward compatibility — writes are write-through via set()/__setitem__."""
+        return
 
     def get(self, key: str, default=None):
-        return self._config.get(key, default)
+        override = self._env_override(key)
+        if override is not _MISSING:
+            return override
+        value = config_repo.get(key, _MISSING)
+        if value is _MISSING:
+            return DEFAULT_CONFIG.get(key, default)
+        return value
 
     def set(self, key: str, value):
-        self._config[key] = value
+        config_repo.set(key, value)
 
     def __getitem__(self, key):
-        return self._config[key]
+        override = self._env_override(key)
+        if override is not _MISSING:
+            return override
+        value = config_repo.get(key, _MISSING)
+        if value is _MISSING:
+            if key in DEFAULT_CONFIG:
+                return DEFAULT_CONFIG[key]
+            raise KeyError(key)
+        return value
 
     def __setitem__(self, key, value):
-        self._config[key] = value
+        config_repo.set(key, value)

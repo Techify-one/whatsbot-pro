@@ -85,6 +85,8 @@ Para trocar para Postgres no Windows: Settings → Banco → cola a URL `postgre
 
 Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arquivo `database.json` é ignorado quando a env está presente.
 
+**Docker Swarm com múltiplas réplicas (ou rolling update entre tasks): `DATABASE_URL` apontando para Postgres compartilhado é obrigatório.** Volumes nomeados em Swarm são locais por nó, não compartilhados entre réplicas — SQLite local resulta em DBs divergentes (escritas vão pra uma réplica, leituras vêm de outra). Coolify e single-container não sofrem disso.
+
 ### Tabelas
 
 | Tabela | Descrição |

@@ -163,8 +163,8 @@ export function DatabaseSettings({ onNotify }) {
           </div>
         ` : info ? html`
           <div class="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-900">
-            Já está rodando em Postgres. Para voltar a SQLite, edite manualmente
-            <code>storages/database.json</code> e reinicie.
+            Já está rodando em Postgres. Para voltar a SQLite, edite manualmente: 
+            <code> storages/database.json</code> e reinicie.
           </div>
         ` : null}
 
