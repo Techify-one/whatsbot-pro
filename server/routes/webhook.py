@@ -1194,6 +1194,15 @@ def register_routes(app, deps):
             "msg_id": msg_id,
         })
 
+        # A real message arriving from the contact proves they finished typing
+        # *something*. WhatsApp doesn't reliably emit `paused` for linked devices,
+        # so without this the orchestrator would block on a stale `composing` flag
+        # until the 25s stale timeout. Clear here; a *new* `composing` event for
+        # the next message will re-set `active=True` with a fresh last_ts.
+        ts = state.typing_state.get(phone)
+        if ts and ts.get("active"):
+            state.typing_state[phone] = {**ts, "active": False}
+
         # Schedule (or restart) the typing-aware orchestrator. This cancels the current
         # cycle if it's not in the SEND phase yet, so a newly arrived message can be
         # bundled into the same batch (and any in-flight LLM call is aborted).
