@@ -456,12 +456,13 @@ class AgentHandler:
             "foram enviadas por um atendente real, não por você. Considere o contexto "
             "mas não imite o estilo do operador."
             "\n\nMensagens marcadas com '[Nota privada do operador]' são notas "
-            "internas do painel — o contato NUNCA as viu. Quando uma nota começar "
-            "com '@ia', trate-a como instrução direta do operador para você executar: "
-            "use as tools disponíveis (ex.: criar lembrete, salvar informações do "
-            "contato, etc.) se a instrução pedir, e redija a resposta ao contato. "
-            "Caso a nota NÃO comece com '@ia', use-a apenas como contexto, sem citar, "
-            "mencionar ou parafrasear em respostas ao contato."
+            "internas do painel — o contato NUNCA as viu. Quando o operador "
+            "acionar você sobre uma nota (via toggle 'IA lê' no painel), trate-a "
+            "como instrução direta para executar: use as tools disponíveis (ex.: "
+            "criar lembrete, salvar informações do contato, etc.) se a instrução "
+            "pedir, e redija a resposta ao contato. Caso contrário, use as notas "
+            "apenas como contexto, sem citar, mencionar ou parafrasear em "
+            "respostas ao contato."
         )
 
         # Plugin-contributed prompt fragments. Each fragment is a callable that

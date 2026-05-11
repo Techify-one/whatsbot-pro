@@ -1,8 +1,9 @@
 """Plugin de exemplo: adiciona assinatura ao final de cada parte da resposta.
 
 Filter interceptive — recebe o texto, devolve modificado. ``filter.reply.part``
-é disparado pela IA, pelo operador manual e pelo fluxo @ia privado; aqui
-filtramos pelo ``ctx.extras["source"]`` pra escolher o que assinar.
+é disparado pela IA, pelo operador manual e pelo fluxo da IA acionada por
+nota privada; aqui filtramos pelo ``ctx.extras["source"]`` pra escolher o
+que assinar.
 
 Texto da assinatura e o flag de operador vêm de ``Settings`` (settings.py) e
 podem ser editados na tela /plugins → Auto Signature.
