@@ -1177,11 +1177,15 @@ def register_routes(app, deps):
         # `is_group`/`media_type` etc.
         emit_event("message.received", parsed_msg)
 
-        # For group messages without mention: save to history but don't trigger AI
+        # For group messages without mention: save to history but don't trigger AI.
+        # Persist media_type/media_path so the chat panel can render the audio/image/document
+        # player on reload, the same way it does for private chats.
         if skip_ai:
             await asyncio.to_thread(
                 agent_handler._get_contact(phone).add_message,
-                "user", display_text, msg_id=msg_id)
+                "user", display_text,
+                media_type=media_type, media_path=media_path,
+                msg_id=msg_id)
             return _ok({"status": "group_no_mention"})
 
         # Batch messages — accumulate and wait before responding
