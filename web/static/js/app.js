@@ -288,10 +288,10 @@ function App({ onLogout, hasPassword }) {
     : null;
 
   return html`
-    <div class="h-screen flex flex-col relative">
+    <div class="h-dvh overflow-hidden flex flex-col relative">
       <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} />
 
-      <main class="flex-1 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
+      <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${activePluginScreen
           ? html`<div class="max-w-5xl mx-auto p-4">
               <${PageHeader} title=${activePluginScreen.title} onBack=${() => setTab('contacts')} />
