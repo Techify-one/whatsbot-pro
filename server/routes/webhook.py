@@ -1181,11 +1181,47 @@ def register_routes(app, deps):
         # Persist media_type/media_path so the chat panel can render the audio/image/document
         # player on reload, the same way it does for private chats.
         if skip_ai:
+            # Transcribe audio/describe image even though the AI won't reply, so the
+            # transcription card still appears in the panel — matches private-chat UX.
+            audio_mode = settings.get("audio_transcription_mode", "received")
+            transcription = ""
+            try:
+                if audio_path and audio_mode in ("received", "both"):
+                    transcription = await asyncio.to_thread(
+                        agent_handler.transcribe_audio, audio_path, phone)
+                elif image_path and settings.get("image_transcription_enabled", True):
+                    transcription = await asyncio.to_thread(
+                        agent_handler.describe_image, image_path, phone)
+            except Exception as e:
+                logger.error("[Webhook] Group transcription error for %s: %s", phone, e)
+
+            saved_text = display_text
+            if transcription and audio_path:
+                saved_text = f"{display_text}\n[Transcrição do áudio]: {transcription}" if display_text else f"[Transcrição do áudio]: {transcription}"
+            elif transcription and image_path:
+                desc_prefix = f"[Descrição da imagem]: {transcription}"
+                saved_text = f"{desc_prefix}\n{display_text}" if display_text else desc_prefix
+
+            contact_obj = agent_handler._get_contact(phone)
             await asyncio.to_thread(
-                agent_handler._get_contact(phone).add_message,
-                "user", display_text,
+                contact_obj.add_message,
+                "user", saved_text,
                 media_type=media_type, media_path=media_path,
                 msg_id=msg_id)
+
+            if transcription:
+                if audio_path:
+                    await _deliver_audio_transcription(phone, contact_obj, transcription)
+                else:
+                    await asyncio.to_thread(contact_obj.add_message, "transcription", transcription)
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone,
+                        "message": {
+                            "role": "transcription",
+                            "content": transcription,
+                            "ts": time.time(),
+                        },
+                    })
             return _ok({"status": "group_no_mention"})
 
         # Batch messages — accumulate and wait before responding
