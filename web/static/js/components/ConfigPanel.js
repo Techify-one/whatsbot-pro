@@ -221,7 +221,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <${Section} title="API e Modelos">
         <!-- API Key -->
         <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">API Key OpenRouter</label>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Chave de API Techify</label>
           <div class="flex gap-2">
             <input
               type="password"

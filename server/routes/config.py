@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from config.settings import LLM_API_BASE_URL
 from server.auth import generate_salt, hash_password
 from server.helpers import _ok, _err, _mask_key
 from plugins.events import emit as emit_event, emit_with_filter
@@ -129,13 +130,13 @@ def register_routes(app, deps):
 
     @app.get("/api/models")
     async def list_models():
-        """Return OpenRouter model list (cached for 10 min)."""
+        """Return OpenRouter-compatible model list (cached for 10 min)."""
         now = time.time()
         if _models_cache["data"] and now - _models_cache["fetched_at"] < _MODELS_CACHE_TTL:
             return _ok(_models_cache["data"])
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get("https://openrouter.ai/api/v1/models")
+                resp = await client.get(f"{LLM_API_BASE_URL}/models")
                 resp.raise_for_status()
                 raw = resp.json()
             models = []

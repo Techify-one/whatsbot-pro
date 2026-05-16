@@ -13,6 +13,7 @@ from openai import OpenAI, AsyncOpenAI
 
 from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import CORE_TOOLS
+from config.settings import LLM_API_BASE_URL
 from db.repositories import message_repo, contact_repo, tool_override_repo
 from agent.execution import track_step
 from plugins.context import ToolContext, PromptContext
@@ -266,7 +267,7 @@ class AgentHandler:
     def _get_client(self) -> OpenAI:
         if self._client is None or self._client.api_key != self.api_key:
             self._client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
+                base_url=LLM_API_BASE_URL,
                 api_key=self.api_key,
             )
         return self._client
@@ -274,7 +275,7 @@ class AgentHandler:
     def _get_async_client(self) -> AsyncOpenAI:
         if self._async_client is None or self._async_client.api_key != self.api_key:
             self._async_client = AsyncOpenAI(
-                base_url="https://openrouter.ai/api/v1",
+                base_url=LLM_API_BASE_URL,
                 api_key=self.api_key,
             )
         return self._async_client
@@ -945,7 +946,7 @@ class AgentHandler:
         """Test if an API key is valid."""
         try:
             client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
+                base_url=LLM_API_BASE_URL,
                 api_key=api_key,
             )
             client.chat.completions.create(

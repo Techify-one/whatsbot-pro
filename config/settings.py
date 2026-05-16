@@ -12,6 +12,13 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+# LLM API base URL — OpenRouter-compatible proxy. Override via the
+# LLM_API_BASE_URL env var to point back at OpenRouter or another proxy.
+LLM_API_BASE_URL = os.environ.get(
+    "LLM_API_BASE_URL", "https://llm.techify.one/api/v1"
+).rstrip("/")
+
+
 _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "OPENROUTER_API_KEY": ("openrouter_api_key", str),
     "WHATSBOT_MODEL": ("model", str),

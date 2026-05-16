@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from config.settings import LLM_API_BASE_URL
 from db.repositories import usage_repo, contact_repo
 from server.helpers import _ok
 from server.routes.config import get_models_cache
@@ -18,7 +19,7 @@ def _get_model_pricing(model_id: str) -> tuple[float, float]:
     _models_cache = get_models_cache()
     if not _models_cache["data"]:
         try:
-            resp = httpx.get("https://openrouter.ai/api/v1/models", timeout=15)
+            resp = httpx.get(f"{LLM_API_BASE_URL}/models", timeout=15)
             resp.raise_for_status()
             raw = resp.json()
             models = []
