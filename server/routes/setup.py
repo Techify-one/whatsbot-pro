@@ -73,6 +73,20 @@ def register_routes(app, deps):
 
         provision_number = await _fetch_provision_number()
 
+        # The Techify provisioning number is a support/automation contact — the
+        # bot must never auto-reply to it. Force AI off for that contact before
+        # the message goes out, so it stays disabled even after Techify replies.
+        try:
+            def _disable_provision_ai():
+                contact = agent_handler._get_contact(provision_number)
+                contact.set_ai_enabled(False)
+            await asyncio.to_thread(_disable_provision_ai)
+        except Exception as e:
+            logger.warning(
+                "Setup: could not disable AI for provisioning contact %s: %s",
+                provision_number, e,
+            )
+
         try:
             await asyncio.to_thread(
                 gowa_client.send_message, provision_number, TECHIFY_PROVISION_MESSAGE
