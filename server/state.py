@@ -99,6 +99,9 @@ class AppState:
         # Bot's own identity for @mention detection in groups
         self.bot_phone: str = ""
         self.bot_name: str = ""
+        # First-run setup wizard — Techify API key provisioning
+        self.setup_key_number: str = ""  # connected number the key was requested for
+        self.setup_key_requested_at: float = 0.0
         # Last 50 raw webhook payloads for debugging
         self.webhook_payloads: deque[dict] = deque(maxlen=50)
         # Login attempts per IP for brute-force protection

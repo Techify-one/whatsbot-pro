@@ -32,3 +32,6 @@ data/
 # Plugin restart trigger (touched by plugins.restart at runtime)
 server/_reload_trigger.py
 .reload_sentinel
+
+# Planos de implementação (local, não versionado)
+PLANO_setup_wizard.md

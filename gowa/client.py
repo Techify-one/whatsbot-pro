@@ -175,6 +175,44 @@ class GOWAClient:
             return results.get("is_logged_in", results.get("is_connected", False))
         return False
 
+    def get_own_number(self) -> str:
+        """Best-effort: the connected account's own phone number (digits only).
+
+        GOWA does not expose the logged-in number consistently, so we probe
+        both /app/status and /devices for anything resembling a JID and
+        extract its user part. Returns "" if it can't be determined.
+        """
+        def _extract(value: object) -> str:
+            text = str(value or "")
+            if "@" not in text:
+                return ""
+            return text.split("@")[0].split(":")[0].strip()
+
+        try:
+            status = self.get_status()
+            if status and isinstance(status, dict):
+                results = status.get("results", status.get("data", status))
+                if isinstance(results, dict):
+                    for key in ("jid", "device", "phone", "id", "user"):
+                        num = _extract(results.get(key))
+                        if num:
+                            return num
+        except Exception as e:
+            logger.debug("get_own_number: /app/status probe failed: %s", e)
+
+        try:
+            for d in self.list_devices():
+                if not isinstance(d, dict):
+                    continue
+                for key in ("device", "jid", "phone", "id"):
+                    num = _extract(d.get(key))
+                    if num:
+                        return num
+        except Exception as e:
+            logger.debug("get_own_number: /devices probe failed: %s", e)
+
+        return ""
+
     # ── QR Code / Login ──────────────────────────────────────────────
 
     def get_qr_code(self) -> bytes | None:

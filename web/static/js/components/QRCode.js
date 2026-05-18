@@ -5,7 +5,7 @@ import { fetchQrBlob, reconnect, logout, refreshQr } from '../services/api.js';
 
 const html = htm.bind(h);
 
-function formatPhone(phone) {
+export function formatPhone(phone) {
   if (!phone) return '';
   if (phone.length === 13 && phone.startsWith('55')) {
     return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;

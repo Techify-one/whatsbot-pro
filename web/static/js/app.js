@@ -10,6 +10,7 @@ import { LoginScreen } from './components/LoginScreen.js';
 import { PluginsManager } from './components/PluginsManager.js';
 import { PluginScreen } from './components/PluginScreen.js';
 import { ToolsManager } from './components/ToolsManager.js';
+import { SetupWizard } from './components/SetupWizard.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
 import { checkAuth, authHeaders } from './services/api.js';
@@ -84,7 +85,7 @@ function MenuItem({ active, href, onClick, icon, children }) {
   `;
 }
 
-function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout }) {
+function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, onReopenSetup }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -138,6 +139,15 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout }) {
               >${s.title}</${MenuItem}>
             `)}
           ` : null}
+
+          <div class="border-t border-wa-border my-1"></div>
+          <button
+            onClick=${() => { onReopenSetup(); close(); }}
+            class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-2 text-wa-text"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>
+            Refazer configuração
+          </button>
 
           <div class="border-t border-wa-border my-1"></div>
           <${MenuItem} active=${tab === 'tools'} href=${CORE_TAB_PATHS.tools} onClick=${() => { onTabChange('tools'); close(); }}
@@ -196,6 +206,7 @@ function App({ onLogout, hasPassword }) {
   const [messagesRead, setMessagesRead] = useState(null);
   const [messageStatus, setMessageStatus] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
+  const [wizardManual, setWizardManual] = useState(false);
 
   // Fetch the public plugin manifest once at boot. Errors are non-fatal —
   // the core app keeps running even if plugins fail to load.
@@ -282,6 +293,21 @@ function App({ onLogout, hasPassword }) {
     `;
   }
 
+  // First-run setup wizard — takes over the whole screen until completed.
+  // Also reopenable on demand via the gear menu ("Refazer configuração").
+  const needsSetup = config && config.setup_completed !== true;
+  if (needsSetup || wizardManual) {
+    return html`<${SetupWizard}
+      status=${status}
+      qrAvailable=${qrAvailable}
+      qrVersion=${qrVersion}
+      config=${config}
+      canClose=${!needsSetup}
+      onClose=${() => setWizardManual(false)}
+      onComplete=${async () => { await save({ setup_completed: true }); setWizardManual(false); }}
+    />`;
+  }
+
   // Resolve plugin screen for the current tab id, if any.
   const activePluginScreen = (tab && tab.startsWith('plugin:'))
     ? pluginScreens.find(s => pluginTabId(s) === tab)
@@ -289,7 +315,7 @@ function App({ onLogout, hasPassword }) {
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} onReopenSetup=${() => setWizardManual(true)} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${activePluginScreen

@@ -52,6 +52,7 @@ def register_routes(app, deps):
             "max_executions": settings.get("max_executions", 200),
             "default_ai_enabled": settings.get("default_ai_enabled", True),
             "has_password": bool(settings.get("web_password_hash", "")),
+            "setup_completed": settings.get("setup_completed", False),
         })
 
     @app.put("/api/config")
@@ -65,7 +66,7 @@ def register_routes(app, deps):
             "split_messages", "split_message_delay",
             "transfer_alert_enabled", "transfer_alert_duration",
             "group_reply_mode", "bot_phone", "bot_name",
-            "max_executions", "default_ai_enabled",
+            "max_executions", "default_ai_enabled", "setup_completed",
         }
         keys_changed = []
         for key, value in body.items():

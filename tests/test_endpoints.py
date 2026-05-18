@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure project root is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +89,7 @@ mock_gowa_client.send_chat_presence = MagicMock(return_value=None)
 mock_gowa_client.mark_as_read = MagicMock(return_value=None)
 mock_gowa_client.reconnect = MagicMock(return_value=None)
 mock_gowa_client.logout = MagicMock(return_value=None)
+mock_gowa_client.get_own_number = MagicMock(return_value="5511999990001")
 
 # Create real Settings and AgentHandler (backed by test DB)
 settings = Settings()
@@ -180,6 +181,7 @@ check("GET /api/config -> has API key field", "openrouter_api_key" in data)
 check("GET /api/config -> has system_prompt", "system_prompt" in data)
 check("GET /api/config -> has split_messages", "split_messages" in data)
 check("GET /api/config -> has has_password", "has_password" in data)
+check("GET /api/config -> has setup_completed", "setup_completed" in data)
 
 r = client.put("/api/config", json={"auto_reply": False})
 check("PUT /api/config -> 200", r.status_code == 200)
@@ -190,6 +192,13 @@ check("PUT /api/config -> auto_reply persisted", r.json()["data"]["auto_reply"] 
 
 # Restore
 client.put("/api/config", json={"auto_reply": True})
+
+# setup_completed flag round-trips through PUT
+r = client.put("/api/config", json={"setup_completed": True})
+check("PUT /api/config (setup_completed) -> 200", r.status_code == 200)
+r = client.get("/api/config")
+check("PUT /api/config -> setup_completed persisted", r.json()["data"]["setup_completed"] is True)
+client.put("/api/config", json={"setup_completed": False})  # restore
 
 # Test key (will fail since no real API)
 r = client.post("/api/config/test-key", json={"api_key": ""})
@@ -541,6 +550,63 @@ check("POST /whatsapp/reconnect -> gowa called", mock_gowa_client.reconnect.call
 r = client.post("/api/whatsapp/logout")
 check("POST /whatsapp/logout -> 200", r.status_code == 200)
 check("POST /whatsapp/logout -> gowa called", mock_gowa_client.logout.called)
+
+# ═══════════════════════════════════════════════════════════════════
+#  20b. Setup Wizard
+# ═══════════════════════════════════════════════════════════════════
+section("Setup Wizard")
+
+
+class _FakeTechifyResp:
+    """Stands in for an httpx Response from the Techify provisioning route."""
+
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _fake_async_client(resp):
+    """Build a patch target mimicking httpx.AsyncClient as an async CM."""
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=fake_client)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
+# request-key: sends the provisioning WhatsApp message and arms polling
+_send_calls_before = mock_gowa_client.send_message.call_count
+r = client.post("/api/setup/request-key")
+check("POST /api/setup/request-key -> 200", r.status_code == 200)
+check("POST /api/setup/request-key -> returns number",
+      r.json()["data"].get("number") == "5511999990001")
+check("POST /api/setup/request-key -> WhatsApp message sent",
+      mock_gowa_client.send_message.call_count == _send_calls_before + 1)
+
+# key-status: account not ready yet
+with patch("server.routes.setup.httpx.AsyncClient",
+           _fake_async_client(_FakeTechifyResp(200, {"status": "pending"}))):
+    r = client.get("/api/setup/key-status")
+check("GET /api/setup/key-status (pending) -> 200", r.status_code == 200)
+check("GET /api/setup/key-status -> pending", r.json()["data"]["status"] == "pending")
+
+# key-status: key ready -> persisted to config
+_provisioned_key = "sk-techify-provisioned-abcdef123456"
+with patch("server.routes.setup.httpx.AsyncClient",
+           _fake_async_client(_FakeTechifyResp(200, {
+               "status": "ready", "api_key": _provisioned_key,
+               "credit": "5.00", "currency": "BRL"}))):
+    r = client.get("/api/setup/key-status")
+check("GET /api/setup/key-status (ready) -> 200", r.status_code == 200)
+check("GET /api/setup/key-status -> ready", r.json()["data"]["status"] == "ready")
+check("GET /api/setup/key-status -> credit passed through",
+      r.json()["data"].get("credit") == "5.00")
+check("GET /api/setup/key-status -> key saved to config",
+      config_repo.get("openrouter_api_key") == _provisioned_key)
 
 # ═══════════════════════════════════════════════════════════════════
 #  21. Sandbox

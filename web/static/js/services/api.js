@@ -75,6 +75,16 @@ export async function refreshQr() {
   return request('POST', '/api/qr/refresh');
 }
 
+// ── Setup wizard ───────────────────────────────────────────────────
+
+export async function setupRequestKey() {
+  return request('POST', '/api/setup/request-key');
+}
+
+export async function setupKeyStatus() {
+  return request('GET', '/api/setup/key-status');
+}
+
 // ── Sandbox ────────────────────────────────────────────────────────
 
 export async function sandboxSend(phone, message) {

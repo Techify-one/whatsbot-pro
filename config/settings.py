@@ -18,6 +18,16 @@ LLM_API_BASE_URL = os.environ.get(
     "LLM_API_BASE_URL", "https://llm.techify.one/api/v1"
 ).rstrip("/")
 
+# Techify account provisioning — used by the first-run setup wizard. The
+# WhatsBot sends a WhatsApp message to TECHIFY_PROVISION_NUMBER, Techify
+# creates an account + API key, and the wizard polls TECHIFY_NEW_ACCOUNT_URL
+# (keyed by the connected WhatsApp number) until the key is ready.
+TECHIFY_PROVISION_NUMBER = os.environ.get("TECHIFY_PROVISION_NUMBER", "5513981744038")
+TECHIFY_NEW_ACCOUNT_URL = os.environ.get(
+    "TECHIFY_NEW_ACCOUNT_URL", "https://llm.techify.one/new_account"
+).rstrip("/")
+TECHIFY_PROVISION_MESSAGE = "Quero Criar conta e receber minha Chave de API"
+
 
 _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "OPENROUTER_API_KEY": ("openrouter_api_key", str),
@@ -69,6 +79,7 @@ DEFAULT_CONFIG = {
     "default_ai_enabled": True,
     "web_password_hash": "",
     "web_password_salt": "",
+    "setup_completed": False,
 }
 
 
