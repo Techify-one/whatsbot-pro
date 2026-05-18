@@ -107,6 +107,14 @@ class Settings:
         # Persist defaults for any key missing in the DB
         missing = {k: v for k, v in DEFAULT_CONFIG.items() if k not in current}
         if missing:
+            # An install that already has an API key configured is NOT a
+            # first run — seed setup_completed=True so the setup wizard does
+            # not ambush existing users after an update.
+            if "setup_completed" in missing:
+                env_key = os.environ.get("OPENROUTER_API_KEY", "")
+                missing["setup_completed"] = bool(
+                    current.get("openrouter_api_key") or env_key
+                )
             config_repo.set_many(missing)
 
     @staticmethod

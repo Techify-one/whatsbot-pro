@@ -295,7 +295,11 @@ function App({ onLogout, hasPassword }) {
 
   // First-run setup wizard — takes over the whole screen until completed.
   // Also reopenable on demand via the gear menu ("Refazer configuração").
-  const needsSetup = config && config.setup_completed !== true;
+  // An install that already has an API key configured is NOT a first run —
+  // never ambush an existing/configured user with the wizard after an update.
+  const needsSetup = config
+    && config.setup_completed !== true
+    && !config.openrouter_api_key;
   if (needsSetup || wizardManual) {
     return html`<${SetupWizard}
       status=${status}
