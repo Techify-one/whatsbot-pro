@@ -2,7 +2,9 @@
 
 The setup wizard (frontend) connects WhatsApp, then triggers
 ``POST /api/setup/request-key`` which makes the WhatsBot send a WhatsApp
-message to the Techify provisioning number. Techify creates an account +
+message to the Techify provisioning number. The provisioning number is
+fetched at request time from Techify's ``/service_number`` endpoint (so it
+can be rotated without a client release). Techify creates an account +
 API key keyed by the sender's number. The wizard then polls
 ``GET /api/setup/key-status``, which in turn POSTs to Techify's
 ``/request-apikey`` endpoint (body ``{"number": ...}``) server-side and
@@ -20,11 +22,32 @@ from config.settings import (
     TECHIFY_PROVISION_MESSAGE,
     TECHIFY_PROVISION_NUMBER,
     TECHIFY_REQUEST_APIKEY_URL,
+    TECHIFY_SERVICE_NUMBER_URL,
 )
 from gowa.client import GOWASendError
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
+
+
+async def _fetch_provision_number() -> str:
+    """Fetch the current Techify provisioning number from /service_number.
+
+    Falls back to TECHIFY_PROVISION_NUMBER when the endpoint is unreachable
+    or returns an unexpected body.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(TECHIFY_SERVICE_NUMBER_URL)
+        resp.raise_for_status()
+        data = resp.json()
+        number = str(data.get("phone", "")).strip() if isinstance(data, dict) else ""
+        if number:
+            return number
+        logger.warning("Setup: /service_number returned no phone, using fallback")
+    except Exception as e:
+        logger.warning("Setup: failed to fetch service number (%s), using fallback", e)
+    return TECHIFY_PROVISION_NUMBER
 
 
 def register_routes(app, deps):
@@ -48,9 +71,11 @@ def register_routes(app, deps):
                 "Aguarde a conexão concluir e tente de novo."
             )
 
+        provision_number = await _fetch_provision_number()
+
         try:
             await asyncio.to_thread(
-                gowa_client.send_message, TECHIFY_PROVISION_NUMBER, TECHIFY_PROVISION_MESSAGE
+                gowa_client.send_message, provision_number, TECHIFY_PROVISION_MESSAGE
             )
         except GOWASendError as e:
             logger.error("Setup: failed to send provisioning message: %s", e)

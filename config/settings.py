@@ -19,10 +19,15 @@ LLM_API_BASE_URL = os.environ.get(
 ).rstrip("/")
 
 # Techify account provisioning — used by the first-run setup wizard. The
-# WhatsBot sends a WhatsApp message to TECHIFY_PROVISION_NUMBER, Techify
-# creates an account + API key, and the wizard polls TECHIFY_REQUEST_APIKEY_URL
-# (keyed by the connected WhatsApp number) until the key is ready. Once the
-# account is created the key stays downloadable for ~1 minute.
+# WhatsBot fetches the current provisioning number from TECHIFY_SERVICE_NUMBER_URL
+# and sends a WhatsApp message to it, Techify creates an account + API key, and
+# the wizard polls TECHIFY_REQUEST_APIKEY_URL (keyed by the connected WhatsApp
+# number) until the key is ready. Once the account is created the key stays
+# downloadable for ~1 minute. TECHIFY_PROVISION_NUMBER is a fallback used only
+# when the service-number endpoint is unreachable.
+TECHIFY_SERVICE_NUMBER_URL = os.environ.get(
+    "TECHIFY_SERVICE_NUMBER_URL", "https://llm.techify.one/service_number"
+).rstrip("/")
 TECHIFY_PROVISION_NUMBER = os.environ.get("TECHIFY_PROVISION_NUMBER", "5513981744038")
 TECHIFY_REQUEST_APIKEY_URL = os.environ.get(
     "TECHIFY_REQUEST_APIKEY_URL", "https://llm.techify.one/request-apikey"
