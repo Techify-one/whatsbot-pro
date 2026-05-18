@@ -308,6 +308,7 @@ function App({ onLogout, hasPassword }) {
       config=${config}
       canClose=${!needsSetup}
       onClose=${() => setWizardManual(false)}
+      onConfigSave=${save}
       onComplete=${async () => { await save({ setup_completed: true }); setWizardManual(false); }}
     />`;
   }

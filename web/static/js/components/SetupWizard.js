@@ -35,7 +35,7 @@ function StepDots({ step }) {
   `;
 }
 
-export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete, canClose, onClose }) {
+export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete, onConfigSave, canClose, onClose }) {
   const [step, setStep] = useState(1);
 
   // ── Step 1: QR / connection ──────────────────────────────────────
@@ -116,9 +116,11 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
     return () => { stopped = true; clearInterval(timer); };
   }, [keyState]);
 
-  // Once the key is ready, show the success state briefly then advance.
+  // Once the key is ready, turn on the AI agent automatically, show the
+  // success state briefly, then advance.
   useEffect(() => {
     if (keyState !== 'ready') return;
+    if (onConfigSave) onConfigSave({ auto_reply: true });
     const t = setTimeout(() => setStep(3), 1800);
     return () => clearTimeout(t);
   }, [keyState]);
@@ -189,8 +191,11 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
         <div class="flex flex-col items-center text-center">
           <div class="text-5xl mb-2 text-wa-teal">✓</div>
           <h2 class="text-lg font-semibold text-wa-text mb-1">Chave de API criada!</h2>
-          <p class="text-sm text-wa-secondary">
+          <p class="text-sm text-wa-secondary mb-1">
             Sua conta foi criada com <span class="text-wa-teal font-medium">crédito grátis</span> para começar.
+          </p>
+          <p class="text-sm text-wa-teal font-medium">
+            Agente de IA ativado — já vai responder suas mensagens.
           </p>
         </div>
       `;
@@ -239,26 +244,23 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
       <div class="flex flex-col items-center text-center">
         <div class="text-5xl mb-2">🎉</div>
         <h2 class="text-lg font-semibold text-wa-text mb-1">Tudo pronto!</h2>
-        <p class="text-sm text-wa-secondary mb-4">
-          Agora é só me chamar no WhatsApp para testar:
-        </p>
-        <div class="w-full px-4 py-3 rounded-xl bg-wa-panel border border-wa-border mb-3">
-          <div class="text-2xl font-bold text-wa-text tracking-wide">
-            ${phone ? formatPhone(phone) : 'Carregando número...'}
-          </div>
-        </div>
-        <p class="text-sm text-wa-secondary mb-3">
+        <p class="text-sm text-wa-secondary mb-1">
           Copie o link abaixo e abra no seu WhatsApp para me mandar um “oi”.
+        </p>
+        <p class="text-xs text-wa-secondary mb-4">
+          Número conectado:
+          <span class="text-wa-text font-medium">${phone ? formatPhone(phone) : 'carregando...'}</span>
         </p>
         <button
           onClick=${handleCopy}
           disabled=${!waLink}
-          class="${btnGhost} w-full mb-1 ${copied ? 'border-green-300 bg-green-50 text-green-700' : ''}"
+          class="w-full py-4 rounded-xl text-base font-semibold text-white shadow-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+            copied ? 'bg-green-600 hover:bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark'}"
         >
-          ${copied ? 'Link copiado!' : 'Copiar link de contato'}
+          ${copied ? '✓ Link copiado!' : 'Copiar link de contato'}
         </button>
         ${waLink ? html`
-          <a href=${waLink} target="_blank" rel="noopener noreferrer" class="text-wa-teal hover:text-wa-tealDark text-xs underline">
+          <a href=${waLink} target="_blank" rel="noopener noreferrer" class="text-wa-teal hover:text-wa-tealDark text-xs underline mt-3">
             ou abrir no WhatsApp agora
           </a>
         ` : null}
