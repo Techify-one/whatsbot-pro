@@ -206,8 +206,23 @@ function App({ onLogout, hasPassword }) {
   const [messagesRead, setMessagesRead] = useState(null);
   const [messageStatus, setMessageStatus] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
-  const [wizardManual, setWizardManual] = useState(false);
+  const [wizardManual, setWizardManual] = useState(() => window.location.pathname === '/wizard');
   const wizardLatchRef = useRef(false);
+
+  // Open/close the setup wizard, keeping the /wizard URL in sync so it can be
+  // reached directly (and bookmarked / shared).
+  const openWizard = useCallback(() => {
+    setWizardManual(true);
+    if (window.location.pathname !== '/wizard') history.pushState(null, '', '/wizard');
+  }, []);
+  const closeWizard = useCallback(() => {
+    wizardLatchRef.current = false;
+    setWizardManual(false);
+    if (window.location.pathname === '/wizard') {
+      history.pushState(null, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+  }, []);
 
   // Fetch the public plugin manifest once at boot. Errors are non-fatal —
   // the core app keeps running even if plugins fail to load.
@@ -241,6 +256,7 @@ function App({ onLogout, hasPassword }) {
     function onPopState() {
       setTabState(tabFromPath(pluginScreens));
       setInitialContactId(contactIdFromPath());
+      setWizardManual(window.location.pathname === '/wizard');
     }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -250,6 +266,15 @@ function App({ onLogout, hasPassword }) {
 
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
+
+  // First run (no API key, setup not completed): reflect the wizard in the
+  // URL so a hard reload / share lands back on /wizard.
+  useEffect(() => {
+    const firstRun = config && config.setup_completed !== true && !config.openrouter_api_key;
+    if (firstRun && window.location.pathname !== '/wizard') {
+      history.replaceState(null, '', '/wizard');
+    }
+  }, [config]);
 
   useWebSocket({
     onStatus: useCallback((data) => setStatus(data), []),
@@ -312,12 +337,11 @@ function App({ onLogout, hasPassword }) {
       qrVersion=${qrVersion}
       config=${config}
       canClose=${!needsSetup}
-      onClose=${() => { wizardLatchRef.current = false; setWizardManual(false); }}
+      onClose=${closeWizard}
       onConfigSave=${save}
       onComplete=${async () => {
-        wizardLatchRef.current = false;
         await save({ setup_completed: true });
-        setWizardManual(false);
+        closeWizard();
       }}
     />`;
   }
@@ -329,7 +353,7 @@ function App({ onLogout, hasPassword }) {
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} onReopenSetup=${() => setWizardManual(true)} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} onReopenSetup=${openWizard} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${activePluginScreen

@@ -6,8 +6,31 @@ import { formatPhone } from './QRCode.js';
 
 const html = htm.bind(h);
 
-const STEPS = ['Conectar', 'Chave de API', 'Testar'];
+const STEPS = ['Conectar', 'Chave de API', 'Agente de IA', 'Testar'];
 const MAX_POLL_ATTEMPTS = 75; // ~2.5 min at 2s interval — beyond the Techify TTL
+
+// Example agent prompt shown on step 3 — a simple snack bar, 4 instruction
+// blocks, kept short so the user can read it at a glance.
+const EXAMPLE_PROMPT = `Você é o atendente virtual da Lanchonete DigiBurger. Atenda de forma simpática, rápida e com linguagem informal.
+
+# Cardápio e preços
+X-Burguer R$ 18
+X-Salada R$ 20
+X-Tudo R$ 26
+Batata frita (porção) R$ 15
+Refrigerante lata R$ 6
+Suco natural R$ 9
+
+Quando perguntarem o cardápio, liste os itens com os preços.
+
+# Como anotar um pedido
+Pergunte o que a pessoa quer e a quantidade, confirme o pedido e pergunte se é entrega ou retirada. Para entrega, peça o endereço completo e informe a taxa de R$ 5.
+
+# Horário de funcionamento
+Funcionamos de todos os dias, das 18h às 23h. Fora desse horário, avise com educação e diga que retorna assim que a lanchonete abrir.
+
+# Regras
+Nunca invente itens ou preços fora do cardápio. Se não souber responder, diga que vai chamar um atendente humano.`;
 
 function StepDots({ step }) {
   return html`
@@ -19,15 +42,15 @@ function StepDots({ step }) {
         return html`
           <div key=${n} class="flex items-center gap-2">
             <div class="flex items-center gap-1.5">
-              <div class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-semibold ${
-                done ? 'bg-wa-teal text-white'
-                : active ? 'bg-wa-teal text-white'
-                : 'bg-wa-panel text-wa-secondary border border-wa-border'}">
+              <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
+                done || active
+                  ? 'bg-wa-teal text-white shadow-sm shadow-wa-teal/40'
+                  : 'bg-gray-100 text-gray-400 border-2 border-gray-300'}">
                 ${done ? '✓' : n}
               </div>
-              <span class="text-xs ${active ? 'text-wa-text font-medium' : 'text-wa-secondary'}">${label}</span>
+              <span class="text-xs ${active ? 'text-wa-teal font-semibold' : 'text-wa-secondary'}">${label}</span>
             </div>
-            ${n < STEPS.length ? html`<div class="w-5 h-px bg-wa-border"></div>` : null}
+            ${n < STEPS.length ? html`<div class="w-5 h-0.5 rounded-full ${n < step ? 'bg-wa-teal' : 'bg-gray-300'}"></div>` : null}
           </div>
         `;
       })}
@@ -117,7 +140,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
   }, [keyState]);
 
   // Once the key is ready, turn on the AI agent automatically, show the
-  // success state briefly, then advance.
+  // success state briefly, then advance to the agent-prompt step.
   useEffect(() => {
     if (keyState !== 'ready') return;
     if (onConfigSave) onConfigSave({ auto_reply: true });
@@ -125,7 +148,17 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
     return () => clearTimeout(t);
   }, [keyState]);
 
-  // ── Step 3: test link ────────────────────────────────────────────
+  // ── Step 3: agent prompt ─────────────────────────────────────────
+  const [agentPrompt, setAgentPrompt] = useState((config && config.system_prompt) || '');
+  const [showExample, setShowExample] = useState(false);
+
+  function saveAgentPrompt() {
+    const txt = agentPrompt.trim();
+    if (txt && onConfigSave) onConfigSave({ system_prompt: txt });
+    setStep(4);
+  }
+
+  // ── Step 4: test link ────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
   const phone = status.bot_phone || '';
   const waLink = phone ? `https://wa.me/${phone}?text=Oi` : '';
@@ -139,17 +172,17 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
   }
 
   // ── Render helpers ───────────────────────────────────────────────
-  const btnPrimary = 'px-4 py-2.5 rounded-lg text-sm font-medium bg-wa-teal hover:bg-wa-tealDark text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed';
-  const btnGhost = 'px-4 py-2.5 rounded-lg text-sm font-medium border border-wa-border bg-white hover:bg-wa-panel text-wa-text transition-colors';
+  const btnPrimary = 'px-5 py-2.5 rounded-lg text-sm font-semibold bg-wa-teal hover:bg-wa-tealDark text-white shadow-md shadow-wa-teal/30 transition-colors disabled:opacity-60 disabled:cursor-not-allowed';
+  const btnGhost = 'px-5 py-2.5 rounded-lg text-sm font-medium border-2 border-gray-300 bg-white hover:bg-gray-50 text-wa-text transition-colors';
 
   function renderStep1() {
     return html`
       <div class="flex flex-col items-center text-center">
-        <h2 class="text-lg font-semibold text-wa-text mb-1">Conecte seu WhatsApp</h2>
+        <h2 class="text-xl font-bold text-wa-text mb-1">Conecte seu WhatsApp</h2>
         <p class="text-sm text-wa-secondary mb-4">
           Escaneie o código abaixo para o WhatsBot atender no seu número.
         </p>
-        <div class="w-[240px] h-[240px] flex items-center justify-center bg-wa-panel rounded-xl overflow-hidden mb-3">
+        <div class="w-[248px] h-[248px] flex items-center justify-center bg-gray-50 border-2 border-gray-200 rounded-2xl overflow-hidden mb-3">
           ${status.connected ? html`
             <div class="text-center">
               <div class="text-5xl mb-2 text-wa-teal">✓</div>
@@ -172,12 +205,12 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
           `}
         </div>
         ${status.connected ? html`
-          <p class="text-sm text-wa-secondary">Avançando...</p>
+          <p class="text-sm text-wa-teal font-medium">Avançando...</p>
         ` : html`
           <div class="text-xs text-wa-secondary leading-relaxed">
-            No celular: <span class="text-wa-text">Configurações → Aparelhos conectados → Conectar um aparelho</span>
+            No celular: <span class="text-wa-text font-medium">Configurações → Aparelhos conectados → Conectar um aparelho</span>
           </div>
-          <button onClick=${() => refreshQr()} class="text-wa-teal hover:text-wa-tealDark text-xs underline mt-2 transition-colors">
+          <button onClick=${() => refreshQr()} class="text-wa-teal hover:text-wa-tealDark text-xs font-medium underline mt-2 transition-colors">
             Atualizar QR Code
           </button>
         `}
@@ -190,11 +223,11 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
       return html`
         <div class="flex flex-col items-center text-center">
           <div class="text-5xl mb-2 text-wa-teal">✓</div>
-          <h2 class="text-lg font-semibold text-wa-text mb-1">Chave de API criada!</h2>
-          <p class="text-sm text-wa-secondary mb-1">
-            Sua conta foi criada com <span class="text-wa-teal font-medium">crédito grátis</span> para começar.
+          <h2 class="text-xl font-bold text-wa-text mb-1">Chave de API criada!</h2>
+          <p class="text-sm text-wa-secondary mb-2">
+            Sua conta foi criada com <span class="text-wa-teal font-semibold">crédito grátis</span> para começar.
           </p>
-          <p class="text-sm text-wa-teal font-medium">
+          <p class="text-sm text-wa-teal font-semibold bg-wa-teal/10 px-4 py-2 rounded-lg">
             Agente de IA ativado — já vai responder suas mensagens.
           </p>
         </div>
@@ -203,8 +236,8 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
     if (keyState === 'requesting' || keyState === 'polling') {
       return html`
         <div class="flex flex-col items-center text-center py-2">
-          <div class="animate-pulse-slow text-3xl mb-3">⏳</div>
-          <h2 class="text-lg font-semibold text-wa-text mb-1">
+          <div class="animate-pulse-slow text-4xl mb-3">⏳</div>
+          <h2 class="text-xl font-bold text-wa-text mb-1">
             ${keyState === 'requesting' ? 'Enviando solicitação...' : 'Criando sua conta...'}
           </h2>
           <p class="text-sm text-wa-secondary">
@@ -218,20 +251,20 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
     // 'idle' or 'error'
     return html`
       <div class="flex flex-col items-center text-center">
-        <h2 class="text-lg font-semibold text-wa-text mb-1">Criar conta e Ganhar Chave de API</h2>
-        <p class="text-sm text-wa-teal font-medium mb-3">+ Crédito Grátis</p>
-        <p class="text-sm text-wa-secondary mb-4 leading-relaxed">
+        <h2 class="text-xl font-bold text-wa-text mb-1">Criar conta e Ganhar Chave de API</h2>
+        <p class="text-sm text-wa-teal font-semibold bg-wa-teal/10 px-3 py-1 rounded-full mb-3">+ Crédito Grátis</p>
+        <p class="text-sm text-wa-secondary mb-4 leading-relaxed max-w-md">
           A chave de API conecta o WhatsBot à inteligência artificial. Ao tocar no botão,
           o WhatsBot envia uma mensagem pelo seu WhatsApp e cria sua conta automaticamente —
           você não precisa fazer mais nada.
         </p>
         ${keyState === 'error' && keyError ? html`
-          <div class="w-full mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-red-600 text-sm">
+          <div class="w-full max-w-md mb-3 px-3 py-2 rounded-lg bg-red-50 border-2 border-red-200 text-red-600 text-sm font-medium">
             ${keyError}
           </div>
         ` : null}
         ${hasKey && keyState === 'idle' ? html`
-          <div class="w-full mb-3 px-3 py-2 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm">
+          <div class="w-full max-w-md mb-3 px-3 py-2 rounded-lg bg-green-50 border-2 border-green-200 text-green-700 text-sm font-medium">
             Você já tem uma chave de API configurada.
           </div>
         ` : null}
@@ -241,26 +274,70 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
 
   function renderStep3() {
     return html`
+      <div class="flex flex-col text-left">
+        <div class="text-center mb-3">
+          <h2 class="text-xl font-bold text-wa-text mb-1">Descreva seu agente de IA</h2>
+          <p class="text-sm text-wa-secondary">
+            Escreva quem é o seu atendente, o que você oferece e como ele deve responder.
+          </p>
+        </div>
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-sm font-semibold text-wa-text">Instruções do agente</span>
+          <button
+            type="button"
+            onClick=${() => setShowExample(v => !v)}
+            class="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-wa-teal/10 text-wa-teal hover:bg-wa-teal/20 transition-colors"
+          >
+            ${showExample ? '✕ Ocultar exemplo' : '💡 Ver exemplo (lanchonete)'}
+          </button>
+        </div>
+        ${showExample ? html`
+          <div class="mb-3 rounded-xl border-2 border-wa-teal/30 bg-wa-teal/5 p-3">
+            <pre class="m-0 text-xs leading-relaxed text-wa-text whitespace-pre-wrap font-mono max-h-52 overflow-auto">${EXAMPLE_PROMPT}</pre>
+            <button
+              type="button"
+              onClick=${() => { setAgentPrompt(EXAMPLE_PROMPT); setShowExample(false); }}
+              class="mt-3 px-3 py-1.5 rounded-lg text-xs font-semibold border-2 border-wa-teal/50 bg-white text-wa-teal hover:bg-wa-teal/10 transition-colors"
+            >
+              Usar este exemplo
+            </button>
+          </div>
+        ` : null}
+        <textarea
+          value=${agentPrompt}
+          onInput=${e => setAgentPrompt(e.currentTarget.value)}
+          placeholder="Ex: Você é o atendente da Pizzaria do Bairro. Seja simpático e objetivo. Liste os sabores e preços quando perguntarem o cardápio..."
+          class="w-full h-[44vh] min-h-[260px] resize-none rounded-xl border-2 border-gray-300 bg-gray-50 p-4 text-sm leading-relaxed text-wa-text placeholder:text-gray-400 shadow-inner focus:outline-none focus:bg-white focus:border-wa-teal focus:ring-4 focus:ring-wa-teal/20 transition-colors"
+        ></textarea>
+        <p class="text-xs text-wa-secondary mt-2">
+          Dica: divida em blocos com títulos (ex: <span class="font-mono text-wa-text"># Cardápio</span>) — fica mais fácil de o agente seguir.
+        </p>
+      </div>
+    `;
+  }
+
+  function renderStep4() {
+    return html`
       <div class="flex flex-col items-center text-center">
         <div class="text-5xl mb-2">🎉</div>
-        <h2 class="text-lg font-semibold text-wa-text mb-1">Tudo pronto!</h2>
+        <h2 class="text-xl font-bold text-wa-text mb-1">Tudo pronto!</h2>
         <p class="text-sm text-wa-secondary mb-1">
           Copie o link abaixo e abra no seu WhatsApp para me mandar um “oi”.
         </p>
         <p class="text-xs text-wa-secondary mb-4">
           Número conectado:
-          <span class="text-wa-text font-medium">${phone ? formatPhone(phone) : 'carregando...'}</span>
+          <span class="text-wa-text font-semibold">${phone ? formatPhone(phone) : 'carregando...'}</span>
         </p>
         <button
           onClick=${handleCopy}
           disabled=${!waLink}
-          class="w-full py-4 rounded-xl text-base font-semibold text-white shadow-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-            copied ? 'bg-green-600 hover:bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark'}"
+          class="w-full max-w-lg py-4 rounded-xl text-base font-bold text-white shadow-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+            copied ? 'bg-green-600 hover:bg-green-600' : 'bg-wa-teal hover:bg-wa-tealDark shadow-wa-teal/40'}"
         >
           ${copied ? '✓ Link copiado!' : 'Copiar link de contato'}
         </button>
         ${waLink ? html`
-          <a href=${waLink} target="_blank" rel="noopener noreferrer" class="text-wa-teal hover:text-wa-tealDark text-xs underline mt-3">
+          <a href=${waLink} target="_blank" rel="noopener noreferrer" class="text-wa-teal hover:text-wa-tealDark text-xs font-medium underline mt-3">
             ou abrir no WhatsApp agora
           </a>
         ` : null}
@@ -296,37 +373,51 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
       // requesting / polling / ready — no action
       return html`<div class="text-xs text-wa-secondary">Aguarde um instante...</div>`;
     }
-    // step 3
+    if (step === 3) {
+      return html`
+        <div class="flex items-center gap-2">
+          <button onClick=${() => setStep(4)} class=${btnGhost}>Pular</button>
+          <button onClick=${saveAgentPrompt} class=${btnPrimary}>Salvar e continuar</button>
+        </div>
+      `;
+    }
+    // step 4
     return html`<button onClick=${onComplete} class=${btnPrimary}>Concluir</button>`;
   }
 
   return html`
-    <div class="min-h-dvh w-full bg-wa-panel flex items-center justify-center p-4 overflow-auto">
-      <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 sm:p-8 relative">
-        ${canClose ? html`
-          <button
-            onClick=${onClose}
-            class="absolute top-3 right-3 text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
-            title="Fechar"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        ` : null}
+    <div class="min-h-dvh w-full bg-gradient-to-br from-wa-teal/15 via-wa-panel to-wa-tealDark/15 flex items-center justify-center p-4 overflow-auto">
+      <div class="bg-white rounded-2xl shadow-2xl ring-1 ring-black/5 max-w-4xl w-full relative overflow-hidden">
+        <div class="h-1.5 w-full bg-gradient-to-r from-wa-teal to-wa-tealDark"></div>
+        <div class="p-6 sm:p-8">
+          ${canClose ? html`
+            <button
+              onClick=${onClose}
+              class="absolute top-4 right-4 text-wa-secondary hover:text-wa-text hover:bg-gray-100 transition-colors p-1.5 rounded-lg"
+              title="Fechar"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          ` : null}
 
-        <div class="text-center mb-1">
-          <h1 class="text-xl font-semibold text-wa-text">Bem-vindo ao WhatsBot</h1>
-          <p class="text-sm text-wa-secondary">Vamos configurar em 3 passos rápidos</p>
-        </div>
-        <div class="mt-5">
-          <${StepDots} step=${step} />
-        </div>
+          <div class="text-center mb-1">
+            <h1 class="text-2xl font-bold text-wa-teal">Bem-vindo ao WhatsBot</h1>
+            <p class="text-sm text-wa-secondary">Vamos configurar em 4 passos rápidos</p>
+          </div>
+          <div class="mt-5">
+            <${StepDots} step=${step} />
+          </div>
 
-        <div class="min-h-[300px] flex flex-col justify-center">
-          ${step === 1 ? renderStep1() : step === 2 ? renderStep2() : renderStep3()}
-        </div>
+          <div class="min-h-[300px] flex flex-col justify-center">
+            ${step === 1 ? renderStep1()
+              : step === 2 ? renderStep2()
+              : step === 3 ? renderStep3()
+              : renderStep4()}
+          </div>
 
-        <div class="mt-6 flex items-center justify-center">
-          ${renderFooter()}
+          <div class="mt-6 pt-5 border-t-2 border-gray-100 flex items-center justify-center">
+            ${renderFooter()}
+          </div>
         </div>
       </div>
     </div>

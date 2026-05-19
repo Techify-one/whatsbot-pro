@@ -207,7 +207,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/tools"}
+        {"/", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -272,6 +272,7 @@ def create_app(
     @app.get("/executions")
     @app.get("/plugins")
     @app.get("/tools")
+    @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/executions/{execution_id:int}")
     async def index(contact_id: int | None = None, execution_id: int | None = None):
