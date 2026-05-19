@@ -1,7 +1,12 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { sandboxSend, sandboxClear, getLogs, clearLogs } from '../services/api.js';
+import {
+  getContact, sandboxClear, getLogs, clearLogs,
+  sandboxSend, sandboxSendImage, sandboxSendAudio, sandboxSendDocument,
+} from '../services/api.js';
+import { ContactDetail } from './contacts/ContactDetail.js';
+import { isSameMessage } from './contacts/utils.js';
 
 const html = htm.bind(h);
 
@@ -74,7 +79,7 @@ function LogPanel() {
       <div
         ref=${logRef}
         class="flex-1 bg-wa-panel rounded border border-wa-border overflow-y-auto font-mono text-xs p-2 min-h-0"
-        style="max-height: 300px;"
+        style="height: 60vh;"
       >
         ${filtered.length === 0
           ? html`<div class="text-wa-secondary text-center py-8">Nenhum log ainda...</div>`
@@ -92,143 +97,149 @@ function LogPanel() {
   `;
 }
 
-function ChatPanel() {
+// ── Sandbox ────────────────────────────────────────────────────────
+// A full WhatsApp-style chat for testing the bot. Reuses `ContactDetail`
+// (sandbox mode): you play the customer, the AI replies — all local, nothing
+// is sent over WhatsApp. The conversation is persisted to the same contact as
+// the real chat, so it shows up there too.
+
+export function Sandbox({ newMessage }) {
   const [phone, setPhone] = useState('5511999999999');
-  const [input, setInput] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [sending, setSending] = useState(false);
-  const chatRef = useRef(null);
+  const [activePhone, setActivePhone] = useState('5511999999999');
+  const [contactData, setContactData] = useState({ messages: [], info: {} });
+  const [botTyping, setBotTyping] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const activePhoneRef = useRef(activePhone);
 
+  useEffect(() => { activePhoneRef.current = activePhone; }, [activePhone]);
+
+  // Debounce the phone field — commit it as the active chat after a pause.
   useEffect(() => {
-    if (chatRef.current) {
-      chatRef.current.scrollTop = chatRef.current.scrollHeight;
-    }
-  }, [messages]);
+    const t = setTimeout(() => setActivePhone(phone.trim()), 500);
+    return () => clearTimeout(t);
+  }, [phone]);
 
-  async function handleSend(e) {
-    e.preventDefault();
-    const text = input.trim();
-    if (!text || sending) return;
+  // Load conversation history for the active phone.
+  useEffect(() => {
+    if (!activePhone) { setContactData({ messages: [], info: {} }); return; }
+    let cancelled = false;
+    getContact(activePhone, false).then(res => {
+      if (cancelled) return;
+      setContactData(res.ok
+        ? { ...res.data, messages: (res.data.messages || []).filter(m => m.role !== 'tool_call') }
+        : { messages: [], info: {} });
+    });
+    return () => { cancelled = true; };
+  }, [activePhone]);
 
-    setMessages(prev => [...prev, { role: 'user', content: text, ts: new Date() }]);
-    setInput('');
-    setSending(true);
-
-    try {
-      const res = await sandboxSend(phone, text);
-      if (res.ok) {
-        const replies = Array.isArray(res.data.replies) && res.data.replies.length
-          ? res.data.replies
-          : [res.data.reply];
-        const newBubbles = replies
-          .filter(r => r && r.trim())
-          .map(r => ({ role: 'assistant', content: r, ts: new Date() }));
-        setMessages(prev => [...prev, ...newBubbles]);
-      } else {
-        setMessages(prev => [...prev, { role: 'error', content: res.error || 'Erro desconhecido', ts: new Date() }]);
+  // Live updates: append messages broadcast for the active phone.
+  useEffect(() => {
+    if (!newMessage) return;
+    const { phone: msgPhone, message } = newMessage;
+    if (!message || msgPhone !== activePhoneRef.current) return;
+    // Tool-execution cards are an operator-panel artifact — keep the sandbox
+    // chat clean (they still appear in the official contact chat).
+    if (message.role === 'tool_call') return;
+    setContactData(prev => {
+      const msgs = prev.messages || [];
+      const idx = msgs.findIndex(m => isSameMessage(m, message));
+      if (idx !== -1) {
+        // Reconcile server-side fields onto the optimistic/loaded bubble.
+        if (message.msg_id || message.status) {
+          const updated = [...msgs];
+          updated[idx] = {
+            ...updated[idx],
+            ...(message.msg_id ? { msg_id: message.msg_id } : {}),
+            ...(message.status && !updated[idx]._status ? { status: message.status } : {}),
+          };
+          return { ...prev, messages: updated };
+        }
+        return prev;
       }
-    } catch (err) {
-      setMessages(prev => [...prev, { role: 'error', content: `Erro de rede: ${err.message}`, ts: new Date() }]);
-    } finally {
-      setSending(false);
-    }
+      return { ...prev, messages: [...msgs, message] };
+    });
+  }, [newMessage]);
+
+  // Sandbox send API injected into ContactDetail. Wraps each call to show the
+  // "digitando..." indicator while the AI is processing.
+  async function withTyping(fn) {
+    setBotTyping(true);
+    try { return await fn(); }
+    finally { setBotTyping(false); }
   }
+  const sandboxApi = {
+    sendText: (p, text) => withTyping(() => sandboxSend(p, text)),
+    sendImage: (p, file, caption) => withTyping(() => sandboxSendImage(p, file, caption)),
+    sendAudio: (p, blob, filename) => withTyping(() => sandboxSendAudio(p, blob, filename)),
+    sendDocument: (p, file, caption) => withTyping(() => sandboxSendDocument(p, file, caption)),
+  };
 
   async function handleClear() {
-    await sandboxClear(phone);
-    setMessages([]);
+    await sandboxClear(activePhone);
+    setContactData({ messages: [], info: {} });
   }
 
   return html`
     <div class="flex flex-col h-full">
-      <!-- Header -->
-      <div class="flex items-center gap-2 mb-2">
-        <h3 class="text-sm font-semibold text-wa-text uppercase tracking-wide shrink-0">Chat Sandbox</h3>
-        <div class="flex items-center gap-1 flex-1">
-          <label class="text-xs text-wa-secondary shrink-0">Telefone:</label>
-          <input
-            type="text"
-            value=${phone}
-            onInput=${(e) => setPhone(e.target.value)}
-            placeholder="5511999999999"
-            class="bg-wa-panel border border-wa-border rounded px-2 py-1 text-xs text-wa-text w-36 focus:border-wa-teal focus:outline-none"
-          />
-        </div>
+      <!-- Sandbox toolbar -->
+      <div class="flex items-center gap-[10px] px-[14px] py-[8px] bg-wa-panel border-b border-wa-border shrink-0">
+        <span class="text-[13px] font-semibold text-wa-text uppercase tracking-wide shrink-0">Sandbox</span>
+        <label class="text-[12px] text-wa-secondary shrink-0">Telefone:</label>
+        <input
+          type="text"
+          value=${phone}
+          onInput=${(e) => setPhone(e.target.value)}
+          placeholder="5511999999999"
+          class="bg-wa-inputBg border border-wa-border rounded px-[8px] py-[4px] text-[13px] text-wa-text w-[160px] focus:border-wa-teal focus:outline-none"
+        />
+        <div class="flex-1"></div>
+        <button
+          onClick=${() => setShowLogs(true)}
+          class="text-[12px] text-wa-secondary hover:text-wa-text border border-wa-border rounded px-[10px] py-[4px] transition-colors"
+        >Logs</button>
         <button
           onClick=${handleClear}
-          class="text-xs text-wa-secondary hover:text-red-500 transition-colors px-2 py-1"
+          class="text-[12px] text-wa-secondary hover:text-red-500 border border-wa-border rounded px-[10px] py-[4px] transition-colors"
         >Limpar conversa</button>
       </div>
 
-      <!-- Messages -->
-      <div
-        ref=${chatRef}
-        class="flex-1 bg-wa-panel rounded border border-wa-border overflow-y-auto p-3 space-y-2 min-h-0"
-        style="max-height: 400px;"
-      >
-        ${messages.length === 0
-          ? html`<div class="text-wa-secondary text-center py-12 text-sm">
-              Envie uma mensagem para testar o bot.<br/>
-              <span class="text-xs text-wa-secondary opacity-70">Usa o mesmo pipeline do WhatsApp (AgentHandler.process_message)</span>
-            </div>`
-          : messages.map((msg, i) => html`
-            <div key=${i} class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
-              <div class="max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                msg.role === 'user'
-                  ? 'bg-wa-outgoing text-wa-text rounded-br-none'
-                  : msg.role === 'error'
-                    ? 'bg-red-50 text-red-600 border border-red-200 rounded-bl-none'
-                    : 'bg-white text-wa-text rounded-bl-none shadow-sm'
-              }">
-                <div class="whitespace-pre-wrap break-words">${msg.content}</div>
-                <div class="text-[10px] mt-1 text-wa-secondary text-right">
-                  ${msg.ts.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                </div>
-              </div>
-            </div>
-          `)
-        }
-        ${sending ? html`
-          <div class="flex justify-start">
-            <div class="bg-white rounded-lg px-3 py-2 text-sm text-wa-secondary rounded-bl-none animate-pulse-slow shadow-sm">
-              Processando...
+      <!-- Chat (reuses the contact chat in sandbox mode) -->
+      <div class="flex-1 min-h-0">
+        <${ContactDetail}
+          phone=${activePhone}
+          sandbox=${true}
+          api=${sandboxApi}
+          messages=${contactData.messages || []}
+          info=${contactData.info || {}}
+          contact=${contactData}
+          setContactData=${setContactData}
+          contactTyping=${botTyping}
+          globalTags=${{}}
+          onBack=${() => {}}
+          onAvatarClick=${() => {}}
+        />
+      </div>
+
+      <!-- Logs overlay -->
+      ${showLogs ? html`
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick=${() => setShowLogs(false)}
+        >
+          <div
+            class="bg-white rounded-lg shadow-xl border border-wa-border w-[90vw] max-w-[900px] p-4"
+            onClick=${(e) => e.stopPropagation()}
+          >
+            <${LogPanel} />
+            <div class="flex justify-end mt-2">
+              <button
+                onClick=${() => setShowLogs(false)}
+                class="text-[13px] text-wa-secondary hover:text-wa-text px-3 py-1"
+              >Fechar</button>
             </div>
           </div>
-        ` : null}
-      </div>
-
-      <!-- Input -->
-      <form onSubmit=${handleSend} class="flex gap-2 mt-2">
-        <input
-          type="text"
-          value=${input}
-          onInput=${(e) => setInput(e.target.value)}
-          placeholder="Digite uma mensagem..."
-          autoFocus
-          class="flex-1 bg-white border border-wa-border rounded-lg px-3 py-2 text-sm text-wa-text placeholder-wa-secondary focus:border-wa-teal focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled=${sending || !input.trim()}
-          class="bg-wa-teal hover:bg-wa-tealDark disabled:bg-wa-panel disabled:text-wa-secondary text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-        >Enviar</button>
-      </form>
-    </div>
-  `;
-}
-
-export function Sandbox() {
-  return html`
-    <div class="space-y-4">
-      <!-- Chat -->
-      <div class="bg-white rounded-lg p-4 border border-wa-border shadow-sm">
-        <${ChatPanel} />
-      </div>
-
-      <!-- Logs -->
-      <div class="bg-white rounded-lg p-4 border border-wa-border shadow-sm">
-        <${LogPanel} />
-      </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }

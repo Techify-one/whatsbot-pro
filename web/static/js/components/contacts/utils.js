@@ -25,6 +25,16 @@ export function isSameDay(tsA, tsB) {
     && a.getDate() === b.getDate();
 }
 
+// ── Messages ─────────────────────────────────────────────────────
+
+// True when two messages are the same logical message — used to dedupe a
+// WebSocket-delivered message against an optimistic/already-loaded bubble.
+export function isSameMessage(a, b) {
+  if (!a || !b || a.role !== b.role) return false;
+  if (a.ts === b.ts) return true;
+  return a.content === b.content && Math.abs((a.ts || 0) - (b.ts || 0)) < 30;
+}
+
 export function formatDateSeparator(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000);

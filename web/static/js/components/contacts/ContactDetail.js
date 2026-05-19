@@ -11,11 +11,18 @@ const html = htm.bind(h);
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags }) {
+export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, sandbox = false, api = null }) {
+  // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
+  // chat uses the real ones. `sendDocument` only exists in sandbox.
+  const _api = {
+    sendText: sendMessage, sendImage, sendAudio, sendDocument: null,
+    ...(api || {}),
+  };
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordDuration, setRecordDuration] = useState(0);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   // mode: 'reply' sends to the contact; 'private' stays in the panel only
   const [mode, setMode] = useState('reply');
   // Private-mode AI flags. aiReadPrivate=false → AI ignores the note entirely.
@@ -26,6 +33,8 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   const [pendingMedia, setPendingMedia] = useState(null);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
+  const docInputRef = useRef(null);
+  const attachMenuRef = useRef(null);
   const inputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const recordTimerRef = useRef(null);
@@ -53,7 +62,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   function handleInputChange(e) {
     const val = e.target.value;
     setInput(val);
-    if (!phone) return;
+    if (!phone || sandbox) return;
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
       if (!presenceTimerRef.current) {
@@ -111,6 +120,18 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     el.style.height = Math.min(el.scrollHeight, INPUT_MAX_HEIGHT) + 'px';
   }, [input]);
 
+  // Close the attach menu on outside click
+  useEffect(() => {
+    if (!attachMenuOpen) return;
+    function onDocClick(e) {
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target)) {
+        setAttachMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [attachMenuOpen]);
+
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
@@ -119,7 +140,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
-    sendPresence(phone, 'stop').catch(() => {});
+    if (!sandbox) sendPresence(phone, 'stop').catch(() => {});
 
     setInput('');
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -147,20 +168,23 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       return;
     }
 
-    // Add message optimistically (status='operator' marks it as manual send)
+    // Add message optimistically. In sandbox you play the customer (role 'user');
+    // otherwise it is a manual operator send (status='operator').
     setContactData(prev => prev ? {
       ...prev,
-      messages: [...(prev.messages || []), {
-        role: 'assistant', content: text, ts: msgTs, status: 'operator',
-        _localId: localId, _status: 'sending',
-      }],
+      messages: [...(prev.messages || []), sandbox
+        ? { role: 'user', content: text, ts: msgTs, _localId: localId, _status: 'sending' }
+        : { role: 'assistant', content: text, ts: msgTs, status: 'operator',
+            _localId: localId, _status: 'sending' }],
     } : prev);
 
     try {
-      const res = await sendMessage(phone, text);
+      const res = await _api.sendText(phone, text);
       if (res.ok) {
         const msgId = res.data?.msg_id || null;
-        updateMsgByLocalId(localId, () => ({ _status: null, status: 'operator', msg_id: msgId }));
+        updateMsgByLocalId(localId, () => sandbox
+          ? { _status: null }
+          : { _status: null, status: 'operator', msg_id: msgId });
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
       }
@@ -187,7 +211,22 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }
 
   function handleAttachClick() {
-    if (fileInputRef.current) fileInputRef.current.click();
+    // Sandbox also allows arbitrary documents → show a picker menu.
+    if (sandbox && _api.sendDocument) {
+      setAttachMenuOpen(o => !o);
+    } else {
+      fileInputRef.current?.click();
+    }
+  }
+
+  function pickImage() {
+    setAttachMenuOpen(false);
+    fileInputRef.current?.click();
+  }
+
+  function pickDocument() {
+    setAttachMenuOpen(false);
+    docInputRef.current?.click();
   }
 
   function requestImageSend(file) {
@@ -200,6 +239,14 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     const file = e.target.files[0];
     if (file) requestImageSend(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function handleDocSelected(e) {
+    const file = e.target.files[0];
+    if (file && !sending && !pendingMedia) {
+      setPendingMedia({ type: 'document', file, filename: file.name });
+    }
+    if (docInputRef.current) docInputRef.current.value = '';
   }
 
   function handlePaste(e) {
@@ -227,39 +274,43 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     setSending(true);
 
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const localUrl = media.previewUrl || URL.createObjectURL(media.blob || media.file);
+    const localUrl = media.previewUrl
+      || (media.blob || media.file ? URL.createObjectURL(media.blob || media.file) : null);
 
+    // In sandbox the media is "received from the customer" (role 'user');
+    // otherwise it is a manual operator send (status='operator').
+    const base = sandbox
+      ? { role: 'user' }
+      : { role: 'assistant', status: 'operator' };
+
+    let optimistic, sendPromise;
     if (media.type === 'image') {
-      setContactData(prev => prev ? {
-        ...prev,
-        messages: [...(prev.messages || []), {
-          role: 'assistant', content: '', ts: Date.now() / 1000, status: 'operator',
-          media_type: 'image', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
-        }],
-      } : prev);
-      try {
-        const res = await sendImage(phone, media.file);
-        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' }));
-      } catch (err) {
-        console.error('Send image error:', err);
-        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
-      }
+      optimistic = { ...base, content: '', media_type: 'image', media_path: localUrl };
+      sendPromise = _api.sendImage(phone, media.file);
+    } else if (media.type === 'document') {
+      const verb = sandbox ? 'recebido' : 'enviado';
+      optimistic = { ...base, content: `[Documento ${verb}: ${media.filename}]`,
+                     media_type: 'document', media_path: localUrl };
+      sendPromise = _api.sendDocument(phone, media.file);
     } else {
-      // audio
-      setContactData(prev => prev ? {
-        ...prev,
-        messages: [...(prev.messages || []), {
-          role: 'assistant', content: '[Áudio]', ts: Date.now() / 1000, status: 'operator',
-          media_type: 'audio', media_path: localUrl, _localId: localId, _status: 'sending', _isLocalBlob: true,
-        }],
-      } : prev);
-      try {
-        const res = await sendAudio(phone, media.blob, media.filename);
-        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' }));
-      } catch (err) {
-        console.error('Send audio error:', err);
-        updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
-      }
+      optimistic = { ...base, content: '[Áudio]', media_type: 'audio', media_path: localUrl };
+      sendPromise = _api.sendAudio(phone, media.blob, media.filename);
+    }
+    optimistic = { ...optimistic, ts: Date.now() / 1000, _localId: localId,
+                   _status: 'sending', _isLocalBlob: true };
+
+    setContactData(prev => prev ? {
+      ...prev,
+      messages: [...(prev.messages || []), optimistic],
+    } : prev);
+    try {
+      const res = await sendPromise;
+      updateMsgByLocalId(localId, () => sandbox
+        ? { _status: res.ok ? null : 'failed' }
+        : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+    } catch (err) {
+      console.error('Send media error:', err);
+      updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
     setSending(false);
   }
@@ -527,13 +578,19 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                 }
               }
 
-              const senderLabel = isUser ? (groupSender || displayName) : (isOperator ? 'Manual' : 'IA');
+              // Which side the bubble sits on. In sandbox you ARE the customer,
+              // so your 'user' messages go right and the IA's replies go left —
+              // the opposite of the contact chat (viewed by the operator).
+              const isFromMe = sandbox ? isUser : !isUser;
+              const senderLabel = sandbox
+                ? (isUser ? 'Você' : 'IA')
+                : (isUser ? (groupSender || displayName) : (isOperator ? 'Manual' : 'IA'));
               const senderColor = isUser ? '#1f7aec' : (isOperator ? '#b45309' : '#047857');
 
               return [dateSeparator, html`
-                <div key=${m._localId || i} class="flex ${isUser ? 'justify-start' : 'justify-end'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
+                <div key=${m._localId || i} class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
                   <div class="wa-bubble max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
-                    isUser
+                    !isFromMe
                       ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
                       : `${isFailed ? 'text-wa-text' : 'bg-wa-outgoing text-wa-text'} ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
                   }" style="${isFailed ? 'background: #fce8e8;' : ''}">
@@ -612,7 +669,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         `;
                       })() : html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(displayContent) }}></span>`}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
-                      ${!isUser ? (() => {
+                      ${(!isUser && !sandbox) ? (() => {
                         if (isFailed) return html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}`;
                         if (isSending) return html`<${ClockIcon} />`;
                         const st = m.status || m._status;
@@ -630,7 +687,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         }
       </div>
 
-      <!-- Hidden file input for image upload -->
+      <!-- Hidden file inputs for image / document upload -->
       <input
         ref=${fileInputRef}
         type="file"
@@ -638,12 +695,23 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         class="hidden"
         onChange=${handleFileSelected}
       />
+      <input
+        ref=${docInputRef}
+        type="file"
+        class="hidden"
+        onChange=${handleDocSelected}
+      />
 
       <!-- Media confirmation overlay -->
       ${pendingMedia && canSend ? html`
         <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
           ${pendingMedia.type === 'image' ? html`
             <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
+          ` : pendingMedia.type === 'document' ? html`
+            <div class="flex items-center gap-[8px] bg-wa-inputBg border border-wa-border rounded-[8px] px-[14px] py-[10px] max-w-full">
+              <span class="text-[22px]">📄</span>
+              <span class="text-[14px] text-wa-text break-all">${pendingMedia.filename}</span>
+            </div>
           ` : html`
             <div class="w-full max-w-[320px]">
               <${AudioPlayer} src=${pendingMedia.previewUrl} isLocalBlob=${true} />
@@ -691,6 +759,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           </button>
         </div>
       ` : html`
+        ${!sandbox ? html`
         <div class="flex items-center gap-[10px] flex-wrap px-[14px] pt-[7px] pb-[3px] bg-wa-panel shrink-0">
           <div class="inline-flex items-center gap-[2px] p-[3px] rounded-full" style="background:#111b21;">
             <button
@@ -734,14 +803,29 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
             ` : ''}
           ` : ''}
         </div>
+        ` : ''}
         <form onSubmit=${handleSend} class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
           <button type="button" class="p-[8px] shrink-0" tabindex="-1">
             <${EmojiIcon} />
           </button>
           ${mode === 'private' ? '' : html`
-            <button type="button" class="p-[8px] shrink-0" tabindex="-1" onClick=${handleAttachClick}>
-              <${AttachIcon} />
-            </button>
+            <div ref=${attachMenuRef} class="relative shrink-0">
+              <button type="button" class="p-[8px]" tabindex="-1" onClick=${handleAttachClick}>
+                <${AttachIcon} />
+              </button>
+              ${attachMenuOpen ? html`
+                <div class="absolute bottom-[44px] left-0 bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] min-w-[160px] z-20">
+                  <button type="button" onClick=${pickImage}
+                    class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
+                    <span class="text-[16px]">🖼️</span> Imagem
+                  </button>
+                  <button type="button" onClick=${pickDocument}
+                    class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
+                    <span class="text-[16px]">📄</span> Documento
+                  </button>
+                </div>
+              ` : ''}
+            </div>
           `}
           <div class="flex-1 mx-[5px]">
             <textarea

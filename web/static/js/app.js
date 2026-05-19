@@ -412,10 +412,7 @@ function App({ onLogout, hasPassword }) {
                         }} />
                         <${Executions} />
                       </div>`
-                    : html`<div class="max-w-5xl mx-auto p-4">
-                        <${PageHeader} title="Sandbox" onBack=${() => setTab('contacts')} />
-                        <${Sandbox} />
-                      </div>`
+                    : html`<${Sandbox} newMessage=${newMessage} />`
         }
       </main>
     </div>

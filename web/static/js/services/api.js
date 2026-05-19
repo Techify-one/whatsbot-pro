@@ -95,6 +95,38 @@ export async function sandboxClear(phone) {
   return request('POST', '/api/sandbox/clear', { phone: phone || '' });
 }
 
+async function _sandboxUpload(path, fields) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    if (value instanceof Blob) form.append(key, value, value.name || 'file');
+    else form.append(key, value ?? '');
+  }
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: _authHeaders(),
+    body: form,
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
+  return res.json();
+}
+
+export async function sandboxSendImage(phone, file, caption = '') {
+  return _sandboxUpload('/api/sandbox/send-image', { phone, caption, image: file });
+}
+
+export async function sandboxSendAudio(phone, blob, filename = 'voice.ogg') {
+  const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
+  return _sandboxUpload('/api/sandbox/send-audio', { phone, audio: named });
+}
+
+export async function sandboxSendDocument(phone, file, caption = '') {
+  return _sandboxUpload('/api/sandbox/send-document', { phone, caption, document: file });
+}
+
 // ── Contacts ──────────────────────────────────────────────────────
 
 export async function getContacts(q = '', archived = false) {
