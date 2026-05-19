@@ -13,8 +13,13 @@ from pathlib import Path
 
 from fastapi import File, Form, UploadFile
 
+from db.repositories import config_repo
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, _err, parse_split_reply
+
+# Config-key prefix flagging a contact as a sandbox/test number. Operator sends
+# from the official chat check this and stay local instead of hitting GOWA.
+SANDBOX_CONTACT_PREFIX = "sandbox_contact."
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,15 @@ def register_routes(app, deps):
     async def _sandbox_reply(phone: str) -> list[str]:
         """Run the agent on the contact's current context, then persist + broadcast
         the reply parts cleanly (no JSON-array brackets). Returns the parts."""
+        # Flag this contact as a sandbox/test number so operator sends from the
+        # official chat are kept local instead of failing a real GOWA send.
+        try:
+            await asyncio.to_thread(
+                config_repo.set, f"{SANDBOX_CONTACT_PREFIX}{phone}", True,
+            )
+        except Exception as e:
+            logger.warning("[Sandbox] could not flag %s as sandbox: %s", phone, e)
+
         result = await asyncio.to_thread(
             agent_handler.process_message, phone, "",
             save_user_message=False, save_response=False,

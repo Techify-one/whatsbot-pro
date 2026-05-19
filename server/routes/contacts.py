@@ -9,11 +9,18 @@ from fastapi import File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from gowa.client import GOWASendError, extract_msg_id
 
-from db.repositories import contact_repo, message_repo
+from db.repositories import contact_repo, message_repo, config_repo
 from server.helpers import _ok, _err, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
+from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 
 logger = logging.getLogger(__name__)
+
+
+def _is_sandbox_contact(phone: str) -> bool:
+    """True when the contact is a sandbox/test number — operator sends to it
+    must stay local (a real GOWA send would fail: the number isn't on WhatsApp)."""
+    return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
 
 
 def register_routes(app, deps):
@@ -186,6 +193,22 @@ def register_routes(app, deps):
         if filtered is None:
             return _err("Mensagem bloqueada por plugin.", status=400)
         message = filtered
+
+        # Sandbox/test contact — never goes over GOWA (the number isn't real).
+        # Persist the operator message locally and broadcast it, no error.
+        if await asyncio.to_thread(_is_sandbox_contact, phone):
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message, status="operator",
+            )
+            await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+            await emit_with_filter("message.sent", {
+                "phone": phone, "text": message, "msg_id": None,
+                "media_type": None, "media_path": None,
+                "source": "operator", "status": "operator",
+                "ts": time.time(),
+            })
+            logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
+            return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
         # Track sent message to filter GOWA echo-backs (must be before send)
         state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
@@ -484,8 +507,11 @@ def register_routes(app, deps):
         dest.write_bytes(content)
 
         send_result = None
+        # Sandbox/test contact — keep the image local, never hit GOWA.
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         try:
-            send_result = await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
+            if not is_sandbox:
+                send_result = await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
         except GOWASendError as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -552,8 +578,11 @@ def register_routes(app, deps):
         dest.write_bytes(content)
 
         send_result = None
+        # Sandbox/test contact — keep the audio local, never hit GOWA.
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         try:
-            send_result = await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
+            if not is_sandbox:
+                send_result = await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
         except GOWASendError as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
