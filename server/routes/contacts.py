@@ -656,7 +656,7 @@ def register_routes(app, deps):
         try:
             if not is_sandbox:
                 send_result = await asyncio.to_thread(
-                    gowa_client.send_file, phone, str(dest), caption
+                    gowa_client.send_file, phone, str(dest), caption, safe_name
                 )
         except GOWASendError as e:
             logger.error("[Send] Failed to send document to %s: %s", phone, e)

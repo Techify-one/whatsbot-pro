@@ -309,18 +309,23 @@ class GOWAClient:
         except Exception as e:
             raise GOWASendError(f"Erro ao enviar imagem: {e}", error_type="unknown")
 
-    def send_file(self, phone: str, file_path: str, caption: str = "") -> dict:
+    def send_file(self, phone: str, file_path: str, caption: str = "",
+                  filename: str | None = None) -> dict:
         """Send an arbitrary file (document) to a phone number or group via multipart/form-data.
 
-        Uses GOWA's POST /send/file endpoint. Raises GOWASendError on failure.
+        Uses GOWA's POST /send/file endpoint. The ``filename`` arg is what the
+        recipient sees in WhatsApp; if omitted, falls back to the disk basename
+        (which may carry a timestamp prefix for collision avoidance).
+        Raises GOWASendError on failure.
         """
         phone = self._format_target(phone)
         url = f"{self.base_url}/send/file"
-        mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        send_name = filename or Path(file_path).name
+        mime = mimetypes.guess_type(send_name)[0] or "application/octet-stream"
         try:
             with httpx.Client(timeout=60.0) as client:
                 with open(file_path, "rb") as f:
-                    files = {"file": (Path(file_path).name, f, mime)}
+                    files = {"file": (send_name, f, mime)}
                     data = {"phone": phone}
                     if caption:
                         data["caption"] = caption
