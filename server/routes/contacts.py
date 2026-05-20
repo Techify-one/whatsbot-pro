@@ -636,6 +636,83 @@ def register_routes(app, deps):
         logger.info("[Send] Audio sent to %s", phone)
         return _ok({"message": "Áudio enviado."})
 
+    @app.post("/api/contacts/{phone}/send-document")
+    async def send_document_to_contact(
+        phone: str,
+        document: UploadFile = File(...),
+        caption: str = Form(""),
+    ):
+        """Send an arbitrary file (document) to a contact (operator-initiated)."""
+        filename = document.filename or "arquivo"
+        safe_name = Path(filename).name
+        suffix = Path(safe_name).suffix
+        stem = Path(safe_name).stem or "arquivo"
+        dest = statics_senditems_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        content = await document.read()
+        dest.write_bytes(content)
+
+        send_result = None
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        try:
+            if not is_sandbox:
+                send_result = await asyncio.to_thread(
+                    gowa_client.send_file, phone, str(dest), caption
+                )
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send document to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Falha ao enviar documento: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Falha ao enviar documento: {e}", status=500)
+        except Exception as e:
+            logger.error("[Send] Failed to send document to %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "error",
+                    "content": f"Erro inesperado ao enviar documento: {e}",
+                    "ts": time.time(),
+                },
+            })
+            return _err(f"Erro ao enviar documento: {e}", status=500)
+
+        msg_id = extract_msg_id(send_result)
+        if msg_id:
+            state.processed_messages.add(msg_id)
+
+        rel_path = f"statics/senditems/{dest.name}"
+        text_content = f"[Documento enviado: {safe_name}]"
+        if caption.strip():
+            text_content = f"{text_content}\n{caption.strip()}"
+
+        msg_data = {
+            "role": "assistant",
+            "content": text_content,
+            "ts": time.time(),
+            "media_type": "document",
+            "media_path": rel_path,
+            "status": "operator",
+            "msg_id": msg_id,
+        }
+        contact = agent_handler._get_contact(phone)
+        contact.add_message("assistant", text_content, media_type="document",
+                            media_path=rel_path, status="operator", msg_id=msg_id)
+
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        await emit_with_filter("message.sent", {
+            "phone": phone, "text": caption, "msg_id": msg_id,
+            "media_type": "document", "media_path": rel_path,
+            "source": "operator", "status": "operator",
+            "ts": time.time(),
+        })
+        logger.info("[Send] Document sent to %s: %s", phone, safe_name)
+        return _ok({"message": "Documento enviado."})
+
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict):
         """Send typing/stop presence indicator to a contact (operator-initiated)."""

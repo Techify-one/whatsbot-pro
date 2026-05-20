@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, retrySend, sendImage, sendAudio, sendPresence, sendPrivateMessage } from '../../services/api.js';
+import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage } from '../../services/api.js';
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
 import { formatBubbleTime, isSameDay, formatDateSeparator } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
@@ -13,9 +13,9 @@ const html = htm.bind(h);
 
 export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, sandbox = false, api = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
-  // chat uses the real ones. `sendDocument` only exists in sandbox.
+  // chat uses the real ones.
   const _api = {
-    sendText: sendMessage, sendImage, sendAudio, sendDocument: null,
+    sendText: sendMessage, sendImage, sendAudio, sendDocument,
     ...(api || {}),
   };
   const [input, setInput] = useState('');
@@ -211,8 +211,8 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   }
 
   function handleAttachClick() {
-    // Sandbox also allows arbitrary documents → show a picker menu.
-    if (sandbox && _api.sendDocument) {
+    // Always show the picker (image vs. arbitrary document).
+    if (_api.sendDocument) {
       setAttachMenuOpen(o => !o);
     } else {
       fileInputRef.current?.click();

@@ -85,6 +85,7 @@ mock_gowa_client = MagicMock()
 mock_gowa_client.send_message = MagicMock(return_value=None)
 mock_gowa_client.send_image = MagicMock(return_value=None)
 mock_gowa_client.send_audio = MagicMock(return_value=None)
+mock_gowa_client.send_file = MagicMock(return_value=None)
 mock_gowa_client.send_chat_presence = MagicMock(return_value=None)
 mock_gowa_client.mark_as_read = MagicMock(return_value=None)
 mock_gowa_client.reconnect = MagicMock(return_value=None)
@@ -348,6 +349,20 @@ r = client.post(
 )
 check("POST /send-audio -> 200", r.status_code == 200)
 check("POST /send-audio -> gowa called", mock_gowa_client.send_audio.called)
+
+# ═══════════════════════════════════════════════════════════════════
+#  10b. Contact send document
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Send Document")
+
+fake_pdf = b"%PDF-1.4\n" + b"\x00" * 100
+r = client.post(
+    "/api/contacts/5511999990001/send-document",
+    files={"document": ("relatorio.pdf", io.BytesIO(fake_pdf), "application/pdf")},
+    data={"caption": "Doc caption"},
+)
+check("POST /send-document -> 200", r.status_code == 200)
+check("POST /send-document -> gowa called", mock_gowa_client.send_file.called)
 
 # ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence

@@ -210,6 +210,23 @@ export async function sendAudio(phone, blob, filename = 'voice.ogg') {
   return res.json();
 }
 
+export async function sendDocument(phone, file, caption = '') {
+  const form = new FormData();
+  form.append('document', file);
+  form.append('caption', caption);
+  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-document`, {
+    method: 'POST',
+    headers: _authHeaders(),
+    body: form,
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
+  return res.json();
+}
+
 export async function sendPresence(phone, action = 'start') {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, { action });
 }
