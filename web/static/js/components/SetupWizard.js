@@ -353,7 +353,14 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
 
   function renderFooter() {
     if (step === 1) {
-      return html`<div class="text-xs text-wa-secondary">A próxima etapa abre sozinha após conectar.</div>`;
+      return html`
+        <div class="flex flex-col items-center gap-2">
+          <div class="text-xs text-wa-secondary">A próxima etapa abre sozinha após conectar.</div>
+          <button onClick=${onComplete} class="text-wa-secondary hover:text-wa-text text-xs font-medium underline transition-colors">
+            Pular configuração e ir para o chat
+          </button>
+        </div>
+      `;
     }
     if (step === 2) {
       if (keyState === 'idle') {
