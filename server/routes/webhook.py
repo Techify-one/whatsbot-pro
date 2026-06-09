@@ -11,6 +11,7 @@ import uuid
 from gowa.client import GOWASendError, extract_msg_id
 
 from db.repositories import contact_repo, message_repo
+from agent import group_mentions
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
@@ -334,6 +335,87 @@ def _extract_media(data: dict, *, is_from_me: bool, existing_text: str) -> dict:
     }
 
 
+# Keys that hold the id of the quoted message (the message being replied to).
+_REPLY_ID_KEYS = (
+    "reply_message_id", "quoted_message_id", "quotedMessageId",
+    "replied_id", "repliedId", "reply_to", "reply_to_id", "in_reply_to",
+    "quoted_id", "quotedId",
+)
+# Keys that hold the quoted message id *inside* a context-info object (whatsmeow's
+# ContextInfo.StanzaID). Here a bare ``id`` IS the quoted id (unlike a `message`
+# wrapper, where ``id`` is the current message's own id).
+_REPLY_CTX_KEYS = ("stanza_id", "stanzaId", "StanzaID", "quoted_message_id", "id", "Id")
+
+
+def _deep_find_reply_id(obj) -> str | None:
+    """Recursively scan a payload for a key that clearly names a quoted/replied
+    message id (e.g. ``replied_id``, ``reply_message_id``, ``stanza_id``). Requires
+    the key to mention repl/quot/stanza AND id, so plain ``id`` or the quoted *text*
+    (``quoted_message``) are never mistaken for it."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (str, int)) and v != "" and isinstance(k, str):
+                kl = k.lower()
+                if (("repl" in kl or "quot" in kl or "stanza" in kl) and "id" in kl):
+                    return str(v)
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                found = _deep_find_reply_id(v)
+                if found:
+                    return found
+    elif isinstance(obj, list):
+        for it in obj:
+            found = _deep_find_reply_id(it)
+            if found:
+                return found
+    return None
+
+
+def _extract_reply_to(data: dict) -> str | None:
+    """Best-effort extraction of the quoted message id from a GOWA webhook payload.
+
+    GOWA is not consistent about exposing this for inbound messages (and nests it
+    differently across versions), so we probe, in order: flat keys, a nested
+    ``message`` object, a ``context_info`` object (flat or inside ``message``), and
+    finally a guarded recursive scan. Returns None when nothing quoted-looking is
+    present.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    # 1) Flat well-known keys.
+    for key in _REPLY_ID_KEYS:
+        val = data.get(key)
+        if val:
+            return str(val)
+
+    # 2) Some GOWA builds nest the text + reply id under a `message` object.
+    msg = data.get("message")
+    if isinstance(msg, dict):
+        for key in _REPLY_ID_KEYS:
+            val = msg.get(key)
+            if val:
+                return str(val)
+
+    # 3) A container describing the quoted message (context info / quoted / reply).
+    #    Inside one of these a bare ``id`` IS the quoted message id. Probe both at
+    #    the top level and nested under ``message``.
+    container_names = ("context_info", "contextInfo", "ContextInfo",
+                       "quoted", "quoted_message", "quotedMessage", "reply")
+    scopes = [data] + ([msg] if isinstance(msg, dict) else [])
+    for scope in scopes:
+        for name in container_names:
+            ctx = scope.get(name)
+            if isinstance(ctx, dict):
+                for key in _REPLY_CTX_KEYS:
+                    val = ctx.get(key)
+                    if val:
+                        return str(val)
+
+    # 4) Last resort: scan the whole payload for a reply/quote *id* key.
+    return _deep_find_reply_id(data)
+
+
 def register_routes(app, deps):
     agent_handler = deps.agent_handler
     gowa_client = deps.gowa_client
@@ -424,13 +506,22 @@ def register_routes(app, deps):
                 except Exception:
                     pass
 
-            # Track for echo-back filtering
-            sent_key = f"{phone}:{part[:120]}"
+            # Resolve @Name / @todos -> real mentions for group targets. We keep
+            # `part` (friendly @Name) for save/broadcast and send `send_text`
+            # (inline @<number>) + mentions on the wire.
+            send_text, mentions = part, None
+            if "@g.us" in phone:
+                send_text, mentions = await asyncio.to_thread(
+                    group_mentions.resolve_outgoing, phone, part)
+
+            # Track for echo-back filtering (key on the wire text we actually send)
+            sent_key = f"{phone}:{send_text[:120]}"
             state.recently_sent[sent_key] = time.time()
 
             send_result = None
             try:
-                send_result = await asyncio.to_thread(gowa_client.send_message, phone, part)
+                send_result = await asyncio.to_thread(
+                    gowa_client.send_message, phone, send_text, mentions)
                 await atrack_step("gowa_send", {"phone": phone, "part": i + 1, "total_parts": len(parts)})
             except GOWASendError as e:
                 logger.error("[Batch] Send failed for %s (part %d/%d): %s", phone, i + 1, len(parts), e)
@@ -720,6 +811,7 @@ def register_routes(app, deps):
 
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
+            text_reply_to: str | None = None
             media_items: list[dict] = []
             for item in items:
                 if (item.get("image_path") or item.get("audio_path")
@@ -729,6 +821,9 @@ def register_routes(app, deps):
                     text_parts.append(item.get("text", ""))
                     if item.get("msg_id"):
                         text_msg_ids.append(item["msg_id"])
+                    # Best-effort: the combined batch quotes the last quoted item.
+                    if item.get("reply_to_msg_id"):
+                        text_reply_to = item["reply_to_msg_id"]
 
             await atrack_step("batch_accumulated", {
                 "text_count": len(text_parts),
@@ -753,7 +848,8 @@ def register_routes(app, deps):
                     logger.info("[Batch] Processing %d text messages from %s: %s",
                                 len(text_parts), phone, combined[:80])
                     last_msg_id = text_msg_ids[-1] if text_msg_ids else None
-                    contact.add_message("user", combined, msg_id=last_msg_id)
+                    contact.add_message("user", combined, msg_id=last_msg_id,
+                                        reply_to_msg_id=text_reply_to)
                     await emit_with_filter("message.saved", {
                         "phone": phone, "text": combined, "msg_id": last_msg_id,
                         "media_type": None, "media_path": None,
@@ -812,6 +908,7 @@ def register_routes(app, deps):
                     media_type=_saved_media_type,
                     media_path=_saved_media_path,
                     msg_id=item.get("msg_id"),
+                    reply_to_msg_id=item.get("reply_to_msg_id"),
                 )
                 await emit_with_filter("message.saved", {
                     "phone": phone, "text": _saved_text,
@@ -996,13 +1093,28 @@ def register_routes(app, deps):
         # localmente nestes (nenhum LLM, nenhum save), só fan-outa pros plugins.
 
         if event == "message.reaction":
+            react_phone = _phone_from_jid(data.get("chat_id", "") or data.get("from", ""))
+            react_from = _phone_from_jid(data.get("from", ""))
+            reacted_id = data.get("reacted_message_id", "")
+            emoji = data.get("reaction", "")
+            is_from_me = bool(data.get("is_from_me", False))
+            # Persist so reactions made on the phone / by the contact reflect in the
+            # panel. Reactor "me" for the bot's own account, else the sender's phone.
+            if reacted_id:
+                reactor = "me" if is_from_me else (react_from or react_phone)
+                reactions = await asyncio.to_thread(
+                    message_repo.set_reaction, reacted_id, emoji, reactor)
+                if reactions is not None:
+                    await ws_manager.broadcast("message_reaction", {
+                        "phone": react_phone, "msg_id": reacted_id, "reactions": reactions,
+                    })
             await emit_with_filter("message.reaction", {
                 "id": data.get("id", ""),
-                "phone": _phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
-                "from": _phone_from_jid(data.get("from", "")),
-                "reaction": data.get("reaction", ""),
-                "reacted_message_id": data.get("reacted_message_id", ""),
-                "is_from_me": bool(data.get("is_from_me", False)),
+                "phone": react_phone,
+                "from": react_from,
+                "reaction": emoji,
+                "reacted_message_id": reacted_id,
+                "is_from_me": is_from_me,
                 "ts": data.get("timestamp") or time.time(),
                 "raw": data,
             })
@@ -1022,11 +1134,21 @@ def register_routes(app, deps):
             return _ok({"status": "edited"})
 
         if event == "message.revoked":
+            revoked_phone = _phone_from_jid(data.get("chat_id", "") or data.get("from", ""))
+            revoked_id = data.get("revoked_message_id", "")
+            # Flag as revoked (keeping content) so a revoke done on the phone/by the
+            # contact reflects in the panel and survives reload, without losing the text.
+            if revoked_id:
+                matched = await asyncio.to_thread(message_repo.mark_revoked, revoked_id, "all")
+                if matched:
+                    await ws_manager.broadcast("message_revoked", {
+                        "phone": revoked_phone, "msg_id": revoked_id,
+                    })
             await emit_with_filter("message.revoked", {
                 "id": data.get("id", ""),
-                "phone": _phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
+                "phone": revoked_phone,
                 "from": _phone_from_jid(data.get("from", "")),
-                "revoked_message_id": data.get("revoked_message_id", ""),
+                "revoked_message_id": revoked_id,
                 "revoked_from_me": bool(data.get("revoked_from_me", False)),
                 "revoked_chat": data.get("revoked_chat", ""),
                 "ts": data.get("timestamp") or time.time(),
@@ -1035,9 +1157,19 @@ def register_routes(app, deps):
             return _ok({"status": "revoked"})
 
         if event == "message.deleted":
+            deleted_phone = _phone_from_jid(data.get("chat_id", "") or data.get("from", ""))
+            deleted_id = data.get("deleted_message_id", "")
+            # Keep the row (flag revoked) instead of hard-deleting, so a "delete for
+            # me" done on the phone leaves the message visible in the panel.
+            if deleted_id:
+                matched = await asyncio.to_thread(message_repo.mark_revoked, deleted_id, "me")
+                if matched:
+                    await ws_manager.broadcast("message_deleted", {
+                        "phone": deleted_phone, "msg_id": deleted_id,
+                    })
             await emit_with_filter("message.deleted", {
-                "deleted_message_id": data.get("deleted_message_id", ""),
-                "phone": _phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
+                "deleted_message_id": deleted_id,
+                "phone": deleted_phone,
                 "from": _phone_from_jid(data.get("from", "")),
                 "original_content": data.get("original_content", ""),
                 "original_sender": data.get("original_sender", ""),
@@ -1049,11 +1181,41 @@ def register_routes(app, deps):
             return _ok({"status": "deleted"})
 
         if event == "group.participants":
+            chat_id = data.get("chat_id", "")
+            ctype = data.get("type", "")
+            jids = data.get("jids", []) or []
+            # Apply the roster delta locally (join adds + resolves push name,
+            # leave drops the member) and push the authoritative list to the open
+            # panel so its @mention autocomplete updates immediately — a removed
+            # member disappears and a just-joined one shows with its name, without
+            # depending on a possibly-stale GOWA /group/info refetch.
+            if chat_id:
+                members = await asyncio.to_thread(
+                    group_mentions.apply_participants_change, chat_id, ctype, jids)
+                await ws_manager.broadcast("group_participants_changed",
+                                           {"group_jid": chat_id, "members": members})
+                # Surface a join/leave/promote notice in the chat timeline (only
+                # for groups already tracked, to avoid materializing phantom
+                # contacts). Saved as `system_notice`: rendered as a centered
+                # bubble and excluded from the LLM context.
+                existing = await asyncio.to_thread(contact_repo.get_by_phone, chat_id)
+                if existing:
+                    notice = await asyncio.to_thread(
+                        group_mentions.describe_change, ctype, jids)
+                    if notice:
+                        contact_obj = agent_handler._get_contact(chat_id)
+                        await asyncio.to_thread(
+                            contact_obj.add_message, "system_notice", notice)
+                        await ws_manager.broadcast("new_message", {
+                            "phone": chat_id,
+                            "message": {"role": "system_notice", "content": notice,
+                                        "ts": time.time()},
+                        })
             await emit_with_filter("group.participants_changed", {
-                "chat_id": data.get("chat_id", ""),
-                "phone": _phone_from_jid(data.get("chat_id", "")),
-                "type": data.get("type", ""),
-                "jids": data.get("jids", []),
+                "chat_id": chat_id,
+                "phone": _phone_from_jid(chat_id),
+                "type": ctype,
+                "jids": jids,
                 "ts": time.time(),
                 "raw": data,
             })
@@ -1212,13 +1374,28 @@ def register_routes(app, deps):
             own_jid = (data.get("sender_jid", "") or data.get("from", "")
                        or data.get("sender", ""))
             if own_jid and "@s.whatsapp.net" in own_jid:
-                state.bot_phone = own_jid.split("@")[0].split(":")[0]
-                logger.info("[Webhook] Bot phone captured from own message: %s", state.bot_phone)
+                captured = own_jid.split("@")[0].split(":")[0]
+                if captured and captured != state.bot_phone:
+                    state.bot_phone = captured
+                    logger.info("[Webhook] Bot phone captured from own message: %s", state.bot_phone)
+                    # Persist + register so @mention detection in groups keeps
+                    # working across restarts, even before the status poll runs.
+                    try:
+                        if settings.get("bot_phone", "") != state.bot_phone:
+                            settings.set("bot_phone", state.bot_phone)
+                        group_mentions.set_bot_identity(
+                            state.bot_phone, state.bot_name)
+                    except Exception as e:
+                        logger.warning("[Webhook] Failed to persist bot_phone: %s", e)
 
         msg_id = data.get("id", data.get("Id", data.get("message_id", ""))
                          ) or str(uuid.uuid4())
         if msg_id in state.processed_messages:
             return _ok({"status": "duplicate"})
+
+        # Best-effort: GOWA's webhook is inconsistent about exposing the quoted
+        # message id. Probe a few known/likely keys (flat + nested context_info).
+        reply_to_msg_id = _extract_reply_to(data)
 
         # Extract body — try multiple known field names
         text = (data.get("content", "")
@@ -1346,6 +1523,7 @@ def register_routes(app, deps):
                 "media_type": media_type,
                 "media_path": media_path,
                 "media_extras": media_extras,
+                "reply_to_msg_id": reply_to_msg_id,
                 "is_from_me": True,
                 "source": "echo",
                 "raw": data,
@@ -1364,6 +1542,7 @@ def register_routes(app, deps):
             media_type = outgoing_msg.get("media_type", media_type)
             media_path = outgoing_msg.get("media_path", media_path)
             media_extras = outgoing_msg.get("media_extras", media_extras)
+            reply_to_msg_id = outgoing_msg.get("reply_to_msg_id", reply_to_msg_id)
 
             logger.info("[Webhook] Syncing outgoing %s to %s: %s",
                         media_type or "message", phone,
@@ -1374,12 +1553,15 @@ def register_routes(app, deps):
             await asyncio.to_thread(
                 contact.add_message, "assistant", text,
                 media_type=media_type, media_path=media_path, msg_id=msg_id,
+                reply_to_msg_id=reply_to_msg_id,
                 status="operator")
 
             # Broadcast to frontend
             broadcast_msg: dict = {"role": "assistant", "content": text,
                                    "ts": time.time(), "msg_id": msg_id,
                                    "status": "operator"}
+            if reply_to_msg_id:
+                broadcast_msg["reply_to_msg_id"] = reply_to_msg_id
             if media_type:
                 broadcast_msg["media_type"] = media_type
                 broadcast_msg["media_path"] = media_path
@@ -1417,6 +1599,7 @@ def register_routes(app, deps):
         # For groups: prefix text with sender name and check @mention
         display_text = text
         skip_ai = False
+        bot_mentioned = False  # set inside the is_group branch; kept bound for non-group
         if is_group:
             # Log full group payload for debugging field names
             logger.info("[Webhook] Group payload: %s", json.dumps(data, default=str, ensure_ascii=False)[:2000])
@@ -1460,20 +1643,26 @@ def register_routes(app, deps):
             # Prefer the saved contact name (if the sender exists as a private
             # contact), so renames in the contact info panel propagate to new
             # group messages. Falls back to WhatsApp pushName, then phone.
-            saved_name = ""
-            try:
-                sender_contact = await asyncio.to_thread(
-                    contact_repo.get_by_phone, individual_phone)
-                if sender_contact and sender_contact.get("name"):
-                    saved_name = sender_contact["name"].lstrip("~").strip()
-            except Exception as e:
-                logger.warning("[Webhook] Failed to lookup sender contact %s: %s",
-                               individual_phone, e)
-            sender_label = saved_name or from_name or individual_phone
-            if text:
-                display_text = f"[{sender_label}]: {text}"
+            # Remember the sender's pushName so future name resolution works
+            # (GOWA's participant list has no display names). Keyed by the
+            # sender's digits (phone OR lid, depending on group addressing).
+            if from_name:
+                await asyncio.to_thread(
+                    group_mentions.record_pushname, [individual_phone], from_name)
 
-            # Check if bot is mentioned
+            # Resolve names for this group once (saved contact > pushName > number),
+            # handling lid-addressed groups. `lookup` maps phone/lid digits -> name
+            # and is reused to turn @<number> mentions in the body into @<Name>.
+            try:
+                lookup = await asyncio.to_thread(group_mentions.build_lookup, chat_jid)
+            except Exception as e:
+                logger.warning("[Webhook] member lookup failed for %s: %s", chat_jid, e)
+                lookup = {}
+            sender_label = lookup.get(individual_phone) or from_name or individual_phone
+            if text:
+                display_text = f"[{sender_label}]: {group_mentions.apply_incoming(lookup, text)}"
+
+            # Check if bot is mentioned (use RAW text, before name resolution)
             group_mode = settings.get("group_reply_mode", "mention_only")
             bot_mentioned = _is_bot_mentioned(text, data)
 
@@ -1484,7 +1673,8 @@ def register_routes(app, deps):
             else:
                 # Bot was mentioned — strip mention from text for LLM
                 cleaned = _strip_bot_mention(text)
-                display_text = f"[{sender_label}]: {cleaned}" if cleaned else display_text
+                display_text = (f"[{sender_label}]: {group_mentions.apply_incoming(lookup, cleaned)}"
+                                if cleaned else display_text)
                 logger.info("[Webhook] Group message (@mention) from %s in %s: %s",
                             sender_label, phone, text[:80] if text else "[media]")
         else:
@@ -1518,6 +1708,11 @@ def register_routes(app, deps):
         # Increment unread count for incoming user messages
         await asyncio.to_thread(lambda: agent_handler._get_contact(phone).increment_unread(msg_id))
 
+        # A group message that @mentions the bot raises the "mention" flag, shown as
+        # an "@" next to the unread badge until the operator opens the conversation.
+        if is_group and bot_mentioned:
+            await asyncio.to_thread(lambda: agent_handler._get_contact(phone).mark_mention())
+
         # Build parsed message payload for plugins (filter + event). Includes
         # the full GOWA payload under `raw` so plugins that need an obscure
         # field can still get it. We emit BEFORE the skip_ai branch so group
@@ -1528,6 +1723,7 @@ def register_routes(app, deps):
             "text": display_text,
             "raw_text": text,
             "msg_id": msg_id,
+            "reply_to_msg_id": reply_to_msg_id,
             "media_type": media_type,
             "media_path": media_path,
             "media_extras": media_extras,
@@ -1549,15 +1745,20 @@ def register_routes(app, deps):
         # Filter may have rewritten user-facing strings — propagate.
         display_text = parsed_msg.get("text", display_text)
         msg_id = parsed_msg.get("msg_id", msg_id)
+        reply_to_msg_id = parsed_msg.get("reply_to_msg_id", reply_to_msg_id)
         media_type = parsed_msg.get("media_type", media_type)
         media_path = parsed_msg.get("media_path", media_path)
         media_extras = parsed_msg.get("media_extras", media_extras)
 
         # Broadcast incoming message to frontend in real-time
         broadcast_msg: dict = {"role": "user", "content": display_text, "ts": time.time(), "msg_id": msg_id}
+        if reply_to_msg_id:
+            broadcast_msg["reply_to_msg_id"] = reply_to_msg_id
         if media_type:
             broadcast_msg["media_type"] = media_type
             broadcast_msg["media_path"] = media_path
+        if is_group and bot_mentioned:
+            broadcast_msg["mentioned"] = True
         await ws_manager.broadcast("new_message", {
             "phone": phone,
             "message": broadcast_msg,
@@ -1600,7 +1801,7 @@ def register_routes(app, deps):
                 contact_obj.add_message,
                 "user", saved_text,
                 media_type=media_type, media_path=media_path,
-                msg_id=msg_id)
+                msg_id=msg_id, reply_to_msg_id=reply_to_msg_id)
             await emit_with_filter("message.saved", {
                 "phone": phone, "text": saved_text, "msg_id": msg_id,
                 "media_type": media_type, "media_path": media_path,
@@ -1636,6 +1837,7 @@ def register_routes(app, deps):
             "media_path": media_path,
             "media_extras": media_extras,
             "msg_id": msg_id,
+            "reply_to_msg_id": reply_to_msg_id,
         })
 
         # A real message arriving from the contact proves they finished typing

@@ -1,17 +1,32 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage } from '../../services/api.js';
+import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage } from '../../services/api.js';
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
-import { formatBubbleTime, isSameDay, formatDateSeparator } from './utils.js';
+import { formatBubbleTime, isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, copyToClipboard } from './MessageContextMenu.js';
+import { EmojiPicker } from './EmojiPicker.js';
 
 const html = htm.bind(h);
 
+// Quick-reaction emojis shown in the message context menu bar (WhatsApp-style).
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+// The operator's own current reaction on a message (stored under reactor "me").
+function myReaction(message) {
+  const r = message.reactions;
+  if (!r) return null;
+  for (const [emoji, reactors] of Object.entries(r)) {
+    if (Array.isArray(reactors) && reactors.includes('me')) return emoji;
+  }
+  return null;
+}
+
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, sandbox = false, api = null }) {
+export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -23,6 +38,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   const [recording, setRecording] = useState(false);
   const [recordDuration, setRecordDuration] = useState(0);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   // mode: 'reply' sends to the contact; 'private' stays in the panel only
   const [mode, setMode] = useState('reply');
   // Private-mode AI flags. aiReadPrivate=false → AI ignores the note entirely.
@@ -31,16 +47,60 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   const [aiReplyInChat, setAiReplyInChat] = useState(true);
   // pendingMedia: { type: 'image'|'audio', file, blob, filename, previewUrl }
   const [pendingMedia, setPendingMedia] = useState(null);
+  // Group @mention autocomplete: list of participants + open menu state.
+  const [members, setMembers] = useState([]);
+  // mentionMenu: { query, start (index of '@' in input), index (highlighted) } | null
+  const [mentionMenu, setMentionMenu] = useState(null);
+  // Per-message context menu: { x, y, message, isFromMe } | null
+  const [msgMenu, setMsgMenu] = useState(null);
+  // Delete confirmation dialog: { message, isFromMe } | null
+  const [deleteDialog, setDeleteDialog] = useState(null);
+  // Message being replied to (quoted) — drives the preview bar above the input.
+  const [replyingTo, setReplyingTo] = useState(null);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const docInputRef = useRef(null);
   const attachMenuRef = useRef(null);
+  const emojiRef = useRef(null);
   const inputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const recordTimerRef = useRef(null);
   const presenceTimerRef = useRef(null);
 
+  // Remember a message to focus (e.g. opened from a search hit) until it renders,
+  // so the messages-driven scroll below jumps to it instead of to the bottom.
+  const pendingScrollRef = useRef(null);
   useEffect(() => {
+    pendingScrollRef.current = scrollToMsg != null ? String(scrollToMsg) : null;
+  }, [scrollToMsg, phone]);
+
+  // Scroll a message into view and flash it briefly. Returns false if the message
+  // isn't rendered (e.g. outside the loaded window). Used by the search-hit jump
+  // and by clicking a reply quote.
+  function focusMessage(mid, { smooth = false } = {}) {
+    if (mid == null || !chatRef.current) return false;
+    const el = chatRef.current.querySelector(`[data-mid="${mid}"]`);
+    if (!el) return false;
+    el.scrollIntoView({ block: 'center', behavior: smooth ? 'smooth' : 'auto' });
+    // Restart the flash even if it was just highlighted (rapid re-clicks).
+    el.classList.remove('wa-msg-highlight');
+    void el.offsetWidth;
+    el.classList.add('wa-msg-highlight');
+    setTimeout(() => el.classList.remove('wa-msg-highlight'), 3000);
+    return true;
+  }
+
+  useEffect(() => {
+    const target = pendingScrollRef.current;
+    if (target != null) {
+      if (focusMessage(target)) {
+        pendingScrollRef.current = null;
+        if (onScrolledToMsg) onScrolledToMsg();
+      }
+      // Either handled, or the target isn't rendered yet — in both cases don't
+      // fall through to the bottom-scroll (wait for the next messages update).
+      return;
+    }
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
 
@@ -49,7 +109,27 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     setMode('reply');
     setAiReadPrivate(false);
     setAiReplyInChat(true);
+    setReplyingTo(null);
+    setEmojiOpen(false);
   }, [phone]);
+
+  // Insert an emoji at the caret position in the message input (keeps the
+  // picker open for multiple picks, WhatsApp-style).
+  function insertEmoji(em) {
+    const el = inputRef.current;
+    const cur = el ? el.value : input;
+    const start = (el && el.selectionStart != null) ? el.selectionStart : cur.length;
+    const end = (el && el.selectionEnd != null) ? el.selectionEnd : cur.length;
+    const newVal = cur.slice(0, start) + em + cur.slice(end);
+    setInput(newVal);
+    setTimeout(() => {
+      if (el) {
+        el.focus();
+        const caret = start + em.length;
+        el.setSelectionRange(caret, caret);
+      }
+    }, 0);
+  }
 
   // Auto-focus message input when opening a chat
   useEffect(() => {
@@ -58,10 +138,102 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     }
   }, [phone]);
 
+  // Fetch group participants for @mention autocomplete.
+  useEffect(() => {
+    setMembers([]);
+    setMentionMenu(null);
+    if (!phone || sandbox || !(contact && contact.is_group)) return;
+    let cancelled = false;
+    getGroupMembers(phone)
+      .then(res => { if (!cancelled && res && res.ok) setMembers(res.data.members || []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [phone, contact && contact.is_group]);
+
+  // A member joined/left the OPEN group. The server already applied the delta
+  // (added member with its push name, or dropped a removed one) and ships the
+  // authoritative roster in the event — use it directly so a removed member
+  // disappears at once and a just-joined one shows its name. Fall back to a
+  // forced refetch only if the event somehow carries no member list.
+  useEffect(() => {
+    if (!groupParticipantsChanged || sandbox) return;
+    if (!phone || !(contact && contact.is_group)) return;
+    if (groupParticipantsChanged.group_jid !== phone) return;
+    if (Array.isArray(groupParticipantsChanged.members)) {
+      setMembers(groupParticipantsChanged.members);
+      return;
+    }
+    let cancelled = false;
+    getGroupMembers(phone, true)
+      .then(res => { if (!cancelled && res && res.ok) setMembers(res.data.members || []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [groupParticipantsChanged]);
+
+  // Render message text with WhatsApp formatting, highlighting @mentions of
+  // known group members (and @todos). Names come from the participant list.
+  function fmt(text) {
+    const names = (contact && contact.is_group)
+      ? members.map(m => m.name).filter(Boolean)
+      : [];
+    return formatWhatsApp(text, names);
+  }
+
+  // Label shown for a member in the @mention menu. A just-joined member has no
+  // saved contact name and no captured pushName yet, so fall back to the phone
+  // (or lid) digits — inserting "@<digits>" still resolves to a real mention.
+  function mentionLabel(m) {
+    return m.name || m.phone || m.lid || '';
+  }
+
+  // Build the @mention candidate list for a typed query (pure; used by render + keys).
+  // The special "todos" entry maps to @todos (mention everyone).
+  function getMentionCandidates(query) {
+    const q = (query || '').toLowerCase();
+    const list = [];
+    if (!q || 'todos'.startsWith(q)) list.push({ special: true, name: 'todos' });
+    for (const m of members) {
+      const label = mentionLabel(m);
+      if (label && label.toLowerCase().includes(q)) list.push(m);
+    }
+    return list.slice(0, 8);
+  }
+
+  // Detect an "@token" at the cursor and open/close the mention menu.
+  function updateMentionMenu(el, val) {
+    if (sandbox || !(contact && contact.is_group)) { setMentionMenu(null); return; }
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : val.length;
+    const m = val.slice(0, pos).match(/(?:^|\s)@([\p{L}\p{N}_]*)$/u);
+    if (m) setMentionMenu({ query: m[1], start: pos - m[1].length - 1, index: 0 });
+    else setMentionMenu(null);
+  }
+
+  // Replace the typed "@token" with the chosen mention and close the menu.
+  function applyMention(cand) {
+    if (!cand || !mentionMenu) return;
+    const el = inputRef.current;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : input.length;
+    const label = cand.special ? 'todos' : mentionLabel(cand);
+    const before = input.slice(0, mentionMenu.start);
+    const after = input.slice(pos);
+    const insert = '@' + label + ' ';
+    const newVal = before + insert + after;
+    setInput(newVal);
+    setMentionMenu(null);
+    setTimeout(() => {
+      if (el) {
+        el.focus();
+        const caret = (before + insert).length;
+        el.setSelectionRange(caret, caret);
+      }
+    }, 0);
+  }
+
   // Send typing presence to contact (debounced)
   function handleInputChange(e) {
     const val = e.target.value;
     setInput(val);
+    updateMentionMenu(e.target, val);
     if (!phone || sandbox) return;
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
@@ -102,7 +274,135 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     });
   }
 
+  // Open the per-message context menu at the given screen coords.
+  function openMsgMenu(e, message, isFromMe) {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
+    const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
+    setMsgMenu({ x, y, message, isFromMe });
+  }
+
+  // Copy the (display) text of a message to the clipboard, stripping the
+  // "[Sender]: " group prefix the backend adds for LLM context.
+  function copyMessageText(message) {
+    let text = message.content || '';
+    if (typeof text === 'string') {
+      const match = text.match(/^\[([^\]]+)\]:\s*([\s\S]*)$/);
+      if (match) text = match[2];
+    }
+    copyToClipboard(text);
+  }
+
+  // Locate a quoted message in the current thread by its GOWA msg_id.
+  function findQuoted(msgId) {
+    if (!msgId || !messages) return null;
+    return messages.find(m => m.msg_id === msgId) || null;
+  }
+
+  // Build {senderLabel, senderColor, snippet} for a quoted message, mirroring
+  // the bubble's own sender/side logic. Returns null when the message is gone.
+  function quotedInfo(qmsg) {
+    if (!qmsg) return null;
+    const isGroupChat = contact && contact.is_group;
+    const qIsUser = qmsg.role === 'user';
+    let text = qmsg.content || '';
+    let qSender = null;
+    if (qIsUser && isGroupChat && typeof text === 'string') {
+      const match = text.match(/^\[([^\]]+)\]:\s*([\s\S]*)$/);
+      if (match) { qSender = match[1]; text = match[2]; }
+    }
+    if (qmsg.media_type === 'image') text = text || '📷 Foto';
+    else if (qmsg.media_type === 'audio') text = '🎤 Áudio';
+    else if (qmsg.media_type === 'video') text = text || '🎬 Vídeo';
+    else if (qmsg.media_type === 'sticker') text = '🪧 Figurinha';
+    else if (qmsg.media_type === 'document') text = '📄 Documento';
+    else if (qmsg.media_type === 'location' || qmsg.media_type === 'live_location') text = '📍 Localização';
+    const fromMe = sandbox ? qIsUser : !qIsUser;
+    const dn = isGroupChat
+      ? (contact.group_name || phone)
+      : (info && info.name ? info.name.replace(/^~/, '') : phone);
+    const senderLabel = sandbox
+      ? (qIsUser ? 'Você' : 'IA')
+      : (qIsUser ? (qSender || dn) : (qmsg.status === 'operator' ? 'Manual' : 'IA'));
+    const senderColor = qIsUser ? '#1f7aec' : (qmsg.status === 'operator' ? '#b45309' : '#047857');
+    return { senderLabel, senderColor, fromMe, snippet: (text || '').replace(/\s+/g, ' ').slice(0, 140) };
+  }
+
+  // Perform a message deletion. scope: 'me' | 'all'. Optimistically updates the
+  // local view; the WS broadcast reconciles other clients.
+  async function performDelete(message, scope) {
+    const msgId = message.msg_id || null;
+    const dbId = message._id || message.id || null;
+    const localId = message._localId || null;
+    setDeleteDialog(null);
+    // Optimistic local update: flag the message as revoked but KEEP it in the list
+    // (and its content) — deletes only remove it from WhatsApp, never from our panel.
+    setContactData(prev => {
+      if (!prev || !prev.messages) return prev;
+      const updated = prev.messages.map(m =>
+        ((msgId && m.msg_id === msgId) || (dbId && (m._id === dbId || m.id === dbId))
+          || (localId && m._localId === localId))
+          ? { ...m, revoked: true, revoke_scope: scope }
+          : m
+      );
+      return { ...prev, messages: updated };
+    });
+    try {
+      if (msgId || dbId) await deleteMessage(phone, { msgId, dbId, scope });
+    } catch (_) { /* best-effort; WS will reconcile if it succeeded */ }
+  }
+
+  // React (or toggle off) on a message. Clicking the current emoji removes it.
+  async function performReact(message, emoji) {
+    const msgId = message.msg_id;
+    if (!msgId) return;
+    const current = myReaction(message);
+    const next = current === emoji ? '' : emoji; // toggle off when same
+    // Optimistic local update: one reaction per reactor (mirror backend).
+    setContactData(prev => {
+      if (!prev || !prev.messages) return prev;
+      const updated = prev.messages.map(m => {
+        if (m.msg_id !== msgId) return m;
+        const r = { ...(m.reactions || {}) };
+        for (const em of Object.keys(r)) {
+          r[em] = (r[em] || []).filter(x => x !== 'me');
+          if (!r[em].length) delete r[em];
+        }
+        if (next) r[next] = [...(r[next] || []), 'me'];
+        return { ...m, reactions: Object.keys(r).length ? r : undefined };
+      });
+      return { ...prev, messages: updated };
+    });
+    try {
+      await reactToMessage(phone, msgId, next);
+    } catch (_) { /* best-effort; WS reconciles */ }
+  }
+
   function handleKeyDown(e) {
+    // When the @mention menu is open, arrows/enter/tab/esc drive it instead of
+    // sending the message.
+    if (mentionMenu) {
+      const cands = getMentionCandidates(mentionMenu.query);
+      if (cands.length) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setMentionMenu(mm => ({ ...mm, index: Math.min((mm.index || 0) + 1, cands.length - 1) }));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setMentionMenu(mm => ({ ...mm, index: Math.max((mm.index || 0) - 1, 0) }));
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          applyMention(cands[Math.min(mentionMenu.index || 0, cands.length - 1)]);
+          return;
+        }
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setMentionMenu(null); return; }
+    }
     // Enter sends; Shift+Enter inserts a line break (default behavior).
     // Ignore while IME composition is in progress.
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.repeat) {
@@ -132,8 +432,21 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [attachMenuOpen]);
 
+  // Close the emoji picker on outside click
+  useEffect(() => {
+    if (!emojiOpen) return;
+    function onDocClick(e) {
+      if (emojiRef.current && !emojiRef.current.contains(e.target)) {
+        setEmojiOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [emojiOpen]);
+
   async function handleSend(e) {
     e.preventDefault();
+    setMentionMenu(null);
     const text = input.trim();
     if (!text) return;
 
@@ -159,7 +472,10 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           aiRead: aiReadPrivate,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
         });
-        updateMsgByLocalId(localId, () => ({ _status: res.ok ? null : 'failed' }));
+        updateMsgByLocalId(localId, () => ({
+          _status: res.ok ? null : 'failed',
+          ...(res.ok && res.data && res.data._id ? { _id: res.data._id } : {}),
+        }));
       } catch (err) {
         console.error('Private send error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
@@ -168,23 +484,44 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       return;
     }
 
+    // Quoted reply (only meaningful when the target has a GOWA msg_id).
+    const replyTo = (replyingTo && replyingTo.msg_id) ? replyingTo.msg_id : null;
+    setReplyingTo(null);
+
     // Add message optimistically. In sandbox you play the customer (role 'user');
     // otherwise it is a manual operator send (status='operator').
     setContactData(prev => prev ? {
       ...prev,
       messages: [...(prev.messages || []), sandbox
-        ? { role: 'user', content: text, ts: msgTs, _localId: localId, _status: 'sending' }
+        ? { role: 'user', content: text, ts: msgTs, _localId: localId, _status: 'sending',
+            reply_to_msg_id: replyTo || undefined }
         : { role: 'assistant', content: text, ts: msgTs, status: 'operator',
-            _localId: localId, _status: 'sending' }],
+            _localId: localId, _status: 'sending', reply_to_msg_id: replyTo || undefined }],
     } : prev);
 
     try {
-      const res = await _api.sendText(phone, text);
+      const res = await _api.sendText(phone, text, replyTo);
       if (res.ok) {
         const msgId = res.data?.msg_id || null;
-        updateMsgByLocalId(localId, () => sandbox
-          ? { _status: null }
-          : { _status: null, status: 'operator', msg_id: msgId });
+        if (sandbox) {
+          updateMsgByLocalId(localId, () => ({ _status: null }));
+        } else {
+          // A plugin may have rewritten the outgoing text (e.g. appended a
+          // signature), so the server's broadcast copy can differ in content.
+          // If that copy already arrived (same msg_id), drop our optimistic
+          // bubble to avoid a duplicate; otherwise just attach the msg_id.
+          setContactData(prev => {
+            if (!prev || !prev.messages) return prev;
+            const serverCopyArrived = msgId
+              && prev.messages.some(m => m.msg_id === msgId && m._localId !== localId);
+            const messages = serverCopyArrived
+              ? prev.messages.filter(m => m._localId !== localId)
+              : prev.messages.map(m => m._localId === localId
+                  ? { ...m, _status: null, status: 'operator', msg_id: msgId }
+                  : m);
+            return { ...prev, messages };
+          });
+        }
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
       }
@@ -422,8 +759,8 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         </button>
         <div onClick=${onAvatarClick} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] cursor-pointer">
           ${isGroup
-            ? html`<${GroupAvatar} size=${40} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
-            : html`<${DefaultAvatar} size=${40} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
+            ? html`<${GroupAvatar} size=${40} avatarUrl=${avatarUrl(phone, contact && contact.avatar_v)} />`
+            : html`<${DefaultAvatar} size=${40} avatarUrl=${avatarUrl(phone, contact && contact.avatar_v)} />`
           }
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
@@ -449,7 +786,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       <div ref=${chatRef} class="flex-1 min-h-0 overflow-y-auto overscroll-contain wa-scrollbar wa-chat-pattern py-2 px-[4%] lg:px-[7%]">
         ${!messages || messages.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 text-[14px]">
-              <span class="bg-white/80 rounded-lg px-3 py-1.5 text-[12.5px] shadow-sm">Nenhuma mensagem ainda</span>
+              <span class="bg-wa-bg/80 rounded-lg px-3 py-1.5 text-[12.5px] shadow-sm">Nenhuma mensagem ainda</span>
             </div>`
           : messages.map((m, i) => {
               const isUser = m.role === 'user';
@@ -464,7 +801,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               const showDateSep = m.ts && (!prevTs || !isSameDay(prevTs, m.ts));
               const dateSeparator = showDateSep
                 ? html`<div key=${`sep-${m.ts}-${i}`} class="flex justify-center my-[12px]">
-                    <span class="bg-white/90 text-wa-secondary text-[12px] font-medium uppercase tracking-wide rounded-[7.5px] px-[12px] py-[5px] shadow-sm">
+                    <span class="bg-wa-bg/90 text-wa-secondary text-[12px] font-medium uppercase tracking-wide rounded-[7.5px] px-[12px] py-[5px] shadow-sm">
                       ${formatDateSeparator(m.ts)}
                     </span>
                   </div>`
@@ -474,14 +811,25 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                 const failed = m._status === 'failed';
                 const pending = m._status === 'sending';
                 return [dateSeparator, html`
-                  <div key=${m._localId || i} class="flex justify-center mt-[4px]">
-                    <div class="max-w-[75%] rounded-[7.5px] px-[11px] pt-[6px] pb-[7px] text-[13px] leading-[18px] whitespace-pre-wrap relative shadow-sm"
-                         style="background:#3b266b; color:#ede9fe; border:1px solid #7c3aed; ${failed ? 'opacity:0.7;' : ''}">
+                  <div key=${m._localId || i} data-mid=${m._id} class="flex justify-center mt-[4px]">
+                    <div
+                      onContextMenu=${(e) => openMsgMenu(e, m, true)}
+                      class="group max-w-[75%] rounded-[7.5px] px-[11px] pt-[6px] pb-[7px] text-[13px] leading-[18px] whitespace-pre-wrap relative shadow-sm"
+                      style="background:#3b266b; color:#ede9fe; border:1px solid #7c3aed; ${failed ? 'opacity:0.7;' : ''}">
+                      <button
+                        onClick=${(e) => openMsgMenu(e, m, true)}
+                        class="absolute top-[2px] right-[2px] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-full p-[1px] hover:bg-black/20"
+                        title="Opções da mensagem"
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="color:#c4b5fd;">
+                          <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
+                        </svg>
+                      </button>
                       <span class="flex items-center gap-[5px] text-[10.5px] font-semibold mb-[3px] tracking-wide uppercase" style="color:#c4b5fd;">
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
                         Mensagem privada
                       </span>
-                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="float-right ml-[8px] mt-[3px] text-[10.5px] leading-[14px] whitespace-nowrap" style="color:#a78bfa;">
                         ${pending ? '⏳ ' : (failed ? '⚠ ' : '')}${formatBubbleTime(m.ts)}
                       </span>
@@ -492,14 +840,14 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
 
               if (isTranscription) {
                 return [dateSeparator, html`
-                  <div key=${i} class="flex justify-center mt-[4px]">
+                  <div key=${i} data-mid=${m._id} class="flex justify-center mt-[4px]">
                     <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
                          style="background: #2d1b4e; color: #d4bfff; border: 1px solid #4a2d7a;">
                       <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
                         Transcrição privada
                       </span>
-                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -517,7 +865,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
                         Mensagem do Sistema
                       </span>
-                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -535,7 +883,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
                         Ferramenta IA
                       </span>
-                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -553,7 +901,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
                         Erro no envio
                       </span>
-                      <span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(m.content) }}></span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
@@ -588,14 +936,45 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               const senderColor = isUser ? '#1f7aec' : (isOperator ? '#b45309' : '#047857');
 
               return [dateSeparator, html`
-                <div key=${m._localId || i} class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'}">
-                  <div class="wa-bubble max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
+                <div key=${m._localId || i} data-mid=${m._id} class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'} ${(m.reactions && Object.keys(m.reactions).length) ? 'mb-[14px]' : ''}">
+                  <div
+                    onContextMenu=${(e) => openMsgMenu(e, m, isFromMe)}
+                    class="wa-bubble group max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
                     !isFromMe
                       ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
                       : `${isFailed ? 'text-wa-text' : 'bg-wa-outgoing text-wa-text'} ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
                   }" style="${isFailed ? 'background: #fce8e8;' : ''}">
+                    <button
+                      onClick=${(e) => openMsgMenu(e, m, isFromMe)}
+                      class="absolute top-[2px] right-[2px] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-full p-[1px] hover:bg-black/10"
+                      title="Opções da mensagem"
+                    >
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="text-wa-secondary">
+                        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
+                      </svg>
+                    </button>
                     <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${senderColor};">${senderLabel}</span>
-                    ${m.media_type === 'image' ? html`
+                    ${(!m.revoked && m.reply_to_msg_id) ? (() => {
+                      const qmsg = findQuoted(m.reply_to_msg_id);
+                      const q = quotedInfo(qmsg);
+                      const accent = q ? q.senderColor : '#8696a0';
+                      const canJump = !!(qmsg && qmsg._id != null);
+                      return html`
+                        <div
+                          onClick=${canJump ? ((e) => { e.stopPropagation(); focusMessage(qmsg._id, { smooth: true }); }) : null}
+                          class="flex rounded-[4px] overflow-hidden mb-[4px] max-w-full ${canJump ? 'cursor-pointer hover:brightness-95' : ''}"
+                          style="background: rgba(0,0,0,0.06);"
+                          title=${canJump ? 'Ir para a mensagem' : ''}
+                        >
+                          <div class="w-[4px] shrink-0" style="background:${accent};"></div>
+                          <div class="px-[8px] py-[3px] min-w-0">
+                            <div class="text-[12px] font-semibold leading-[15px] truncate" style="color:${accent};">${q ? q.senderLabel : 'Mensagem'}</div>
+                            <div class="text-[12.5px] leading-[16px] text-wa-secondary truncate">${q ? q.snippet : 'Mensagem original indisponível'}</div>
+                          </div>
+                        </div>
+                      `;
+                    })() : ''}
+                    ${m.revoked ? '' : m.media_type === 'image' ? html`
                       <img
                         src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}"
                         alt="Imagem"
@@ -605,12 +984,12 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         loading="lazy"
                       />
                       ${displayContent && displayContent !== '[Imagem enviada pelo contato]' && !displayContent.startsWith('[Descrição da imagem]')
-                        ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(displayContent) }}></span>`
+                        ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
                     ` : m.media_type === 'audio' ? html`
                       <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} />
                       ${displayContent && displayContent !== '[Áudio recebido]' && displayContent !== '[Áudio]' && !displayContent.startsWith('[Transcrição do áudio]')
-                        ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: formatWhatsApp(displayContent) }}></span>`
+                        ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
                     ` : m.media_type === 'video' ? html`
                       <video
@@ -621,7 +1000,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         style="min-width:180px"
                       ></video>
                       ${displayContent && !displayContent.startsWith('[Vídeo')
-                        ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(displayContent) }}></span>`
+                        ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
                     ` : m.media_type === 'sticker' ? html`
                       <img
@@ -663,11 +1042,17 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                               class="flex items-center gap-1 text-wa-teal text-[13px] underline break-all"
                             >📄 ${docName}</a>
                             ${docCaption
-                              ? html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(docCaption) }}></span>`
+                              ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(docCaption)}}></span>`
                               : null}
                           </div>
                         `;
-                      })() : html`<span dangerouslySetInnerHTML=${{ __html: formatWhatsApp(displayContent) }}></span>`}
+                      })() : html`<span dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`}
+                    ${m.revoked ? html`
+                      <span class="italic text-wa-secondary flex items-center gap-[5px] text-[12px] mt-[2px]">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31C15.55 19.37 13.85 20 12 20zm6.31-3.1L7.1 5.69C8.45 4.63 10.15 4 12 4c4.41 0 8 3.59 8 8 0 1.85-.63 3.55-1.69 4.9z"/></svg>
+                        ${m.revoke_scope === 'me' ? 'apagado para mim no WhatsApp' : 'apagado para todos no WhatsApp'}
+                      </span>
+                    ` : ''}
                     <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
                       ${(!isUser && !sandbox) ? (() => {
                         if (isFailed) return html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}`;
@@ -680,6 +1065,21 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         return html`<${DoubleCheckIcon} />`;
                       })() : ''}${formatBubbleTime(m.ts)}
                     </span>
+                    ${(m.reactions && Object.keys(m.reactions).length) ? (() => {
+                      const entries = Object.entries(m.reactions).filter(([, rs]) => rs && rs.length);
+                      const total = entries.reduce((n, [, rs]) => n + rs.length, 0);
+                      const mine = myReaction(m);
+                      return html`
+                        <button
+                          onClick=${(e) => openMsgMenu(e, m, isFromMe)}
+                          class="absolute -bottom-[11px] ${isFromMe ? 'right-[6px]' : 'left-[6px]'} bg-wa-panel border border-wa-border rounded-full px-[5px] py-[1px] text-[12px] leading-[16px] shadow-sm flex items-center gap-[1px]"
+                          title="${mine ? 'Sua reação: ' + mine : 'Reações'}"
+                        >
+                          ${entries.map(([em]) => html`<span key=${em}>${em}</span>`)}
+                          ${total > 1 ? html`<span class="text-wa-secondary ml-[1px]">${total}</span>` : ''}
+                        </button>
+                      `;
+                    })() : ''}
                   </div>
                 </div>
               `];
@@ -804,10 +1204,44 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           ` : ''}
         </div>
         ` : ''}
+        ${(replyingTo && mode !== 'private') ? (() => {
+          const q = quotedInfo(replyingTo);
+          const accent = q ? q.senderColor : '#8696a0';
+          return html`
+            <div class="px-[14px] pt-[6px] bg-wa-panel shrink-0">
+              <div class="flex items-stretch rounded-[6px] overflow-hidden" style="background:#1f2c33;">
+                <div class="w-[4px] shrink-0" style="background:${accent};"></div>
+                <div class="px-[10px] py-[5px] min-w-0 flex-1">
+                  <div class="text-[12.5px] font-semibold leading-[16px] truncate" style="color:${accent};">${q ? q.senderLabel : 'Mensagem'}</div>
+                  <div class="text-[13px] leading-[17px] text-wa-secondary truncate">${q ? q.snippet : ''}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick=${() => setReplyingTo(null)}
+                  class="px-[12px] text-wa-secondary hover:text-wa-text shrink-0 text-[18px] leading-none"
+                  title="Cancelar resposta"
+                >✕</button>
+              </div>
+            </div>
+          `;
+        })() : ''}
         <form onSubmit=${handleSend} class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
-          <button type="button" class="p-[8px] shrink-0" tabindex="-1">
-            <${EmojiIcon} />
-          </button>
+          <div ref=${emojiRef} class="relative shrink-0">
+            <button
+              type="button"
+              class="p-[8px] transition-colors ${emojiOpen ? 'text-wa-teal' : ''}"
+              tabindex="-1"
+              onClick=${() => setEmojiOpen(o => !o)}
+              title="Emojis"
+            >
+              <${EmojiIcon} />
+            </button>
+            ${emojiOpen ? html`
+              <div class="absolute bottom-[48px] left-0 z-30">
+                <${EmojiPicker} onPick=${insertEmoji} />
+              </div>
+            ` : ''}
+          </div>
           ${mode === 'private' ? '' : html`
             <div ref=${attachMenuRef} class="relative shrink-0">
               <button type="button" class="p-[8px]" tabindex="-1" onClick=${handleAttachClick}>
@@ -827,7 +1261,32 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               ` : ''}
             </div>
           `}
-          <div class="flex-1 mx-[5px]">
+          <div class="flex-1 mx-[5px] relative">
+            ${mentionMenu ? (() => {
+              const cands = getMentionCandidates(mentionMenu.query);
+              if (!cands.length) return '';
+              const sel = Math.min(mentionMenu.index || 0, cands.length - 1);
+              return html`
+                <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] max-h-[210px] overflow-y-auto bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] z-30 wa-scrollbar">
+                  ${cands.map((c, i) => html`
+                    <button
+                      type="button"
+                      key=${c.special ? '@todos' : c.phone}
+                      onMouseDown=${(ev) => { ev.preventDefault(); applyMention(c); }}
+                      class="w-full text-left px-[12px] py-[7px] text-[14px] flex items-center gap-[8px] ${i === sel ? 'bg-wa-hover' : ''} hover:bg-wa-hover"
+                    >
+                      <span class="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[12px] shrink-0 ${c.special ? 'bg-wa-teal text-white' : 'bg-wa-border text-wa-text'}">
+                        ${c.special ? '@' : (mentionLabel(c) || '?').slice(0, 1).toUpperCase()}
+                      </span>
+                      <span class="text-wa-text truncate">
+                        ${c.special ? 'todos — todos os membros' : mentionLabel(c)}
+                        ${(!c.special && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
+                      </span>
+                    </button>
+                  `)}
+                </div>
+              `;
+            })() : ''}
             <textarea
               ref=${inputRef}
               rows="1"
@@ -854,6 +1313,60 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
           `}
         </form>
       `}
+      ${msgMenu ? html`
+        <${MessageContextMenu}
+          x=${msgMenu.x}
+          y=${msgMenu.y}
+          reactionBar=${(!msgMenu.message.revoked && msgMenu.message.msg_id && !sandbox) ? {
+            emojis: QUICK_REACTIONS,
+            current: myReaction(msgMenu.message),
+            onReact: (em) => performReact(msgMenu.message, em),
+          } : null}
+          items=${[
+            ...((!msgMenu.message.revoked && mode !== 'private'
+                 && msgMenu.message.role !== 'private_note') ? [
+              { label: 'Responder', icon: ReplyIcon,
+                onClick: () => { setMode('reply'); setReplyingTo(msgMenu.message);
+                                 setTimeout(() => inputRef.current?.focus(), 0); } },
+            ] : []),
+            { label: 'Copiar', icon: CopyIcon, onClick: () => copyMessageText(msgMenu.message) },
+            ...(msgMenu.message.revoked ? [] : [
+              { label: 'Apagar', icon: TrashIcon, danger: true,
+                onClick: () => setDeleteDialog({ message: msgMenu.message, isFromMe: msgMenu.isFromMe }) },
+            ]),
+          ]}
+          onClose=${() => setMsgMenu(null)}
+        />
+      ` : ''}
+      ${deleteDialog ? html`
+        <div
+          class="fixed inset-0 z-[130] bg-black/40 flex items-center justify-center"
+          onClick=${() => setDeleteDialog(null)}
+        >
+          <div
+            class="bg-wa-panel rounded-lg shadow-xl w-[330px] max-w-[90vw] p-[22px]"
+            onClick=${(e) => e.stopPropagation()}
+          >
+            <div class="text-[15px] text-wa-text mb-[20px]">Deseja apagar a mensagem?</div>
+            <div class="flex flex-col items-end gap-[10px]">
+              ${deleteDialog.isFromMe && deleteDialog.message.msg_id ? html`
+                <button
+                  onClick=${() => performDelete(deleteDialog.message, 'all')}
+                  class="px-[20px] py-[8px] rounded-full border border-wa-teal text-wa-teal text-[14px] font-medium hover:bg-wa-teal/10 transition-colors"
+                >Apagar para todos</button>
+              ` : ''}
+              <button
+                onClick=${() => performDelete(deleteDialog.message, 'me')}
+                class="px-[20px] py-[8px] rounded-full border border-wa-teal text-wa-teal text-[14px] font-medium hover:bg-wa-teal/10 transition-colors"
+              >Apagar para mim</button>
+              <button
+                onClick=${() => setDeleteDialog(null)}
+                class="px-[20px] py-[8px] rounded-full text-wa-teal text-[14px] font-medium hover:bg-wa-teal/10 transition-colors"
+              >Cancelar</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }

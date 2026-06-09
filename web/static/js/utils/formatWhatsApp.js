@@ -12,7 +12,11 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-export function formatWhatsApp(text) {
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function formatWhatsApp(text, mentionNames = []) {
   if (!text) return '';
   let s = escapeHtml(text);
 
@@ -40,6 +44,21 @@ export function formatWhatsApp(text) {
   // Phone numbers with @ (e.g. 5511999999999@s.whatsapp.net) — styled as link but not clickable
   s = s.replace(/(\d{7,15})@([\w.]+)/g,
     '<span style="color:#53bdeb;text-decoration:underline;cursor:default">$1@$2</span>');
+
+  // @mentions: known group member names + the mention-all keywords (@todos, …).
+  // Names are escaped the same way the text was, then regex-escaped, so they
+  // match the already-escaped string. Longest names first so a short name does
+  // not shadow a longer one. The mention-all keywords are ALWAYS highlighted —
+  // independent of whether any member names resolved — so @todos stands out the
+  // same way a user mention does, even in groups with no named members.
+  const ALL_KEYWORDS = ['todos', 'todes', 'todxs', 'all', 'everyone', 'geral'];
+  const names = (mentionNames || [])
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map(n => escapeRegex(escapeHtml(n)));
+  const alts = [...names, ...ALL_KEYWORDS];
+  const mentionRe = new RegExp('@(' + alts.join('|') + ')', 'gi');
+  s = s.replace(mentionRe, '<span style="color:#53bdeb;font-weight:600">@$1</span>');
 
   return s;
 }

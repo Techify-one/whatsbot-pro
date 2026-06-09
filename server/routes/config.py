@@ -11,6 +11,7 @@ from config.settings import LLM_API_BASE_URL
 from server.auth import generate_salt, hash_password
 from server.helpers import _ok, _err, _mask_key
 from server import balance_monitor
+from agent import group_mentions
 from plugins.events import emit as emit_event, emit_with_filter
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ def register_routes(app, deps):
             "audio_model": settings.get("audio_model", "google/gemini-2.5-flash"),
             "image_model": settings.get("image_model", "google/gemini-2.5-flash"),
             "system_prompt": settings.get("system_prompt", ""),
+            "group_reply_mode": settings.get("group_reply_mode", "mention_only"),
             "auto_reply": settings.get("auto_reply", True),
             "max_context_messages": settings.get("max_context_messages", 10),
             "message_batch_delay": settings.get("message_batch_delay", 3.0),
@@ -69,7 +71,7 @@ def register_routes(app, deps):
             "max_context_messages", "message_batch_delay",
             "split_messages", "split_message_delay",
             "transfer_alert_enabled", "transfer_alert_duration",
-            "group_reply_mode", "bot_phone", "bot_name",
+            "group_reply_mode", "bot_phone",
             "max_executions", "default_ai_enabled", "setup_completed",
             "low_balance_enabled", "low_balance_threshold",
         }
@@ -93,6 +95,11 @@ def register_routes(app, deps):
                 logger.info("Web panel password removed.")
 
         settings.save()
+
+        # Bot phone changed → refresh mention detection (the bot's display name
+        # comes from GOWA, not config — see background.py).
+        if "bot_phone" in keys_changed:
+            group_mentions.set_bot_identity(state.bot_phone, state.bot_name)
 
         agent_handler.update_config(
             api_key=settings.get("openrouter_api_key", ""),

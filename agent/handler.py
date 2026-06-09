@@ -13,6 +13,7 @@ from openai import OpenAI, AsyncOpenAI
 
 from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import CORE_TOOLS
+from agent import group_mentions
 from config.settings import LLM_API_BASE_URL
 from db.repositories import message_repo, contact_repo, tool_override_repo
 from agent.execution import track_step
@@ -443,6 +444,23 @@ class AgentHandler:
                 "de forma natural ao grupo.\n"
                 "--- Fim do contexto de grupo ---"
             )
+            # Inject participant names so the AI can @mention a specific member.
+            try:
+                members = group_mentions.get_members(contact.phone)
+            except Exception:
+                members = []
+            named = [m["name"] for m in members if m.get("name")]
+            if named:
+                prompt += (
+                    "\n\n--- Mencionar participantes ---\n"
+                    "Para mencionar alguém do grupo, escreva @ seguido do nome "
+                    "EXATAMENTE como aparece nesta lista — o sistema converte "
+                    "automaticamente para a menção real do WhatsApp:\n"
+                    + ", ".join(f"@{n}" for n in named)
+                    + "\nMencione apenas quando fizer sentido se dirigir a uma "
+                    "pessoa específica; não mencione todo mundo sem necessidade.\n"
+                    "--- Fim mencionar participantes ---"
+                )
         info_summary = contact.get_info_summary()
         if info_summary:
             prompt += (
@@ -975,10 +993,12 @@ class AgentHandler:
 
     def save_operator_message(self, phone: str, text: str, *,
                               status: str | None = None,
-                              msg_id: str | None = None) -> dict:
+                              msg_id: str | None = None,
+                              reply_to_msg_id: str | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing."""
         contact = self._get_contact(phone)
-        contact.add_message("assistant", text, status=status, msg_id=msg_id)
+        contact.add_message("assistant", text, status=status, msg_id=msg_id,
+                            reply_to_msg_id=reply_to_msg_id)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def mark_message_sent(self, phone: str, content: str,

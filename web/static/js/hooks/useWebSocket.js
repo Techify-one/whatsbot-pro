@@ -1,7 +1,7 @@
 import { useEffect } from 'preact/hooks';
 import { createWebSocket } from '../services/websocket.js';
 
-export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onLowBalance, onWsConnect, onWsDisconnect }) {
+export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onWsConnect, onWsDisconnect }) {
   useEffect(() => {
     const ws = createWebSocket({
       onConnect: onWsConnect,
@@ -19,6 +19,11 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       contact_ai_toggled: onContactAiToggled,
       messages_read: onMessagesRead,
       message_status: onMessageStatus,
+      message_revoked: onMessageAction ? (d) => onMessageAction({ ...d, action: 'revoked' }) : undefined,
+      message_deleted: onMessageAction ? (d) => onMessageAction({ ...d, action: 'deleted' }) : undefined,
+      message_reaction: onMessageReaction,
+      avatar_updated: onAvatarUpdated,
+      group_participants_changed: onGroupParticipantsChanged,
       low_balance: onLowBalance,
     });
     return () => ws.close();

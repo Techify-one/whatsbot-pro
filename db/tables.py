@@ -53,9 +53,11 @@ contacts = Table(
     Column("group_name", Text, nullable=False, server_default=""),
     Column("is_archived", Integer, nullable=False, server_default="0"),
     Column("archived_by_app", Integer, nullable=False, server_default="0"),
+    Column("is_pinned", Integer, nullable=False, server_default="0"),
     Column("can_send", Integer, nullable=False, server_default="1"),
     Column("unread_count", Integer, nullable=False, server_default="0"),
     Column("unread_ai_count", Integer, nullable=False, server_default="0"),
+    Column("has_unread_mention", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
@@ -86,6 +88,9 @@ messages = Table(
     Column("media_path", Text),
     Column("status", Text),
     Column("msg_id", Text),
+    Column("revoked", Integer, nullable=False, server_default="0"),
+    Column("reactions", Text),  # JSON: {emoji: [reactor, ...]}
+    Column("reply_to_msg_id", Text),  # GOWA msg_id of the quoted message (reply)
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)

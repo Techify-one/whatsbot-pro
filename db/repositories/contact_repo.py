@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 
+from sqlalchemy import case
+from sqlalchemy import func
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert as sa_insert
 from sqlalchemy import select
@@ -11,6 +14,18 @@ from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
 from db.tables import contact_tags, contacts, observations, tags, unread_msg_ids
+
+
+def _fold(s: str) -> str:
+    """Casefold and strip accents so search matches regardless of diacritics.
+
+    "Ó"/"ó"/"o" all fold to "o", so typing an unaccented letter still finds
+    accented names (and vice-versa).
+    """
+    if not s:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch)).casefold()
 
 
 def _br_phone_variants(phone: str) -> list[str]:
@@ -85,6 +100,15 @@ def set_archived(contact_id: int, archived: bool, by_app: bool = False) -> None:
         ))
 
 
+def set_pinned(contact_id: int, pinned: bool) -> None:
+    """Pin or unpin a conversation (pinned ones sort to the top of the list)."""
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(contacts).where(contacts.c.id == contact_id).values(
+            is_pinned=1 if pinned else 0,
+            updated_at=time.time(),
+        ))
+
+
 def get_by_phone(phone: str) -> dict | None:
     """Get a contact by phone number. Checks BR phone variants."""
     variants = _br_phone_variants(phone)
@@ -137,9 +161,81 @@ def mark_as_read(contact_id: int) -> list[str]:
         conn.execute(sa_update(contacts).where(contacts.c.id == contact_id).values(
             unread_count=0,
             unread_ai_count=0,
+            has_unread_mention=0,
             updated_at=time.time(),
         ))
     return msg_ids
+
+
+def unread_conversation_count() -> int:
+    """Number of non-archived conversations that have unread messages — used for the
+    browser-tab badge (e.g. "(3) WhatsBot"). Counts a conversation once regardless of
+    how many messages are unread, mirroring the sidebar badge visibility."""
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(func.count()).select_from(contacts).where(
+                (contacts.c.is_archived == 0)
+                & ((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0))
+            )
+        ).scalar() or 0
+
+
+def set_mention(contact_id: int) -> None:
+    """Raise the unread-mention flag (bot was @mentioned in a group). Shown as an
+    "@" next to the unread badge until the operator opens the conversation."""
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(contacts).where(contacts.c.id == contact_id).values(
+            has_unread_mention=1,
+            updated_at=time.time(),
+        ))
+
+
+def mark_as_unread(contact_id: int) -> None:
+    """Mark a contact as unread by ensuring unread_count is at least 1.
+
+    Only touches the in-app green badge; preserves an already-higher count.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(contacts).where(contacts.c.id == contact_id).values(
+            unread_count=case(
+                (contacts.c.unread_count < 1, 1),
+                else_=contacts.c.unread_count,
+            ),
+            updated_at=time.time(),
+        ))
+
+
+def mark_all_as_unread() -> int:
+    """Mark every conversation as unread (green badge).
+
+    Only rows currently at 0 are touched, so existing higher counts are kept.
+    Returns the number of conversations newly marked.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_update(contacts).where(contacts.c.unread_count < 1).values(
+                unread_count=1,
+                updated_at=time.time(),
+            )
+        )
+    return result.rowcount or 0
+
+
+def mark_all_as_read() -> int:
+    """Reset unread counts for every conversation (clear all in-app badges).
+
+    App-only: clears the tracked unread msg_ids too, but does not send WhatsApp
+    read receipts. Returns the number of conversations that had unread badges.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(sa_delete(unread_msg_ids))
+        result = conn.execute(
+            sa_update(contacts)
+            .where((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0)
+                   | (contacts.c.has_unread_mention > 0))
+            .values(unread_count=0, unread_ai_count=0, has_unread_mention=0, updated_at=time.time())
+        )
+    return result.rowcount or 0
 
 
 def mark_user_messages_as_read(contact_id: int) -> list[str]:
@@ -195,6 +291,72 @@ def add_observation(contact_id: int, text: str) -> None:
         ))
 
 
+def _match_snippet(content: str, folded_q: str, radius: int = 40) -> str:
+    """A short excerpt of ``content`` centered on the first match of ``folded_q``,
+    with ellipses when trimmed. Matching is accent/case-insensitive (via ``_fold``),
+    but the snippet keeps the ORIGINAL text (accents intact) for display.
+    """
+    if not content:
+        return ""
+    # Per-character fold, tracking the original index each folded char came from,
+    # so a match position in the folded string maps back to the original text.
+    folded_chars: list[str] = []
+    orig_idx: list[int] = []
+    for i, ch in enumerate(content):
+        for fc in _fold(ch):
+            folded_chars.append(fc)
+            orig_idx.append(i)
+    folded = "".join(folded_chars)
+    pos = folded.find(folded_q)
+    if pos < 0:
+        return content[: radius * 2].strip()
+    start = orig_idx[pos]
+    end_f = min(pos + len(folded_q), len(orig_idx)) - 1
+    end = orig_idx[end_f] + 1 if end_f >= 0 else start
+    w_start = max(0, start - radius)
+    w_end = min(len(content), end + radius)
+    excerpt = content[w_start:w_end].strip()
+    prefix = "…" if w_start > 0 else ""
+    suffix = "…" if w_end < len(content) else ""
+    return f"{prefix}{excerpt}{suffix}"
+
+
+def _contact_ids_matching_message(folded_q: str, archived: bool) -> dict[int, dict]:
+    """Map of contact id -> ``{"snippet": str, "id": int}`` for contacts (within the
+    given archived scope) that have at least one message whose content matches
+    ``folded_q`` (accent/case-insensitive, like names). The match comes from the most
+    recent matching message; ``id`` is its DB primary key (so the UI can scroll to it).
+
+    Covers normal messages, private notes and transcriptions; only the purely
+    internal roles (tool calls, system notices) are skipped. Revoked messages are
+    kept in the DB with their content, so they remain searchable too.
+    """
+    if not folded_q:
+        return {}
+    from sqlalchemy import text as sql_text
+
+    # Most recent first, so the first match seen per contact is the freshest one.
+    sql = sql_text("""
+        SELECT m.id, m.contact_id, m.content
+        FROM messages m
+        JOIN contacts c ON c.id = m.contact_id
+        WHERE c.is_archived = :archived
+          AND m.content <> ''
+          AND m.role NOT IN ('tool_call', 'system_notice')
+        ORDER BY m.ts DESC
+    """)
+    matched: dict[int, dict] = {}
+    with get_engine().connect() as conn:
+        for row in conn.execute(sql, {"archived": 1 if archived else 0}).mappings():
+            cid = row["contact_id"]
+            if cid in matched:
+                continue
+            content = row["content"] or ""
+            if folded_q in _fold(content):
+                matched[cid] = {"snippet": _match_snippet(content, folded_q), "id": row["id"]}
+    return matched
+
+
 def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts."""
     from sqlalchemy import text as sql_text
@@ -223,7 +385,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             ) m2 ON m1.contact_id = m2.contact_id AND m1.ts = m2.max_ts
         ) lm ON lm.contact_id = c.id
         WHERE c.is_archived = :archived
-        ORDER BY COALESCE(lm.ts, c.updated_at) DESC
+        ORDER BY c.is_pinned DESC, COALESCE(lm.ts, c.updated_at) DESC
     """)
 
     with get_engine().connect() as conn:
@@ -265,25 +427,38 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                 "msg_count": row["msg_count"] or 0,
                 "unread_count": row["unread_count"],
                 "unread_ai_count": row["unread_ai_count"],
+                "has_unread_mention": bool(row["has_unread_mention"]),
                 "ai_enabled": bool(row["ai_enabled"]),
                 "is_group": is_group,
                 "group_name": group_name,
                 "is_archived": bool(row["is_archived"]),
                 "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
+                "is_pinned": bool(row["is_pinned"]) if row["is_pinned"] is not None else False,
                 "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
                 "tags": tags_list,
                 "updated_at": row["updated_at"],
             })
 
     if q:
-        ql = q.lower()
-        results = [
-            c for c in results
-            if ql in c["name"].lower()
-            or ql in c["phone"]
-            or ql in c.get("group_name", "").lower()
-            or any(ql in t.lower() for t in c.get("tags", []))
-        ]
+        ql = _fold(q)
+        # Also match by message content (normal, private notes, transcriptions),
+        # so the search bar finds a conversation by something that was said in it.
+        msg_matched = _contact_ids_matching_message(ql, archived)
+        filtered = []
+        for c in results:
+            if (ql in _fold(c["name"])
+                    or ql in c["phone"]
+                    or ql in _fold(c.get("group_name", ""))
+                    or any(ql in _fold(t) for t in c.get("tags", []))):
+                filtered.append(c)
+            elif c["id"] in msg_matched:
+                # Matched only by message content — show the matching excerpt so the
+                # operator sees why this conversation came up, and the message id so
+                # opening it can scroll straight to that message.
+                c["match_snippet"] = msg_matched[c["id"]]["snippet"]
+                c["match_msg_id"] = msg_matched[c["id"]]["id"]
+                filtered.append(c)
+        results = filtered
 
     return results
 
@@ -337,6 +512,7 @@ def _row_to_dict(row) -> dict:
         "group_name": row["group_name"],
         "is_archived": bool(row["is_archived"]),
         "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
+        "is_pinned": bool(row.get("is_pinned")) if hasattr(row, "get") else bool(row["is_pinned"]),
         "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
         "unread_count": row["unread_count"],
         "unread_ai_count": row["unread_ai_count"],

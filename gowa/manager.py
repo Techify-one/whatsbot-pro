@@ -72,8 +72,22 @@ class GOWAManager:
         ]
         if self.webhook_url:
             cmd.extend(["--webhook", self.webhook_url])
-        # Enable chat_presence webhook events (typing/recording indicators)
-        cmd.extend(["--webhook-events", "message,chat_presence,message.ack"])
+        # Forward every event the webhook handler knows how to process. GOWA
+        # only delivers events listed here; omitting one (e.g. group.participants)
+        # silently drops it even though webhook.py has a handler — which is why
+        # group join/leave, reactions, edits and revokes never fired before.
+        cmd.extend(["--webhook-events", ",".join([
+            "message",
+            "message.reaction",
+            "message.edited",
+            "message.revoked",
+            "message.deleted",
+            "message.ack",
+            "chat_presence",
+            "group.participants",
+            "group.joined",
+            "call.offer",
+        ])])
         # Must be "available" to receive typing events from contacts
         cmd.extend(["--presence-on-connect", "available"])
         cmd.extend(["--os", "Techify - WhatsBot"])

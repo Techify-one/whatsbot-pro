@@ -6,7 +6,12 @@ import time
 from pathlib import Path
 
 from db.repositories import contact_repo
+from agent import group_mentions
 from plugins.events import emit as emit_event, emit_with_filter
+from server.avatars import refresh_and_broadcast
+
+# How often the background sweep re-checks every contact's avatar for changes.
+AVATAR_REFRESH_INTERVAL = 1800  # seconds (30 min)
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +78,19 @@ async def status_poll_loop(deps):
                 last_qr_required = qr_required
             # Auto-reply is handled via GOWA webhook (POST /api/webhook)
             state.auto_reply_running = connected and settings.get("auto_reply", True)
+            # Bot's display name = real WhatsApp profile name from GOWA (/devices
+            # display_name), not a configured value. Fetched independently of the
+            # phone capture below, which may happen first via the webhook echo path.
+            if connected and not state.bot_name:
+                name = await asyncio.to_thread(gowa_client.get_own_display_name)
+                if name:
+                    state.bot_name = name
+                    if state.bot_phone:
+                        group_mentions.set_bot_identity(state.bot_phone, state.bot_name)
             # Populate bot identity for @mention detection in groups
             if connected and not state.bot_phone:
                 # Try config first
                 state.bot_phone = settings.get("bot_phone", "").split(":")[0]
-                state.bot_name = settings.get("bot_name", "")
                 # Auto-detect: fetch recent chat messages to find our own JID
                 if not state.bot_phone:
                     try:
@@ -104,6 +117,17 @@ async def status_poll_loop(deps):
                 if state.bot_phone:
                     logger.info("[Status] Bot phone: %s, name: %s",
                                 state.bot_phone, state.bot_name or "(empty)")
+                    # Persist so it survives restarts and @mention detection in
+                    # groups works immediately on the next boot (loaded above from
+                    # config before the auto-detect path).
+                    if settings.get("bot_phone", "") != state.bot_phone:
+                        try:
+                            settings.set("bot_phone", state.bot_phone)
+                        except Exception as e:
+                            logger.warning("[Status] Failed to persist bot_phone: %s", e)
+                    # Register bot identity so mentions of the bot resolve to
+                    # its configured panel name (settings > GOWA pushName).
+                    group_mentions.set_bot_identity(state.bot_phone, state.bot_name)
         except Exception as e:
             logger.error("Status poll error: %s", e)
         await asyncio.sleep(5)
@@ -148,8 +172,14 @@ async def qr_poll_loop(deps):
 
 
 async def avatar_fetch_task(deps):
-    """Fetch WhatsApp profile photos for all existing contacts once connected."""
-    gowa_client = deps.gowa_client
+    """Keep WhatsApp profile photos fresh for all contacts.
+
+    Runs an initial sweep once connected, then re-sweeps every
+    ``AVATAR_REFRESH_INTERVAL`` seconds. Each pass re-fetches every contact's
+    avatar and overwrites the cached file only when it actually changed (new
+    photo, removed photo handled by keeping the last one), broadcasting
+    ``avatar_updated`` so open clients update live.
+    """
     state = deps.state
     settings = deps.settings
     avatars_dir = settings.data_dir / "statics" / "avatars"
@@ -167,39 +197,35 @@ async def avatar_fetch_task(deps):
     # Give GOWA a moment to stabilize after connection
     await asyncio.sleep(5)
 
-    try:
-        contacts = await asyncio.to_thread(contact_repo.list_contacts, "", False)
-        archived = await asyncio.to_thread(contact_repo.list_contacts, "", True)
-        all_contacts = contacts + archived
-    except Exception as e:
-        logger.error("[Avatar] Failed to load contacts: %s", e)
-        return
-
-    fetched = 0
-    skipped = 0
-    for c in all_contacts:
-        if state.stop_event.is_set():
-            break
-        phone = c.get("phone", "")
-        if not phone:
-            continue
-        avatar_path = avatars_dir / f"{phone}.jpg"
-        if avatar_path.exists():
-            skipped += 1
-            continue
+    while not state.stop_event.is_set():
         try:
-            data = await asyncio.to_thread(gowa_client.get_avatar, phone)
-            if data and isinstance(data, bytes):
-                avatar_path.write_bytes(data)
-                fetched += 1
-                logger.info("[Avatar] Fetched avatar for %s", phone)
-            else:
-                skipped += 1
+            contacts = await asyncio.to_thread(contact_repo.list_contacts, "", False)
+            archived = await asyncio.to_thread(contact_repo.list_contacts, "", True)
+            all_contacts = contacts + archived
         except Exception as e:
-            logger.debug("[Avatar] Failed for %s: %s", phone, e)
-            skipped += 1
-        # Rate limit to avoid overwhelming GOWA
-        await asyncio.sleep(0.5)
+            logger.error("[Avatar] Failed to load contacts: %s", e)
+            all_contacts = []
 
-    logger.info("[Avatar] Done: %d fetched, %d skipped (of %d total)",
-                fetched, skipped, len(all_contacts))
+        changed = 0
+        for c in all_contacts:
+            if state.stop_event.is_set():
+                return
+            phone = c.get("phone", "")
+            if not phone:
+                continue
+            try:
+                if await refresh_and_broadcast(deps, phone):
+                    changed += 1
+            except Exception as e:
+                logger.debug("[Avatar] refresh failed for %s: %s", phone, e)
+            # Rate limit to avoid overwhelming GOWA
+            await asyncio.sleep(0.5)
+
+        logger.info("[Avatar] Sweep done: %d updated (of %d contacts)",
+                    changed, len(all_contacts))
+
+        # Sleep until the next sweep (interruptible by shutdown).
+        slept = 0
+        while slept < AVATAR_REFRESH_INTERVAL and not state.stop_event.is_set():
+            await asyncio.sleep(3)
+            slept += 3

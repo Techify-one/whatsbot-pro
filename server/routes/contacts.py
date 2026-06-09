@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse
 from gowa.client import GOWASendError, extract_msg_id
 
 from db.repositories import contact_repo, message_repo, config_repo
+from agent import group_mentions
+from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
@@ -44,6 +46,10 @@ def register_routes(app, deps):
     async def list_contacts(q: str = "", archived: bool = False):
         """List all contacts with summary info."""
         results = await asyncio.to_thread(contact_repo.list_contacts, q, archived)
+        # Cache-busting version for each avatar (file mtime) so updated photos
+        # are picked up by the browser instead of the stale cached image.
+        for c in results:
+            c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
         return _ok(results)
 
     @app.post("/api/contacts/check-phone")
@@ -88,6 +94,15 @@ def register_routes(app, deps):
             "jid": result.get("jid", ""),
             "name": name,
         })
+
+    @app.get("/api/contacts/unread-count")
+    async def unread_count():
+        """Number of conversations with unread messages (for the browser-tab badge).
+
+        Declared before /api/contacts/{phone} so the static path wins over the
+        path parameter."""
+        count = await asyncio.to_thread(contact_repo.unread_conversation_count)
+        return _ok({"count": count})
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, mark_read: bool = True):
@@ -135,6 +150,11 @@ def register_routes(app, deps):
                         agent_handler._contacts[phone].can_send = can_send
             except Exception as e:
                 logger.warning("[Contact] Failed to check group send permission: %s", e)
+        # Opening a conversation triggers a best-effort avatar refresh in the
+        # background; if the photo changed, an `avatar_updated` WS event updates
+        # it live. Include the current version for immediate cache-busting.
+        data["avatar_v"] = avatar_version(settings, phone)
+        asyncio.create_task(refresh_and_broadcast(deps, phone))
         return _ok(data)
 
     @app.delete("/api/contacts/{phone}")
@@ -178,12 +198,33 @@ def register_routes(app, deps):
         await ws_manager.broadcast("contact_archived", {"phone": phone, "archived": result})
         return _ok({"archived": result})
 
+    @app.post("/api/contacts/{phone}/pin")
+    async def pin_contact(phone: str, body: dict):
+        """Pin or unpin a conversation (pinned ones sort to the top of the list)."""
+        pinned = body.get("pinned")
+        if pinned is None:
+            return _err("Campo 'pinned' é obrigatório.")
+        def _pin():
+            data = contact_repo.get_by_phone(phone)
+            if data is None:
+                return None
+            contact_repo.set_pinned(data["id"], bool(pinned))
+            return bool(pinned)
+        result = await asyncio.to_thread(_pin)
+        if result is None:
+            return _err("Contato não encontrado.", status=404)
+        logger.info("[Contact] %s contact %s", "Pinned" if result else "Unpinned", phone)
+        await ws_manager.broadcast("contact_pinned", {"phone": phone, "pinned": result})
+        return _ok({"pinned": result})
+
     @app.post("/api/contacts/{phone}/send")
     async def send_to_contact(phone: str, body: dict):
         """Send a manual message to a contact (operator-initiated, no LLM)."""
         message = (body.get("message") or "").strip()
         if not message:
             return _err("Campo 'message' é obrigatório.")
+        # Optional: quote/reply to an existing message (GOWA msg_id).
+        reply_to = (body.get("reply_to") or "").strip() or None
 
         # Plugin filter: allow plugins to add signature/formatting/redact to operator sends
         filtered = await apply_filter(
@@ -199,26 +240,37 @@ def register_routes(app, deps):
         if await asyncio.to_thread(_is_sandbox_contact, phone):
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message, status="operator",
+                reply_to_msg_id=reply_to,
             )
             await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
             await emit_with_filter("message.sent", {
                 "phone": phone, "text": message, "msg_id": None,
                 "media_type": None, "media_path": None,
                 "source": "operator", "status": "operator",
+                "reply_to_msg_id": reply_to,
                 "ts": time.time(),
             })
             logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
             return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
-        # Track sent message to filter GOWA echo-backs (must be before send)
-        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
+        # Resolve @Name / @todos -> real mentions for group targets. `message`
+        # (friendly @Name) is saved/shown; `send_text` (inline @<number>) +
+        # mentions go on the wire.
+        send_text, mentions = message, None
+        if "@g.us" in phone:
+            send_text, mentions = await asyncio.to_thread(
+                group_mentions.resolve_outgoing, phone, message)
+
+        # Track sent message to filter GOWA echo-backs (key on the wire text)
+        state.recently_sent[f"{phone}:{send_text[:120]}"] = time.time()
 
         # Try to send via GOWA — always save message (with status on failure)
         send_failed = False
         error_msg = ""
         send_result = None
         try:
-            send_result = await asyncio.to_thread(gowa_client.send_message, phone, message)
+            send_result = await asyncio.to_thread(
+                gowa_client.send_message, phone, send_text, mentions, reply_to)
         except GOWASendError as e:
             logger.error("[Send] Failed to send message to %s: %s", phone, e)
             send_failed = True
@@ -235,7 +287,7 @@ def register_routes(app, deps):
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message,
                 status="failed" if send_failed else "operator",
-                msg_id=msg_id,
+                msg_id=msg_id, reply_to_msg_id=reply_to,
             )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
@@ -266,10 +318,100 @@ def register_routes(app, deps):
             "phone": phone, "text": message, "msg_id": msg_id,
             "media_type": None, "media_path": None,
             "source": "operator", "status": "operator",
+            "reply_to_msg_id": reply_to,
             "ts": time.time(),
         })
 
         return _ok({"message": "Mensagem enviada.", "msg_id": msg_id})
+
+    @app.post("/api/contacts/{phone}/messages/delete")
+    async def delete_message(phone: str, body: dict):
+        """Delete a message. scope='me' (local) or scope='all' (revoke for everyone).
+
+        Identifies the message by GOWA ``msg_id`` (preferred) or, for local-only
+        messages without one, by DB ``db_id``. ``scope='all'`` is only allowed for
+        the operator's own (outgoing) messages and requires a msg_id.
+
+        In every case the message is deleted on WhatsApp (via GOWA) but KEPT in our
+        DB — it is only flagged as revoked, never hard-deleted — so the panel keeps
+        showing it with a 'deleted' indicator.
+        """
+        scope = (body.get("scope") or "me").strip()
+        msg_id = (body.get("msg_id") or "").strip()
+        db_id = body.get("db_id")
+        if scope not in ("me", "all"):
+            return _err("scope inválido (use 'me' ou 'all').")
+        if not msg_id and not db_id:
+            return _err("É necessário msg_id ou db_id.")
+
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+
+        if scope == "all":
+            if not msg_id:
+                return _err("Apagar para todos exige uma mensagem já enviada ao WhatsApp.", status=400)
+            # Only outgoing (own) messages can be revoked for everyone.
+            msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+            if msg and msg.get("role") == "user":
+                return _err("Só é possível apagar para todos as suas próprias mensagens.", status=400)
+            if not is_sandbox:
+                await asyncio.to_thread(gowa_client.revoke_message, msg_id, phone)
+            await asyncio.to_thread(message_repo.mark_revoked, msg_id, "all")
+            await ws_manager.broadcast("message_revoked", {"phone": phone, "msg_id": msg_id})
+            await emit_with_filter("message.revoked", {
+                "id": msg_id, "phone": phone,
+                "revoked_message_id": msg_id, "revoked_from_me": True,
+                "ts": time.time(),
+            })
+            logger.info("[Delete] Revoked (all) msg %s for %s", msg_id, phone)
+            return _ok({"message": "Mensagem apagada para todos.", "msg_id": msg_id})
+
+        # scope == "me": delete on the linked device via GOWA, but keep the row in
+        # our DB (flagged revoked) so the panel still shows it.
+        was_from_me = True
+        if msg_id:
+            msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+            was_from_me = (msg or {}).get("role") != "user"
+            if not is_sandbox:
+                await asyncio.to_thread(gowa_client.delete_message, msg_id, phone)
+            await asyncio.to_thread(message_repo.mark_revoked, msg_id, "me")
+        if db_id:
+            await asyncio.to_thread(message_repo.mark_revoked_by_id, int(db_id), "me")
+        await ws_manager.broadcast("message_deleted", {
+            "phone": phone, "msg_id": msg_id or None, "db_id": db_id,
+        })
+        await emit_with_filter("message.deleted", {
+            "phone": phone, "deleted_message_id": msg_id or "",
+            "was_from_me": was_from_me, "ts": time.time(),
+        })
+        logger.info("[Delete] Revoked (me, kept in DB) msg %s/db %s for %s", msg_id, db_id, phone)
+        return _ok({"message": "Mensagem apagada para você.", "msg_id": msg_id or None})
+
+    @app.post("/api/contacts/{phone}/messages/react")
+    async def react_to_message(phone: str, body: dict):
+        """React to a message with an emoji. Empty emoji removes the operator's reaction.
+
+        The operator's own reaction is stored under the sentinel reactor "me".
+        """
+        msg_id = (body.get("msg_id") or "").strip()
+        emoji = (body.get("emoji") or "").strip()
+        if not msg_id:
+            return _err("msg_id é obrigatório.")
+
+        if not await asyncio.to_thread(_is_sandbox_contact, phone):
+            await asyncio.to_thread(gowa_client.react_to_message, msg_id, phone, emoji)
+        reactions = await asyncio.to_thread(message_repo.set_reaction, msg_id, emoji, "me")
+        if reactions is None:
+            return _err("Mensagem não encontrada.", status=404)
+        await ws_manager.broadcast("message_reaction", {
+            "phone": phone, "msg_id": msg_id, "reactions": reactions,
+        })
+        await emit_with_filter("message.reaction", {
+            "id": msg_id, "phone": phone,
+            "reaction": emoji, "reacted_message_id": msg_id,
+            "is_from_me": True, "ts": time.time(),
+        })
+        logger.info("[React] %s reacted %r to msg %s", phone, emoji, msg_id)
+        return _ok({"message": "Reação registrada.", "reactions": reactions})
 
     async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True):
         """Process a private message via the LLM.
@@ -330,22 +472,24 @@ def register_routes(app, deps):
 
             if not reply_in_chat:
                 # AI reply stays in the panel as a private note.
+                saved_note = None
                 try:
                     def _save_note(p=part):
                         contact = agent_handler._get_contact(phone)
                         contact.add_message("private_note", p)
-                    await asyncio.to_thread(_save_note)
+                        return message_repo.get_last(contact.id)
+                    saved_note = await asyncio.to_thread(_save_note)
                 except Exception as e:
                     logger.error("[PrivateAI] failed to save private note: %s", e)
-                await ws_manager.broadcast("new_message", {
-                    "phone": phone,
-                    "message": {
-                        "role": "private_note",
-                        "content": part,
-                        "ts": time.time(),
-                        "status": None,
-                    },
-                })
+                note_msg = {
+                    "role": "private_note",
+                    "content": part,
+                    "ts": (saved_note or {}).get("ts", time.time()),
+                    "status": None,
+                }
+                if saved_note and saved_note.get("_id"):
+                    note_msg["_id"] = saved_note["_id"]
+                await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
                 continue
 
             state.recently_sent[f"{phone}:{part[:120]}"] = time.time()
@@ -418,27 +562,29 @@ def register_routes(app, deps):
             def _save():
                 contact = agent_handler._get_contact(phone)
                 contact.add_message("private_note", text)
-            await asyncio.to_thread(_save)
+                return message_repo.get_last(contact.id)
+            saved = await asyncio.to_thread(_save)
         except Exception as e:
             logger.error("[Private] Failed to save private message for %s: %s", phone, e)
             return _err(f"Erro ao salvar mensagem privada: {e}", status=500)
 
-        await ws_manager.broadcast("new_message", {
-            "phone": phone,
-            "message": {
-                "role": "private_note",
-                "content": text,
-                "ts": time.time(),
-                "status": None,
-            },
-        })
+        # Carry the DB row id so the panel can delete the note without a reload.
+        note_msg = {
+            "role": "private_note",
+            "content": text,
+            "ts": (saved or {}).get("ts", time.time()),
+            "status": None,
+        }
+        if saved and saved.get("_id"):
+            note_msg["_id"] = saved["_id"]
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
 
         if ai_read:
             asyncio.create_task(_run_private_ai(phone, text, reply_in_chat=ai_reply))
 
         logger.info("[Private] Saved private note for %s (ai_read=%s, ai_reply=%s): %s",
                     phone, ai_read, ai_reply, text[:80])
-        return _ok({"message": "Mensagem privada salva."})
+        return _ok(note_msg)
 
     @app.post("/api/contacts/{phone}/retry-send")
     async def retry_send_to_contact(phone: str, body: dict):
@@ -730,6 +876,55 @@ def register_routes(app, deps):
         if msg_ids:
             asyncio.create_task(_send_read_receipts(phone, msg_ids))
         return _ok({"message": "Marcado como lido."})
+
+    @app.post("/api/contacts/mark-all-unread")
+    async def mark_all_contacts_unread():
+        """Mark every conversation as unread (re-light the in-app green badge)."""
+        def _mark():
+            count = contact_repo.mark_all_as_unread()
+            # Keep already-loaded ContactMemory caches consistent.
+            for contact in agent_handler._contacts.values():
+                if contact.unread_count < 1:
+                    contact.unread_count = 1
+            return count
+        count = await asyncio.to_thread(_mark)
+        return _ok({"count": count, "message": "Todas as conversas marcadas como não lidas."})
+
+    @app.post("/api/contacts/mark-all-read")
+    async def mark_all_contacts_read():
+        """Mark every conversation as read (clear all in-app unread badges)."""
+        def _mark():
+            count = contact_repo.mark_all_as_read()
+            # Keep already-loaded ContactMemory caches consistent.
+            for contact in agent_handler._contacts.values():
+                contact.unread_count = 0
+                contact.unread_ai_count = 0
+            return count
+        count = await asyncio.to_thread(_mark)
+        return _ok({"count": count, "message": "Todas as conversas marcadas como lidas."})
+
+    @app.post("/api/contacts/{phone}/unread")
+    async def mark_contact_unread(phone: str):
+        """Mark a single conversation as unread (re-light the in-app green badge)."""
+        def _mark():
+            contact = agent_handler._get_contact(phone)
+            contact.mark_as_unread()
+            return contact.unread_count
+        unread_count = await asyncio.to_thread(_mark)
+        return _ok({"unread_count": unread_count, "message": "Marcado como não lida."})
+
+    @app.get("/api/contacts/{phone}/members")
+    async def get_group_members(phone: str, force: bool = False):
+        """List group participants with resolved names (for @mention autocomplete).
+
+        ``force=true`` bypasses the TTL cache (used after a participant change to
+        pick up a just-joined member immediately).
+        """
+        if "@g.us" not in phone:
+            return _ok({"members": []})
+        members = await asyncio.to_thread(
+            group_mentions.get_members, phone, force, True)
+        return _ok({"members": members})
 
     @app.post("/api/contacts/{phone}/toggle-ai")
     async def toggle_contact_ai(phone: str, body: dict):

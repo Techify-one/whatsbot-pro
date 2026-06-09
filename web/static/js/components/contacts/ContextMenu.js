@@ -2,12 +2,13 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactTags } from '../../services/api.js';
+import { TagPicker } from './TagPicker.js';
 
 const html = htm.bind(h);
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, onToggleAI, onEditContact, onTagsUpdate, onArchive, onDelete, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDelete, onCreateTag, onClose }) {
   const ref = useRef(null);
   const [showTags, setShowTags] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -34,12 +35,10 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
     }
   }
 
-  const tagEntries = Object.entries(globalTags || {});
-
   return html`
     <div
       ref=${ref}
-      class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[180px]"
+      class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[200px] max-h-[85vh] overflow-y-auto wa-scrollbar"
       style="left:${left}px;top:${top}px"
     >
       <button
@@ -63,6 +62,38 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         </svg>
         Editar Contato
       </button>
+      ${isUnread ? html`
+        <button
+          onClick=${() => { onMarkRead(phone); onClose(); }}
+          class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+          </svg>
+          Marcar como lido
+        </button>
+      ` : html`
+        <button
+          onClick=${() => { onMarkUnread(phone); onClose(); }}
+          class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884">
+            <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+          </svg>
+          Marcar como não lida
+        </button>
+      `}
+
+      <!-- Pin / Unpin -->
+      <button
+        onClick=${() => { onPin && onPin(phone, !isPinned); onClose(); }}
+        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
+        </svg>
+        ${isPinned ? 'Desafixar conversa' : 'Fixar conversa'}
+      </button>
 
       <!-- Tags toggle -->
       <button
@@ -79,35 +110,12 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       </button>
 
       ${showTags ? html`
-        <div class="border-t border-wa-border">
-          ${tagEntries.length === 0 ? html`
-            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma tag criada</div>
-          ` : tagEntries.map(([name, tagData]) => {
-            const isActive = (contactTags || []).includes(name);
-            return html`
-              <button
-                key=${name}
-                onClick=${() => toggleTag(name)}
-                class="w-full text-left px-4 py-[8px] text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-3"
-              >
-                <span
-                  class="w-[16px] h-[16px] rounded border-2 flex items-center justify-center shrink-0"
-                  style="border-color: ${tagData.color}; background: ${isActive ? tagData.color : 'transparent'};"
-                >
-                  ${isActive ? html`
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="white">
-                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-                    </svg>
-                  ` : null}
-                </span>
-                <span
-                  class="font-medium"
-                  style="color: ${tagData.color};"
-                >${name}</span>
-              </button>
-            `;
-          })}
-        </div>
+        <${TagPicker}
+          globalTags=${globalTags}
+          isActive=${(name) => (contactTags || []).includes(name)}
+          onToggle=${toggleTag}
+          onCreateTag=${onCreateTag}
+        />
       ` : null}
 
       <!-- Archive / Delete separator -->

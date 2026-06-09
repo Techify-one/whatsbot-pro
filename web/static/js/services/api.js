@@ -137,6 +137,11 @@ export async function getContacts(q = '', archived = false) {
   return request('GET', `/api/contacts${query}`);
 }
 
+// Number of conversations with unread messages (for the browser-tab badge).
+export async function getUnreadCount() {
+  return request('GET', '/api/contacts/unread-count');
+}
+
 export async function getContact(phone, markRead = true) {
   const qs = markRead ? '' : '?mark_read=false';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
@@ -150,12 +155,33 @@ export async function archiveContact(phone, archived) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/archive`, { archived });
 }
 
-export async function sendMessage(phone, message) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, { message });
+export async function pinContact(phone, pinned) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/pin`, { pinned });
+}
+
+export async function sendMessage(phone, message, replyTo = null) {
+  const body = { message };
+  if (replyTo) body.reply_to = replyTo;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, body);
 }
 
 export async function retrySend(phone, message) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, { message });
+}
+
+// Delete a message. scope='me' (local) or scope='all' (revoke for everyone).
+// Pass msgId (GOWA id) and/or dbId (DB row id, for local messages without a msg_id).
+export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 'me' } = {}) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, {
+    msg_id: msgId, db_id: dbId, scope,
+  });
+}
+
+// React to a message with an emoji. Empty emoji removes the operator's reaction.
+export async function reactToMessage(phone, msgId, emoji) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, {
+    msg_id: msgId, emoji,
+  });
 }
 
 export async function sendPrivateMessage(phone, text, opts = {}) {
@@ -169,12 +195,29 @@ export async function markAsRead(phone) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/read`);
 }
 
+export async function markAsUnread(phone) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/unread`);
+}
+
+export async function markAllUnread() {
+  return request('POST', `/api/contacts/mark-all-unread`);
+}
+
+export async function markAllRead() {
+  return request('POST', `/api/contacts/mark-all-read`);
+}
+
 export async function updateContactInfo(phone, info) {
   return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/info`, info);
 }
 
 export async function toggleContactAI(phone, enabled) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, { enabled });
+}
+
+export async function getGroupMembers(groupJid, force = false) {
+  const qs = force ? '?force=true' : '';
+  return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
 export async function sendImage(phone, file, caption = '') {

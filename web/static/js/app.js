@@ -14,8 +14,9 @@ import { SetupWizard } from './components/SetupWizard.js';
 import { LowBalanceModal } from './components/LowBalanceModal.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
-import { checkAuth, authHeaders } from './services/api.js';
+import { checkAuth, authHeaders, getUnreadCount } from './services/api.js';
 import { playTransferAlert } from './utils/alertSound.js';
+import { getNotifPref, playNotificationSound, showBrowserNotification } from './utils/notifications.js';
 
 const LOW_BALANCE_SNOOZE_KEY = 'whatsbot_low_balance_snoozed_until';
 
@@ -115,18 +116,29 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
 
   const close = () => setOpen(false);
 
+  // Dark mode: toggles `.dark` on <html> (re-themes the whole app via CSS
+  // variables) and persists the choice. The early script in index.html applies
+  // it before first paint so there's no flash on reload.
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
+  function toggleDark() {
+    const next = !document.documentElement.classList.contains('dark');
+    document.documentElement.classList.toggle('dark', next);
+    try { localStorage.setItem('whatsbot_theme', next ? 'dark' : 'light'); } catch (e) {}
+    setDark(next);
+  }
+
   return html`
     <div ref=${menuRef} class="fixed top-3 right-3 z-50">
       <button
         onClick=${() => setOpen(!open)}
-        class="w-[36px] h-[36px] flex items-center justify-center rounded-full bg-white shadow-md border border-wa-border hover:bg-wa-hover transition-colors"
+        class="w-[36px] h-[36px] flex items-center justify-center rounded-full bg-wa-bg shadow-md border border-wa-border hover:bg-wa-hover transition-colors"
       >
         <svg viewBox="0 0 24 24" width="20" height="20" fill="#54656f">
           <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
         </svg>
       </button>
       ${open ? html`
-        <div class="absolute right-0 mt-1 bg-white rounded-lg shadow-lg border border-wa-border py-1 min-w-[180px] max-h-[80vh] overflow-y-auto">
+        <div class="absolute right-0 mt-1 bg-wa-bg rounded-lg shadow-lg border border-wa-border py-1 min-w-[180px] max-h-[80vh] overflow-y-auto">
           <${MenuItem} active=${tab === 'dashboard'} href=${CORE_TAB_PATHS.dashboard} onClick=${() => { onTabChange('dashboard'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`}
           >Painel</${MenuItem}>
@@ -176,6 +188,20 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>`}
           >Gerenciar Plugins</${MenuItem}>
 
+          <div class="border-t border-wa-border my-1"></div>
+          <button
+            onClick=${toggleDark}
+            class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-2 text-wa-text"
+          >
+            ${dark
+              ? html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5l2.39 3.42C13.65 5.15 12.84 5 12 5c-.84 0-1.65.15-2.39.42L12 2zM3.34 7l4.16-.35C6.84 7.28 6.31 8 5.91 8.81L3.34 7zm0 10l2.57-1.81c.4.81.93 1.53 1.59 2.16L3.34 17zM12 22l-2.39-3.42c.74.27 1.55.42 2.39.42.84 0 1.65-.15 2.39-.42L12 22zm8.66-5l-4.16.35c.66-.63 1.19-1.35 1.59-2.16L20.66 17zm0-10l-2.57 1.81c-.4-.81-.93-1.53-1.59-2.16L20.66 7z"/></svg>`
+              : html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 01-4.4 2.26 5.4 5.4 0 01-5.4-5.4c0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"/></svg>`}
+            <span class="flex-1">Modo escuro</span>
+            <span class="w-9 h-5 rounded-full transition-colors relative shrink-0 ${dark ? 'bg-wa-teal' : 'bg-wa-border'}">
+              <span class="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all ${dark ? 'left-[18px]' : 'left-0.5'}"></span>
+            </span>
+          </button>
+
           ${hasPassword ? html`
             <div class="border-t border-wa-border my-1"></div>
             <button
@@ -216,6 +242,7 @@ function App({ onLogout, hasPassword }) {
   const [wsConnected, setWsConnected] = useState(true);
   const [pluginScreens, setPluginScreens] = useState([]);
   const [tab, setTabState] = useState(() => tabFromPath([]));
+  const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
   const [chatPresence, setChatPresence] = useState(null);
   const [contactInfoUpdated, setContactInfoUpdated] = useState(null);
@@ -224,6 +251,10 @@ function App({ onLogout, hasPassword }) {
   const [contactAiToggled, setContactAiToggled] = useState(null);
   const [messagesRead, setMessagesRead] = useState(null);
   const [messageStatus, setMessageStatus] = useState(null);
+  const [messageAction, setMessageAction] = useState(null);
+  const [messageReaction, setMessageReaction] = useState(null);
+  const [avatarUpdated, setAvatarUpdated] = useState(null);
+  const [groupParticipantsChanged, setGroupParticipantsChanged] = useState(null);
   const [lowBalance, setLowBalance] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
   const [wizardManual, setWizardManual] = useState(() => window.location.pathname === '/wizard');
@@ -252,7 +283,9 @@ function App({ onLogout, hasPassword }) {
       .then(res => {
         if (!res || !res.ok) return;
         const screens = (res.data.plugins || []).flatMap(p =>
-          (p.screens || []).map(s => ({ ...s, pluginId: s.pluginId || p.id }))
+          (p.screens || [])
+            .filter(s => !s.config)  // config screens live in the Plugins tab, not the gear menu
+            .map(s => ({ ...s, pluginId: s.pluginId || p.id }))
         );
         setPluginScreens(screens);
         // Re-evaluate tab now that we know about plugin paths.
@@ -318,6 +351,10 @@ function App({ onLogout, hasPassword }) {
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),
     onMessagesRead: useCallback((data) => setMessagesRead(data), []),
     onMessageStatus: useCallback((data) => setMessageStatus(data), []),
+    onMessageAction: useCallback((data) => setMessageAction(data), []),
+    onMessageReaction: useCallback((data) => setMessageReaction(data), []),
+    onAvatarUpdated: useCallback((data) => setAvatarUpdated(data), []),
+    onGroupParticipantsChanged: useCallback((data) => setGroupParticipantsChanged({ ...data, _t: Date.now() }), []),
     onLowBalance: useCallback((data) => {
       if (lowBalanceIsSnoozed()) return;
       setLowBalance(data);
@@ -347,6 +384,57 @@ function App({ onLogout, hasPassword }) {
       })
       .catch(() => { /* ignore */ });
   }, [config && config.openrouter_api_key]);
+
+  // ── Browser-tab unread badge ("(3) WhatsBot"), like WhatsApp Web ──────────
+  // Single source of truth is the backend count; we refresh it (debounced) on
+  // boot, on WS events that change unread state, and when the contacts list
+  // reports a change (e.g. the operator opened/read a chat — no WS event fires
+  // for that on the same client).
+  const unreadTimerRef = useRef(null);
+  const refreshUnreadCount = useCallback(() => {
+    if (unreadTimerRef.current) clearTimeout(unreadTimerRef.current);
+    unreadTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await getUnreadCount();
+        if (res && res.ok) setUnreadConvos(res.data.count || 0);
+      } catch (_) { /* ignore */ }
+    }, 250);
+  }, []);
+
+  useEffect(() => { refreshUnreadCount(); }, [newMessage, messagesRead, refreshUnreadCount]);
+
+  // Bumped when notification prefs change in the config panel, so the effects
+  // below re-evaluate (e.g. turning the tab badge off should apply at once).
+  const [notifVersion, setNotifVersion] = useState(0);
+  useEffect(() => {
+    const onPrefs = () => setNotifVersion(v => v + 1);
+    window.addEventListener('whatsbot:notif-prefs', onPrefs);
+    return () => window.removeEventListener('whatsbot:notif-prefs', onPrefs);
+  }, []);
+
+  // Tab-title badge — gated by the "tab notification" preference.
+  useEffect(() => {
+    const tabBadge = getNotifPref('tab');
+    document.title = (tabBadge && unreadConvos > 0) ? `(${unreadConvos}) WhatsBot` : 'WhatsBot';
+  }, [unreadConvos, notifVersion]);
+
+  // Browser notification + sound on a new INBOUND message (from a contact).
+  // Sound plays whenever enabled; the desktop notification only shows when the
+  // tab isn't visible (you're away), like Telegram/WhatsApp Web.
+  useEffect(() => {
+    if (!newMessage) return;
+    const m = newMessage.message;
+    if (!m || m.role !== 'user') return;
+    if (getNotifPref('sound')) playNotificationSound();
+    const away = document.hidden || !document.hasFocus();
+    if (getNotifPref('browser') && away) {
+      let preview = (m.content || '').trim();
+      if (!preview) {
+        preview = m.media_type ? 'Enviou uma mídia' : 'Nova mensagem';
+      }
+      showBrowserNotification('WhatsBot — nova mensagem', preview.slice(0, 140));
+    }
+  }, [newMessage]);
 
   async function handleSave(data) {
     const result = await save(data);
@@ -419,7 +507,9 @@ function App({ onLogout, hasPassword }) {
                   fetch('/api/plugins/manifest', { headers: authHeaders() }).then(r => r.json()).then(res => {
                     if (res && res.ok) {
                       const sc = (res.data.plugins || []).flatMap(p =>
-                        (p.screens || []).map(s => ({ ...s, pluginId: s.pluginId || p.id }))
+                        (p.screens || [])
+                          .filter(s => !s.config)
+                          .map(s => ({ ...s, pluginId: s.pluginId || p.id }))
                       );
                       setPluginScreens(sc);
                     }
@@ -441,7 +531,7 @@ function App({ onLogout, hasPassword }) {
                   />
                 </div>`
               : tab === 'contacts'
-                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} initialContactId=${initialContactId} wsConnected=${wsConnected} config=${config} onConfigSave=${save} />`
+                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
                 : tab === 'costs'
                   ? html`<div class="max-w-5xl mx-auto p-4">
                       <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />

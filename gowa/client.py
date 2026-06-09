@@ -213,6 +213,32 @@ class GOWAClient:
 
         return ""
 
+    def get_own_display_name(self) -> str:
+        """Best-effort: the connected account's own WhatsApp profile name.
+
+        Read from GET /devices, where ``display_name`` is the name the account
+        holder set on WhatsApp (the "default name decided by the contact").
+        Prefers a logged-in device; falls back to the first named one. Returns
+        "" if it can't be determined.
+        """
+        try:
+            devices = self.list_devices()
+        except Exception as e:
+            logger.debug("get_own_display_name: /devices probe failed: %s", e)
+            return ""
+        chosen = ""
+        for d in devices:
+            if not isinstance(d, dict):
+                continue
+            name = (d.get("display_name") or "").strip()
+            if not name:
+                continue
+            if str(d.get("state", "")).lower() == "logged_in":
+                return name
+            if not chosen:
+                chosen = name
+        return chosen
+
     # ── QR Code / Login ──────────────────────────────────────────────
 
     def get_qr_code(self) -> bytes | None:
@@ -265,12 +291,22 @@ class GOWAClient:
             return phone
         return self._clean_phone(phone)
 
-    def send_message(self, phone: str, text: str) -> dict:
-        """Send a text message to a phone number or group. Raises GOWASendError on failure."""
+    def send_message(self, phone: str, text: str, mentions: list[str] | None = None,
+                     reply_message_id: str | None = None) -> dict:
+        """Send a text message to a phone number or group. Raises GOWASendError on failure.
+
+        ``mentions`` is an optional list of phone numbers to mention (and/or the
+        special keyword ``"@everyone"``), per GOWA's /send/message API.
+        ``reply_message_id`` quotes an existing message (GOWA msg_id) in the reply.
+        """
         payload = {
             "phone": self._format_target(phone),
             "message": text,
         }
+        if mentions:
+            payload["mentions"] = mentions
+        if reply_message_id:
+            payload["reply_message_id"] = reply_message_id
         return self._request("POST", "/send/message", raise_on_error=True, json=payload)
 
     def send_image(self, phone: str, image_path: str, caption: str = "") -> dict:
@@ -402,6 +438,42 @@ class GOWAClient:
             logger.warning("mark_as_read failed for %s: %s", message_id, e)
             return None
 
+    # ── Delete / Revoke ────────────────────────────────────────────
+
+    def _message_jid(self, phone: str) -> str:
+        """Build the chat JID GOWA expects for per-message endpoints."""
+        if self._is_group_jid(phone):
+            return phone
+        return f"{self._clean_phone(phone)}@s.whatsapp.net"
+
+    def revoke_message(self, message_id: str, phone: str) -> dict | None:
+        """Delete a message for everyone (revoke). Best-effort, never raises."""
+        payload = {"phone": self._message_jid(phone)}
+        try:
+            return self._request("POST", f"/message/{message_id}/revoke", json=payload)
+        except Exception as e:
+            logger.warning("revoke_message failed for %s: %s", message_id, e)
+            return None
+
+    def delete_message(self, message_id: str, phone: str) -> dict | None:
+        """Delete a message for me only (local device). Best-effort, never raises."""
+        payload = {"phone": self._message_jid(phone)}
+        try:
+            return self._request("POST", f"/message/{message_id}/delete", json=payload)
+        except Exception as e:
+            logger.warning("delete_message failed for %s: %s", message_id, e)
+            return None
+
+    def react_to_message(self, message_id: str, phone: str, emoji: str) -> dict | None:
+        """React to a message with an emoji (empty string removes the reaction).
+        Best-effort, never raises."""
+        payload = {"phone": self._message_jid(phone), "emoji": emoji}
+        try:
+            return self._request("POST", f"/message/{message_id}/reaction", json=payload)
+        except Exception as e:
+            logger.warning("react_to_message failed for %s: %s", message_id, e)
+            return None
+
     # ── Presence ───────────────────────────────────────────────────
 
     def send_chat_presence(self, phone: str, action: str = "start") -> dict | None:
@@ -420,6 +492,22 @@ class GOWAClient:
         result = self._request("GET", f"/chats?limit={limit}")
         if result and isinstance(result, dict):
             # v8.5.0 nests list under results.data
+            results = result.get("results", {})
+            if isinstance(results, dict):
+                return results.get("data", []) or []
+            if isinstance(results, list):
+                return results
+        return []
+
+    def get_wa_contacts(self) -> list[dict]:
+        """Return the device's WhatsApp contact store: [{jid, name}].
+
+        ``name`` is the saved contact name (whatsmeow FullName) — empty for
+        numbers the account hasn't saved. Used to resolve group participants to
+        a display name without them having to message first.
+        """
+        result = self._request("GET", "/user/my/contacts")
+        if result and isinstance(result, dict):
             results = result.get("results", {})
             if isinstance(results, dict):
                 return results.get("data", []) or []

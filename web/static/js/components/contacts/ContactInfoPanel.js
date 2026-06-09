@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactInfo, updateContactTags, createTag } from '../../services/api.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
+import { avatarUrl } from './utils.js';
 
 const html = htm.bind(h);
 
@@ -13,7 +14,7 @@ const TAG_COLORS = [
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
 
-export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, onClose, onSave }) {
+export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -128,8 +129,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     { key: 'address', label: 'Endereço', placeholder: 'Rua, número, bairro' },
   ];
 
+  // The panel closes only via the X button or by switching conversations
+  // (handled in Contacts.js) — never on a click in the conversation behind it.
   return html`
-    <div class="absolute inset-0 z-50 flex justify-end" onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div class="absolute inset-0 z-50 flex justify-end">
       <div class="w-full lg:w-[400px] h-full bg-wa-panel flex flex-col shadow-xl animate-slide-in-right">
         <!-- Header -->
         <div class="h-[59px] flex items-center px-4 bg-wa-teal shrink-0 gap-4">
@@ -145,8 +148,8 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
           <div class="flex flex-col items-center py-7 bg-wa-panel">
             <div class="w-[200px] h-[200px] rounded-full overflow-hidden mb-3">
               ${isGroup
-                ? html`<${GroupAvatar} size=${200} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
-                : html`<${DefaultAvatar} size=${200} avatarUrl=${phone ? "/statics/avatars/" + phone + ".jpg" : null} />`
+                ? html`<${GroupAvatar} size=${200} avatarUrl=${avatarUrl(phone, avatarV)} />`
+                : html`<${DefaultAvatar} size=${200} avatarUrl=${avatarUrl(phone, avatarV)} />`
               }
             </div>
             <div class="text-wa-text text-[22px] font-light">${isGroup ? (groupName || phone) : (form.name || phone)}</div>

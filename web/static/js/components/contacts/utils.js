@@ -1,3 +1,12 @@
+// ── Avatar URL (with cache-busting version) ──────────────────────
+// `v` is the cached file's mtime (avatar_v from the API); appending it makes
+// the browser re-fetch when the photo changes instead of using the stale image.
+export function avatarUrl(phone, v) {
+  if (!phone) return null;
+  const base = `/statics/avatars/${phone}.jpg`;
+  return v ? `${base}?v=${v}` : base;
+}
+
 // ── Time formatting ──────────────────────────────────────────────
 
 export function formatTime(ts) {

@@ -17,6 +17,7 @@ from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
 from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes
 from db.repositories import tool_override_repo
+from agent import group_mentions
 from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
 from plugins.context import set_runtime as _set_plugin_runtime
 from plugins.events import (
@@ -122,6 +123,9 @@ def create_app(
         plugins_dir=plugins_dir,
         plugins_registry=registry,
     )
+
+    # Group @mention resolution service (members lookup + name/number mapping).
+    group_mentions.init(gowa_client)
 
     # ── GOWA restart callback ──────────────────────────────────────────
     def _on_gowa_restart():
@@ -253,7 +257,7 @@ def create_app(
             "worker-src 'self' blob:; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
-            "media-src 'self' blob:; "
+            "media-src 'self' data: blob:; "
             "connect-src 'self' ws: wss:; "
             "frame-ancestors 'none'"
         )

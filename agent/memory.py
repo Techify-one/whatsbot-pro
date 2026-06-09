@@ -135,11 +135,12 @@ class ContactMemory:
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
-                    status: str | None = None, msg_id: str | None = None):
+                    status: str | None = None, msg_id: str | None = None,
+                    reply_to_msg_id: str | None = None):
         message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
-            status=status, msg_id=msg_id,
+            status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
         )
         # Touch updated_at
         contact_repo.update(self.id)
@@ -164,6 +165,10 @@ class ContactMemory:
         self.unread_ai_count += 1
         contact_repo.increment_unread_ai(self.id)
 
+    def mark_mention(self):
+        """Flag that the bot was @mentioned in this group (unread)."""
+        contact_repo.set_mention(self.id)
+
     def mark_as_read(self) -> list[str]:
         """Reset unread count and return the list of unread msg_ids (for read receipts)."""
         msg_ids = contact_repo.mark_as_read(self.id)
@@ -176,6 +181,12 @@ class ContactMemory:
         msg_ids = contact_repo.mark_user_messages_as_read(self.id)
         self.unread_count = 0
         return msg_ids
+
+    def mark_as_unread(self):
+        """Mark this contact as unread — re-light the in-app green badge."""
+        contact_repo.mark_as_unread(self.id)
+        if self.unread_count < 1:
+            self.unread_count = 1
 
     def set_ai_enabled(self, enabled: bool):
         self.ai_enabled = enabled
