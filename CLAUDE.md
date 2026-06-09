@@ -9,7 +9,7 @@ Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
 - **SQLite** — banco default (WAL mode, driver `sqlite3` da stdlib)
 - **PostgreSQL** — backend opcional via `psycopg[binary]`, configurável pela tela Settings → Banco
 - **GOWA** (go-whatsapp-web-multidevice v8.5.0) — bridge WhatsApp via REST, roda como subprocess
-- **OpenRouter** — LLM provider (API compatível com OpenAI)
+- **Proxy LLM da Techify** (`https://llm.techify.one/api/v1`) — provider de LLM, API **compatível com OpenRouter/OpenAI**. Substituiu o OpenRouter direto: a chave é provisionada pelo wizard de 1ª execução e o crédito/recarga é gerido pela Techify. O base URL é configurável via env `LLM_API_BASE_URL`. A chave continua sendo persistida na config key `openrouter_api_key` (nome legado mantido por compatibilidade)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
 - **Preact + HTM + Tailwind CSS** — frontend web (sem build step, vendorizado local)
 - **PyInstaller** — empacotamento como EXE
@@ -21,10 +21,13 @@ main.py              → entry point, inicia uvicorn + abre browser
 server/app.py        → FastAPI app (endpoints REST, WebSocket, webhook, background tasks)
 gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
-agent/handler.py     → processa mensagens com LLM via OpenRouter (tool calling)
+agent/handler.py     → processa mensagens com LLM via proxy Techify (compatível OpenRouter, tool calling)
 agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no SQLite via repos)
+agent/group_mentions.py → resolução de @menções em grupos (número ↔ nome, lista de membros, @todos)
 agent/tools/         → tools core do LLM (uma tool por arquivo, agregadas em CORE_TOOLS)
-config/settings.py   → load/save config na tabela `config` do SQLite
+config/settings.py   → load/save config + constantes do provider/Techify (LLM_API_BASE_URL, TECHIFY_*)
+server/avatars.py    → cache de fotos de perfil em disco (statics/avatars/<phone>.jpg) + broadcast avatar_updated
+server/balance_monitor.py → consulta saldo de crédito do proxy (/credits) e emite low_balance via WS
 db/                  → módulo de banco de dados (SQLAlchemy 2.0 Core)
   engine.py          → factory do Engine, URL resolution (env > arquivo > sqlite default), PRAGMAs SQLite
   tables.py          → MetaData + 11 Table objects (Core, sem mapper/Session)
@@ -106,9 +109,9 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | Tabela | Descrição |
 |--------|-----------|
 | `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
-| `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags) |
+| `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo) e `has_unread_mention` (@menção não lida em grupo) |
 | `observations` | Notas/observações por contato (texto livre) |
-| `messages` | Histórico completo de mensagens (role, content, ts, media) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada) |
 | `usage` | Registros de uso da API (tokens, custo, modelo) |
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
@@ -185,20 +188,58 @@ Cada contato é armazenado na tabela `contacts` com campos normalizados:
 
 Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
 
+## Provider de LLM e onboarding (Techify)
+
+O WhatsBot usa o **proxy LLM da Techify** (`https://llm.techify.one/api/v1`) como provider — API compatível com OpenRouter/OpenAI, então o cliente OpenAI (`base_url=LLM_API_BASE_URL`) e os endpoints `/models` e `/credits` funcionam sem mudança. As constantes vivem em [config/settings.py](config/settings.py) (`LLM_API_BASE_URL`, `TECHIFY_SERVICE_NUMBER_URL`, `TECHIFY_PROVISION_NUMBER`, `TECHIFY_REQUEST_APIKEY_URL`, `TECHIFY_PROVISION_MESSAGE`), todas com override por env.
+
+**Wizard de 1ª execução** ([web/static/js/components/SetupWizard.js](web/static/js/components/SetupWizard.js), rota `/wizard`): em 3 passos —
+1. **Conectar WhatsApp** (QR; auto-avança ao conectar).
+2. **Provisionar chave de API**: o WhatsBot consulta `/service_number` da Techify, manda uma mensagem WhatsApp ao número de provisionamento pedindo a conta+chave (`POST /api/config/request-apikey`), faz polling até a chave chegar (com TTL) e já credita ~US$1. O contato do número de provisionamento tem a IA desativada automaticamente.
+3. **Prompt do agente**: o usuário escreve a personalidade da IA. Pode pular o wizard e ir direto pro chat.
+
+O wizard só aparece em instalações ainda não configuradas. A chave é persistida em `config["openrouter_api_key"]` (nome legado).
+
+**Monitor de saldo** ([server/balance_monitor.py](server/balance_monitor.py)): consulta `/credits` do proxy, cacheia o resultado e, após chamadas ao LLM, emite o evento WS `low_balance` quando `remaining < low_balance_threshold` (default US$0,50, configurável; `low_balance_enabled` liga/desliga). O frontend (`LowBalanceModal.js`) abre um modal de recarga apontando para `account_url` (URL da conta Techify, salva junto com `access_token` na config). `GET /api/balance` retorna o snapshot inicial no boot.
+
+## Fotos de perfil (avatars)
+
+[server/avatars.py](server/avatars.py) cacheia as fotos de perfil em disco em `statics/avatars/<phone>.jpg` (servidas pelo mount estático). Como o WhatsApp não emite evento de "foto mudou", a atualização é por re-fetch do GOWA (ao abrir a conversa e numa varredura periódica de fundo — `AVATAR_REFRESH_INTERVAL = 1800s` em [server/background.py](server/background.py)), sobrescrevendo o arquivo só quando os bytes diferem. O frontend faz cache-bust pelo mtime (`avatar_v`); uma mudança dispara o WS `avatar_updated` `{phone, v}` pra atualizar ao vivo sem reload.
+
+## @menções em grupos
+
+[agent/group_mentions.py](agent/group_mentions.py) é o serviço central que conhece os participantes de um grupo e converte menções entre o formato de fio do WhatsApp (`@<número>`) e nomes humanos:
+
+- **Entrada**: `resolve_incoming()` troca `@<dígitos>` numa mensagem recebida por `@<Nome>` (o painel/LLM veem nomes, não números).
+- **Saída**: `resolve_outgoing()` transforma `@Nome` / `@todos` (escritos pelo operador ou pela IA) em menção real — `@<número>` inline no texto + a lista `mentions` que o `/send/message` do GOWA aceita. `@todos`/`@geral`/`@all`/etc. viram `@everyone`.
+
+Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos salvos → pushName capturado de mensagens recebidas → catálogo do device (`/user/my/contacts`) → `/user/info` (cap de 20 lookups por chamada). Participantes são indexados por dígitos do phone **e** do `lid`. Cache de membros por grupo (TTL 300s), invalidado em mudança de roster (join/leave/promote/demote, via webhook `group.participants_changed`). O serviço é inicializado em `create_app` (`group_mentions.init(gowa_client)`) e a identidade do bot é registrada via `set_bot_identity`. A config `group_reply_mode` (default `mention_only`) controla quando a IA responde em grupos.
+
 ## API REST do WhatsBot (backend FastAPI)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | GET | `/` | Serve o frontend (web/index.html) |
-| GET | `/api/config` | Retorna config (API key mascarada) |
+| GET | `/wizard` | Serve o frontend forçando o wizard de 1ª execução (onboarding) |
+| GET | `/api/config` | Retorna config (API key mascarada) + `account_url` |
 | PUT | `/api/config` | Salva config + atualiza AgentHandler |
-| POST | `/api/config/test-key` | Testa API key OpenRouter |
+| POST | `/api/config/test-key` | Testa API key no proxy Techify (compatível OpenRouter); auto-salva se válida |
+| POST | `/api/config/request-apikey` | Provisiona uma chave via Techify (manda msg ao número de provisionamento; usado pelo wizard) |
+| GET | `/api/models` | Lista de modelos do proxy (cache 10 min) |
+| GET | `/api/balance` | Saldo de crédito atual + threshold + `account_url` (recarga). Updates live via WS `low_balance` |
 | GET | `/api/status` | Status de conexão + contagem de msgs |
 | GET | `/api/qr` | QR code como PNG (204 se indisponível) |
 | POST | `/api/whatsapp/reconnect` | Reconectar GOWA |
 | POST | `/api/whatsapp/logout` | Logout GOWA |
 | POST | `/api/webhook` | Recebe mensagens do GOWA (webhook) |
 | GET | `/api/contacts?archived=true` | Lista apenas contatos/grupos arquivados |
+| GET | `/api/contacts/unread-count` | Total de mensagens não lidas (badge global) |
+| POST | `/api/contacts/{phone}/pin` | Fixa/desafixa a conversa (`{pinned}`). Fixadas vão pro topo da lista. WS `contact_pinned` |
+| POST | `/api/contacts/{phone}/unread` | Marca a conversa como não lida (manual) |
+| POST | `/api/contacts/mark-all-read` | Zera não lidas de todas as conversas |
+| POST | `/api/contacts/mark-all-unread` | Marca todas as conversas como não lidas |
+| POST | `/api/contacts/{phone}/messages/react` | Reage a uma mensagem com emoji (string vazia remove). WS `message_reaction` |
+| POST | `/api/contacts/{phone}/messages/delete` | Apaga mensagem (revoke pra todos). WS `message_revoked`/`message_deleted` |
+| GET | `/api/contacts/{phone}/members` | Lista participantes do grupo com nomes resolvidos (autocomplete de @menção) |
 | GET | `/api/webhook-payloads?limit=N` | Últimos N payloads raw do webhook (debug, max 50) |
 | GET | `/api/gowa-logs?limit=N` | Tail do `logs/gowa.log` (stdout/stderr do subprocess GOWA, só populado com `WHATSBOT_GOWA_DEBUG=1`) |
 | GET | `/api/tools` | Lista todas as tools registradas (core + plugin) com estado de override |
@@ -220,7 +261,7 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
-Eventos WebSocket: `{"event": "status|qr_update|gowa_status|config_saved", "data": {...}}`
+Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga).
 
 ## GOWA REST API (endpoints reais — v8.5.0 multi-device)
 
@@ -234,9 +275,15 @@ IMPORTANTE: O GOWA v8.5.0 é multi-device. Antes de usar qualquer endpoint, é n
 | Status | GET | `/app/status` | Retorna `results.is_connected`, `results.is_logged_in` |
 | Logout | GET | `/app/logout` | |
 | Reconectar | GET | `/app/reconnect` | |
-| Enviar msg | POST | `/send/message` body: `{phone, message}` | |
+| Enviar msg | POST | `/send/message` body: `{phone, message, mentions?, reply_message_id?}` | `mentions`: lista de números (ou `@everyone`); `reply_message_id`: citar/responder |
+| Revogar msg | POST | `/message/{id}/revoke` | Apagar mensagem pra todos |
+| Reagir | POST | `/message/{id}/reaction` body: `{phone, emoji}` | Emoji vazio remove a reação |
 | Listar chats | GET | `/chats?limit=N` | Resposta aninhada: `results.data[]` |
 | Msgs do chat | GET | `/chat/{jid}/messages?limit=N` | Resposta aninhada: `results.data[]` |
+| Info de grupo | GET | `/group/info?group_id={jid}` | Participantes (phone/lid/admin) — usado por `group_mentions` |
+| Info de usuário | GET | `/user/info?phone={jid}` | pushName ("default name") — só business retorna |
+| Contatos do device | GET | `/user/my/contacts` | Catálogo do celular (digits → nome salvo) |
+| Foto de perfil | GET | `/user/avatar` | Bytes do avatar (cacheado em `statics/avatars/`) |
 
 Binário iniciado com: `gowa.exe rest --port 3000 --webhook http://127.0.0.1:{web_port}/api/webhook`
 
@@ -246,7 +293,7 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 
 - Python com type hints nas assinaturas de função
 - Logging via `logging` stdlib (nunca print)
-- Operações bloqueantes (GOWA, OpenRouter, SQLite) usam `asyncio.to_thread()` no backend FastAPI
+- Operações bloqueantes (GOWA, LLM/proxy Techify, SQLite) usam `asyncio.to_thread()` no backend FastAPI
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
@@ -254,6 +301,21 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 - **Tools de plugin**: viver em `storages/plugins/<id>/tools.py` no formato `CORE_TOOLS = [(schema, executor), ...]` e ser declaradas no manifest. NÃO mexer em `agent/tools/` ou no handler
 - **Contrato de tool (core OU plugin)**: toda tool registrada vira row em `tool_overrides` automaticamente (via `tool_override_repo.ensure` no `_register_tool`). O usuário pode customizar `description` e `display_label` na tela `/tools`. O `name` da tool é IDENTIDADE e NÃO deve ser renomeado depois de release — quebra histórico de `usage` (`call_type=<name>`) e overrides do usuário. Description em código é o **default**: escreva como instrução clara pro LLM, deve funcionar sem customização. O schema também aceita `"display_label": "..."` no dict raiz (fora de `function`) — o handler retira antes de mandar pro LLM, e o valor vira o default mostrado na UI
 - **Acesso a dados**: sempre via SQLAlchemy Core. Repos em `db/repositories/` usam `with get_engine().begin() as conn:` + statements de `db/tables`. Nunca usar `sqlite3` diretamente. Plugins acessam o banco via `from plugins.context import make_plugin_db` + `from sqlalchemy import text`
+
+## Tema e modo escuro (legibilidade)
+
+O painel suporta **modo claro e escuro**. O tema é a classe `.dark` no `<html>` (toggle no menu da engrenagem → "Modo escuro", persistido em `localStorage["whatsbot_theme"]`; um script inline no `<head>` do `web/index.html` aplica antes do 1º paint pra não piscar). As cores são dirigidas por **variáveis CSS (canais RGB)** em [web/static/css/custom.css](web/static/css/custom.css): a paleta `wa-*` do Tailwind (`bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) resolve para `rgb(var(--wa-*) / <alpha-value>)` (config em `web/index.html`), então alternar a classe re-tematiza o app inteiro e os modificadores de opacidade (`bg-wa-teal/10`) continuam funcionando.
+
+**REGRA — ao adicionar QUALQUER área nova (tela core, card, modal, tela de plugin), garanta que as cores sejam legíveis no modo escuro.** Na prática:
+
+- **Prefira as classes semânticas `wa-*`** para superfícies/textos/bordas (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `text-wa-secondary`, `border-wa-border`, `bg-wa-hover`, `bg-wa-teal`). Elas trocam de cor sozinhas nos dois temas — é o caminho recomendado e à prova de futuro.
+- **Não dependa de cores cruas do Tailwind** (`bg-white`, `text-gray-*`, `bg-green-50`…) nem do fundo padrão do navegador em inputs. Como rede de segurança, `custom.css` tem overrides `html.dark` que re-tematizam as cruas mais comuns (brancos, cinzas `50–300`, e as tintas de acento green/red/amber/yellow/blue/orange/purple/pink em `-50/100/200` + textos `-600/700/800`). Isso é **fallback**, não substitui usar `wa-*` — cores fora dessa lista (ex.: um hex inline, um `bg-*-300` de fundo, uma cor nova) NÃO são cobertas e ficarão ilegíveis.
+- **Campos de formulário**: use a classe `.wa-field` (fundo cinza + texto preto, legível nos dois temas) em `<input>`/`<textarea>`/`<select>`. Deixar sem cor de fundo cai no branco padrão do navegador + texto claro do tema = ilegível.
+- **Controles nativos** (date/time/range/checkbox/scrollbar) seguem o tema via `color-scheme` (já setado em `:root`/`html.dark`).
+- **Acentos** (`text-white` em botão colorido, vermelho de "excluir") podem ficar como estão.
+- **Sempre teste**: abra a tela, ligue o modo escuro e confira o contraste. Se uma cor crua não estiver coberta, ou troque por `wa-*`/`.wa-field`, ou adicione o override `html.dark` correspondente em `custom.css`.
+
+Telas de plugin (`storages/plugins/<id>/static/*.js`) seguem as MESMAS regras — usam o mesmo runtime do Tailwind e o mesmo `custom.css`.
 
 ## Dados do projeto
 
@@ -288,6 +350,7 @@ storages/plugins/<id>/
 ├── prompts.py               # PROMPT_FRAGMENTS = [callable, ...]        (opcional)
 ├── routes.py                # router = APIRouter()                       (opcional)
 ├── settings.py              # class Settings(BaseModel) — Pydantic       (opcional)
+│                            #   (config do plugin: settings OU screen config:true)
 ├── migrations/
 │   └── 001_initial.sql      # tabelas com prefixo plugin_<id>_
 └── static/
@@ -307,9 +370,25 @@ storages/plugins/<id>/
 
 Plugin declara `class Settings(BaseModel)` em `settings.py`. O endpoint `GET /api/plugins/<id>/settings` retorna `model_json_schema()` + valores atuais; `PUT` valida via Pydantic e persiste em `config_repo` com prefixo `plugin.<id>.<field>`. Frontend (`PluginSettingsForm.js`) renderiza form genérico para string/int/float/bool/enum.
 
+### Onde fica a configuração de um plugin (REGRA)
+
+**Toda configuração de um plugin vive na aba de configuração DO PRÓPRIO plugin** — o botão **Configurar** no card em *Gerenciar Plugins* (`/plugins`). **Nunca** adicione uma seção/aba nova ao painel de Configurações padrão do WhatsBot ([web/static/js/components/ConfigPanel.js](web/static/js/components/ConfigPanel.js)) para algo que pertence a um plugin. O core não deve crescer com opções de plugin.
+
+Há dois jeitos (escolha um, ou combine) de preencher o modal "Configurar":
+
+1. **Settings declarativas** (`settings.py` → `class Settings(BaseModel)`): form auto-gerado pelo `PluginSettingsForm`. Use quando as opções são campos simples (string/int/float/bool/enum) persistidos no servidor (`plugin.<id>.<field>`).
+2. **Tela de configuração custom** (`screen` com `config: true`): um componente Preact próprio, renderizado dentro do mesmo modal "Configurar" via `PluginScreen`. Use quando precisa de UI rica (toggles que aplicam na hora, preferências em `localStorage` per-device, upload, preview de som, etc.). Quando o plugin tem uma screen `config: true`, o modal renderiza ela **no lugar** do form declarativo.
+
+Referências bundladas: `auto_signature` (settings declarativas), `custom_sounds` e `notifications` (screen `config: true`).
+
 ### Frontend dinâmico
 
-`/api/plugins/manifest` retorna apenas plugins carregados com seus `screens[]`. `app.js` faz fetch no boot, popula `pluginScreens`, mostra entradas no `GearMenu` e renderiza via `PluginScreen` que faz `import(screen.component)` dinâmico. Plugin component recebe `apiBase = "/api/plugins/<id>"` como prop. Importmap em `web/index.html` cobre `preact`, `preact/hooks`, `htm` — plugin usa os mesmos sem bundle.
+`/api/plugins/manifest` retorna apenas plugins carregados com seus `screens[]`. `app.js` faz fetch no boot e separa as screens por flag `config`:
+
+- **`config: false`** (default) — screen "de funcionalidade": aparece como página no `GearMenu` (menu da engrenagem) e é renderizada full-page via `PluginScreen`. Ex: uma tela de listagem/operação do plugin.
+- **`config: true`** — screen "de configuração": **filtrada fora do GearMenu** (`app.js` faz `.filter(s => !s.config)`) e renderizada dentro do modal **Configurar** do card em `/plugins` (`PluginsManager.js`). É a aba de configuração do próprio plugin.
+
+`PluginScreen` faz `import(screen.component)` dinâmico e passa `apiBase = "/api/plugins/<id>"` como prop. Importmap em `web/index.html` cobre `preact`, `preact/hooks`, `htm` — plugin usa os mesmos sem bundle. Screen custom pode importar utilitários do core por URL absoluta (ex: `import { playNotificationSound } from '/static/js/utils/notifications.js'`).
 
 ### Convenções obrigatórias
 
@@ -317,7 +396,9 @@ Plugin declara `class Settings(BaseModel)` em `settings.py`. O endpoint `GET /ap
 - **Tabelas**: SEMPRE `plugin_<id>_<nome>`. O migrator rejeita o contrário com erro claro.
 - **`whatsbot_api_version`**: range semver no manifest (ex: `">=1.0,<2.0"`). Versão atual em `plugins/manifest.WHATSBOT_API_VERSION`.
 - **Permissions**: declaradas no manifest mas **não enforced no MVP** — informativo apenas.
+- **Configuração no próprio plugin**: opções de um plugin vão SEMPRE na aba de configuração dele (settings declarativas e/ou screen `config: true`), NUNCA numa aba nova do painel de Configurações do core. Ver "Onde fica a configuração de um plugin".
 - **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
+- **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
 
 ### Events e Filters (bus do plugin)
 
@@ -433,7 +514,7 @@ FILTERS = {
 - `payload["raw"]` carrega o payload bruto do GOWA (potencialmente grande, com base64 de áudio). Plugins que logam tudo devem cortar `raw` antes de serializar.
 - Restart obrigatório no toggle do plugin: `plugin.enabled`/`plugin.disabled` emitem ANTES do `os._exit`; o novo processo emite `plugin.loaded` no boot.
 
-Plugins de exemplo bundled em `assets/plugin_examples/`: `event_logger` (assina `*`), `auto_signature` (`filter.reply.part`), `blacklist` (`filter.message.before_save` → `None`), `transcricao_grupos` (`filter.transcription.should_run` — controle de transcrição por grupo via UI + DB).
+Plugins de exemplo bundled em `assets/plugin_examples/`: `event_logger` (assina `*`), `auto_signature` (`filter.reply.part`), `blacklist` (`filter.message.before_save` → `None`), `transcricao_grupos` (`filter.transcription.should_run` — controle de transcrição por grupo via UI + DB), `horario_funcionamento` (settings declarativas + `filter.system_prompt`/`filter.llm.tools`/`filter.llm.messages` + migrations — horário de funcionamento por dia da semana, com mensagem de ausência fora do expediente e cooldown por contato), `custom_sounds` (screen `config: true` + routes/migrations — biblioteca de sons), `notifications` (screen `config: true` somente-UI — preferências de notificação per-device em `localStorage`).
 
 ### Media types suportados
 
@@ -472,7 +553,7 @@ Para instalações que usavam a versão anterior (armazenamento em JSON), o sist
 
 ## Testes automatizados
 
-Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient com banco SQLite temporário. GOWA e OpenRouter são mockados.
+Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient com banco SQLite temporário. GOWA e o LLM (proxy Techify) são mockados.
 
 ```bash
 # Rodar testes (não precisa de servidor rodando)
@@ -480,15 +561,15 @@ source venv/Scripts/activate
 python tests/test_endpoints.py
 ```
 
-Os testes criam um banco temporário (SQLite por default; setar `WHATSBOT_TEST_DB_URL=postgresql+psycopg://...` para rodar contra Postgres), inserem dados de teste (contatos, mensagens, tags, usage), e validam 129 assertions cobrindo:
-- Health, Auth (com e sem senha), Config (GET/PUT/test-key), Status
-- Contacts (list, detail, search, archived, send, retry, image, audio, presence, read, toggle-ai, update info)
+Os testes criam um banco temporário (SQLite por default; setar `WHATSBOT_TEST_DB_URL=postgresql+psycopg://...` para rodar contra Postgres), inserem dados de teste (contatos, mensagens, tags, usage), e validam ~196 checagens (helper `check(...)`) cobrindo:
+- Health, Auth (com e sem senha), Config (GET/PUT/test-key, `group_reply_mode`), Status, Balance
+- Contacts (list, detail, search, archived, send, retry, image, audio, presence, read, toggle-ai, update info, **pin/unpin**, **unread/mark-all-read/mark-all-unread**, **unread-count**, **@menção em grupo / has_unread_mention**, **react/delete de mensagem**, **members** de grupo)
 - Tags (CRUD + contact tags)
 - Usage (summary, by-contact, detail)
-- Logs, Webhook payloads, Webhook (presence, echo, ack)
+- Logs, Webhook payloads, Webhook (presence, echo, ack, reaction, reply/quoted, revoke)
 - WhatsApp/QR (get, refresh, reconnect, logout)
 - Sandbox (send, clear)
-- Frontend SPA routes
+- Frontend SPA routes (inclui `/wizard`)
 - Auth middleware (proteção de endpoints, exemptions)
 
 ## Teste opcional com Evolution API
@@ -552,7 +633,7 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **Mensagens HSM via Cloud API (linked device limitation)**: contas Business via WhatsApp Cloud API enviam mensagens template (`<hsm tag="..."/>`, ex: Mercado Livre, OTP, notificações). Por design do WhatsApp, esses templates **não são entregues com conteúdo para linked devices** — só para o device primário. O GOWA recebe um `placeholderMessage` com `type: MASK_LINKED_DEVICES` (sem body/media), e o webhook chega só com metadata (`chat_id`, `from`, `id`, `timestamp`). Não é bug — é limitação estrutural. Para confirmar, ativar `WHATSBOT_GOWA_DEBUG=1` e procurar `placeholderMessage` ou `<hsm tag=` em `/api/gowa-logs`
 - **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
 - **Auto-criação do banco**: na inicialização, `init_db()` resolve a URL (env > `storages/database.json` > sqlite default), cria o engine e roda `alembic upgrade head`. SQLite vazio é criado do zero; DBs SQLite legados (sem `alembic_version`) são automaticamente stampados no baseline antes do upgrade — não há recriação destrutiva
-- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: `lembretes`, `event_logger`, `auto_signature`, `blacklist`. Instalações que já tinham `storages/plugins/` populado (mesmo só com `lembretes`) NÃO recebem os 3 novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
+- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: `lembretes`, `event_logger`, `auto_signature`, `blacklist`, `transcricao_grupos`, `horario_funcionamento`, `custom_sounds`, `notifications`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
 - **Restart de plugin requer supervisor**: `enable`/`disable` chama `os._exit(0)` após um delay curto. Em Docker, `restart: unless-stopped` (compose) faz o container relançar; em dev, `restart.py` toca `server/_reload_trigger.py` (`.py` dentro de um `--reload-dir`, casa com o include default `*.py` do uvicorn) — o watchfiles reinicia o worker antes do `os._exit` rodar. O arquivo é regenerado em runtime e está no `.gitignore`. Em EXE Windows, o `update.py` relança. Sem supervisor, o servidor cai e não volta sozinho.
 - **Prefixo de tabela enforced**: o migrator usa regex em `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX`/`DROP TABLE`/`DROP INDEX` e RECUSA migration que tente criar objeto fora do prefixo `plugin_<id>_`. Erro mostra qual nome violou. Usar comentários SQL `--` ou `/* */` é OK; o migrator os strip-a antes da validação.
 - **Tool name é global**: se um plugin registra uma tool com nome já existente (core ou outro plugin), o registry loga warning e ignora a duplicata. Convenção: nomes específicos como `<id>_<verbo>` (ex: `orders_create`).
