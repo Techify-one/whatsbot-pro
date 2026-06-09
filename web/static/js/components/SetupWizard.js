@@ -45,12 +45,12 @@ function StepDots({ step }) {
               <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
                 done || active
                   ? 'bg-wa-teal text-white shadow-sm shadow-wa-teal/40'
-                  : 'bg-gray-100 text-gray-400 border-2 border-gray-300'}">
+                  : 'bg-wa-panel text-wa-secondary border-2 border-wa-border'}">
                 ${done ? '✓' : n}
               </div>
               <span class="text-xs ${active ? 'text-wa-teal font-semibold' : 'text-wa-secondary'}">${label}</span>
             </div>
-            ${n < STEPS.length ? html`<div class="w-5 h-0.5 rounded-full ${n < step ? 'bg-wa-teal' : 'bg-gray-300'}"></div>` : null}
+            ${n < STEPS.length ? html`<div class="w-5 h-0.5 rounded-full ${n < step ? 'bg-wa-teal' : 'bg-wa-border'}"></div>` : null}
           </div>
         `;
       })}
@@ -173,7 +173,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
 
   // ── Render helpers ───────────────────────────────────────────────
   const btnPrimary = 'px-5 py-2.5 rounded-lg text-sm font-semibold bg-wa-teal hover:bg-wa-tealDark text-white shadow-md shadow-wa-teal/30 transition-colors disabled:opacity-60 disabled:cursor-not-allowed';
-  const btnGhost = 'px-5 py-2.5 rounded-lg text-sm font-medium border-2 border-gray-300 bg-white hover:bg-gray-50 text-wa-text transition-colors';
+  const btnGhost = 'px-5 py-2.5 rounded-lg text-sm font-medium border-2 border-wa-border bg-wa-bg hover:bg-wa-hover text-wa-text transition-colors';
 
   function renderStep1() {
     return html`
@@ -182,7 +182,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
         <p class="text-sm text-wa-secondary mb-4">
           Escaneie o código abaixo para o WhatsBot atender no seu número.
         </p>
-        <div class="w-[248px] h-[248px] flex items-center justify-center bg-gray-50 border-2 border-gray-200 rounded-2xl overflow-hidden mb-3">
+        <div class="w-[248px] h-[248px] flex items-center justify-center bg-wa-panel border-2 border-wa-border rounded-2xl overflow-hidden mb-3">
           ${status.connected ? html`
             <div class="text-center">
               <div class="text-5xl mb-2 text-wa-teal">✓</div>
@@ -303,7 +303,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
             <button
               type="button"
               onClick=${() => { setAgentPrompt(EXAMPLE_PROMPT); setShowExample(false); }}
-              class="mt-3 px-3 py-1.5 rounded-lg text-xs font-semibold border-2 border-wa-teal/50 bg-white text-wa-teal hover:bg-wa-teal/10 transition-colors"
+              class="mt-3 px-3 py-1.5 rounded-lg text-xs font-semibold border-2 border-wa-teal/50 bg-wa-bg text-wa-teal hover:bg-wa-teal/10 transition-colors"
             >
               Usar este exemplo
             </button>
@@ -313,7 +313,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
           value=${agentPrompt}
           onInput=${e => setAgentPrompt(e.currentTarget.value)}
           placeholder="Ex: Você é o atendente da Pizzaria do Bairro. Seja simpático e objetivo. Liste os sabores e preços quando perguntarem o cardápio..."
-          class="w-full h-[44vh] min-h-[260px] resize-none rounded-xl border-2 border-gray-300 bg-gray-50 p-4 text-sm leading-relaxed text-wa-text placeholder:text-gray-400 shadow-inner focus:outline-none focus:bg-white focus:border-wa-teal focus:ring-4 focus:ring-wa-teal/20 transition-colors"
+          class="w-full h-[44vh] min-h-[260px] resize-none rounded-xl border-2 border-wa-border bg-wa-panel p-4 text-sm leading-relaxed text-wa-text placeholder:text-gray-400 shadow-inner focus:outline-none focus:bg-white focus:border-wa-teal focus:ring-4 focus:ring-wa-teal/20 transition-colors"
         ></textarea>
         <p class="text-xs text-wa-secondary mt-2">
           Dica: divida em blocos com títulos (ex: <span class="font-mono text-wa-text"># Cardápio</span>) — fica mais fácil de o agente seguir.
@@ -400,13 +400,13 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
 
   return html`
     <div class="min-h-dvh w-full bg-gradient-to-br from-wa-teal/15 via-wa-panel to-wa-tealDark/15 flex items-center justify-center p-4 overflow-auto">
-      <div class="bg-white rounded-2xl shadow-2xl ring-1 ring-black/5 max-w-4xl w-full relative overflow-hidden">
+      <div class="bg-wa-bg rounded-2xl shadow-2xl ring-1 ring-black/5 max-w-4xl w-full relative overflow-hidden">
         <div class="h-1.5 w-full bg-gradient-to-r from-wa-teal to-wa-tealDark"></div>
         <div class="p-6 sm:p-8">
           ${canClose ? html`
             <button
               onClick=${onClose}
-              class="absolute top-4 right-4 text-wa-secondary hover:text-wa-text hover:bg-gray-100 transition-colors p-1.5 rounded-lg"
+              class="absolute top-4 right-4 text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors p-1.5 rounded-lg"
               title="Fechar"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -428,7 +428,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
               : renderStep4()}
           </div>
 
-          <div class="mt-6 pt-5 border-t-2 border-gray-100 flex items-center justify-center">
+          <div class="mt-6 pt-5 border-t-2 border-wa-border flex items-center justify-center">
             ${renderFooter()}
           </div>
         </div>

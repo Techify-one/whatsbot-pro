@@ -34,7 +34,7 @@ export function LoginScreen({ onLogin }) {
 
   return html`
     <div class="h-screen bg-wa-panel flex items-center justify-center">
-      <div class="bg-white rounded-xl shadow-lg border border-wa-border p-8 w-full max-w-sm">
+      <div class="bg-wa-bg rounded-xl shadow-lg border border-wa-border p-8 w-full max-w-sm">
         <div class="text-center mb-6">
           <div class="w-16 h-16 mx-auto mb-3 bg-wa-teal rounded-full flex items-center justify-center">
             <svg viewBox="0 0 24 24" width="32" height="32" fill="white">

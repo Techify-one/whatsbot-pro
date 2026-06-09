@@ -54,7 +54,7 @@ function EditModal({ tool, onClose, onSave, busy }) {
 
   return html`
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center" onClick=${onClose}>
-      <div class="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto"
+      <div class="bg-wa-bg rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto"
            onClick=${(e) => e.stopPropagation()}>
         <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between">
           <div>
@@ -74,7 +74,7 @@ function EditModal({ tool, onClose, onSave, busy }) {
               value=${label}
               onInput=${(e) => setLabel(e.target.value)}
               placeholder=${tool.default_label || tool.name}
-              class="w-full text-[13px] border border-wa-border rounded px-2 py-1.5 focus:outline-none focus:border-wa-teal"
+              class="w-full wa-field text-[13px] border border-wa-border rounded px-2 py-1.5 focus:outline-none focus:border-wa-teal"
             />
             ${tool.has_label_override && tool.default_label ? html`
               <div class="text-[11px] text-wa-secondary mt-1">
@@ -92,7 +92,7 @@ function EditModal({ tool, onClose, onSave, busy }) {
               value=${description}
               onInput=${(e) => setDescription(e.target.value)}
               placeholder=${tool.default_description}
-              class="w-full text-[13px] border border-wa-border rounded px-2 py-1.5 focus:outline-none focus:border-wa-teal resize-y"
+              class="w-full wa-field text-[13px] border border-wa-border rounded px-2 py-1.5 focus:outline-none focus:border-wa-teal resize-y"
             />
             ${tool.has_override ? html`
               <div class="text-[11px] text-wa-secondary mt-1">
@@ -218,7 +218,7 @@ export function ToolsManager() {
           value=${query}
           onInput=${(e) => setQuery(e.target.value)}
           placeholder="Buscar por nome, slug ou plugin…"
-          class="w-full md:w-80 text-[13px] border border-wa-border rounded px-3 py-2 focus:outline-none focus:border-wa-teal"
+          class="w-full md:w-80 wa-field text-[13px] border border-wa-border rounded px-3 py-2 focus:outline-none focus:border-wa-teal"
         />
       </div>
 
@@ -229,7 +229,7 @@ export function ToolsManager() {
         : tools.length === 0
           ? html`<div class="text-wa-secondary">Nenhuma tool registrada.</div>`
           : html`
-            <div class="bg-white border border-wa-border rounded-lg overflow-hidden">
+            <div class="bg-wa-bg border border-wa-border rounded-lg overflow-hidden">
               <table class="w-full text-[13px]">
                 <thead class="bg-wa-panel border-b border-wa-border text-wa-secondary text-[12px] uppercase tracking-wide">
                   <tr>
@@ -244,13 +244,13 @@ export function ToolsManager() {
                   ${filtered.length === 0
                     ? html`<tr><td colspan="5" class="px-3 py-6 text-center text-wa-secondary">Nenhuma tool encontrada.</td></tr>`
                     : filtered.map((t) => html`
-                      <tr key=${t.name} class="border-b border-wa-border last:border-b-0 hover:bg-gray-50">
+                      <tr key=${t.name} class="border-b border-wa-border last:border-b-0 hover:bg-wa-hover">
                         <td class="px-3 py-2">
                           <div class="font-medium">${t.current_label || t.name}</div>
                           ${t.has_override || t.has_label_override ? html`<div class="text-[11px] text-blue-700">customizada</div>` : null}
                         </td>
                         <td class="px-3 py-2">
-                          <code class="text-[12px] bg-gray-100 px-1.5 py-0.5 rounded">${t.name}</code>
+                          <code class="text-[12px] bg-wa-panel px-1.5 py-0.5 rounded">${t.name}</code>
                         </td>
                         <td class="px-3 py-2 text-wa-secondary">
                           ${t.plugin_id ? html`<code class="text-[12px]">${t.plugin_id}</code>` : html`<span class="text-[12px]">core</span>`}
@@ -264,7 +264,7 @@ export function ToolsManager() {
                               disabled=${busy === t.name}
                               onChange=${() => toggle(t)}
                             />
-                            <div class="relative w-9 h-5 bg-gray-300 rounded-full peer peer-checked:bg-green-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-4"></div>
+                            <div class="relative w-9 h-5 bg-wa-border rounded-full peer peer-checked:bg-green-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-4"></div>
                           </label>
                         </td>
                         <td class="px-3 py-2 text-center">

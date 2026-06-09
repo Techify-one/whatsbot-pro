@@ -11,7 +11,7 @@ import { isSameMessage } from './contacts/utils.js';
 const html = htm.bind(h);
 
 const LEVEL_COLORS = {
-  DEBUG: 'text-gray-400',
+  DEBUG: 'text-wa-secondary',
   INFO: 'text-blue-600',
   WARNING: 'text-yellow-600',
   ERROR: 'text-red-500',
@@ -227,7 +227,7 @@ export function Sandbox({ newMessage }) {
           onClick=${() => setShowLogs(false)}
         >
           <div
-            class="bg-white rounded-lg shadow-xl border border-wa-border w-[90vw] max-w-[900px] p-4"
+            class="bg-wa-bg rounded-lg shadow-xl border border-wa-border w-[90vw] max-w-[900px] p-4"
             onClick=${(e) => e.stopPropagation()}
           >
             <${LogPanel} />

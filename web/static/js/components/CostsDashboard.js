@@ -111,7 +111,7 @@ export function CostsDashboard() {
   return html`
     <div class="space-y-4">
       <!-- Period selector -->
-      <div class="bg-white rounded-xl border border-wa-border p-4">
+      <div class="bg-wa-bg rounded-xl border border-wa-border p-4">
         <div class="flex flex-wrap items-center gap-2">
           ${PERIODS.map(p => html`
             <button
@@ -120,7 +120,7 @@ export function CostsDashboard() {
               class="px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors ${
                 period === p.key
                   ? 'bg-wa-teal text-white'
-                  : 'bg-gray-100 text-wa-secondary hover:bg-gray-200'
+                  : 'bg-wa-panel text-wa-secondary hover:bg-wa-hover'
               }"
             >${p.label}</button>
           `)}
@@ -164,13 +164,13 @@ export function CostsDashboard() {
         ${summary ? html`
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <!-- Total cost -->
-            <div class="bg-white rounded-xl border border-wa-border p-4">
+            <div class="bg-wa-bg rounded-xl border border-wa-border p-4">
               <div class="text-[12px] text-wa-secondary uppercase tracking-wide mb-1">Custo Total</div>
               <div class="text-[22px] font-semibold text-wa-text">${formatUsd(summary.cost_usd)}</div>
               <div class="text-[14px] text-wa-secondary">${formatBrl(summary.cost_usd, usdBrlRate)}</div>
             </div>
             <!-- Total tokens -->
-            <div class="bg-white rounded-xl border border-wa-border p-4">
+            <div class="bg-wa-bg rounded-xl border border-wa-border p-4">
               <div class="text-[12px] text-wa-secondary uppercase tracking-wide mb-1">Tokens</div>
               <div class="text-[22px] font-semibold text-wa-text">${formatTokens(summary.total_tokens)}</div>
               <div class="text-[13px] text-wa-secondary flex gap-3">
@@ -179,7 +179,7 @@ export function CostsDashboard() {
               </div>
             </div>
             <!-- Call count -->
-            <div class="bg-white rounded-xl border border-wa-border p-4">
+            <div class="bg-wa-bg rounded-xl border border-wa-border p-4">
               <div class="text-[12px] text-wa-secondary uppercase tracking-wide mb-1">Chamadas IA</div>
               <div class="text-[22px] font-semibold text-wa-text">${summary.call_count || 0}</div>
               <div class="text-[13px] text-wa-secondary space-x-2">
@@ -191,13 +191,13 @@ export function CostsDashboard() {
           </div>
 
           <!-- Cost by type -->
-          <div class="bg-white rounded-xl border border-wa-border p-4">
+          <div class="bg-wa-bg rounded-xl border border-wa-border p-4">
             <div class="text-[13px] font-medium text-wa-text mb-3">Custo por tipo de chamada</div>
             <div class="grid grid-cols-3 gap-3">
               ${['text', 'audio', 'image'].map(type => {
                 const data = (summary.by_type || {})[type] || { cost_usd: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, call_count: 0 };
                 return html`
-                  <div key=${type} class="bg-gray-50 rounded-lg p-3">
+                  <div key=${type} class="bg-wa-panel rounded-lg p-3">
                     <div class="text-[12px] text-wa-secondary mb-1">${typeLabel[type]}</div>
                     <div class="text-[16px] font-semibold text-wa-text">${formatUsd(data.cost_usd)}</div>
                     <div class="text-[12px] text-wa-secondary">${formatBrl(data.cost_usd, usdBrlRate)}</div>
@@ -214,19 +214,19 @@ export function CostsDashboard() {
         ` : null}
 
         <!-- Search + Contact table -->
-        <div class="bg-white rounded-xl border border-wa-border overflow-hidden">
+        <div class="bg-wa-bg rounded-xl border border-wa-border overflow-hidden">
           <div class="px-4 py-3 border-b border-wa-border">
             <input
               type="text"
               placeholder="Buscar por nome ou telefone..."
               value=${search}
               onInput=${e => setSearch(e.target.value)}
-              class="w-full border border-wa-border rounded-lg px-3 py-2 text-[13px] outline-none focus:border-wa-teal transition-colors"
+              class="w-full wa-field border border-wa-border rounded-lg px-3 py-2 text-[13px] outline-none focus:border-wa-teal transition-colors"
             />
           </div>
           <table class="w-full text-[13px]">
             <thead>
-              <tr class="bg-gray-50 border-b border-wa-border">
+              <tr class="bg-wa-panel border-b border-wa-border">
                 <th
                   class="text-left px-4 py-2.5 font-medium text-wa-secondary cursor-pointer hover:text-wa-text"
                   onClick=${() => handleSort('name')}
@@ -287,7 +287,7 @@ function ContactRow({ contact: c, usdBrlRate, typeLabel }) {
   const [expanded, setExpanded] = useState(false);
 
   return html`
-    <tr class="border-b border-wa-border/50 hover:bg-gray-50 transition-colors">
+    <tr class="border-b border-wa-border/50 hover:bg-wa-hover transition-colors">
       <td class="px-4 py-2.5">
         ${c.name ? html`
           <div class="font-medium text-wa-text">${c.name}</div>
@@ -311,13 +311,13 @@ function ContactRow({ contact: c, usdBrlRate, typeLabel }) {
       </td>
     </tr>
     ${expanded ? html`
-      <tr class="bg-gray-50">
+      <tr class="bg-wa-panel">
         <td colspan="6" class="px-4 py-3">
           <div class="grid grid-cols-3 gap-2 text-[12px]">
             ${['text', 'audio', 'image'].map(type => {
               const data = (c.by_type || {})[type] || { cost_usd: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, call_count: 0 };
               return html`
-                <div key=${type} class="bg-white rounded-lg border border-wa-border/50 p-2">
+                <div key=${type} class="bg-wa-bg rounded-lg border border-wa-border/50 p-2">
                   <div class="font-medium text-wa-secondary">${typeLabel[type]}</div>
                   <div class="text-wa-text">${formatUsd(data.cost_usd)} (${formatBrl(data.cost_usd, usdBrlRate)})</div>
                   <div class="mt-0.5 flex gap-2">

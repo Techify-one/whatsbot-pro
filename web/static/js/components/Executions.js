@@ -6,7 +6,7 @@ import { getExecutions, getExecution } from '../services/api.js';
 const html = htm.bind(h);
 
 const STEP_COLORS = {
-  webhook_received: { bg: 'bg-gray-100', text: 'text-gray-700', border: 'border-gray-300' },
+  webhook_received: { bg: 'bg-wa-panel', text: 'text-wa-text', border: 'border-wa-border' },
   batch_accumulated: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
   media_processed: { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-300' },
   llm_request: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-300' },
@@ -65,7 +65,7 @@ function JsonBlock({ data, expandSignal }) {
 
   return html`
     <div class="mt-1">
-      <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto">${json}</pre>
+      <pre class="text-xs bg-wa-panel border border-wa-border rounded p-2 overflow-x-auto">${json}</pre>
     </div>
   `;
 }
@@ -81,7 +81,7 @@ function ExecutionDetail({ execution, onBack }) {
   return html`
     <div class="flex flex-col h-full">
       <!-- Header -->
-      <div class="flex items-center gap-3 px-4 py-3 border-b border-wa-border bg-white">
+      <div class="flex items-center gap-3 px-4 py-3 border-b border-wa-border bg-wa-bg">
         <button
           onClick=${onBack}
           class="p-1.5 rounded hover:bg-wa-hover transition-colors"
@@ -120,7 +120,7 @@ function ExecutionDetail({ execution, onBack }) {
 
         <div class="relative pl-6">
           <!-- Vertical line -->
-          <div class="absolute left-[9px] top-2 bottom-2 w-px bg-gray-200"></div>
+          <div class="absolute left-[9px] top-2 bottom-2 w-px bg-wa-border"></div>
 
           ${steps.map((step, i) => {
             const colors = STEP_COLORS[step.step_type] || STEP_COLORS.error;
@@ -128,7 +128,7 @@ function ExecutionDetail({ execution, onBack }) {
             return html`
               <div key=${step.id} class="relative mb-4 last:mb-0">
                 <!-- Dot -->
-                <div class="absolute -left-6 top-1 w-[18px] h-[18px] rounded-full border-2 ${isError ? 'bg-red-100 border-red-400' : `bg-white ${colors.border}`}"></div>
+                <div class="absolute -left-6 top-1 w-[18px] h-[18px] rounded-full border-2 ${isError ? 'bg-red-100 border-red-400' : `bg-wa-bg ${colors.border}`}"></div>
                 <!-- Content -->
                 <div class="ml-2">
                   <div class="flex items-center gap-2 flex-wrap">
@@ -237,7 +237,7 @@ export function Executions() {
   // Detail view
   if (selected && selectedData) {
     return html`
-      <div class="h-full bg-white rounded-xl border border-wa-border shadow-sm overflow-hidden">
+      <div class="h-full bg-wa-bg rounded-xl border border-wa-border shadow-sm overflow-hidden">
         <${ExecutionDetail} execution=${selectedData} onBack=${handleBack} />
       </div>
     `;
@@ -247,7 +247,7 @@ export function Executions() {
 
   // List view
   return html`
-    <div class="bg-white rounded-xl border border-wa-border shadow-sm flex flex-col h-full">
+    <div class="bg-wa-bg rounded-xl border border-wa-border shadow-sm flex flex-col h-full">
       <!-- Header -->
       <div class="px-4 py-3 border-b border-wa-border">
         <h2 class="text-base font-bold text-wa-text mb-2">Execuções</h2>
@@ -302,7 +302,7 @@ export function Executions() {
                   <td class="px-4 py-2.5 font-mono font-bold text-wa-text">${ex.id}</td>
                   <td class="px-4 py-2.5 text-wa-text">${ex.phone}</td>
                   <td class="px-4 py-2.5">
-                    <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">${ex.trigger_type}</span>
+                    <span class="text-xs px-1.5 py-0.5 rounded bg-wa-panel text-wa-secondary">${ex.trigger_type}</span>
                   </td>
                   <td class="px-4 py-2.5"><${StatusBadge} status=${ex.status} /></td>
                   <td class="px-4 py-2.5 text-wa-secondary text-xs">${formatTime(ex.started_at)}</td>

@@ -1,11 +1,17 @@
 <!DOCTYPE html>
-<html lang="pt-BR" class="dark">
+<html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WhatsBot</title>
+  <!-- Apply the saved theme before first paint to avoid a flash of the wrong theme. -->
+  <script>try{if(localStorage.getItem('whatsbot_theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}</script>
   <script src="/static/vendor/tailwind.js"></script>
   <script>
+    // Colors are driven by CSS variables (channel triplets) defined in custom.css,
+    // so a single `.dark` class on <html> re-themes the whole app. The
+    // `rgb(var(--x) / <alpha-value>)` form keeps Tailwind opacity modifiers
+    // (e.g. bg-wa-teal/10) working.
     tailwind.config = {
       darkMode: 'class',
       theme: {
@@ -13,23 +19,23 @@
           colors: {
             whatsapp: '#25D366',
             wa: {
-              teal: '#008069',
-              tealDark: '#00a884',
-              bg: '#ffffff',
-              panel: '#f0f2f5',
-              chatBg: '#efeae2',
-              chatOverlay: '#d1d7db',
-              outgoing: '#d9fdd3',
-              incoming: '#ffffff',
-              text: '#111b21',
-              secondary: '#667781',
-              border: '#e9edef',
-              inputBg: '#ffffff',
-              hover: '#f5f6f6',
-              selected: '#f0f2f5',
-              badge: '#25d366',
-              icon: '#54656f',
-              iconActive: '#008069',
+              teal: 'rgb(var(--wa-teal) / <alpha-value>)',
+              tealDark: 'rgb(var(--wa-tealDark) / <alpha-value>)',
+              bg: 'rgb(var(--wa-bg) / <alpha-value>)',
+              panel: 'rgb(var(--wa-panel) / <alpha-value>)',
+              chatBg: 'rgb(var(--wa-chatBg) / <alpha-value>)',
+              chatOverlay: 'rgb(var(--wa-chatOverlay) / <alpha-value>)',
+              outgoing: 'rgb(var(--wa-outgoing) / <alpha-value>)',
+              incoming: 'rgb(var(--wa-incoming) / <alpha-value>)',
+              text: 'rgb(var(--wa-text) / <alpha-value>)',
+              secondary: 'rgb(var(--wa-secondary) / <alpha-value>)',
+              border: 'rgb(var(--wa-border) / <alpha-value>)',
+              inputBg: 'rgb(var(--wa-inputBg) / <alpha-value>)',
+              hover: 'rgb(var(--wa-hover) / <alpha-value>)',
+              selected: 'rgb(var(--wa-selected) / <alpha-value>)',
+              badge: 'rgb(var(--wa-badge) / <alpha-value>)',
+              icon: 'rgb(var(--wa-icon) / <alpha-value>)',
+              iconActive: 'rgb(var(--wa-iconActive) / <alpha-value>)',
             }
           }
         }

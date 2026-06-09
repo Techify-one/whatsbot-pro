@@ -1,5 +1,52 @@
 /* WhatsBot custom styles */
 
+/* ── Theme tokens ─────────────────────────────────────────────────
+   The Tailwind `wa-*` palette resolves to these CSS variables (channel
+   triplets, so opacity modifiers like bg-wa-teal/10 keep working). Light is
+   the default; adding `.dark` on <html> swaps the whole app to dark mode.
+   The toggle lives in the gear menu (app.js) and persists in localStorage. */
+:root {
+  color-scheme: light;
+  --wa-teal: 0 128 105;
+  --wa-tealDark: 0 168 132;
+  --wa-bg: 255 255 255;
+  --wa-panel: 240 242 245;
+  --wa-chatBg: 239 234 226;
+  --wa-chatOverlay: 209 215 219;
+  --wa-outgoing: 217 253 211;
+  --wa-incoming: 255 255 255;
+  --wa-text: 17 27 33;
+  --wa-secondary: 102 119 129;
+  --wa-border: 233 237 239;
+  --wa-inputBg: 255 255 255;
+  --wa-hover: 245 246 246;
+  --wa-selected: 240 242 245;
+  --wa-badge: 37 211 102;
+  --wa-icon: 84 101 111;
+  --wa-iconActive: 0 128 105;
+}
+
+html.dark {
+  color-scheme: dark;
+  --wa-teal: 0 168 132;
+  --wa-tealDark: 0 168 132;
+  --wa-bg: 17 27 33;
+  --wa-panel: 32 44 51;
+  --wa-chatBg: 11 20 26;
+  --wa-chatOverlay: 32 44 51;
+  --wa-outgoing: 0 92 75;
+  --wa-incoming: 32 44 51;
+  --wa-text: 233 237 239;
+  --wa-secondary: 142 158 168;
+  --wa-border: 42 57 66;
+  --wa-inputBg: 42 57 66;
+  --wa-hover: 42 57 66;
+  --wa-selected: 42 57 66;
+  --wa-badge: 37 211 102;
+  --wa-icon: 142 158 168;
+  --wa-iconActive: 0 168 132;
+}
+
 /* Smooth transitions for status indicators */
 .status-dot {
   transition: background-color 0.3s ease;
@@ -32,7 +79,7 @@
   left: -8px;
   width: 0;
   height: 0;
-  border-top: 8px solid #ffffff;
+  border-top: 8px solid rgb(var(--wa-incoming));
   border-left: 8px solid transparent;
 }
 
@@ -47,7 +94,7 @@
   right: -8px;
   width: 0;
   height: 0;
-  border-top: 8px solid #d9fdd3;
+  border-top: 8px solid rgb(var(--wa-outgoing));
   border-right: 8px solid transparent;
 }
 
@@ -65,6 +112,12 @@
 .wa-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.25);
 }
+html.dark .wa-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+html.dark .wa-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
 
 /* Contact row hover transition */
 .wa-contact-row {
@@ -73,7 +126,7 @@
 
 /* WhatsApp chat doodle background pattern */
 .wa-chat-pattern {
-  background-color: #efeae2;
+  background-color: rgb(var(--wa-chatBg));
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300'%3E%3Cg fill='%23c8c3ba' fill-opacity='0.2'%3E%3Cpath d='M20 15a5 5 0 110 10 5 5 0 010-10zm0 2a3 3 0 100 6 3 3 0 000-6z'/%3E%3Cpath d='M80 45l-4 8h8l-4-8zm0 2l2.5 5h-5l2.5-5z'/%3E%3Crect x='140' y='15' width='8' height='10' rx='1' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Ccircle cx='200' cy='20' r='4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M258 15l6 5-6 5V15zm1 1.8v6.4l4.3-3.2-4.3-3.2z'/%3E%3Cpath d='M20 75a6 6 0 014 2l-1 1a4.8 4.8 0 00-7 0l-1-1a6 6 0 014-2z'/%3E%3Cpath d='M78 80h4v1h-4v3h-1v-3h-4v-1h4v-4h1v4z'/%3E%3Cpath d='M135 75h10v1h-10v-1zm0 4h7v1h-7v-1z'/%3E%3Ccircle cx='200' cy='80' r='5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M195 78l3 2 3-2v5l-3 2-3-2v-5z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.15'/%3E%3Cpath d='M260 75c2 0 4 2 4 4s-2 4-4 4-4-2-4-4 2-4 4-4zm0 1.5c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5z'/%3E%3Cpath d='M17 135h6l-3 6-3-6zm3 1.5l-1.8 3.5h3.6l-1.8-3.5z'/%3E%3Cpath d='M80 135a4 4 0 110 8 4 4 0 010-8zm0 1.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z'/%3E%3Cpath d='M140 138h3v-3h1v3h3v1h-3v3h-1v-3h-3v-1z'/%3E%3Cpath d='M195 135h10v8h-10v-8zm1 1v6h8v-6h-8z'/%3E%3Ccircle cx='260' cy='140' r='3'/%3E%3Cpath d='M20 200l4-3v6l-4-3zm1 0l2 1.5v-3l-2 1.5z'/%3E%3Cpath d='M75 195h10v1h-10v-1zm2 3h6v1h-6v-1z'/%3E%3Cpath d='M140 197a3 3 0 110 6 3 3 0 010-6z'/%3E%3Cpath d='M197 195l3 5 3-5h-6zm3 1.5l1.8 3h-3.6l1.8-3z'/%3E%3Cpath d='M258 197c1.7 0 3 1.3 3 3s-1.3 3-3 3-3-1.3-3-3 1.3-3 3-3z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M18 260h4v4h-4v-4zm.8.8v2.4h2.4v-2.4h-2.4z'/%3E%3Ccircle cx='80' cy='262' r='3.5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M138 258l4 4 4-4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2' stroke-width='1.2'/%3E%3Cpath d='M198 260a2 2 0 012 2c0 1.1-.9 2-2 2s-2-.9-2-2a2 2 0 012-2z'/%3E%3Cpath d='M256 258h8v6h-8v-6zm1 1v4h6v-4h-6z'/%3E%3C/g%3E%3C/svg%3E");
 }
 
@@ -86,8 +139,8 @@
 
 /* Empty state background (WhatsApp's darker panel) */
 .wa-empty-bg {
-  background-color: #f0f2f5;
-  border-left: 1px solid #e9edef;
+  background-color: rgb(var(--wa-panel));
+  border-left: 1px solid rgb(var(--wa-border));
 }
 
 /* Slide-in from right animation for contact info panel */
@@ -98,3 +151,93 @@
 .animate-slide-in-right {
   animation: slide-in-right 0.25s ease-out;
 }
+
+/* Brief highlight band when a message is focused from a search result */
+@keyframes wa-msg-flash {
+  0%   { background-color: rgba(0, 168, 132, 0.32); }
+  70%  { background-color: rgba(0, 168, 132, 0.32); }
+  100% { background-color: transparent; }
+}
+.wa-msg-highlight {
+  border-radius: 8px;
+  animation: wa-msg-flash 3s ease-out;
+}
+
+/* ── Dark-mode fallback for raw Tailwind color utilities ──────────────────
+   Core components use the themed wa-* palette, but plugin screens — including
+   ones we don't control and ones added in the future — may use raw utilities
+   like bg-white / text-gray-* / border-gray-*. These scoped overrides re-theme
+   those whenever <html> has the `.dark` class, so ANY screen stays readable in
+   dark mode automatically. They sit at higher specificity than the base
+   utilities but use NO !important, so inline styles still win (e.g. the QR code
+   keeps its white background). Accent colors (text-white, red/green/blue/amber,
+   bg-black/ overlays) are intentionally left untouched. */
+html.dark .bg-white { background-color: rgb(var(--wa-panel)); }
+html.dark .bg-gray-50,
+html.dark .bg-gray-100 { background-color: rgb(var(--wa-panel)); }
+html.dark .bg-gray-200,
+html.dark .bg-gray-300 { background-color: rgb(var(--wa-border)); }
+
+html.dark .hover\:bg-white:hover,
+html.dark .hover\:bg-gray-50:hover,
+html.dark .hover\:bg-gray-100:hover,
+html.dark .hover\:bg-gray-200:hover,
+html.dark .hover\:bg-gray-300:hover { background-color: rgb(var(--wa-hover)); }
+
+html.dark .text-gray-300,
+html.dark .text-gray-400,
+html.dark .text-gray-500,
+html.dark .text-gray-600 { color: rgb(var(--wa-secondary)); }
+html.dark .text-gray-700,
+html.dark .text-gray-800,
+html.dark .text-gray-900,
+html.dark .text-black { color: rgb(var(--wa-text)); }
+
+html.dark .border-gray-100,
+html.dark .border-gray-200,
+html.dark .border-gray-300 { border-color: rgb(var(--wa-border)); }
+
+html.dark .placeholder-gray-400::placeholder,
+html.dark .placeholder-gray-500::placeholder { color: rgb(var(--wa-secondary)); }
+
+/* Soft accent tints (bg-green-50, border-red-200, text-amber-700, …) used for
+   selected / success / warning / error states stay LIGHT by default, so in dark
+   mode they'd show themed light text over a near-white pill = unreadable. Re-tint
+   them to a dark, translucent version of the same hue (so the card reads as a
+   subtle colored-dark surface) and lift the paired accent text to a light shade. */
+html.dark .bg-green-50, html.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.14); }
+html.dark .border-green-100, html.dark .border-green-200 { border-color: rgba(34, 197, 94, 0.40); }
+html.dark .text-green-600, html.dark .text-green-700, html.dark .text-green-800 { color: #86efac; }
+
+html.dark .bg-red-50, html.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.14); }
+html.dark .border-red-100, html.dark .border-red-200 { border-color: rgba(239, 68, 68, 0.40); }
+html.dark .text-red-600, html.dark .text-red-700, html.dark .text-red-800 { color: #fca5a5; }
+
+html.dark .bg-amber-50, html.dark .bg-amber-100 { background-color: rgba(245, 158, 11, 0.14); }
+html.dark .border-amber-100, html.dark .border-amber-200 { border-color: rgba(245, 158, 11, 0.40); }
+html.dark .text-amber-600, html.dark .text-amber-700, html.dark .text-amber-800 { color: #fcd34d; }
+
+html.dark .bg-yellow-50, html.dark .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.14); }
+html.dark .border-yellow-100, html.dark .border-yellow-200 { border-color: rgba(234, 179, 8, 0.40); }
+html.dark .text-yellow-600, html.dark .text-yellow-700, html.dark .text-yellow-800 { color: #fde047; }
+
+html.dark .bg-blue-50, html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.14); }
+html.dark .border-blue-100, html.dark .border-blue-200 { border-color: rgba(59, 130, 246, 0.40); }
+html.dark .text-blue-600, html.dark .text-blue-700, html.dark .text-blue-800 { color: #93c5fd; }
+
+html.dark .bg-orange-50, html.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.14); }
+html.dark .border-orange-100, html.dark .border-orange-200 { border-color: rgba(249, 115, 22, 0.40); }
+html.dark .text-orange-600, html.dark .text-orange-700, html.dark .text-orange-800 { color: #fdba74; }
+
+html.dark .bg-purple-50, html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.14); }
+html.dark .border-purple-100, html.dark .border-purple-200 { border-color: rgba(168, 85, 247, 0.40); }
+html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800 { color: #d8b4fe; }
+
+html.dark .bg-pink-50, html.dark .bg-pink-100 { background-color: rgba(236, 72, 153, 0.14); }
+html.dark .border-pink-100, html.dark .border-pink-200 { border-color: rgba(236, 72, 153, 0.40); }
+html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { color: #f9a8d4; }
+
+/* Form fields: fixed gray surface + black text, readable in both themes.
+   A dedicated class so the dark utility overrides above never touch it. */
+.wa-field { background-color: #e5e7eb; color: #000; }
+.wa-field::placeholder { color: #6b7280; }

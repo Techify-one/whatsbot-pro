@@ -44,7 +44,7 @@ export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
             <span class="text-wa-secondary text-xs">${formatPhone(botPhone)}</span>
             <button
               onClick=${handleCopyLink}
-              class="px-2 py-0.5 text-xs rounded border transition-colors ${copied ? 'bg-green-100 border-green-300 text-green-700' : 'bg-white border-wa-border text-wa-secondary hover:text-wa-text hover:bg-wa-panel'}"
+              class="px-2 py-0.5 text-xs rounded border transition-colors ${copied ? 'bg-green-100 border-green-300 text-green-700' : 'bg-wa-bg border-wa-border text-wa-secondary hover:text-wa-text hover:bg-wa-panel'}"
               title="Copiar link wa.me"
             >
               ${copied ? 'Copiado!' : 'Copiar Link'}
@@ -67,7 +67,7 @@ export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
         </button>
         <button
           onClick=${onOpenQR}
-          class="px-3 py-1.5 border border-wa-border bg-white hover:bg-wa-panel text-wa-text text-xs rounded-lg transition-colors flex items-center gap-1.5"
+          class="px-3 py-1.5 border border-wa-border bg-wa-bg hover:bg-wa-panel text-wa-text text-xs rounded-lg transition-colors flex items-center gap-1.5"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
           QR Code
@@ -99,7 +99,7 @@ export function QRCodeModal({ connected, qrAvailable, qrVersion, botPhone, botNa
       class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
       onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 flex flex-col items-center relative">
+      <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-sm w-full p-6 flex flex-col items-center relative">
         <!-- Close button -->
         <button
           onClick=${onClose}
@@ -128,6 +128,7 @@ export function QRCodeModal({ connected, qrAvailable, qrVersion, botPhone, botNa
               src=${imgSrc}
               alt="QR Code"
               class="qr-image w-full h-full object-contain"
+              style="background:#ffffff"
               onError=${() => setImgError(true)}
             />
           ` : html`

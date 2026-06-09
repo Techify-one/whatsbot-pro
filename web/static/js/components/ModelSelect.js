@@ -139,7 +139,7 @@ export function ModelSelect({ value, onChange, filterModality, placeholder }) {
       ${open && html`
         <div
           ref=${listRef}
-          class="absolute z-50 left-0 right-0 mt-1 bg-white border border-wa-border rounded-lg shadow-lg max-h-[240px] overflow-y-auto wa-scrollbar"
+          class="absolute z-50 left-0 right-0 mt-1 bg-wa-bg border border-wa-border rounded-lg shadow-lg max-h-[240px] overflow-y-auto wa-scrollbar"
         >
           ${filtered.length === 0
             ? html`<div class="px-3 py-2 text-sm text-wa-secondary">Nenhum modelo encontrado</div>`

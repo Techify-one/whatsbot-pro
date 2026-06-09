@@ -97,13 +97,13 @@ export function DatabaseSettings({ onNotify }) {
     : 0;
 
   return html`
-    <div class="bg-white rounded-xl p-5 border border-wa-border shadow-sm">
+    <div class="bg-wa-bg rounded-xl p-5 border border-wa-border shadow-sm">
       <h3 class="text-xs font-semibold text-wa-secondary uppercase tracking-wider mb-4">
         Banco de dados
       </h3>
       <div class="flex flex-col gap-4 text-sm">
         ${info ? html`
-          <div class="rounded-lg bg-gray-50 px-3 py-2">
+          <div class="rounded-lg bg-wa-panel px-3 py-2">
             <div><span class="font-medium">Backend atual:</span> ${info.dialect}</div>
             <div class="text-xs text-wa-secondary break-all">${info.url_redacted}</div>
             ${info.sqlite_path ? html`
@@ -155,7 +155,7 @@ export function DatabaseSettings({ onNotify }) {
                   >Sim, migrar</button>
                   <button
                     onClick=${() => setConfirming(false)}
-                    class="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-xs rounded-lg"
+                    class="px-3 py-1.5 bg-wa-border hover:bg-wa-hover text-xs rounded-lg"
                   >Cancelar</button>
                 </div>
               </div>
@@ -178,7 +178,7 @@ export function DatabaseSettings({ onNotify }) {
             ${progress.tables_total ? html`
               <div>
                 <div class="text-xs">Tabelas: ${progress.tables_done}/${progress.tables_total}</div>
-                <div class="w-full bg-gray-200 rounded h-1.5 mt-1 overflow-hidden">
+                <div class="w-full bg-wa-border rounded h-1.5 mt-1 overflow-hidden">
                   <div class="bg-wa-teal h-full" style=${{ width: tablesPct + '%' }}></div>
                 </div>
               </div>
@@ -188,7 +188,7 @@ export function DatabaseSettings({ onNotify }) {
                 <div class="text-xs">
                   Linhas (${progress.table || 'tabela'}): ${progress.rows_done}/${progress.rows_total}
                 </div>
-                <div class="w-full bg-gray-200 rounded h-1.5 mt-1 overflow-hidden">
+                <div class="w-full bg-wa-border rounded h-1.5 mt-1 overflow-hidden">
                   <div class="bg-emerald-500 h-full" style=${{ width: rowsPct + '%' }}></div>
                 </div>
               </div>
@@ -251,7 +251,7 @@ function WipeAndRetryPanel({ conflicts, target, running, confirming, ack, onAckC
       <p>
         O WhatsBot vai executar <code>DROP SCHEMA public CASCADE</code> em:
       </p>
-      <div class="font-mono break-all bg-white/60 rounded px-2 py-1">${target}</div>
+      <div class="font-mono break-all bg-wa-bg/60 rounded px-2 py-1">${target}</div>
       <p>
         Isso apaga <strong>TODAS</strong> as tabelas, índices e sequências do schema <code>public</code>
         deste banco — incluindo dados que não pertencem ao WhatsBot, se houver.
@@ -277,7 +277,7 @@ function WipeAndRetryPanel({ conflicts, target, running, confirming, ack, onAckC
         >Apagar tudo e migrar</button>
         <button
           onClick=${onCancel}
-          class="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-xs rounded-lg"
+          class="px-3 py-1.5 bg-wa-border hover:bg-wa-hover text-xs rounded-lg"
         >Cancelar</button>
       </div>
     </div>

@@ -31,7 +31,7 @@ export function LowBalanceModal({ balance, threshold, accountUrl, onClose, onSno
       class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
       onClick=${(e) => { if (e.target === e.currentTarget) handleClose(); }}
     >
-      <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 relative">
+      <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-sm w-full p-6 relative">
         <button
           onClick=${handleClose}
           class="absolute top-3 right-3 text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
