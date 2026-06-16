@@ -313,7 +313,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
           value=${agentPrompt}
           onInput=${e => setAgentPrompt(e.currentTarget.value)}
           placeholder="Ex: Você é o atendente da Pizzaria do Bairro. Seja simpático e objetivo. Liste os sabores e preços quando perguntarem o cardápio..."
-          class="w-full h-[44vh] min-h-[260px] resize-none rounded-xl border-2 border-wa-border bg-wa-panel p-4 text-sm leading-relaxed text-wa-text placeholder:text-gray-400 shadow-inner focus:outline-none focus:bg-white focus:border-wa-teal focus:ring-4 focus:ring-wa-teal/20 transition-colors"
+          class="w-full h-[44dvh] min-h-[200px] resize-none rounded-xl border-2 border-wa-border bg-wa-panel p-4 text-sm leading-relaxed text-wa-text placeholder:text-gray-400 shadow-inner focus:outline-none focus:bg-white focus:border-wa-teal focus:ring-4 focus:ring-wa-teal/20 transition-colors"
         ></textarea>
         <p class="text-xs text-wa-secondary mt-2">
           Dica: divida em blocos com títulos (ex: <span class="font-mono text-wa-text"># Cardápio</span>) — fica mais fácil de o agente seguir.
@@ -399,8 +399,9 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
   }
 
   return html`
-    <div class="min-h-dvh w-full bg-gradient-to-br from-wa-teal/15 via-wa-panel to-wa-tealDark/15 flex items-center justify-center p-4 overflow-auto">
-      <div class="bg-wa-bg rounded-2xl shadow-2xl ring-1 ring-black/5 max-w-4xl w-full relative overflow-hidden">
+    <div class="h-dvh w-full overflow-y-auto bg-gradient-to-br from-wa-teal/15 via-wa-panel to-wa-tealDark/15">
+      <div class="min-h-full flex items-center justify-center p-4">
+      <div class="bg-wa-bg rounded-2xl shadow-2xl ring-1 ring-black/5 max-w-4xl w-full relative overflow-hidden my-auto">
         <div class="h-1.5 w-full bg-gradient-to-r from-wa-teal to-wa-tealDark"></div>
         <div class="p-6 sm:p-8">
           ${canClose ? html`
@@ -432,6 +433,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
             ${renderFooter()}
           </div>
         </div>
+      </div>
       </div>
     </div>
   `;
