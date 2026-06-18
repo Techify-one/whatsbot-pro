@@ -384,11 +384,11 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
         </div>
       <//>
 
-      <!-- Section: System Prompt -->
-      <${Section} title="System Prompt">
+      <!-- Section: Comportamento da IA -->
+      <${Section} title="Comportamento da IA">
         <div class="flex-1 flex flex-col">
           <div class="flex items-center justify-between mb-1">
-            <label class="block text-sm font-semibold text-wa-text">Prompt</label>
+            <label class="block text-sm font-semibold text-wa-text">Instruções</label>
             <button
               type="button"
               onClick=${() => setPromptFullscreen(true)}
@@ -412,7 +412,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
         <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick=${(e) => { if (e.target === e.currentTarget) setPromptFullscreen(false); }}>
           <div class="bg-wa-bg w-full h-full rounded-xl flex flex-col shadow-2xl overflow-hidden">
             <div class="flex items-center justify-between px-5 py-3 border-b border-wa-border">
-              <h2 class="text-sm font-semibold text-wa-text">System Prompt</h2>
+              <h2 class="text-sm font-semibold text-wa-text">Comportamento da IA</h2>
               <button
                 type="button"
                 onClick=${() => setPromptFullscreen(false)}
