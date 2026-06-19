@@ -22,6 +22,7 @@ from types import ModuleType
 
 from db.repositories import plugin_repo
 
+from plugins import pkg_deps
 from plugins.manifest import PluginManifest, find_manifest_file, load_manifest
 from plugins.migrator import run_pending_migrations
 
@@ -142,6 +143,7 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         return
 
     try:
+        _ensure_plugin_deps(manifest, db_row)
         loaded = _load_plugin_module(manifest, plugin_dir)
         run_pending_migrations(manifest, plugin_dir)
         registry.loaded[manifest.id] = loaded
@@ -161,6 +163,26 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         logger.error("Plugin %s failed to load:\n%s", manifest.id, traceback.format_exc())
         plugin_repo.set_load_error(manifest.id, err)
         registry.discovered[manifest.id].error = err
+
+
+def _ensure_plugin_deps(manifest: PluginManifest, db_row: dict) -> None:
+    """Install the plugin's declared pip ``dependencies`` before importing it.
+
+    Mirrors the code-in-DB AI tool installer: pip only runs the first time the
+    declared spec set changes (cache marker in ``plugins.installed_deps``). Any
+    failure raises and bubbles to ``_process_one``'s handler → ``load_error``,
+    so the plugin is skipped and the app still boots.
+    """
+    deps = manifest.dependencies or []
+    if not deps:
+        return
+    ran = pkg_deps.ensure_pip_deps(
+        deps,
+        already=db_row.get("installed_deps") or [],
+        label=f"plugin '{manifest.id}'",
+    )
+    if ran:
+        plugin_repo.set_installed_deps(manifest.id, deps)
 
 
 def _load_plugin_module(

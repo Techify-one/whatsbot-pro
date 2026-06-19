@@ -21,37 +21,18 @@ from __future__ import annotations
 import importlib.util
 import logging
 import re
-import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 from db.repositories import tool_repo
+from plugins import pkg_deps
 
 logger = logging.getLogger(__name__)
 
 # Tool name == schema function name == usage.call_type — keep it conservative.
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 PARENT_PACKAGE = "whatsbot_ai_tools"
-_PIP_TIMEOUT = 600  # seconds
-
-
-# --------------------------------------------------------------------------- #
-# Dependency policy
-# --------------------------------------------------------------------------- #
-def is_dep_allowed(pkg: str) -> bool:
-    """Allowlist gate for a dependency package name.
-
-    OPEN in the MVP (returns ``True`` for everything) but the single choke point
-    is here: closing the policy later is a one-line change, no refactor.
-    """
-    return True
-
-
-def _pkg_name(spec: str) -> str:
-    """Extract the bare package name from a pip spec (``httpx>=0.27`` → ``httpx``)."""
-    m = re.match(r"^[A-Za-z0-9_.\-]+", (spec or "").strip())
-    return m.group(0) if m else (spec or "").strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -142,23 +123,13 @@ def _ensure_deps(row: dict) -> None:
     deps = row.get("dependencies") or []
     if not deps:
         return
-    # Cache marker: skip pip entirely when the installed set already matches.
+    # Cache marker lives in the row; pip only runs when the spec set changed.
     if row.get("installed_deps") == deps:
         return
-    blocked = [d for d in deps if not is_dep_allowed(_pkg_name(d))]
-    if blocked:
-        raise PermissionError(f"dependencies not allowed by policy: {blocked}")
-
-    logger.info("AI tool '%s': installing dependencies %s", name, deps)
     tool_repo.set_status(name, "installing", None)
-    proc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", *deps],
-        capture_output=True, text=True, timeout=_PIP_TIMEOUT,
-    )
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-500:]
-        raise RuntimeError(f"pip install failed (code {proc.returncode}): {tail}")
-    tool_repo.set_installed_deps(name, deps)
+    ran = pkg_deps.ensure_pip_deps(deps, already=None, label=f"AI tool '{name}'")
+    if ran:
+        tool_repo.set_installed_deps(name, deps)
 
 
 # --------------------------------------------------------------------------- #

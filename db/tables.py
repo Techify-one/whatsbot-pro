@@ -183,6 +183,10 @@ plugins = Table(
     Column("installed_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     Column("load_error", Text),
+    # JSON array of pip specs already installed for this plugin's manifest
+    # ``dependencies`` (cache marker: the loader skips pip on boot when this
+    # equals the manifest's declared deps).
+    Column("installed_deps", Text, nullable=False, server_default="[]"),
 )
 
 

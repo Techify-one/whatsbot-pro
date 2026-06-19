@@ -23,6 +23,9 @@ build/
 *.exe
 !bin/gowa.exe
 
+# Plugins exportados (.zip distribuído pela Loja, não versionado no core)
+*-plugin.zip
+
 # Linux GOWA binary (baixado/buildado localmente por dev; não trackeado)
 bin/gowa
 

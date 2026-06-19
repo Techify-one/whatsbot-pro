@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -20,11 +21,27 @@ logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^plugin_[a-z][a-z0-9_]{0,31}_[A-Za-z0-9_]+$")
 
 
+def _decode_list(value):
+    if value is None:
+        return []
+    try:
+        out = json.loads(value)
+        return out if isinstance(out, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _row_to_dict(row) -> dict:
+    d = dict(row)
+    d["installed_deps"] = _decode_list(d.get("installed_deps"))
+    return d
+
+
 def list_all() -> list[dict]:
     """Return all known plugins (one row per id, including disabled)."""
     with get_engine().connect() as conn:
         rows = conn.execute(select(plugins).order_by(plugins.c.id)).mappings().all()
-    return [dict(r) for r in rows]
+    return [_row_to_dict(r) for r in rows]
 
 
 def get(plugin_id: str) -> dict | None:
@@ -32,7 +49,7 @@ def get(plugin_id: str) -> dict | None:
         row = conn.execute(
             select(plugins).where(plugins.c.id == plugin_id)
         ).mappings().first()
-    return dict(row) if row else None
+    return _row_to_dict(row) if row else None
 
 
 def upsert(plugin_id: str, version: str, *, enabled: bool | None = None) -> None:
@@ -70,6 +87,15 @@ def set_enabled(plugin_id: str, enabled: bool) -> bool:
             updated_at=time.time(),
         ))
     return True
+
+
+def set_installed_deps(plugin_id: str, deps: list[str]) -> None:
+    """Persist the pip spec set already installed for this plugin (cache marker)."""
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(plugins).where(plugins.c.id == plugin_id).values(
+            installed_deps=json.dumps(list(deps or []), ensure_ascii=False),
+            updated_at=time.time(),
+        ))
 
 
 def set_load_error(plugin_id: str, error: str | None) -> None:

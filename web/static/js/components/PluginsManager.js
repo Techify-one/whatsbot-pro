@@ -253,6 +253,11 @@ export function PluginsManager({ onPluginsChanged }) {
                 ${p.description ? html`
                   <div class="text-[13px] mt-2 text-wa-text">${p.description}</div>
                 ` : null}
+                ${(p.dependencies && p.dependencies.length) ? html`
+                  <div class="text-[11px] mt-2 text-wa-secondary">
+                    📦 Instala ao ativar: ${p.dependencies.join(', ')}
+                  </div>
+                ` : null}
                 ${p.load_error ? html`
                   <div class="mt-2 text-[12px] text-red-700 bg-red-50 border border-red-100 rounded px-2 py-1 break-all">
                     ${p.load_error}
