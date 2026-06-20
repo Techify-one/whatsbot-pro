@@ -77,19 +77,24 @@ def build_model(handler, model_id: str | None = None,
     ``top_p``/``max_tokens``. When absent, behaviour matches the legacy default
     (``handler.model`` + ``_DEFAULT_MAX_TOKENS``, provider-default sampling).
     """
-    mc = model_config or {}
-    extra: dict = {}
-    if mc.get("temperature") is not None:
-        extra["temperature"] = mc["temperature"]
-    if mc.get("top_p") is not None:
-        extra["top_p"] = mc["top_p"]
-    return OpenAILike(
-        id=mc.get("model") or model_id or handler.model,
-        api_key=handler.api_key,
-        base_url=LLM_API_BASE_URL,
-        max_tokens=mc.get("max_tokens") or _DEFAULT_MAX_TOKENS,
-        **extra,
+    from ai_engine import model_factory
+    # Per-agent tuning cascade (model_config > ai_variables{param}_{agent} > global)
+    # only matters on the config-in-DB path; legacy path passes model_config=None,
+    # so no variable lookup happens and behaviour is unchanged.
+    variables = None
+    if model_config:
+        try:
+            from db.repositories import variable_repo
+            variables = variable_repo.as_map()
+        except Exception:
+            variables = None
+    kwargs = model_factory.build_kwargs(
+        model_config,
+        fallback_model=model_id or handler.model,
+        default_max_tokens=_DEFAULT_MAX_TOKENS,
+        variables=variables,
     )
+    return OpenAILike(api_key=handler.api_key, base_url=LLM_API_BASE_URL, **kwargs)
 
 
 def split_messages(messages: list[dict]) -> tuple[str, list[Message]]:

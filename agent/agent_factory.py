@@ -149,6 +149,8 @@ def build_for_contact(handler, contact) -> AgentSpec | None:
         model_config = dict(agent.get("model_config") or {})
         if not model_config.get("model"):
             model_config["model"] = handler.model
+        # Let the model factory resolve per-agent tuning vars ({param}_{agent_key}).
+        model_config["_agent_key"] = agent["agent_key"]
 
         return AgentSpec(
             agent_key=agent["agent_key"],
