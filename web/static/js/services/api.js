@@ -400,6 +400,38 @@ export async function archiveConversation(id, archived) {
   return request('POST', `/api/conversations/${id}/archive`, { archived });
 }
 
+// ── Channels (plano 02 Fase 2) ────────────────────────────────────
+// Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
+// Credentials are ALWAYS returned masked by the backend; sending a new
+// credential value replaces it. All responses are {ok, data, error}.
+
+export async function listChannels() {
+  return request('GET', '/api/channels');
+}
+
+export async function getChannel(id) {
+  return request('GET', `/api/channels/${encodeURIComponent(id)}`);
+}
+
+// body: {id, provider, display_name, config?, credentials?:{key:value}}
+export async function createChannel(payload) {
+  return request('POST', '/api/channels', payload);
+}
+
+// body: {display_name?, enabled?, config?, credentials?:{key:value}}
+export async function updateChannel(id, payload) {
+  return request('PUT', `/api/channels/${encodeURIComponent(id)}`, payload);
+}
+
+export async function deleteChannel(id) {
+  return request('DELETE', `/api/channels/${encodeURIComponent(id)}`);
+}
+
+// {connected, logged_in, needs_qr, error}
+export async function getChannelStatus(id) {
+  return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
 // ── Models ──────────────────────────────────────────────────────────
 
 export async function getModels() {

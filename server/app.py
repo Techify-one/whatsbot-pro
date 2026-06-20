@@ -15,7 +15,7 @@ from server.auth import auth_required, verify_token, rbac_enforced, resolve_requ
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, users as users_routes, conversations as conversations_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, users as users_routes, conversations as conversations_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -212,20 +212,11 @@ def create_app(
             "ts": _time.time(),
         })
 
-        # Plugin lifecycle (plano 09 Fase 1): call+await setup() for plugins that
-        # declared entry.lifecycle. A failing setup() does not bring down the app.
-        for loaded in registry.loaded.values():
-            if getattr(loaded, "setup_fn", None) or getattr(loaded, "teardown_fn", None):
-                err = await _lifecycle_manager.run_setup(loaded, agent_handler, _loop)
-                if err:
-                    try:
-                        from db.repositories import plugin_repo
-                        plugin_repo.set_load_error(loaded.id, f"setup() failed: {err}")
-                    except Exception:
-                        pass
-
         # Background task supervisor (plano 09 Fase 3): the 4 core tasks now run
         # under classified restart + backoff instead of a bare create_task list.
+        # Built + wired into the plugin runtime BEFORE plugin setup() runs, so a
+        # plugin can register a supervised task via ctx.spawn_task() during setup
+        # (plano 02 Fase 1 — channel providers register their polling loop there).
         supervisor = TaskSupervisor()
         supervisor.register(TaskSpec(
             "gowa_start", lambda: start_gowa_task(deps), policy=RestartPolicy.TRANSIENT))
@@ -241,6 +232,20 @@ def create_app(
         subprocess_service = SubprocessService()
         state.subprocess_service = subprocess_service
         _set_runtime_services(supervisor, subprocess_service)
+
+        # Plugin lifecycle (plano 09 Fase 1): call+await setup() for plugins that
+        # declared entry.lifecycle. A failing setup() does not bring down the app.
+        # Runs AFTER the supervisor is wired (above) so ctx.spawn_task works.
+        for loaded in registry.loaded.values():
+            if getattr(loaded, "setup_fn", None) or getattr(loaded, "teardown_fn", None):
+                err = await _lifecycle_manager.run_setup(loaded, agent_handler, _loop)
+                if err:
+                    try:
+                        from db.repositories import plugin_repo
+                        plugin_repo.set_load_error(loaded.id, f"setup() failed: {err}")
+                    except Exception:
+                        pass
+
         await supervisor.start_all()
         yield
         # Shutdown — ordered (plano 09 Fase 2): app.shutdown → plugin teardown →
@@ -289,7 +294,10 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/plugins/", "/api/auth/")
+    # NOTE: "/api/webhook/" (trailing slash) exempts per-provider webhooks
+    # (Cloud API/Telegram authenticate themselves). The EXACT "/api/webhook"
+    # (GOWA, no slash) and "/health" stay in _AUTH_EXEMPT_EXACT — INTOCÁVEIS.
+    _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/plugins/", "/api/auth/", "/api/webhook/")
     _AUTH_EXEMPT_EXACT = {"/api/webhook", "/health"}
     _PLUGIN_SPA_PATHS = {
         s["path"]
@@ -298,7 +306,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai", "/wizard"}
+        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai", "/channels", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -386,6 +394,7 @@ def create_app(
     @app.get("/users")
     @app.get("/conversations")
     @app.get("/ai")
+    @app.get("/channels")
     @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/executions/{execution_id:int}")
@@ -426,6 +435,7 @@ def create_app(
     custom_attributes_routes.register_routes(app, deps)
     runtime_routes.register_routes(app, deps)
     channels_routes.register_routes(app, deps)
+    channel_webhook_routes.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
     plugins_routes.register_routes(app, deps)

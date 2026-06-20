@@ -1,0 +1,24 @@
+id: whatsapp_cloud
+name: WhatsApp Cloud API
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Provider de canal para a WhatsApp Cloud API oficial da Meta (Graph API).
+  Adiciona o provider "whatsapp_cloud" à tela Canais do core — sem QR, com
+  suporte a templates (HSM) para mensagens fora da janela de 24h.
+author: WhatsBot
+entry:
+  channels: channels
+  routes: routes
+  settings: settings
+screens:
+  - id: whatsapp-cloud-config
+    title: WhatsApp Cloud API
+    path: /whatsapp_cloud/config
+    icon: cloud
+    config: true
+    component: /plugins/whatsapp_cloud/static/whatsapp_cloud.js
+permissions:
+  - channel.provider
+  - net.outbound
+dependencies: []
