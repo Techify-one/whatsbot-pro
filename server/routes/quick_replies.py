@@ -4,8 +4,8 @@ Global single list (P42, no scope), plain text (P47). ``short_code`` is UNIQUE
 global (P41), stored without the leading slash. The same GET feeds both the
 composer autocomplete and the management screen.
 
-Authorization (Fase 3, plano 03 / RBAC) is not wired yet: until ``quickreply.manage``
-exists, these endpoints sit behind the current single-password auth.
+Authorization (RBAC): mutations are gated by ``quickreply.manage``. The GET stays
+open so the message composer's autocomplete works for any authenticated operator.
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import re
 from fastapi import Request
 
 from db.repositories import quick_reply_repo
+from server.authz import permission_denied
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ def register_routes(app, deps):
 
     @app.post("/api/quick-replies")
     async def create_quick_reply(request: Request):
+        denied = permission_denied(request, "quickreply.manage")
+        if denied:
+            return denied
         body = await request.json()
         short_code = _normalize_short_code(body.get("short_code", ""))
         content = (body.get("content") or "").strip()
@@ -79,6 +83,9 @@ def register_routes(app, deps):
 
     @app.put("/api/quick-replies/{qr_id}")
     async def update_quick_reply(qr_id: int, request: Request):
+        denied = permission_denied(request, "quickreply.manage")
+        if denied:
+            return denied
         body = await request.json()
         existing = await asyncio.to_thread(quick_reply_repo.get_by_id, qr_id)
         if existing is None:
@@ -103,7 +110,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.delete("/api/quick-replies/{qr_id}")
-    async def delete_quick_reply(qr_id: int):
+    async def delete_quick_reply(qr_id: int, request: Request):
+        denied = permission_denied(request, "quickreply.manage")
+        if denied:
+            return denied
         ok = await asyncio.to_thread(quick_reply_repo.delete, qr_id)
         if not ok:
             return _err("Resposta rápida não encontrada.", 404)

@@ -15,7 +15,7 @@ from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from agent import group_mentions
 from server import system_notices
-from server.authz import current_user
+from server.authz import current_user, permission_denied
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
@@ -77,8 +77,11 @@ def register_routes(app, deps):
                 logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
 
     @app.get("/api/contacts")
-    async def list_contacts(q: str = "", archived: bool = False):
+    async def list_contacts(request: Request, q: str = "", archived: bool = False):
         """List all contacts with summary info."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         results = await asyncio.to_thread(contact_repo.list_contacts, q, archived)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
@@ -89,6 +92,9 @@ def register_routes(app, deps):
     @app.post("/api/contacts/check-phone")
     async def check_phone(request: Request):
         """Check if a phone number is registered on WhatsApp."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         body = await request.json()
         phone = (body.get("phone") or "").strip()
         if not phone:
@@ -130,17 +136,23 @@ def register_routes(app, deps):
         })
 
     @app.get("/api/contacts/unread-count")
-    async def unread_count():
+    async def unread_count(request: Request):
         """Number of conversations with unread messages (for the browser-tab badge).
 
         Declared before /api/contacts/{phone} so the static path wins over the
         path parameter."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         count = await asyncio.to_thread(contact_repo.unread_conversation_count)
         return _ok({"count": count})
 
     @app.get("/api/contacts/{phone}")
-    async def get_contact(phone: str, mark_read: bool = True):
+    async def get_contact(phone: str, request: Request, mark_read: bool = True):
         """Return full contact data including conversation history."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         def _load():
             data = contact_repo.get_full_contact(phone)
             if data is None:
@@ -192,8 +204,11 @@ def register_routes(app, deps):
         return _ok(data)
 
     @app.delete("/api/contacts/{phone}")
-    async def delete_contact(phone: str):
+    async def delete_contact(phone: str, request: Request):
         """Permanently delete a contact and all associated data."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
         def _delete():
             data = contact_repo.get_by_phone(phone)
             if data is None:
@@ -210,8 +225,11 @@ def register_routes(app, deps):
         return _ok({"message": "Contato apagado."})
 
     @app.post("/api/contacts/{phone}/archive")
-    async def archive_contact(phone: str, body: dict):
+    async def archive_contact(phone: str, body: dict, request: Request):
         """Archive or unarchive a contact (by app)."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
         archived = body.get("archived")
         if archived is None:
             return _err("Campo 'archived' é obrigatório.")
@@ -233,8 +251,11 @@ def register_routes(app, deps):
         return _ok({"archived": result})
 
     @app.post("/api/contacts/{phone}/pin")
-    async def pin_contact(phone: str, body: dict):
+    async def pin_contact(phone: str, body: dict, request: Request):
         """Pin or unpin a conversation (pinned ones sort to the top of the list)."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
         pinned = body.get("pinned")
         if pinned is None:
             return _err("Campo 'pinned' é obrigatório.")
@@ -252,8 +273,11 @@ def register_routes(app, deps):
         return _ok({"pinned": result})
 
     @app.post("/api/contacts/{phone}/send")
-    async def send_to_contact(phone: str, body: dict):
+    async def send_to_contact(phone: str, body: dict, request: Request):
         """Send a manual message to a contact (operator-initiated, no LLM)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         message = (body.get("message") or "").strip()
         if not message:
             return _err("Campo 'message' é obrigatório.")
@@ -362,7 +386,7 @@ def register_routes(app, deps):
         return _ok({"message": "Mensagem enviada.", "msg_id": msg_id})
 
     @app.post("/api/contacts/{phone}/messages/delete")
-    async def delete_message(phone: str, body: dict):
+    async def delete_message(phone: str, body: dict, request: Request):
         """Delete a message. scope='me' (local) or scope='all' (revoke for everyone).
 
         Identifies the message by GOWA ``msg_id`` (preferred) or, for local-only
@@ -373,6 +397,9 @@ def register_routes(app, deps):
         DB — it is only flagged as revoked, never hard-deleted — so the panel keeps
         showing it with a 'deleted' indicator.
         """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         scope = (body.get("scope") or "me").strip()
         msg_id = (body.get("msg_id") or "").strip()
         db_id = body.get("db_id")
@@ -428,11 +455,14 @@ def register_routes(app, deps):
         return _ok({"message": "Mensagem apagada para você.", "msg_id": msg_id or None})
 
     @app.post("/api/contacts/{phone}/messages/react")
-    async def react_to_message(phone: str, body: dict):
+    async def react_to_message(phone: str, body: dict, request: Request):
         """React to a message with an emoji. Empty emoji removes the operator's reaction.
 
         The operator's own reaction is stored under the sentinel reactor "me".
         """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         msg_id = (body.get("msg_id") or "").strip()
         emoji = (body.get("emoji") or "").strip()
         if not msg_id:
@@ -589,13 +619,16 @@ def register_routes(app, deps):
             })
 
     @app.post("/api/contacts/{phone}/private-message")
-    async def send_private_message(phone: str, body: dict):
+    async def send_private_message(phone: str, body: dict, request: Request):
         """Save a message that stays in the panel — never delivered to the contact.
 
         AI processing is triggered when the operator sets `ai_read=true` (UI
         toggle "IA lê"). `ai_reply` (default true) controls whether the AI
         reply goes to the WhatsApp chat or stays as a private note.
         """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         text = (body.get("text") or "").strip()
         if not text:
             return _err("Campo 'text' é obrigatório.")
@@ -633,8 +666,11 @@ def register_routes(app, deps):
         return _ok(note_msg)
 
     @app.post("/api/contacts/{phone}/retry-send")
-    async def retry_send_to_contact(phone: str, body: dict):
+    async def retry_send_to_contact(phone: str, body: dict, request: Request):
         """Retry sending a message that previously failed."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         message = (body.get("message") or "").strip()
         if not message:
             return _err("Campo 'message' é obrigatório.")
@@ -690,11 +726,15 @@ def register_routes(app, deps):
     @app.post("/api/contacts/{phone}/send-image")
     async def send_image_to_contact(
         phone: str,
+        request: Request,
         image: UploadFile = File(...),
         caption: str = Form(""),
         conversation_id: str = Form(""),
     ):
         """Send an image to a contact (operator-initiated)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         suffix = Path(image.filename or "img.png").suffix or ".png"
         dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await image.read()
@@ -764,10 +804,14 @@ def register_routes(app, deps):
     @app.post("/api/contacts/{phone}/send-audio")
     async def send_audio_to_contact(
         phone: str,
+        request: Request,
         audio: UploadFile = File(...),
         conversation_id: str = Form(""),
     ):
         """Send an audio file to a contact (operator-initiated)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
         dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
@@ -836,11 +880,15 @@ def register_routes(app, deps):
     @app.post("/api/contacts/{phone}/send-document")
     async def send_document_to_contact(
         phone: str,
+        request: Request,
         document: UploadFile = File(...),
         caption: str = Form(""),
         conversation_id: str = Form(""),
     ):
         """Send an arbitrary file (document) to a contact (operator-initiated)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         filename = document.filename or "arquivo"
         safe_name = Path(filename).name
         suffix = Path(safe_name).suffix
@@ -913,18 +961,24 @@ def register_routes(app, deps):
         return _ok({"message": "Documento enviado."})
 
     @app.post("/api/contacts/{phone}/presence")
-    async def send_presence_to_contact(phone: str, body: dict):
+    async def send_presence_to_contact(phone: str, body: dict, request: Request):
         """Send typing/stop presence indicator to a contact (operator-initiated).
 
         Capability-gated: channels without presence (e.g. WhatsApp Cloud) no-op."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         action = body.get("action", "start")
         channel_id = _channel_for(phone, body.get("conversation_id"))
         await asyncio.to_thread(outbound.send_presence, channel_id, phone, action)
         return _ok({"status": "ok"})
 
     @app.post("/api/contacts/{phone}/read")
-    async def mark_contact_read(phone: str):
+    async def mark_contact_read(phone: str, request: Request):
         """Mark all messages from this contact as read (reset unread_count)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         def _mark():
             contact = agent_handler._get_contact(phone)
             return contact.mark_as_read()
@@ -934,8 +988,11 @@ def register_routes(app, deps):
         return _ok({"message": "Marcado como lido."})
 
     @app.post("/api/contacts/mark-all-unread")
-    async def mark_all_contacts_unread():
+    async def mark_all_contacts_unread(request: Request):
         """Mark every conversation as unread (re-light the in-app green badge)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         def _mark():
             count = contact_repo.mark_all_as_unread()
             # Keep already-loaded ContactMemory caches consistent.
@@ -947,8 +1004,11 @@ def register_routes(app, deps):
         return _ok({"count": count, "message": "Todas as conversas marcadas como não lidas."})
 
     @app.post("/api/contacts/mark-all-read")
-    async def mark_all_contacts_read():
+    async def mark_all_contacts_read(request: Request):
         """Mark every conversation as read (clear all in-app unread badges)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         def _mark():
             count = contact_repo.mark_all_as_read()
             # Keep already-loaded ContactMemory caches consistent.
@@ -960,8 +1020,11 @@ def register_routes(app, deps):
         return _ok({"count": count, "message": "Todas as conversas marcadas como lidas."})
 
     @app.post("/api/contacts/{phone}/unread")
-    async def mark_contact_unread(phone: str):
+    async def mark_contact_unread(phone: str, request: Request):
         """Mark a single conversation as unread (re-light the in-app green badge)."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
         def _mark():
             contact = agent_handler._get_contact(phone)
             contact.mark_as_unread()
@@ -970,12 +1033,15 @@ def register_routes(app, deps):
         return _ok({"unread_count": unread_count, "message": "Marcado como não lida."})
 
     @app.get("/api/contacts/{phone}/members")
-    async def get_group_members(phone: str, force: bool = False):
+    async def get_group_members(phone: str, request: Request, force: bool = False):
         """List group participants with resolved names (for @mention autocomplete).
 
         ``force=true`` bypasses the TTL cache (used after a participant change to
         pick up a just-joined member immediately).
         """
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         if "@g.us" not in phone:
             return _ok({"members": []})
         members = await asyncio.to_thread(
@@ -985,6 +1051,9 @@ def register_routes(app, deps):
     @app.post("/api/contacts/{phone}/toggle-ai")
     async def toggle_contact_ai(phone: str, body: dict, request: Request):
         """Enable or disable AI auto-reply for a specific contact."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
         enabled = body.get("enabled")
         if enabled is None:
             return _err("Campo 'enabled' é obrigatório.")
@@ -1015,8 +1084,11 @@ def register_routes(app, deps):
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")
-    async def get_contact_avatar(phone: str):
+    async def get_contact_avatar(phone: str, request: Request):
         """Return contact's WhatsApp profile photo (cached on disk)."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
         avatars_dir = statics_senditems_dir.parent / "avatars"
         avatars_dir.mkdir(parents=True, exist_ok=True)
         avatar_path = avatars_dir / f"{phone}.jpg"
@@ -1037,9 +1109,12 @@ def register_routes(app, deps):
         return Response(status_code=204)
 
     @app.put("/api/contacts/{phone}/info")
-    async def update_contact_info(phone: str, body: dict):
+    async def update_contact_info(phone: str, body: dict, request: Request):
         """Update contact info fields (name, email, profession, company, observations,
         plus custom_attributes — plano 05)."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
         # Validate custom attributes up front so we can return a clean 400 (P50:
         # unknown key → error; invalid value → error) before touching the row.
         custom_attrs = body.get("custom_attributes")
