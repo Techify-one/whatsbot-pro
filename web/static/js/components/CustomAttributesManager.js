@@ -24,6 +24,14 @@ const TYPES = [
   ['link', 'Link'],
 ];
 
+// Scope: who the attribute belongs to. Immutable after creation (backend enforces
+// UNIQUE(attribute_key, applies_to)). contact → contacts.custom_attributes;
+// conversation → conversations.custom_attributes.
+const SCOPES = [
+  ['contact', 'Contato'],
+  ['conversation', 'Conversa'],
+];
+
 const KEY_RE = /^[a-z][a-z0-9_]*$/;
 
 function slugify(name) {
@@ -44,6 +52,7 @@ function AttributeForm({ editing, onSubmit, onCancel, busy }) {
   const [key, setKey] = useState(editing ? editing.attribute_key : '');
   const [keyTouched, setKeyTouched] = useState(!!editing);
   const [type, setType] = useState(editing ? editing.type : 'text');
+  const [appliesTo, setAppliesTo] = useState(editing ? editing.applies_to : 'contact');
   const [options, setOptions] = useState(editing && editing.options ? editing.options.join('\n') : '');
   const [required, setRequired] = useState(editing ? !!editing.required : false);
   const [description, setDescription] = useState(editing ? (editing.description || '') : '');
@@ -74,7 +83,7 @@ function AttributeForm({ editing, onSubmit, onCancel, busy }) {
         }
       : {
           attribute_key: key, display_name: displayName.trim(), type,
-          applies_to: 'contact', required: required ? 1 : 0, description: description.trim(),
+          applies_to: appliesTo, required: required ? 1 : 0, description: description.trim(),
           regex_pattern: regexPattern.trim() || null, regex_cue: regexCue.trim() || null,
           ...(type === 'list' ? { options: optionList } : {}),
         };
@@ -110,6 +119,19 @@ function AttributeForm({ editing, onSubmit, onCancel, busy }) {
             onChange=${(e) => setType(e.target.value)}>
             ${TYPES.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
           </select>
+        </div>
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Escopo (não muda depois)</label>
+          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px] ${editing ? 'opacity-60' : ''}"
+            value=${appliesTo} disabled=${!!editing}
+            onChange=${(e) => setAppliesTo(e.target.value)}>
+            ${SCOPES.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
+          </select>
+          <div class="text-[11px] text-wa-secondary mt-1">
+            ${appliesTo === 'conversation'
+              ? 'Por conversa — preenchido manualmente em "Dados desta conversa".'
+              : 'Por contato — preenchido pelo operador e pela IA.'}
+          </div>
         </div>
         ${type === 'list' ? html`
           <div>
@@ -165,7 +187,7 @@ export default function CustomAttributesManager() {
 
   async function load() {
     setLoading(true);
-    const res = await getCustomAttributes('contact');
+    const res = await getCustomAttributes();   // todos os escopos (contato + conversa)
     if (res && res.ok) setItems(res.data || []);
     else setError((res && res.error) || 'Falha ao carregar.');
     setLoading(false);
@@ -197,12 +219,13 @@ export default function CustomAttributesManager() {
   }
 
   const typeLabel = (t) => (TYPES.find(([v]) => v === t) || [t, t])[1];
+  const scopeLabel = (s) => (SCOPES.find(([v]) => v === s) || [s, s])[1];
 
   return html`
     <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Campos personalizados do contato. Aparecem no painel de dados e a IA pode preenchê-los.
+          Campos personalizados por <span class="font-medium">contato</span> ou por <span class="font-medium">conversa</span>. Aparecem no painel de dados; os de contato a IA também pode preencher.
         </p>
         ${!creating && !editing ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
@@ -227,9 +250,12 @@ export default function CustomAttributesManager() {
         ${items.map(row => html`
           <div key=${row.id} class="bg-wa-panel border border-wa-border rounded-lg p-3 flex items-start gap-3">
             <div class="flex-1 min-w-0">
-              <div class="text-[14px] text-wa-text font-medium">
-                ${row.display_name}
-                ${row.required ? html`<span class="text-red-500"> *</span>` : null}
+              <div class="text-[14px] text-wa-text font-medium flex items-center gap-2 flex-wrap">
+                <span>${row.display_name}</span>
+                ${row.required ? html`<span class="text-red-500">*</span>` : null}
+                <span class="text-[11px] font-normal px-1.5 py-0.5 rounded bg-wa-hover text-wa-secondary">
+                  ${scopeLabel(row.applies_to)}
+                </span>
               </div>
               <div class="text-[12px] text-wa-secondary mt-0.5">
                 <span class="font-mono">${row.attribute_key}</span> · ${typeLabel(row.type)}
