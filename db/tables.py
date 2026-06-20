@@ -241,6 +241,10 @@ users = Table(
     Column("name", Text, nullable=False, server_default=""),
     Column("password_hash", Text, nullable=False),       # Argon2id PHC string
     Column("is_active", Integer, nullable=False, server_default="1"),
+    # custom_permissions=1 ⇒ this user's effective permission set is the explicit
+    # grants in user_permissions, REPLACING roles entirely (no role, no admin
+    # short-circuit). custom_permissions=0 ⇒ permissions come from roles.
+    Column("custom_permissions", Integer, nullable=False, server_default="0"),
     Column("last_login_at", Float),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
@@ -280,6 +284,18 @@ user_roles = Table(
     Column("role_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False),
     PrimaryKeyConstraint("user_id", "role_id"),
 )
+
+# Per-user explicit permission grants — only consulted when the user's
+# users.custom_permissions flag is set. Lets an admin give a single user a set of
+# permissions outside of any role ("completely customizable").
+user_permissions = Table(
+    "user_permissions",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("permission_id", Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False),
+    PrimaryKeyConstraint("user_id", "permission_id"),
+)
+Index("idx_user_permissions_user", user_permissions.c.user_id)
 
 user_sessions = Table(
     "user_sessions",

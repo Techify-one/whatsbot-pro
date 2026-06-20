@@ -1002,6 +1002,135 @@ r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_gtok}"})
 check("gestor /me -> 200 (still authenticated)", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15g-bis. Custom per-user permissions + role editor + new gates
+# ═══════════════════════════════════════════════════════════════════
+section("RBAC custom permissions + role editor")
+
+# ── Custom user: explicit permission set replaces roles ────────────
+r = client.post("/api/users", json={
+    "email": "custom@test.com", "name": "Custom", "password": "supersecret",
+    "custom_permissions": True,
+    "permissions": ["contact.read", "conversation.reply"]})
+check("POST /api/users (custom) -> 200", r.status_code == 200)
+_cu = r.json()["data"]["user"]
+_cu_id = _cu["id"]
+check("custom user -> flag set, no roles",
+      _cu.get("custom_permissions") is True and _cu.get("roles") == [])
+check("custom user -> explicit permissions echoed",
+      set(_cu.get("permissions") or []) == {"contact.read", "conversation.reply"})
+check("custom user -> not admin", _cu.get("is_admin") is False)
+
+# custom mode requires at least one permission
+r = client.post("/api/users", json={
+    "email": "empty@test.com", "name": "E", "password": "supersecret",
+    "custom_permissions": True, "permissions": []})
+check("POST /api/users (custom, no perms) -> 400", r.status_code == 400)
+
+# effective permissions = exactly the explicit set (no '*', no role union)
+_curesolved = _rrepo.user_permissions(_cu_id)
+check("custom resolver -> exact set, no '*'",
+      _curesolved == {"contact.read", "conversation.reply"})
+
+r = client.post("/api/auth/login", json={"email": "custom@test.com", "password": "supersecret"})
+_ctok = r.json()["data"]["token"]
+r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_ctok}"})
+check("custom /me -> exact perms",
+      set(r.json()["data"]["user"]["permissions"]) == {"contact.read", "conversation.reply"})
+
+# ── New enforcement gates (custom user lacks these) ────────────────
+_chdr = {"Authorization": f"Bearer {_ctok}"}
+r = client.put("/api/config", json={"model": "x"}, headers=_chdr)
+check("PUT /api/config (no settings.manage) -> 403", r.status_code == 403)
+r = client.get("/api/contacts", headers=_chdr)
+check("GET /api/contacts (has contact.read) -> 200", r.status_code == 200)
+r = client.get("/api/users", headers=_chdr)
+check("GET /api/users (no users.manage) -> 403", r.status_code == 403)
+r = client.post("/api/quick-replies", json={"short_code": "x", "content": "y"}, headers=_chdr)
+check("POST /api/quick-replies (no quickreply.manage) -> 403", r.status_code == 403)
+r = client.put("/api/contacts/5511999/info", json={"name": "x"}, headers=_chdr)
+check("PUT /api/contacts/{p}/info (no contact.write) -> 403", r.status_code == 403)
+
+# ── Switching modes + last-admin guard ────────────────────────────
+r = client.put(f"/api/users/{_cu_id}", json={
+    "custom_permissions": False, "roles": ["atendente"]})
+check("PUT custom->role -> 200", r.status_code == 200)
+check("PUT custom->role -> flag cleared + role set",
+      r.json()["data"]["user"]["custom_permissions"] is False
+      and r.json()["data"]["user"]["roles"] == ["atendente"])
+check("PUT custom->role -> explicit grants cleared",
+      r.json()["data"]["user"].get("permissions") == [])
+
+# Converting the only active admin to custom mode drops their admin role -> guard
+r = client.put(f"/api/users/{_admin['id']}", json={
+    "custom_permissions": True, "permissions": ["contact.read"]})
+check("PUT last-admin -> custom -> 409 guard", r.status_code == 409)
+
+client.delete(f"/api/users/{_cu_id}")
+
+# ── Role editor: GET /api/roles exposes permission_keys ────────────
+r = client.get("/api/roles")
+_roles_payload = r.json()["data"]["roles"]
+_by_key = {ro["key"]: ro for ro in _roles_payload}
+check("GET /api/roles -> permission_keys present",
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 13)
+check("GET /api/roles -> admin shows all 16",
+      len(_by_key["admin"]["permission_keys"]) == 16)
+
+# Create a custom role
+r = client.post("/api/roles", json={
+    "key": "supervisor", "name": "Supervisor",
+    "permission_keys": ["conversation.read", "audit.read"]})
+check("POST /api/roles (custom) -> 200", r.status_code == 200)
+_sup = r.json()["data"]["role"]
+_sup_id = _sup["id"]
+check("custom role -> is_system 0 + perms",
+      _sup.get("is_system") == 0 and set(_sup["permission_keys"]) == {"conversation.read", "audit.read"})
+
+# Reserved + invalid keys rejected
+r = client.post("/api/roles", json={"key": "admin", "name": "X", "permission_keys": []})
+check("POST /api/roles (reserved key) -> 400", r.status_code == 400)
+r = client.post("/api/roles", json={"key": "Bad Key", "name": "X", "permission_keys": []})
+check("POST /api/roles (invalid key) -> 400", r.status_code == 400)
+
+# A user with the custom role inherits its permissions
+r = client.post("/api/users", json={
+    "email": "sup@test.com", "name": "S", "password": "supersecret", "roles": ["supervisor"]})
+_sup_user_id = r.json()["data"]["user"]["id"]
+check("user with custom role -> inherits perms",
+      _rrepo.user_permissions(_sup_user_id) == {"conversation.read", "audit.read"})
+
+# Edit the custom role's permissions -> reflected live
+r = client.put(f"/api/roles/{_sup_id}", json={"permission_keys": ["conversation.read"]})
+check("PUT /api/roles (custom) -> 200", r.status_code == 200)
+check("role edit -> reflected on assigned user",
+      _rrepo.user_permissions(_sup_user_id) == {"conversation.read"})
+
+# admin role is locked
+_admin_role_id = _by_key["admin"]["id"]
+r = client.put(f"/api/roles/{_admin_role_id}", json={"permission_keys": []})
+check("PUT admin role -> 400 (locked)", r.status_code == 400)
+
+# delete blocked while assigned, system roles undeletable
+r = client.delete(f"/api/roles/{_sup_id}")
+check("DELETE custom role (assigned) -> 409", r.status_code == 409)
+_gestor_role_id = _by_key["gestor"]["id"]
+r = client.delete(f"/api/roles/{_gestor_role_id}")
+check("DELETE system role -> 409", r.status_code == 409)
+
+# free the role then delete it
+client.delete(f"/api/users/{_sup_user_id}")
+r = client.delete(f"/api/roles/{_sup_id}")
+check("DELETE custom role (free) -> 200", r.status_code == 200)
+
+# edit gestor then restore defaults
+r = client.put(f"/api/roles/{_gestor_role_id}", json={"permission_keys": ["conversation.read"]})
+check("PUT gestor role (shrink) -> 200", r.status_code == 200)
+check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
+r = client.post(f"/api/roles/{_gestor_role_id}/reset")
+check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
+check("gestor restored to 13 perms", len(_rrepo.get_role_permissions("gestor")) == 13)
+
+# ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
 section("Conversations")
