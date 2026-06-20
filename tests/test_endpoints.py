@@ -1110,6 +1110,17 @@ r = client.get("/api/conversations/filter?cattr:plano_conv=silver")
 check("filter cattr=silver -> não acha",
       all(c["id"] != _live_conv["id"] for c in r.json()["data"]["conversations"]))
 
+# Robustez (achados do pentest adversarial) — input malformado vira 400, nunca 500
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "status", "filter_operator": "equal_to", "values": [{"$ne": None}]}]})
+check("filter value dict (NoSQL-ish) -> 400 não 500", r.status_code == 400)
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "priority", "filter_operator": "equal_to", "values": []}]})
+check("filter values:[] em op escalar -> 400 não 500", r.status_code == 400)
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "assignee", "filter_operator": "equal_to", "values": []}]})
+check("filter assignee values:[] -> 400 não 500", r.status_code == 400)
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
