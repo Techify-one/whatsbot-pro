@@ -39,6 +39,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
   const [maxExecutions, setMaxExecutions] = useState(200);
+  const [auditRetentionDays, setAuditRetentionDays] = useState(365);
   const [confirmUnreadAll, setConfirmUnreadAll] = useState(false);
   const [markingAllUnread, setMarkingAllUnread] = useState(false);
   const [confirmReadAll, setConfirmReadAll] = useState(false);
@@ -97,6 +98,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setLowBalanceEnabled(config.low_balance_enabled ?? true);
       setLowBalanceThreshold(config.low_balance_threshold ?? 0.5);
       setMaxExecutions(config.max_executions ?? 200);
+      setAuditRetentionDays(config.audit_retention_days ?? 365);
       setDefaultAiEnabled(config.default_ai_enabled ?? true);
       setGroupReplyMode(config.group_reply_mode ?? 'mention_only');
     }
@@ -203,6 +205,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
       max_executions: parseInt(maxExecutions, 10) || 200,
+      audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
       default_ai_enabled: defaultAiEnabled,
       group_reply_mode: groupReplyMode,
     };
@@ -653,6 +656,21 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
           />
           <span class="text-xs text-wa-secondary">Quantidade máxima de execuções e payloads mantidos no banco</span>
+        </div>
+
+        <!-- Audit retention -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Retenção da auditoria (dias)</label>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            step="1"
+            value=${auditRetentionDays}
+            onInput=${(e) => setAuditRetentionDays(e.target.value)}
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+          />
+          <span class="text-xs text-wa-secondary">Por quantos dias os registros da trilha de auditoria são mantidos</span>
         </div>
 
         <!-- Panel Password -->

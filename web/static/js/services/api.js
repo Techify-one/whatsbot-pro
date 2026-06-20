@@ -566,6 +566,61 @@ export async function restartAi() {
   return request('POST', '/api/ai/restart');
 }
 
+// ── Audit trail (plano 07 Fase 2) ─────────────────────────────────
+// Append-only audit log, gated by the `audit.read` permission (the backend
+// returns 403 if the user lacks it). Responses are {ok, data, error}.
+
+// Drop empty/undefined values and build a querystring from `params`. The list
+// endpoint's date filters (`from`/`to`) are epoch seconds; `actor` is a user id.
+function _auditQuery(params = {}) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  }
+  return parts.join('&');
+}
+
+export async function listAudit(params = {}) {
+  const qs = _auditQuery(params);
+  return request('GET', `/api/audit${qs ? '?' + qs : ''}`);
+}
+
+export async function getAuditActions() {
+  return request('GET', '/api/audit/actions');
+}
+
+// Download the audit export (csv|json). The export endpoint returns the raw
+// file (not {ok,data}); a plain link/window.open wouldn't carry the bearer
+// token, so we fetch with auth headers and trigger a blob download. Returns
+// {ok} or {ok:false, error}.
+export async function downloadAuditExport(params = {}, format = 'csv') {
+  const qs = _auditQuery({ ...params, format });
+  const res = await fetch(`${BASE}/api/audit/export?${qs}`, {
+    headers: _authHeaders(),
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('whatsbot_token');
+    window.dispatchEvent(new Event('whatsbot:unauthorized'));
+    return { ok: false, error: 'Não autenticado.' };
+  }
+  if (!res.ok) {
+    let msg = 'Falha ao exportar.';
+    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+    return { ok: false, error: msg };
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = format === 'json' ? 'audit_log.json' : 'audit_log.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { ok: true };
+}
+
 // ── Update ────────────────────────────────────────────────────────
 
 export async function checkForUpdates() {
