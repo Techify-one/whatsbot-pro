@@ -1,7 +1,7 @@
 import { useEffect } from 'preact/hooks';
 import { createWebSocket } from '../services/websocket.js';
 
-export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
+export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onAiTyping, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
   useEffect(() => {
     // The 6 conversation lifecycle events (plano 10 FF2) all route to a single
     // onConversationChanged(eventName, data) so the consumer can patch/refetch.
@@ -17,6 +17,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       config_saved: onConfigSaved,
       new_message: onNewMessage,
       chat_presence: onChatPresence,
+      ai_typing: onAiTyping,
       contact_info_updated: onContactInfoUpdated,
       tags_changed: onTagsChanged,
       contact_tags_updated: onContactTagsUpdated,

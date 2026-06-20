@@ -913,6 +913,8 @@ def register_routes(app, deps):
                         else:
                             try:
                                 await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
+                                # Signal the panel the AI is working on this chat (cleared in the cycle's finally).
+                                await ws_manager.broadcast("ai_typing", {"phone": phone, "channel_id": channel_id, "active": True})
                                 # Cancellable LLM call
                                 result = await agent_handler.aprocess_message(
                                     phone, combined,
@@ -1054,6 +1056,7 @@ def register_routes(app, deps):
 
                 try:
                     await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
+                    await ws_manager.broadcast("ai_typing", {"phone": phone, "channel_id": channel_id, "active": True})
                     result = await agent_handler.aprocess_message(
                         phone,
                         llm_text,
@@ -1085,6 +1088,10 @@ def register_routes(app, deps):
             raise
         except Exception as exc:
             await aend_execution(exec_id, error=str(exc))
+        finally:
+            # Always clear the "IA respondendo" hint (success, cancel, or error),
+            # even if it was never set (AI off for this chat) — a no-op then.
+            await ws_manager.broadcast("ai_typing", {"phone": phone, "channel_id": channel_id, "active": False})
 
         max_exec = settings.get("max_executions", 200)
         try:

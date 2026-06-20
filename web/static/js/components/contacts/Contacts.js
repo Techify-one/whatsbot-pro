@@ -114,7 +114,7 @@ function shapeConvData(d) {
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, wsConnected, config, onConfigSave, onUnreadChange }) {
+export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, wsConnected, config, onConfigSave, onUnreadChange }) {
   const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -136,6 +136,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const [currentUserId, setCurrentUserId] = useState(null);
   const [users, setUsers] = useState([]);
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
+  const [aiRespondingState, setAiRespondingState] = useState({});  // { phone: true } — IA processando
   const [showArchived, setShowArchived] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
@@ -154,6 +155,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const selectedConvIdRef = useRef(null);
   const selectedChannelIdRef = useRef('default');
   const typingTimers = useRef({});
+  const aiTypingTimers = useRef({});
   const contactsRef = useRef([]);
   const displayedRef = useRef([]);   // currently-visible (filtered) rows — for "selecionar todas"
   const lastResolvedId = useRef(null);
@@ -758,6 +760,27 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     }
   }, [chatPresence]);
 
+  // Handle "IA respondendo" events — the AI is processing a reply for this chat,
+  // so the operator sees a hint and avoids replying over it.
+  useEffect(() => {
+    if (!aiTyping) return;
+    const { phone, active } = aiTyping;
+    if (!phone) return;
+
+    if (active) {
+      setAiRespondingState(prev => ({ ...prev, [phone]: true }));
+      // Defensive auto-clear in case the `active:false` event is missed (e.g. a
+      // dropped connection mid-processing), so the hint never sticks forever.
+      clearTimeout(aiTypingTimers.current[phone]);
+      aiTypingTimers.current[phone] = setTimeout(() => {
+        setAiRespondingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      }, 60000);
+    } else {
+      clearTimeout(aiTypingTimers.current[phone]);
+      setAiRespondingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+    }
+  }, [aiTyping]);
+
   // Handle real-time contact info updates (e.g. from save_contact_info tool)
   useEffect(() => {
     if (!contactInfoUpdated) return;
@@ -1148,6 +1171,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
                 contact=${contactData}
                 onAvatarClick=${() => selected && setShowInfoPanel(true)}
                 contactTyping=${selected && typingState[selected] || null}
+                aiResponding=${selected && !!aiRespondingState[selected]}
                 globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
