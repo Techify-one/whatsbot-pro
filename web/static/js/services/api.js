@@ -400,6 +400,23 @@ export async function archiveConversation(id, archived) {
   return request('POST', `/api/conversations/${id}/archive`, { archived });
 }
 
+// Assume the conversation for the current user (plano 10 Onda 0). No body — the
+// server resolves "me" from the authenticated session.
+export async function assignMeConversation(id) {
+  return request('POST', `/api/conversations/${id}/assign-me`, {});
+}
+
+// Toggle the conversation-level AI (ai_active) — distinct from the contact-level
+// toggle. Drives the chat-header IA switch (FF3).
+export async function setConversationAi(id, active) {
+  return request('POST', `/api/conversations/${id}/ai`, { active });
+}
+
+// Resolve the open conversation for a contact by phone (feeds the chat header).
+export async function getContactConversation(phone) {
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
+}
+
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
 // Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
 // Credentials are ALWAYS returned masked by the backend; sending a new
