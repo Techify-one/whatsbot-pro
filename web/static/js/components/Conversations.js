@@ -12,7 +12,7 @@
 // tab and resolves the id → phone → opens the chat).
 
 import { h } from 'preact';
-import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listConversations,
@@ -24,6 +24,7 @@ import {
   getUsers,
 } from '../services/api.js';
 import { FilterBar } from './FilterBar.js';
+import { useWebSocket } from '../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
 
@@ -271,6 +272,33 @@ export function Conversations() {
   }, [richFilters]);
 
   useEffect(() => { fetchConversations(); }, [fetchConversations]);
+
+  // ── Tempo real (FF2) ────────────────────────────────────────────────
+  // Patch the touched row immediately for snappiness, then refetch (debounced)
+  // so membership/ordering reconcile against the active filter — the strategy
+  // the plano prescribes for the MVP.
+  const fetchRef = useRef(fetchConversations);
+  useEffect(() => { fetchRef.current = fetchConversations; }, [fetchConversations]);
+  const debounceRef = useRef(null);
+
+  const onConversationChanged = useCallback((name, data) => {
+    const id = data && data.conversation_id;
+    if (id != null) {
+      setConversations(prev => prev.map(c => {
+        if (c.id !== id) return c;
+        const patch = {};
+        if (data.status !== undefined) patch.status = data.status;
+        if (data.assignee_user_id !== undefined) patch.assignee_user_id = data.assignee_user_id;
+        if (data.is_archived !== undefined) patch.is_archived = data.is_archived;
+        if (data.ai_active !== undefined) patch.ai_active = data.ai_active;
+        return { ...c, ...patch };
+      }));
+    }
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => { fetchRef.current(); }, 700);
+  }, []);
+
+  useWebSocket({ onConversationChanged });
 
   // Open the contact's chat in the main panel. Mirrors how the Contacts screen
   // navigates: push /contacts/{id} and notify the router via popstate.
