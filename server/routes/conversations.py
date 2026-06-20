@@ -114,6 +114,17 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
+    @app.post("/api/conversations/{conv_id}/agent")
+    async def set_agent(conv_id: int, body: dict, request: Request):
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        agent_key = body.get("agent_key") or None
+        conv = await asyncio.to_thread(conversation_repo.set_agent, conv_id, agent_key)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        return _ok({"conversation": conv})
+
     @app.post("/api/conversations/{conv_id}/ai")
     async def set_ai(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.reply")

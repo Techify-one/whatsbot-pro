@@ -191,6 +191,11 @@ def set_custom_attributes(conv_id: int, attrs: dict) -> dict | None:
     return _update(conv_id, {"custom_attributes": dict(attrs or {})})
 
 
+def set_agent(conv_id: int, agent_key: str | None) -> dict | None:
+    """Bind a specific AI agent to this conversation (plano 06)."""
+    return _update(conv_id, {"active_agent_key": agent_key})
+
+
 def touch_activity(conv_id: int, ts: float | None = None) -> None:
     with get_engine().begin() as conn:
         conn.execute(update(conversations).where(conversations.c.id == conv_id)

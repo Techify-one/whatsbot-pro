@@ -1154,6 +1154,22 @@ _pt = sorted(h["version"] for h in r.json()["data"])[-2]
 r = client.post(f"/api/ai/prompts/default/rollback/{_pt}")
 check("prompt rollback -> restaura body V1", r.json()["data"]["body"] == "Prompt V1")
 
+# Binding agente↔conversa + campos de roteamento (plano 06 schema)
+r = client.put("/api/ai/agents/default", json={
+    "display_name": "Roteador", "prompt_key": "default", "model_config": {},
+    "enabled": True, "is_router": True, "routing_targets": ["vendas", "suporte"],
+    "description": "Agente roteador"})
+check("save agent c/ is_router+routing_targets -> 200", r.status_code == 200)
+check("agent is_router persistido", r.json()["data"]["is_router"] is True)
+check("agent routing_targets persistido", r.json()["data"]["routing_targets"] == ["vendas", "suporte"])
+
+r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key": "default"})
+check("POST /conversations/{id}/agent -> 200", r.status_code == 200)
+check("conversa ganha active_agent_key", r.json()["data"]["conversation"]["active_agent_key"] == "default")
+r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key": None})
+check("POST agent null -> desvincula",
+      r.json()["data"]["conversation"]["active_agent_key"] is None)
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
