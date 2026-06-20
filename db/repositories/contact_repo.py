@@ -518,4 +518,25 @@ def _row_to_dict(row) -> dict:
         "unread_ai_count": row["unread_ai_count"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        # Custom attributes (plano 05). Defensive: not every contacts query
+        # selects the column. JSON column comes back as a dict (or str on SQLite).
+        "custom_attributes": _coerce_attrs(row),
     }
+
+
+def _coerce_attrs(row) -> dict:
+    """Return the custom_attributes dict for a row, tolerating missing/serialized."""
+    try:
+        val = row["custom_attributes"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str) and val:
+        try:
+            import json
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}

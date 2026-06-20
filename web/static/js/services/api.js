@@ -67,6 +67,23 @@ export async function deleteQuickReply(id) {
   return request('DELETE', `/api/quick-replies/${id}`);
 }
 
+// ── Custom attributes (plano 05) ──────────────────────────────────
+export async function getCustomAttributes(appliesTo = 'contact') {
+  return request('GET', `/api/custom-attributes?applies_to=${encodeURIComponent(appliesTo)}`);
+}
+
+export async function createCustomAttribute(def) {
+  return request('POST', '/api/custom-attributes', def);
+}
+
+export async function updateCustomAttribute(id, def) {
+  return request('PUT', `/api/custom-attributes/${id}`, def);
+}
+
+export async function deleteCustomAttribute(id) {
+  return request('DELETE', `/api/custom-attributes/${id}`);
+}
+
 export async function getStatus() {
   return request('GET', '/api/status');
 }

@@ -22,11 +22,16 @@ from agent.tools.transfer_to_human import (
     TRANSFER_TO_HUMAN_TOOL,
     execute as _exec_transfer_to_human,
 )
+from agent.tools.set_custom_attribute import (
+    SET_CUSTOM_ATTRIBUTE_TOOL,
+    execute as _exec_set_custom_attribute,
+)
 
 # (schema, executor) tuples — registered by AgentHandler at construction time.
 CORE_TOOLS: list[tuple[dict, callable]] = [
     (SAVE_CONTACT_INFO_TOOL, _exec_save_contact_info),
     (TRANSFER_TO_HUMAN_TOOL, _exec_transfer_to_human),
+    (SET_CUSTOM_ATTRIBUTE_TOOL, _exec_set_custom_attribute),
 ]
 
 # Backward-compatible flat list of schemas (some logging/track_step code reads it).
