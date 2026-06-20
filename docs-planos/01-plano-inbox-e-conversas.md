@@ -23,41 +23,99 @@
 > tabela-contador `UPDATE…RETURNING`), P7 (auto-resolução off), P8 (grupos = conversa normal, VISÍVEIS
 > com badge de grupo), P9 (visibilidade por membership de inbox), P10 (archive ortogonal ao status),
 > P11 (merge fora do MVP), P12 (`source_id` = JID + LID, guardar ambos), P18 (índice único
-> `(channel_id, external_msg_id)`).
+> `(channel_id, external_msg_id)`), **P82 (encadeamento Alembic linear)**. Frontend/UX: FQ1 (rail só
+> com ≥2 inboxes), FQ2 (toggle de IA no header da conversa), FQ3 (4 abas), FQ4 (ordenar por última
+> atividade, mais recente no topo).
 
 ---
 
-## 0. Estado atual (pontos de integração reais, confirmados no código)
+## Estado atual (WF1, 2026-06-20)
 
-- **`db/tables.py:41-65`** — `contacts` com `phone` UNIQUE (chave de negócio fundida pessoa+canal),
-  `ai_enabled` (`:51`), flags ad-hoc `is_archived/is_pinned/unread_count/has_unread_mention`.
-- **`db/tables.py:79-96`** — `messages` com FK `contact_id`; **sem** `conversation_id`. Índices
-  `idx_msg_contact_ts`, `idx_msg_id`.
-- **`db/tables.py:144-168`** — `executions`/`execution_steps`: ciclo de UMA resposta da IA, NÃO a
-  conversa de atendimento. Não confundir nem reaproveitar.
-- **`db/tables.py:207`** — `CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)` —
-  derivada do metadata; tabelas novas entram automaticamente (a migração SQLite→Postgres já as
-  cobre).
-- **`db/alembic/versions/`** — última revisão `20260603_0006_contact_mention.py`. Padrão de
-  migration: `revision`/`down_revision` string, `upgrade()`/`downgrade()` com `op.add_column` etc.
+> Reconciliado contra o código real em `b673a61` (árvore idêntica a `58586e1` + os 5 arquivos do
+> kill-switch P62). Fonte: `_RECONCILIACAO-WF1.md §"Plano 01"` (delta VERIFICADO, precedência
+> código > planos). Este plano é **GREENFIELD**: nenhuma das 5 fases tem código. Confirmado por grep
+> vazio de `inboxes|contact_inboxes|conversations|conversation_counters` em `db/`.
+
+### Legenda de fases
+
+| Fase | Estado | Evidência verificada (delta WF1) |
+|---|---|---|
+| **1a — schema** (tabelas + reescopo de `contacts` + `messages.conversation_id`) | `nao_feito` | `db/tables.py:45` (`contacts.phone` ainda UNIQUE), `:51` (`ai_enabled` presente), `:79`/`:95` (`messages` sem `conversation_id`, índices só por `contact_id`). Grep das 4 tabelas novas = 0 hits. Schema intocado. |
+| **1b — backfill** (data migration idempotente) | `nao_feito` | Nenhuma migration de backfill. Head real = `0008_plugin_installed_deps`. |
+| **1c — repos + webhook + handler** | `nao_feito` | Sem `conversation_repo`/`contact_inbox_repo`. Gate de IA ainda `contact.ai_enabled and settings.get("auto_reply", True)` nos 3 sites do webhook (verificado em `webhook.py:844`, `:870`, `:991`). `transfer_to_human.py:51` chama `set_ai_enabled(False)`. `memory.py:191-193` escreve `contacts.ai_enabled` (legado). |
+| **1d — API + WS** | `nao_feito` | Sem `server/routes/conversations.py`. Sem eventos `conversation_*` (único broadcast é `state.py:61`, genérico). |
+| **1e — frontend** | `nao_feito` | `Contacts.js:28` só `showArchived`; `:66` toggle IA por phone; `api.js` sem `listConversations/patchConversation/assignMe`. Sidebar segue "1 contato = 1 thread". |
+
+> **Reframe central (o que mudou desde a redação original):**
+> 1. **O gate de IA ainda está pré-P5** — `contacts.ai_enabled` é o ÚNICO gate, nos 3 sites do webhook.
+>    Implementar = reescrever esses 3 sites para a **cascata global→inbox→conversa (P5)**, não criar do
+>    zero um gate inexistente. O texto deste plano (§5) já descreve a cascata correta; falta SÓ aplicar.
+> 2. **Migrations renumeradas (P82):** os slots **0007 e 0008 JÁ FORAM CONSUMIDOS** por
+>    `0007_ai_engine_tables` (AGNO) e `0008_plugin_installed_deps` (pkg_deps). As duas migrations deste
+>    plano descem para **0009/0010** (ver §2). **NÃO** usar 0007/0008 como slot novo — ramifica a cadeia
+>    e **quebra o boot**.
+> 3. **Drift de linha corrigido:** a redação original citava `:834/:860/:966` para o gate; os sites
+>    reais (verificados via grep) são **`webhook.py:844`, `:870`, `:991`** — lógica idêntica. Todas as
+>    âncoras de linha abaixo foram **re-verificadas via grep** em 2026-06-20; ainda assim, na
+>    implementação use `grep`/âncora semântica, nunca linha hardcoded (offsets podem mover).
+
+### Posicionamento na sequência de ondas (relatório §4 — sequência viva)
+
+> Ondas: **0** = endurecimento do que já shippou · **1** = plano 09 (`SubprocessService`) · **2** =
+> retrofit P62 (isolar code-in-DB) · **3** = **RBAC (03) + Inbox (ESTE plano)** · **4** = completar 06
+> · **5+** = 02, 04, 05, 08.
+
+**Este plano é Onda 3.** Depende de:
+- **RBAC + sessão (plano 03)** — para `current_user`, `assignee_user_id`, `inbox_members` (P9). Entra
+  **antes** deste plano na Onda 3. Mitigação P1: `assignee_user_id` nasce NULLABLE **sem FK**;
+  visibilidade por membership degrada para a senha única atual enquanto `users` não existir.
+- **Stub de `inboxes` (plano 02)** — criado **localmente** neste plano (§1.1) quando o doc 02 ainda não
+  chegou. O doc 02 faz `ALTER` aditivo depois.
+- **Fundação Runtime (plano 09, Onda 1)** — não bloqueia o schema/backfill; só relevante se este plano
+  precisar agendar background tasks (auto-resolução é P7=off no MVP, então **não precisa**).
+
+O **binding agente↔inbox** (`default_agent_key`/`active_agent_key`) é trabalho do **plano 06** (Onda 4)
+e **depende deste plano** — não fazer aqui.
+
+---
+
+## 0. Pontos de integração reais (confirmados no código, 2026-06-20)
+
+- **`db/tables.py:45`** — `contacts.phone` ainda `Text, nullable=False, unique=True` (chave de negócio
+  fundida pessoa+canal). `ai_enabled` em `:51`; flags ad-hoc `is_archived` (`:54`), `is_pinned` (`:56`),
+  `unread_count` (`:58`), `has_unread_mention` (`:60`); índice `idx_contacts_archived` em `:65`.
+- **`db/tables.py:79-96`** — `messages` com FK `contact_id` (`:83`); **sem** `conversation_id`. Índices
+  `idx_msg_contact_ts` (`:95`), `idx_msg_id` (`:96`).
+- **`db/tables.py` — `executions`/`execution_steps`:** ciclo de UMA resposta da IA, NÃO a conversa de
+  atendimento. Não confundir nem reaproveitar. (Nota: `0007_ai_engine_tables` adicionou colunas
+  `agent_key/total_tokens/total_cost_usd` a `executions` — irrelevantes aqui.)
+- **`db/tables.py` — `CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)`** — derivada do
+  metadata; tabelas novas entram automaticamente (a migração SQLite→Postgres já as cobre). Hoje
+  `CORE_TABLES` tem **20** tabelas (13 originais + 7 `ai_*`); as 4 deste plano levam a 24.
+- **`db/alembic/versions/`** — HEAD real = **`20260619_0008_plugin_installed_deps.py`**. Cadeia
+  verificada:
+  `0001_baseline → 0002_message_revoked → 0003_message_reactions → 0004_message_reply_to →
+  0005_contact_pinned → 0006_contact_mention → 0007_ai_engine_tables → 0008_plugin_installed_deps`.
+  Padrão de migration: `revision`/`down_revision` string, `upgrade()`/`downgrade()` com `op.add_column`
+  etc.
 - **`db/repositories/contact_repo.py:49`** — `get_or_create(phone, default_ai_enabled)`: resolve por
   variantes BR de telefone (`_br_phone_variants`, `:31`), cria a linha. É o ponto onde hoje "nasce" a
-  unidade de trabalho.
-- **`db/repositories/message_repo.py:14`** — `add(contact_id, role, content, ...)`; todas as queries
+  unidade de trabalho. `update(contact_id, **fields)` em `:122`.
+- **`db/repositories/message_repo.py:14`** — `add(contact_id, role, content, *, ...)`; todas as queries
   filtram por `contact_id`. **Não há** `conversation_id` em lugar nenhum.
 - **`agent/memory.py:66-193`** — `ContactMemory`: carrega `ai_enabled` (`:87`), persiste via
   `set_ai_enabled` (`:191-193`) → `contact_repo.update(ai_enabled=...)`.
 - **`agent/tools/transfer_to_human.py:51-53`** — handoff atual: `ctx.contact.set_ai_enabled(False)` +
   tag `transferido_atendente`. **Não atribui a ninguém.**
-- **`server/routes/webhook.py`** — gate da IA em 3 sites: `:834`, `:860`, `:966`
-  (`if contact.ai_enabled and settings.get("auto_reply", True)`). Alerta de handoff
-  `human_transfer_alert` emitido em `:617-622`.
-- **`server/routes/contacts.py`** — `POST /api/contacts/{phone}/toggle-ai` (vide pesquisa
-  `:929-938`).
-- **`server/state.py:61`** — `ConnectionManager.broadcast(event, data)`. Nenhum evento de conversa
-  hoje.
+- **`server/routes/webhook.py`** — gate da IA em 3 sites: **`:844`**, **`:870`**, **`:991`**
+  (`if contact.ai_enabled and settings.get("auto_reply", True)`; `:991` é a forma negada
+  `if not contact.ai_enabled or not settings.get(...)`). Alerta de handoff `human_transfer_alert`
+  emitido em `:619` com payload `{phone}` apenas (o `"ai_enabled": False` que aparece em `:622` é de um
+  broadcast adjacente `contact_ai_toggled`, não do alerta). Na Fase 1d ambos ganham `conversation_id`.
+- **`server/routes/contacts.py`** — `POST /api/contacts/{phone}/toggle-ai`.
+- **`server/state.py:61`** — `async def broadcast(self, event, data)`. Nenhum evento de conversa hoje.
 - **`web/static/js/components/contacts/Contacts.js`** — raiz da sidebar; filtro só por `showArchived`
-  (`:28`), `handleToggleAI` (`:66-76`).
+  (`:28`, refs em `:284-289/:345`), `handleToggleAI` (`:66`).
 
 **Conclusão:** hoje "1 contato = 1 thread infinita + 1 bit `ai_enabled`". Precisamos introduzir
 ContactInbox + Conversation **sem quebrar o histórico** (mantendo `contact_id` em `messages` e
@@ -70,13 +128,15 @@ ContactInbox + Conversation **sem quebrar o histórico** (mantendo `contact_id` 
 | Precisa estar pronto | De onde vem | Por quê | Mitigação se ausente |
 |---|---|---|---|
 | Tabela **`inboxes`** + inbox WhatsApp default | [`02-canais-e-providers`] | `contact_inboxes.inbox_id` e `conversations.inbox_id` referenciam `inboxes(id)` | **Stub local**: criar `inboxes` mínima neste plano (Fase 1a) e marcar como "owned" pelo doc 02 quando ele chegar (ver §1.1 e Perguntas q1). |
-| Tabela **`users`** + sessão com `current_user` | [`03-rbac-usuarios`] (PLANO já existe) | `conversations.assignee_user_id` FK em `users(id)`; "atribuir a mim" precisa de `current_user` | `assignee_user_id` fica NULLABLE; endpoints de atribuição retornam 501/no-op até `users` existir. Status funciona sem usuários. |
-| Tabela **`teams`** | [`03-rbac-usuarios`] (fase 2 de lá) | `conversations.team_id` opcional | Coluna NULLABLE; ignorada no MVP. |
-| `custom_attributes` (contrato JSON) | [`05-atributos-personalizados`] | Coluna `custom_attributes` em `contacts` e `conversations` | Criar a coluna agora (`TEXT DEFAULT '{}'`); o doc 05 só define o schema lógico. |
-| Saved views / filtros | [`08-filtros`] | Abas de status/assignee na UI | MVP usa filtros fixos (query params); saved views são fase posterior. |
+| Tabela **`users`** + sessão com `current_user` | [`03-rbac-usuarios`] (Onda 3, entra **antes** deste) | `conversations.assignee_user_id` referencia `users(id)`; "atribuir a mim" precisa de `current_user` | `assignee_user_id` fica NULLABLE **e sem FK** (P1); endpoints de atribuição retornam no-op/501 até `users` existir. Status funciona sem usuários. |
+| Tabela **`inbox_members`** | [`03-rbac-usuarios`] | Visibilidade por membership (P9) no `list` de conversas | Sem `inbox_members`, o `list` libera tudo (degrada para a senha única atual). |
+| Tabela **`teams`** | [`03-rbac-usuarios`] (fase posterior) | `conversations.team_id` opcional | Coluna NULLABLE; ignorada no MVP. |
+| `custom_attributes` (contrato JSON) | [`05-atributos-personalizados`] | Coluna `custom_attributes` em `contacts` e `conversations` | Criar a coluna agora (`TEXT NOT NULL DEFAULT '{}'`); o doc 05 só define o schema lógico. |
+| Saved views / filtros | [`08-filtros`] | Abas de status/assignee na UI | MVP usa filtros fixos (query params); saved views são fase posterior. O `/api/conversations` criado aqui é o endpoint canônico que o doc 08 estende (P76). |
 
-**Ordem recomendada:** doc 02 (inbox) → doc 03 (users) → **este plano**. Se 02/03 atrasarem, a
-Fase 1a deste plano cria stubs mínimos para destravar o schema de conversas.
+**Ordem recomendada (sequência viva):** plano 09 → plano 03 (users) → **este plano** (cria stub
+`inboxes`) → plano 06 (binding) → 02/05/08. Se 02/03 atrasarem, a Fase 1a deste plano cria stubs
+mínimos para destravar o schema de conversas.
 
 ---
 
@@ -85,7 +145,8 @@ Fase 1a deste plano cria stubs mínimos para destravar o schema de conversas.
 ### 1.1 Stub `inboxes` (Fase 1a — só se o doc 02 não chegou antes)
 
 Tabela mínima para destravar as FKs. Quando o doc 02 entregar a versão completa, ele faz
-`ALTER TABLE` aditivo (provider config etc.) — **não** recria.
+`ALTER TABLE` aditivo (provider config etc.) — **não** recria. **FQ1:** o rail de inboxes na UI só
+aparece com ≥2 inboxes; uma instalação migrada de 1 número fica idêntica ao hoje.
 
 ```python
 # db/tables.py  (ilustrativo)
@@ -94,8 +155,8 @@ inboxes = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False, server_default="WhatsApp"),
     Column("channel_type", Text, nullable=False, server_default="whatsapp"),  # provider plugin id
-    Column("agent_bot_enabled", Integer, nullable=False, server_default="1"), # gate IA por inbox
-    Column("created_at", Float, nullable=False),
+    Column("agent_bot_enabled", Integer, nullable=False, server_default="1"), # gate IA por inbox (P5 nível 2)
+    Column("created_at", Float, nullable=False),                              # epoch float (P56)
     Column("updated_at", Float, nullable=False),
 )
 ```
@@ -109,6 +170,9 @@ A inbox default (`id` conhecido, ex.: 1) é semeada na própria migration de bac
   exibível, **não** mais a identidade-no-canal. A identidade migra para `contact_inboxes.source_id`.
   > **Nota SQLite:** SQLite não dropa constraint via `ALTER`; remover o unique exige
   > **batch_alter_table** do Alembic (recria a tabela). Postgres usa `DROP CONSTRAINT`. Ver §2.1.
+  > **Risco operacional (delta WF1):** `batch_alter_table` recria a tabela `contacts` inteira no
+  > SQLite — em DB grande é custoso. Mitigar rodando a migration em janela de baixa carga e validando
+  > num clone antes.
 - **Adicionar** `custom_attributes TEXT NOT NULL DEFAULT '{}'` (contrato do doc 05).
 - As flags ad-hoc (`is_archived/is_pinned/unread_count/has_unread_mention/can_send`) **permanecem no
   contato** na Fase 1 (transição); migram para a conversa na Fase 2 (ver Perguntas q10).
@@ -118,6 +182,7 @@ A inbox default (`id` conhecido, ex.: 1) é semeada na própria migration de bac
 - **`contacts.ai_enabled` (P5 — MUDANÇA):** **sai do gate de IA.** Não é mais consultado na cascata
   nem usado como "default para novas conversas". Fica como coluna **aposentada/ignorada** (mantida
   fisicamente por compat de schema durante a transição; o `toggle-ai` deixa de escrevê-la — ver §5).
+  > Hoje (pré-P5) `agent/memory.py:191-193` ainda escreve essa coluna; a Fase 1c remove essa escrita.
 
 ### 1.3 `contact_inboxes` (a IDENTIDADE da pessoa numa inbox minha)
 
@@ -160,10 +225,10 @@ conversations = Table(
     Column("contact_inbox_id", Integer, ForeignKey("contact_inboxes.id", ondelete="CASCADE"), nullable=False),
     Column("status", Text, nullable=False, server_default="open"),     # P3: SÓ open|closed (closed = "resolved")
     Column("is_archived", Integer, nullable=False, server_default="0"),# P10: archive ORTOGONAL ao status
-    Column("assignee_user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),  # nullable até doc 03
-    Column("team_id", Integer),                       # FK p/ teams quando existir (doc 03 fase 2)
+    Column("assignee_user_id", Integer),              # P1: NULLABLE e SEM FK até o doc 03 (ver nota abaixo)
+    Column("team_id", Integer),                       # FK p/ teams quando existir (doc 03 fase posterior)
     Column("priority", Text),                         # low|medium|high|urgent | NULL (fase 2)
-    Column("ai_active", Integer, nullable=False, server_default="1"),  # gate IA por conversa (P5)
+    Column("ai_active", Integer, nullable=False, server_default="1"),  # gate IA por conversa (P5 nível 3)
     Column("opened_at", Float, nullable=False),
     Column("resolved_at", Float),                     # ts em que virou closed
     Column("waiting_since", Float),                   # última msg do contato aguardando resposta
@@ -176,7 +241,7 @@ Index("idx_conv_inbox_status", conversations.c.inbox_id, conversations.c.status)
 Index("idx_conv_assignee_status", conversations.c.assignee_user_id, conversations.c.status)
 Index("idx_conv_contact", conversations.c.contact_id)
 Index("idx_conv_contact_inbox", conversations.c.contact_inbox_id)
-Index("idx_conv_last_activity", conversations.c.last_activity_at)
+Index("idx_conv_last_activity", conversations.c.last_activity_at)   # FQ4: ordenação por última atividade
 Index("idx_conv_archived", conversations.c.is_archived)
 Index("uq_conv_display_id", conversations.c.display_id, unique=True)
 ```
@@ -190,14 +255,15 @@ Index("uq_conv_display_id", conversations.c.display_id, unique=True)
 > **Sem** índice de unicidade sobre conversas ativas — múltiplas conversas por contact_inbox é o
 > modelo final. "Conversa atual" é derivada por query (§3.2).
 >
-> **FK `assignee_user_id → users(id)`:** se `users` ainda não existir (doc 03 não aplicado), criar a
-> coluna **sem** a FK na Fase 1 e adicionar a FK numa migration posterior (evita falha de ordem de
-> migrations). Ver Perguntas q1.
+> **`assignee_user_id` (P1 — stub sem FK):** a coluna nasce **NULLABLE e SEM FK** para `users(id)`.
+> O doc 03 adiciona a FK numa migration posterior (evita falha de ordem de migrations / referência a
+> tabela inexistente). Mesma regra para `team_id` (NULLABLE, sem FK no MVP). Ver Perguntas q1.
+> `epoch Float` em todos os timestamps (P56).
 
 ### 1.5 `messages.conversation_id`
 
 ```python
-# adicionar em messages (db/tables.py:79)
+# adicionar em messages (db/tables.py:79-96)
 Column("conversation_id", Integer, ForeignKey("conversations.id", ondelete="CASCADE")),  # nullable
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
 ```
@@ -238,29 +304,46 @@ SELECT next_value - 1 AS display_id FROM conversation_counters WHERE name = 'con
 > portável e concorrência-safe. `UPDATE…RETURNING` no Postgres é 1 round-trip; em SQLite o par
 > UPDATE+SELECT roda dentro da transação write serializada. A linha-semente
 > `('conversation_display_id', N)` é criada na migration (N = `MAX(display_id)+1` após o backfill, ou 1
-> num DB vazio). Se um dia o backend for só Postgres, dá para trocar por `SEQUENCE` sem mudar a API do
-> repo — mas **não é necessário**.
+> num DB vazio). **Decisão global de banco (2026-06-18):** se um dia o backend for só Postgres, dá para
+> trocar por `SEQUENCE` sem mudar a API do repo — mas **não é necessário**.
 
 ### 1.7 `CORE_TABLES`
 
-Nada a fazer: `db/tables.py:207` deriva do metadata; as 4 tabelas novas (`inboxes`,
+Nada a fazer: `db/tables.py` deriva `CORE_TABLES` do metadata; as 4 tabelas novas (`inboxes`,
 `contact_inboxes`, `conversations`, `conversation_counters`) entram automaticamente na migração
 SQLite→Postgres.
 
 **Critério de pronto (Fase 1 schema):** `alembic upgrade head` cria as tabelas num SQLite vazio e
 num Postgres vazio; `python tests/test_endpoints.py` continua passando; `CORE_TABLES` inclui as 4
-tabelas novas.
+tabelas novas (24 no total).
 
 ---
 
 ## 2. Migrations Alembic
 
-### 2.1 `20260619_0007_inbox_conversations.py` — schema novo
+> **REGRA P82 (encadeamento linear) — fonte de verdade:** **`down_revision` = head real no momento de
+> implementar (hoje `0008_plugin_installed_deps`); número = próximo livre (≥0009).** Os slots
+> **0007 e 0008 JÁ FORAM CONSUMIDOS** por `0007_ai_engine_tables` e `0008_plugin_installed_deps`.
+> **NÃO** usar 0006/0007/0008 como slot novo — ramifica a cadeia e **quebra o boot**. Este plano cria
+> **2 migrations**: a 2ª encadeia na 1ª.
+>
+> Pela sequência viva (relatório §4), a ordem provável de implementação é: 09 (sem migration) → 03
+> (`rbac_users`) → **01 (`inbox_conversations`, `backfill`)** → 06 (`ai_agent_links`) → 02/04/05/08.
+> Se o RBAC (03) entrar antes (provável), o head no momento de criar `inbox_conversations` será
+> `0009_rbac_users` e os números deste plano deslizam para **0010/0011** — re-checar o head real com
+> `alembic heads` na hora de gerar.
+
+### 2.1 `NNNN_inbox_conversations.py` — schema novo (próximo número livre, ≥0009)
+
+> **`down_revision` = head real no momento de implementar (hoje `0008_plugin_installed_deps`);
+> número = próximo livre (≥0009).** Nomenclatura: `<data>_0009_inbox_conversations.py` se o head for
+> `0008`; ajustar se 03 já tiver entrado.
 
 `upgrade()`:
 1. `op.create_table("inboxes", ...)` (se doc 02 não criou; senão pular — checar via inspector).
-2. `op.create_table("contact_inboxes", ...)` + unique index `uq_contact_inbox_inbox_source`.
-3. `op.create_table("conversations", ...)` + índices.
+2. `op.create_table("contact_inboxes", ...)` + unique index `uq_contact_inbox_inbox_source` + índices
+   `idx_contact_inbox_contact` / `idx_contact_inbox_lid`.
+3. `op.create_table("conversations", ...)` + índices (`assignee_user_id`/`team_id` SEM FK — P1).
 4. `op.add_column("messages", conversation_id)` + `op.create_index("idx_msg_conversation_ts", ...)`.
 5. **Remover unique de `contacts.phone`**: usar
    `with op.batch_alter_table("contacts") as batch:` (recria a tabela no SQLite, in-place no
@@ -268,16 +351,19 @@ tabelas novas.
    `idx_contacts_phone` (lookup ainda rápido).
 6. `op.add_column("contacts", custom_attributes TEXT NOT NULL server_default "{}")`.
 7. `op.create_table("conversation_counters", ...)` (P6 — tabela-contador do `display_id`). A
-   linha-semente `('conversation_display_id', 1)` é inserida aqui; a migration de backfill (0008)
+   linha-semente `('conversation_display_id', 1)` é inserida aqui; a migration de backfill
    reposiciona `next_value` para `MAX(display_id)+1` ao final.
 
-> **Idempotência das migrations (P82 — encadeamento linear):** cada revisão aponta para o head real no
-> momento de implementar; sem branches. Antes de criar `inboxes`/`conversation_counters`, checar com o
-> inspector se a tabela já existe (caso o doc 02 a tenha criado) para não duplicar.
+> **Idempotência das migrations (P82):** antes de criar `inboxes`/`conversation_counters`, checar com o
+> inspector se a tabela já existe (caso o doc 02 a tenha criado) para não duplicar. Sem branches: a
+> revisão aponta para o head real do momento.
 
 `downgrade()`: inverso (drop tabelas, drop coluna, restaurar unique de phone via batch).
 
-### 2.2 `20260619_0008_backfill_conversations.py` — backfill de dados (data migration)
+### 2.2 `NNNN_backfill_conversations.py` — backfill de dados (data migration)
+
+> **`down_revision` = a migration `inbox_conversations` da §2.1** (encadeia na 1ª, P82). Número =
+> próximo livre depois dela (`0010` se a 2.1 foi `0009`).
 
 Idempotente e não-destrutiva. Roda só se `conversations` estiver vazia (guard).
 
@@ -366,11 +452,13 @@ Seguir o padrão Core do projeto (`with get_engine().begin()/connect()`, stateme
 - `set_assignee(id, user_id, by_user_id=None)`, `set_ai_active(id, active)`,
   `touch_activity(id, ts, waiting_since=None)`.
 - `list(filters) -> list[dict]` — filtros: `status` (`open`/`closed`), `is_archived`,
-  `assignee` (`me`/`unassigned`/`all`/id), `inbox_id`, paginação por `last_activity_at`. Join com
-  `contacts` (nome/phone/avatar/`is_group` p/ badge — P8) e `users` (nome do assignee).
-  **Visibilidade por membership de inbox (P9):** o `list` filtra pelas inboxes em que o `current_user`
-  é membro (`inbox_members`, do doc 03); fora delas, não retorna nada. `conversation.read_all`
-  (admin/gestor) ignora o filtro de membership.
+  `assignee` (`me`/`unassigned`/`all`/id), `inbox_id`, paginação por `last_activity_at`
+  (**FQ4: ordenar `last_activity_at DESC`, mais recente no topo**; página 30 + scroll infinito é
+  detalhe do doc 08/P80). Join com `contacts` (nome/phone/avatar/`is_group` p/ badge — P8) e `users`
+  (nome do assignee). **Visibilidade por membership de inbox (P9):** o `list` filtra pelas inboxes em
+  que o `current_user` é membro (`inbox_members`, do doc 03); fora delas, não retorna nada.
+  `conversation.read_all` (admin/gestor) ignora o filtro de membership. **Sem `inbox_members`/RBAC, o
+  `list` libera tudo** (degrada para a senha única atual).
 - `count_unassigned()`, `get_full(id)` (com contato + última mensagem).
 
 ### 3.3 `db/repositories/message_repo.py` (editar)
@@ -380,14 +468,15 @@ Seguir o padrão Core do projeto (`with get_engine().begin()/connect()`, stateme
   **aditivos**, não substituem os por `contact_id` na Fase 1.
 
 ### 3.4 `agent/memory.py` (editar)
-- `ContactMemory` ganha awareness de `conversation_id` e `ai_active`. **P5:** `set_ai_enabled` deixa de
-  escrever `contacts.ai_enabled` e passa a operar **só** `conversation_repo.set_ai_active(conv_id, ...)`
-  — o toggle age na **conversa**. `contacts.ai_enabled` sai do gate (não é mais lido como default). Ver
-  §5 (cascata de IA global→inbox→conversa).
+- `ContactMemory` ganha awareness de `conversation_id` e `ai_active`. **P5:** `set_ai_enabled`
+  (hoje `memory.py:191-193`, que grava `contacts.ai_enabled`) deixa de escrever `contacts.ai_enabled`
+  e passa a operar **só** `conversation_repo.set_ai_active(conv_id, ...)` — o toggle age na
+  **conversa**. `contacts.ai_enabled` sai do gate (não é mais lido como default). Ver §5 (cascata de
+  IA global→inbox→conversa).
 
 **Critério de pronto (repos):** testes unitários novos em `tests/` cobrindo `resolve_inbound`
-(criação, reabertura dentro da janela, nova conversa fora da janela, múltiplas conversas) num SQLite
-temporário.
+(criação, reabertura de conversa `closed`, não-criação de nova conversa quando o cliente volta a falar
+P2, múltiplas conversas) num SQLite temporário.
 
 ---
 
@@ -396,7 +485,8 @@ temporário.
 ### 4.1 `server/routes/webhook.py` (editar — o coração da mudança)
 
 Hoje o webhook resolve por `contact_repo.get_or_create(phone)` e checa `contact.ai_enabled` em 3
-sites (`:834`, `:860`, `:966`). Mudanças:
+sites — **verificados via grep em `webhook.py:844`, `:870`, `:991`** (a redação original citava
+`:834/:860/:966`; lógica idêntica). Mudanças:
 
 1. **Resolução do remetente (P12)** → trocar `get_or_create(phone)` por
    `conversation_repo.resolve_inbound(inbox_id=INBOX_WA, source_id_or_lid=<JID e/ou LID do payload>)`.
@@ -409,8 +499,8 @@ sites (`:834`, `:860`, `:966`). Mudanças:
    - **Idempotência (P18):** o INSERT de mensagem respeita o índice único
      `(channel_id, external_msg_id)` (ver doc 02 para a coluna `channel_id`; no MVP single-channel use
      a inbox default + `msg_id` do GOWA como `external_msg_id`). Webhook duplicado não duplica linha.
-3. **Gate da IA (P5 — cascata global → inbox → conversa, SEM nível de contato)** nos 3 sites:
-   substituir `contact.ai_enabled and settings.auto_reply` por:
+3. **Gate da IA (P5 — cascata global → inbox → conversa, SEM nível de contato)** nos 3 sites
+   (`:844`, `:870`, `:991`): substituir `contact.ai_enabled and settings.get("auto_reply", True)` por:
    ```
    ia_responde = settings.get("ai_global_enabled", True)   # NÍVEL 1: global (IA da conta toda)
                  AND inbox.agent_bot_enabled                # NÍVEL 2: inbox
@@ -418,19 +508,24 @@ sites (`:834`, `:860`, `:966`). Mudanças:
                  AND conversation.ai_active                 # NÍVEL 3: conversa (o toggle age aqui)
                  AND settings.get("auto_reply", True)
    ```
-   `contacts.ai_enabled` **NÃO entra** na expressão (P5).
+   `contacts.ai_enabled` **NÃO entra** na expressão (P5). **Reframe:** isto é uma **reescrita** dos 3
+   sites pré-P5 existentes, não a criação de um gate novo.
 4. **`touch_activity`**: a cada inbound, atualizar `last_activity_at` e `waiting_since` da conversa.
 5. **Eventos**: todos os `new_message` passam a carregar `conversation_id`; emitir
    `conversation_created`/`conversation_status_changed` quando a `resolve_inbound` abrir/reabrir
-   (§6). O `human_transfer_alert` (`:617-622`) passa a carregar `conversation_id`.
+   (§6). O `human_transfer_alert` (`webhook.py:619`) passa a carregar `conversation_id`.
 
 ### 4.2 `agent/handler.py` (editar)
-- O dispatch já é por `phone`/`ContactMemory`. Propagar `conversation_id` no `ContactMemory`
-  (`handler.py:431`) para que os saves de resposta da IA (`message.sent`) gravem `conversation_id` e
-  os eventos do bus carreguem o id. Sem `if/elif` por tool (regra do CLAUDE.md).
+- O dispatch já é por `phone`/`ContactMemory`. Propagar `conversation_id` no `ContactMemory` para que
+  os saves de resposta da IA (`message.sent`) gravem `conversation_id` e os eventos do bus carreguem o
+  id. Sem `if/elif` por tool (regra do CLAUDE.md).
+- **Coexistência com o motor AGNO (relatório §5.6):** o motor AGNO é stateless por request e **não**
+  conhece conversa/inbox; o gate de IA da cascata fica **no webhook** (§4.1), antes de delegar ao
+  motor. Nada da cascata vive dentro do `agno_engine`.
 
 ### 4.3 `agent/tools/transfer_to_human.py` (editar — handoff evoluído)
-Manter o **nome** da tool (identidade). Trocar o corpo (`:51-53`):
+Manter o **nome** da tool (identidade — regra de contrato de tool do CLAUDE.md). Trocar o corpo
+(hoje `:51-53`, que chama `ctx.contact.set_ai_enabled(False)` + tag):
 - `conversation_repo.set_ai_active(conv_id, False)`
 - `conversation_repo.update_status(conv_id, "open")` (sinal "humano assume", estilo Chatwoot)
 - (opcional, fase 2) atribuir à fila / round-robin
@@ -446,13 +541,17 @@ cascata permite. `transfer_to_human` põe a conversa em `open` + `ai_active=0` e
 
 ## 5. Gate de IA: cascata **global → inbox → conversa** (P5 — DECIDIDO, MUDANÇA do Lote 2)
 
+> **Estado atual:** o código está **pré-P5** — `contacts.ai_enabled` é o ÚNICO gate, nos 3 sites do
+> webhook (`:844/:870/:991`) e escrito por `memory.py:191-193` e `transfer_to_human.py:51`. Este plano
+> **substitui** esse gate pela cascata abaixo; não há cascata existente a estender.
+
 A cascata tem **3 níveis** (SEM nível de contato). `contacts.ai_enabled` **sai do gate**.
 
-| Ordem | Nível | Coluna / config | Papel |
-|---|---|---|---|
-| 1 | Global | config key `ai_global_enabled` (default `True`) | liga/desliga a IA **da conta toda** |
-| 2 | Inbox | `inboxes.agent_bot_enabled` (default `1`) | liga/desliga o bot **na inbox** |
-| 3 | Conversa | `conversations.ai_active` (default `1`) | override **por conversa** — é o que `toggle-ai` e `transfer_to_human` mexem |
+| Ordem | Nível | Coluna / config | Papel | Onde fica o toggle na UI (FQ2) |
+|---|---|---|---|---|
+| 1 | Global | config key `ai_global_enabled` (default `True`) | liga/desliga a IA **da conta toda** | Configurações |
+| 2 | Inbox | `inboxes.agent_bot_enabled` (default `1`) | liga/desliga o bot **na inbox** | tela de Canais (doc 02) |
+| 3 | Conversa | `conversations.ai_active` (default `1`) | override **por conversa** — é o que `toggle-ai` e `transfer_to_human` mexem | header/painel da conversa |
 
 A IA só responde se **todos** os níveis permitem **e** `status=='open'` (P3) **e** `auto_reply` global.
 `contacts.ai_enabled` não participa.
@@ -480,7 +579,7 @@ Registrar via `register_routes(app, deps)` (padrão `ServerDeps`). Endpoints:
 
 | Método | Endpoint | Descrição |
 |---|---|---|
-| GET | `/api/conversations` | Lista com filtros `?status=&assignee=me\|unassigned\|all&inbox_id=&cursor=` |
+| GET | `/api/conversations` | Lista com filtros `?status=&assignee=me\|unassigned\|all&inbox_id=&cursor=`. **Endpoint canônico de filtros (P76)** — o doc 08 estende daqui. Ordena por `last_activity_at DESC` (FQ4). |
 | GET | `/api/conversations/unassigned-count` | Badge da fila |
 | GET | `/api/conversations/{id}` | Detalhe (contato + status + assignee + última msg) |
 | GET | `/api/conversations/{id}/messages?limit=N` | Mensagens por `conversation_id` |
@@ -489,8 +588,8 @@ Registrar via `register_routes(app, deps)` (padrão `ServerDeps`). Endpoints:
 
 - **RBAC (P9 — visibilidade por membership de inbox)**: gate por permissões do doc 03
   (`conversation.read/reply/assign/resolve`); o atendente só vê/atua nas **inboxes em que é membro**;
-  `conversation.read_all` (admin/gestor) libera tudo. Enquanto doc 03 não existir, liberar para a senha
-  única atual.
+  `conversation.read_all` (admin/gestor) libera tudo. **Enquanto o doc 03 não existir, liberar para a
+  senha única atual** (degrada; a estrutura do endpoint já chama o gate, que vira no-op sem `users`).
 - **Validação de transições** de status no repo: só `open`↔`closed` (P3); rejeitar valores inválidos
   com 409. `is_archived` não é transição de status (flag independente).
 
@@ -511,7 +610,7 @@ Todos os `new_message` ganham `conversation_id`. `human_transfer_alert` ganha `c
 Emitir em paralelo aos WS, via `emit`/`emit_with_filter` do bus:
 `conversation.created`, `conversation.status_changed`, `conversation.assigned`,
 `conversation.resolved`, `conversation.reopened`. Permite automações de terceiros sem tocar no core.
-(Documentar no CLAUDE.md na seção de eventos.)
+(Documentar no CLAUDE.md na seção de eventos e adicionar à `KNOWN_EVENTS`.)
 
 **Critério de pronto:** `tests/test_endpoints.py` ganha bloco cobrindo `GET/PATCH /api/conversations`
 (listar por status, assignee=unassigned/me, atribuir, resolver, reabrir); eventos WS observáveis no
@@ -521,31 +620,39 @@ TestClient.
 
 ## 7. Frontend (Preact + HTM, sem build)
 
-Seguir regras de modo escuro do CLAUDE.md (`wa-*`, `.wa-field`) em toda tela nova.
+Seguir regras de modo escuro do CLAUDE.md (`wa-*`, `.wa-field`) em toda tela nova. **O painel evolui
+os 3 painéis existentes** (`ContactList`/`Contacts` | `ContactDetail` | `ContactInfoPanel`), não
+reescreve (decisão de UX, doc 10).
 
 ### 7.1 Lista de conversas (MVP simplificado)
 - **`web/static/js/components/contacts/Contacts.js`** → introduzir `Conversations.js` (ou refatorar
   internamente). Item = contato + badge de status + **badge de grupo quando `is_group` (P8)** +
   (quando houver) avatar do assignee. MVP: **uma linha por conversa ativa derivada** (parece a lista
-  de hoje).
-- **Abas/dropdown de filtro** (P3 — só `open`/`closed`) substituindo o `showArchived`
-  (`Contacts.js:28`): **Abertas** / **Resolvidas** / **Não atribuídas** / **Minhas**. (Sem aba
-  "Pendentes" no MVP.) O toggle **Arquivadas** continua como dimensão **independente** (P10 — archive
-  ortogonal ao status). Mapeiam para query params do `GET /api/conversations`.
+  de hoje). **Ordenação FQ4:** por `last_activity_at`, mais recente no topo (a conversa sobe ao chegar
+  ou sair mensagem) — vale para todas as abas.
+- **Abas/dropdown de filtro (FQ3 — 4 abas)** substituindo o `showArchived` (`Contacts.js:28`):
+  **Abertas** / **Minhas** / **Não atribuídas** / **Resolvidas**. (Sem aba "Pendentes" no MVP — P3.)
+  O toggle **Arquivadas** continua como dimensão **independente** (P10 — archive ortogonal ao status).
+  Mapeiam para query params do `GET /api/conversations`.
+- **Rail de inboxes (FQ1):** coluna fina de ícones na extrema esquerda (estilo Chatwoot) só aparece
+  **com ≥2 inboxes**; instalação migrada de 1 número fica idêntica ao hoje. Atendente vê só as inboxes
+  em que é membro (P9); admin vê todas. (O rail completo é trabalho do doc 02/10 — aqui só garantir que
+  a lista não quebra quando ele surgir.)
 - **Grupos (P8):** aparecem normalmente nas filas (NÃO ocultar), apenas marcados com badge de grupo.
-- **Tela "Não atribuídas"**: fila FIFO (ordenada por `waiting_since`) com botão **Pegar**
-  (`POST /assign-me`). Respeita membership de inbox (P9).
+- **Tela "Não atribuídas"**: fila ordenada por última atividade (FQ4) com botão **Pegar**
+  (`POST /assign-me`). Respeita membership de inbox (P9). (FIFO estrito por `waiting_since` só em "Não
+  atribuídas" é ajuste futuro — FQ4.)
 
 ### 7.2 Header da conversa (`ContactDetail.js`)
 Botões: **Atribuir a mim**, **Transferir** (dropdown de atendentes; gated por RBAC),
 **Resolver** (`status='closed'`) / **Reabrir** (`status='open'`), **Arquivar/Desarquivar**
 (`is_archived`, ortogonal ao status — P10), e o toggle **IA on/off** existente (`handleToggleAI`,
 `Contacts.js:66`) agora operando **`conversation.ai_active`** via `PATCH /api/conversations/{id}`
-(P5 — o toggle age na conversa, não no contato). **Adiar (snooze)** fica para a Fase 2.
+(P5/FQ2 — o toggle age na conversa, não no contato). **Adiar (snooze)** fica para a Fase 2.
 
 ### 7.3 Serviços/estado
 - `web/static/js/services/api.js`: adicionar chamadas `listConversations`, `patchConversation`,
-  `assignMe`, `getConversationMessages`.
+  `assignMe`, `getConversationMessages` (hoje ausentes — confirmado no delta WF1).
 - WS handlers em `app.js`: reagir a `conversation_*` para atualizar a lista/header ao vivo.
 - Roteamento de `new_message` por `conversation_id`.
 
@@ -565,21 +672,32 @@ reabrir — tudo refletindo via WS sem reload; tudo legível no modo escuro.
 
 ## 9. Faseamento (resumo acionável)
 
-- **Fase 1a — schema:** stub `inboxes` (se preciso) + `contact_inboxes` + `conversations` +
-  `messages.conversation_id` + reescopo de `contacts` (drop unique phone, +custom_attributes).
-  Migrations 0007/0008. **Pronto:** `alembic upgrade head` limpo em SQLite e Postgres.
-- **Fase 1b — backfill:** data migration idempotente (contact → 1 contact_inbox + 1 conversa;
-  `messages.conversation_id` em massa). **Pronto:** invariantes de §2.2 num clone de produção.
-- **Fase 1c — repos + webhook + handler:** `resolve_inbound`, gate de IA por cascata,
-  `transfer_to_human` evoluída. **Pronto:** webhook opera por conversa (teste Evolution/mock).
-- **Fase 1d — API + WS:** `conversations.py`, eventos WS + bus. **Pronto:** testes de endpoint.
-- **Fase 1e — frontend:** lista de conversas + abas + fila não-atribuídas + ações no header.
-  **Pronto:** fluxo manual ponta-a-ponta no painel.
+> **Todas as fases estão `nao_feito` (greenfield).** Posicionamento: **Onda 3**, depois do RBAC (03).
+> Migrations renumeradas para o head real do momento (≥0009), encadeadas linear (P82).
+
+- **Fase 1a — schema** (`nao_feito`): stub `inboxes` (se preciso) + `contact_inboxes` + `conversations`
+  (`assignee_user_id`/`team_id` sem FK — P1) + `messages.conversation_id` + reescopo de `contacts`
+  (drop unique phone, +`custom_attributes`) + `conversation_counters`. Migration
+  **`inbox_conversations`** = próximo número livre (≥0009; `down=0008_plugin_installed_deps` hoje).
+  **Pronto:** `alembic upgrade head` limpo em SQLite e Postgres.
+- **Fase 1b — backfill** (`nao_feito`): data migration idempotente (contact → 1 contact_inbox + 1
+  conversa `open`; `messages.conversation_id` em massa; reposiciona o counter). Migration
+  **`backfill_conversations`** encadeia na 1a (≥0010; `down=<inbox_conversations>`). **Pronto:**
+  invariantes de §2.2 num clone de produção.
+- **Fase 1c — repos + webhook + handler** (`nao_feito`): `resolve_inbound` (P2), `display_id` (P6),
+  **reescrever o gate de IA pré-P5 nos 3 sites (`:844/:870/:991`) para a cascata global→inbox→conversa
+  (P5)**, `transfer_to_human` evoluída, `memory.set_ai_enabled` deixa de escrever `contacts.ai_enabled`.
+  **Pronto:** webhook opera por conversa (teste Evolution/mock); coexiste com o motor AGNO stateless.
+- **Fase 1d — API + WS** (`nao_feito`): `conversations.py` (`/api/conversations` canônico — P76),
+  eventos WS + bus. **Pronto:** testes de endpoint.
+- **Fase 1e — frontend** (`nao_feito`): lista de conversas + 4 abas (FQ3) + fila não-atribuídas +
+  ações no header + toggle de IA por conversa (FQ2) + ordenação por última atividade (FQ4). **Pronto:**
+  fluxo manual ponta-a-ponta no painel.
 - **Fase 2 — paridade Chatwoot (fora do MVP):** estado `pending`/"aguardando" (P3 adiou),
-  `snoozed`/auto-resolução por inatividade (P7 — desligada no MVP; background task em
-  `server/background.py`), `priority`, `agent_bot_enabled` real por inbox (multi-inbox do doc 02),
-  timeline/auditoria (`conversation_events`), UI multi-conversa ("outras conversas deste contato"),
-  merge de contatos (P11).
+  `snoozed`/auto-resolução por inatividade (P7 — desligada no MVP; background task seria registrada no
+  `TaskSupervisor` do plano 09 quando entrar), `priority`, `agent_bot_enabled` real por inbox
+  (multi-inbox do doc 02), timeline/auditoria (`conversation_events`), UI multi-conversa ("outras
+  conversas deste contato"), merge de contatos (P11).
 - **Fase 3 — automação + multi-canal:** round-robin, presença online, caps por atendente,
   `team_id`/filas, saved views (doc 08), merge de contatos (§3.4.1 da pesquisa).
 
@@ -592,8 +710,10 @@ reabrir — tudo refletindo via WS sem reload; tudo legível no modo escuro.
 
 1. **Ordem com docs 02 e 03 / FKs para `inboxes` e `users`.**
    - ✅ **DECIDIDO (2026-06-19): P1 — stubs sem FK.** Este plano cria stubs mínimos de `inboxes` e
-     `assignee_user_id` **sem FK**; os docs 02/03 fazem `ALTER` aditivo (e adicionam a FK) depois.
-     Destrava o trabalho sem retrabalho de schema.
+     `assignee_user_id`/`team_id` **sem FK** (NULLABLE); os docs 02/03 fazem `ALTER` aditivo (e
+     adicionam a FK) depois. Destrava o trabalho sem retrabalho de schema. Pela sequência viva, o RBAC
+     (03) entra **antes** deste plano na Onda 3, então `users` provavelmente já existirá — mesmo assim
+     manter a coluna sem FK na migration deste plano por robustez de ordem.
 
 2. **Janela de reabertura (`conversation_reopen_window`).**
    - ✅ **DECIDIDO (2026-06-19): P2 — sempre reabrir a mesma conversa.** Quando o cliente volta a
@@ -611,7 +731,9 @@ reabrir — tudo refletindo via WS sem reload; tudo legível no modo escuro.
 5. **Cascata de IA.**
    - ✅ **DECIDIDO (2026-06-19): P5 (MUDANÇA) — cascata global → inbox → conversa, SEM nível de
      contato.** `contacts.ai_enabled` **sai do gate** (aposentado/ignorado). O toggle passa a agir na
-     **conversa** (`conversations.ai_active`). Ver §5 reescrita.
+     **conversa** (`conversations.ai_active`). FQ2 ancora o toggle de cada nível no lugar certo da UI.
+     **Reframe:** o código está pré-P5 (gate só por `contacts.ai_enabled` em `:844/:870/:991`); este
+     plano reescreve esses 3 sites. Ver §5.
 
 6. **`display_id`: global ou por inbox? Como gerar concorrência-safe?**
    - ✅ **DECIDIDO (2026-06-19): P6 — global, via tabela-contador** (`conversation_counters`) com
@@ -619,7 +741,8 @@ reabrir — tudo refletindo via WS sem reload; tudo legível no modo escuro.
      global, como Chatwoot/Zendesk/Intercom. Ver §1.6.
 
 7. **Auto-resolução por inatividade.**
-   - ✅ **DECIDIDO (2026-06-19): P7 — desligada.** Fica como extra para depois (Fase 2).
+   - ✅ **DECIDIDO (2026-06-19): P7 — desligada.** Fica como extra para depois (Fase 2). Quando entrar,
+     a background task será registrada no `TaskSupervisor` do plano 09 (não criar task hardcoded).
 
 8. **Grupos de WhatsApp (`contacts.is_group=1`).**
    - ✅ **DECIDIDO (2026-06-19): P8 — grupos viram conversa normal E aparecem nas filas com badge de
@@ -629,7 +752,8 @@ reabrir — tudo refletindo via WS sem reload; tudo legível no modo escuro.
 9. **Visibilidade: atendente vê só as dele ou a fila inteira?**
    - ✅ **DECIDIDO (2026-06-19): P9 — membership de inbox (modelo Chatwoot).** Atendente só vê/atua nas
      inboxes em que é membro; fora delas, não vê nada. `conversation.read_all` (admin/gestor) libera
-     tudo. Catálogo de permissões no doc 03.
+     tudo. Catálogo de permissões no doc 03. **Sem `inbox_members`/RBAC, o `list` libera tudo** (degrada
+     para a senha única atual).
 
 10. **Migração de `is_archived`: vira `resolved`?**
     - ✅ **DECIDIDO (2026-06-19): P10 — archive ORTOGONAL ao status.** `is_archived` é flag

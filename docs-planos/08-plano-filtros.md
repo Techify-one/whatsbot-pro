@@ -12,41 +12,100 @@
 
 ---
 
-## 0. Estado atual (pontos de integração reais, confirmados no código)
+## Estado atual (WF1, 2026-06-20)
 
-- **`db/tables.py:41-65`** — `contacts`: hoje só `is_archived`, `is_pinned`, `unread_count`,
-  `has_unread_mention`, `updated_at`. **Não existem** `status`, `assignee_id`, `inbox_id`,
-  `custom_attributes`. As entidades filtráveis são criadas pelos docs 01/02/05.
-- **`db/tables.py:116-131`** — `tags` (`id`, `name` UNIQUE, `color`) + `contact_tags`
-  (N:N `contact_id`/`tag_id`). Já existem. Falta o **filtro por tag** (hoje só exibição/ação
-  em massa). Índice `idx_ct_tag` (`contact_tags.c.tag_id`) ajuda a subquery por tag.
-- **`db/tables.py:207`** — `CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)`:
-  qualquer `Table` novo (ex.: `saved_filters`) entra automaticamente na migração SQLite→Postgres.
-- **`db/repositories/contact_repo.py:360`** — `list_contacts(q, archived)`: monta **SQL raw via
+> Reconciliação verificada `arquivo:linha` em `_RECONCILIACAO-WF1.md §"Plano 08"` (working tree
+> `b673a61`). **Este plano é GREENFIELD: todas as fases estão `nao_feito`.** Nenhum artefato de filtros
+> existe no código (grep vazio: sem `db/filters/*`, sem `GET /api/conversations`, sem `conversation_repo`,
+> sem `FilterBar.js`/`Conversations.js`, sem `saved_filters`/`saved_filter_repo`/`server/routes/saved_filters.py`).
+> O único caminho de filtro hoje é o **degenerado** `q + archived` em `/api/contacts`
+> (`contacts.py:45-48` → `contact_repo.list_contacts:360`).
+
+**Por que o plano permanece como "completude + endurecimento" e não foi reduzido a stub:** o plano
+constrói sobre tabelas que **ainda não existem** (`conversations`, `users`, `custom_attributes`). Logo,
+o valor está na ESPECIFICAÇÃO detalhada (DDL, allowlist anti-injection, tradução dialect-agnóstica,
+endpoints, índices, keyset) que será implementada quando as dependências chegarem. Nada aqui se reconstrói
+do zero — o que existe e pode ser **reaproveitado** está catalogado em §0.
+
+**Posição na sequência viva (relatório §4 / reconciliação §1.3 item 25):** este plano é **Onda 5+**.
+A sequência completa é:
+
+| Onda | Conteúdo | Relação com o 08 |
+|---|---|---|
+| **0** | Endurecimento do que já shippou (pin `agno`, popular `executions`, `server/dev.py`, `CLAUDE.md`) | — |
+| **1** | Plano 09 — `SubprocessService` (fundação runtime) | — |
+| **2** | Retrofit P62 — isolar o code-in-DB sobre o `SubprocessService` | — |
+| **3** | RBAC (03) + Inbox/Conversas (01) | **destrava o valor real do 08** (`conversations`, `users`, `current_user`) |
+| **4** | Completar o motor 06 (binding inbox, handoff/routing) | — |
+| **5+** | 02, 04, 05 (independentes) → **08 entra DEPOIS de 01/05/03** | este plano |
+
+**Legenda de estado por fase (verificado WF1):**
+
+| Fase | Estado | Resumo |
+|---|---|---|
+| **0 — deps (01/02/03/05)** | `nao_feito` | Nenhuma tabela base existe (`grep` vazio em `db/`). |
+| **§1 — módulo `db/filters/*`** | `nao_feito` | Greenfield. Reaproveita switch de dialeto (`db/upsert.py:26-27`) e busca textual (`contact_repo._contact_ids_matching_message:324`). |
+| **1 — MVP (query params)** | `nao_feito` | Sem `GET /api/conversations`. |
+| **2 — query builder (POST /filter)** | `nao_feito` | Sem `POST /api/conversations/filter`. |
+| **3 — views salvas (`saved_filters`)** | `nao_feito` | Sem tabela/repo/rotas. Migration vai para o head real (≥0009). |
+| **4 — refinos (WS/ordenação)** | `nao_feito` | — |
+| **§5–8 — SQL/perf/RBAC/WS** | `nao_feito` | Regras transversais; nada implementado. |
+
+> **Decisões já incorporadas (não re-litigar):** P76, P77, P78, P79, P80, P81 (+ FQ4 que o encerra),
+> P82, P83, P55, P56. As do Lote 3 (P62/P64/P65/P67) **não tocam este plano diretamente** — pertencem
+> aos planos 06/09 — mas a regra de Alembic linear (P82) que elas reforçam vale aqui (ver §4.2).
+
+---
+
+## 0. Pontos de integração reais (confirmados no código, drift de linha corrigido)
+
+> **Drift WF1:** os planos foram escritos sobre um snapshot pré-AGNO. Os offsets antigos estão
+> marcados como ~aprox.; use as âncoras por `grep` (nome de função / rota) na implementação, nunca a
+> linha hardcoded.
+
+- **`db/tables.py:41` (`contacts = Table(...)`)** — `contacts`: hoje só `is_archived`, `is_pinned`,
+  `unread_count`, `has_unread_mention`, `updated_at`. **Não existem** `status`, `assignee_id`,
+  `inbox_id`, `custom_attributes`. As entidades filtráveis são criadas pelos docs 01/02/05.
+- **`db/tables.py:116` (`tags`) / `:125` (`contact_tags`)** — `tags` (`id`, `name` UNIQUE, `color`) +
+  `contact_tags` (N:N `contact_id`/`tag_id`). Já existem. Falta o **filtro por tag** (hoje só
+  exibição/ação em massa). O índice `idx_ct_tag` (`contact_tags.c.tag_id`) ajuda a subquery por tag.
+- **`db/tables.py:324` (`CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)`)** — *(plano
+  citava `:207`; ~117 linhas de drift por causa das tabelas `ai_*` adicionadas no `0007`)*. Qualquer
+  `Table` novo (ex.: `saved_filters`) entra automaticamente na migração SQLite→Postgres.
+- **`db/repositories/contact_repo.py:360` (`def list_contacts(q, archived)`)** — monta **SQL raw via
   `sqlalchemy.text()`** (`SELECT c.*` + LEFT JOIN da última mensagem + subqueries de contagem),
   `WHERE c.is_archived = :archived`. O `q` casa em nome/telefone e, via
-  `_contact_ids_matching_message` (`:324`), no conteúdo de mensagens. **Único critério hoje:
-  archived + texto.** É o ponto a estender/duplicar para o caminho de filtros.
-- **`server/routes/contacts.py:45-53`** — `@app.get("/api/contacts")` →
-  `list_contacts(q="", archived=False)` → `contact_repo.list_contacts`. É onde entram os params
-  novos do MVP.
-- **`server/routes/contacts.py:28`** — `register_routes(app, deps)`; `deps` expõe
-  `agent_handler`, `gowa_client`, `ws_manager`, `state`, `settings`. Padrão de registro de todos
-  os módulos de rota.
-- **`server/app.py:18` / `:304-319`** — import + `*.register_routes(app, deps)`. Um módulo novo
-  (`server/routes/saved_filters.py`) entra aqui.
-- **`db/upsert.py:26-35`** — `_insert_for_current_dialect()` faz `get_engine().dialect.name` →
+  `_contact_ids_matching_message` (`:324`, usada em `:446`), no conteúdo de mensagens. **Único critério
+  hoje: archived + texto.** É o ponto a estender/duplicar para o caminho de filtros — **sem reescrever**.
+- **`server/routes/contacts.py:45-48` (`@app.get("/api/contacts")` → `list_contacts(q="", archived=False)`)**
+  — é onde os params novos do MVP entrariam **se** fosse o endpoint legado; por P76 os filtros novos vão
+  no caminho de conversas, não aqui.
+- **`server/routes/contacts.py:28` (`register_routes(app, deps)`)** — `deps` expõe `agent_handler`,
+  `gowa_client`, `ws_manager`, `state`, `settings`. Padrão de registro de todos os módulos de rota.
+- **`server/app.py:18` (import) / `:328-344` (`*.register_routes(app, deps)`)** — *(plano citava
+  `:304-319`; ~24 linhas de drift)*. Um módulo novo (`server/routes/saved_filters.py`) entra:
+  - import na linha 18 (lista `from server.routes import logs, sandbox, config, … ai_engine`);
+  - chamada `saved_filters.register_routes(app, deps)` no bloco `:328-344` (hoje termina em
+    `ai_engine_routes.register_routes(app, deps)` na `:344`).
+- **`db/upsert.py:26-27` (`_insert_for_current_dialect()` → `get_engine().dialect.name`)** —
   `sqlite`/`postgresql`. **Precedente exato** do switch por dialeto que a §5 (JSON) e os índices
   parciais vão reusar.
-- **`db/alembic/versions/`** — última revisão `0006_contact_mention`
-  (`20260603_0006_contact_mention.py`). Migration novas encadeiam `down_revision` na cadeia certa
-  (ver Dependências). Estilo: `revision`/`down_revision` string, `upgrade()`/`downgrade()`.
-- **Frontend** — `web/static/js/components/contacts/Contacts.js`: `search` (`:17`),
-  `showArchived` (`:28`) + ref (`:284`), `fetchContacts(q)` chama `getContacts(q, showArchived)`
-  (`:287-289`), recarga em `[showArchived]` (`:345`) e debounce 300ms em `[search]` (`:367-371`).
-  `globalTags`/`handleBulkTag` (`:208`) são para ação em massa, não filtro.
-- **`web/static/js/services/api.js:132-137`** — `getContacts(q, archived)` monta query com `q` e
-  `archived` apenas. Ponto a estender (params) / acrescentar `filterConversations(payload)`.
+- **`db/alembic/versions/`** — **cadeia real verificada (HEAD = `0008_plugin_installed_deps`)**:
+  ```
+  0001_baseline → 0002_message_revoked → 0003_message_reactions → 0004_message_reply_to
+    → 0005_contact_pinned → 0006_contact_mention → 0007_ai_engine_tables
+    → 0008_plugin_installed_deps   (HEAD)
+  ```
+  **Os slots 0007 e 0008 JÁ FORAM CONSUMIDOS** (AGNO + `pkg_deps`). A migration `saved_filters`
+  **não** usa 0006/0007/0008 — encadeia linear a partir do head real no momento de implementar (ver §4.2).
+- **Frontend** — `web/static/js/components/contacts/Contacts.js`: `search`, `showArchived` + ref,
+  `fetchContacts(q)` chama `getContacts(q, showArchived)`, recarga em `[showArchived]` e debounce 300ms
+  em `[search]`. `globalTags`/`handleBulkTag` são para ação em massa, não filtro. *(offsets antigos
+  `:17/:28/:284/:287-289/:345/:367-371/:208` aproximados — confirmar por grep; o doc 01 deve criar
+  `Conversations.js` ao lado.)*
+- **`web/static/js/services/api.js`** — `getContacts(q, archived)` monta query com `q` e `archived`
+  apenas *(offset antigo `:132-137`, aproximado)*. Ponto a estender / acrescentar
+  `getConversations(params)` / `filterConversations(payload)`.
 
 **Conclusão:** o filtro de hoje é degenerado (1 booleano + 1 texto). Este plano constrói o
 filtro multi-dimensional **assumindo a conversa como unidade filtrável** (doc 01), com graceful
@@ -61,12 +120,18 @@ degradation enquanto as entidades não existem.
 | Tabela **`conversations`** (`status`, `assignee_user_id`, `inbox_id`, `last_activity_at`, `custom_attributes`) + repo `conversation_repo.list(filters)` | [`01-plano-inbox-e-conversas`] (§1.4, §3.2) | Dimensões R1/R2/R3/R6 vivem na conversa; o filtro JOINa/lê dela | **Fallback degradado**: enquanto `conversations` não existir, filtrar sobre `contacts` (status/assignee/inbox ausentes no `filter-schema`; só `tags`/`last_activity`/`q`/`archived`). Endpoint canônico é `/api/conversations` (P76). |
 | Tabela **`inboxes`** | [`02-canais-e-providers`] (stub no plano 01 §1.1) | Dimensão `inbox_id` e os valores do `filter-schema` | Omitir `inbox` do schema enquanto a tabela não existir. |
 | Tabela **`users`** + `inbox_members` + helper **`current_user`** / `Require` | [`03-plano-rbac-usuarios`] (§3.2 `auth.py`) | `assignee=me` (resolve o id no servidor), recorte por inbox do atendente, `saved_filters.created_by`, scope global=admin | Sem `users`: `assignee` filtra por id cru (`me`/`unassigned` desabilitados ou `me`→501); `saved_filters.created_by` NULLABLE; sem recorte por inbox (instância single-operator). |
-| Tabela **`custom_attribute_definitions`** + coluna JSON `custom_attributes` (`JSON().with_variant(JSONB,"postgresql")`) | [`05-plano-atributos-personalizados`] (§1.1) | Dimensões `cattr:<key>` no schema + tradução JSON→SQL | Omitir `cattr:*` do `filter-schema`; o tradutor ignora `attribute_key` começando com `cattr:` se a coluna não existir. |
+| Tabela **`custom_attribute_definitions`** + coluna JSON `custom_attributes` (`JSON().with_variant(JSONB,"postgresql")` via helper `_json_type()`) | [`05-plano-atributos-personalizados`] (§1.1) | Dimensões `cattr:<key>` no schema + tradução JSON→SQL | Omitir `cattr:*` do `filter-schema`; o tradutor ignora `attribute_key` começando com `cattr:` se a coluna não existir. |
 
-**Ordem recomendada:** docs 01 (conversations) + 05 (custom attrs) + 03 (users) →
-**Fase 1 deste plano** (params simples) → **Fase 2** (payload estruturado) → **Fase 3** (views salvas).
-A Fase 1 pode entregar parcialmente sobre `contacts` se 01 atrasar (graceful), mas o valor real
-exige `conversations`.
+**Estado das dependências (WF1):** `conversations` (01), `inboxes` (02), `users`/`inbox_members`/
+`current_user` (03), `custom_attribute_definitions`/`custom_attributes`/`_json_type()` (05) — **todas
+ausentes hoje** (`nao_feito` em todos os planos respectivos). Bloqueiam o valor real; sem 01 só entrega
+o fallback degradado sobre `contacts`.
+
+**Ordem recomendada (sequência viva):** Onda 3 entrega 03 (`rbac_users`) + 01 (`inbox_conversations`,
+`backfill`); Onda 5+ entrega 05 (`custom_attributes`) e então **este plano**. Dentro do 08:
+**Fase 1** (params simples) → **Fase 2** (payload estruturado) → **Fase 3** (views salvas). A Fase 1
+pode entregar parcialmente sobre `contacts` se 01 atrasar (graceful), mas o valor real exige
+`conversations`.
 
 > **IMPORTANTE — alinhamento de modelagem (decidido, não re-litigar):** o doc 01 já decidiu a tabela
 > `conversations` separada (Chatwoot 3 níveis). Portanto **todo este plano trata "conversa" como
@@ -74,11 +139,11 @@ exige `conversations`.
 > **P76**). O `GET /api/contacts` **NÃO** recebe filtros novos — fica restrito a **`q` e `archived`
 > (legado)** até a migração do frontend para a lista de conversas (doc 01 §6). Os filtros novos são
 > construídos **no caminho de conversas**; reaproveita-se apenas a lógica de busca textual de
-> `contact_repo`.
+> `contact_repo` (`_contact_ids_matching_message:324`).
 
 ---
 
-## 1. Arquitetura do módulo de filtros
+## 1. Arquitetura do módulo de filtros  *(nao_feito — greenfield)*
 
 Criar um módulo **isolado e reutilizável** que traduz a especificação de filtro em cláusulas
 SQLAlchemy Core, consumido tanto pelo endpoint de query params (Fase 1) quanto pelo payload
@@ -149,12 +214,16 @@ OPS = {
 > para SQLite **e** Postgres — caminho dialect-agnóstico natural. Só **tags N:N** e **JSON custom
 > attrs** precisam de tratamento por dialeto/subquery (§5).
 
-**Validação (anti-injection, obrigatória):**
+**Validação (anti-injection, OBRIGATÓRIA — item crítico do plano):**
 
 1. `attribute_key` ∈ `FILTERABLE` (ou `cattr:<key>` com `<key>` ∈ defs do doc 05). Caso contrário → 400.
 2. `operator` ∈ `Dim.ops` daquela dimensão. Caso contrário → 400.
 3. `values` coerência por `kind` (number→float, ts→epoch/relativo, enum→∈valores conhecidos).
 4. **Nunca** interpolar `attribute_key`/`operator` em string SQL; só usar como chave de lookup.
+
+> Esta allowlist é o ponto de segurança nº 1 do plano (registrado na reconciliação §"Plano 08" como
+> "anti-injection crítico"). Toda key/operador vindo do cliente é validado contra o registry **antes**
+> de virar expressão Core — nunca há concatenação de nome de coluna/operador em SQL.
 
 **Critério de pronto (módulo):** teste unitário `tests/test_filters.py` que monta `FilterSpec`
 a partir de (a) query params e (b) payload estruturado, gera o mesmo `WHERE` compilado, e valida
@@ -163,14 +232,14 @@ rejeição de `attribute_key`/operador fora do allowlist. Roda em SQLite e (com
 
 ---
 
-## 2. Fase 1 — Filtros básicos (MVP, query params)
+## 2. Fase 1 — Filtros básicos (MVP, query params)  *(nao_feito)*
 
 **Objetivo:** entregar o grosso do valor (status/assignee/inbox/tags + AND) sobre o endpoint de
 conversas, com risco baixo e sem infra nova além do módulo §1.
 
 ### 2.1 Endpoint
 
-Estender `GET /api/conversations` (criado no doc 01 §3.2 / endpoints §375) com query params:
+Estender `GET /api/conversations` (criado no doc 01) com query params:
 
 ```
 GET /api/conversations?status=open&assignee=me&inbox_id=3&labels=lead,vip&since=7d&q=texto&cursor=...&limit=30
@@ -195,7 +264,7 @@ GET /api/conversations?status=open&assignee=me&inbox_id=3&labels=lead,vip&since=
 ### 2.2 Repositório
 
 Implementar `conversation_repo.list(filters: FilterSpec, *, viewer)` (o doc 01 já reserva
-`list(filters)` em §3.2; este plano define o **contrato `filters` = `FilterSpec`** e a tradução).
+`list(filters)`; este plano define o **contrato `filters` = `FilterSpec`** e a tradução).
 
 - Constrói `select(...)` com JOIN `contacts` (nome/phone/avatar) + `users` (nome do assignee) +
   subquery da última mensagem (espelhando o LEFT JOIN de `contact_repo.list_contacts:360`).
@@ -205,13 +274,13 @@ Implementar `conversation_repo.list(filters: FilterSpec, *, viewer)` (o doc 01 j
 - `ORDER BY last_activity_at DESC, id DESC` + keyset (`WHERE (last_activity_at, id) < (:c_ts, :c_id)`).
 - Retorna `{items: [...], next_cursor: str|None}`.
 
-> O parâmetro hoje em `contact_repo.list_contacts(q, archived)` permanece intocado para a UI legada;
-> a lógica nova vive em `conversation_repo`, não reescreve a função existente.
+> O parâmetro hoje em `contact_repo.list_contacts(q, archived)` (`:360`) permanece **intocado** para a
+> UI legada; a lógica nova vive em `conversation_repo`, não reescreve a função existente.
 
 ### 2.3 Frontend
 
 - `services/api.js`: adicionar `getConversations(params)` (monta querystring a partir de um objeto
-  de filtros) — espelha `getContacts` (`:132`). Manter `getContacts` para o legado.
+  de filtros) — espelha `getContacts`. Manter `getContacts` para o legado.
 - `Contacts.js` (ou novo `Conversations.js` do doc 01): estado `const [filters, setFilters] =
   useState({})`; passar a `fetchContacts`/`fetchConversations`. `showArchived` continua como
   **toggle dedicado** (decisão **P81**) — não vira `status=archived`.
@@ -232,11 +301,11 @@ operadores válidos, e os valores possíveis quando enumeráveis (status fixos; 
 `tag_repo.get_all`). **`archived` é exposto como dimensão no schema** (P81), embora a UI também o
 ofereça via toggle dedicado. Desacopla a UI das migrations.
 
-> *(Pendência de UX, não bloqueante — P81)* a ordenação da lista ainda precisa de esclarecimento:
-> o padrão de inbox é **ordenar por última mensagem (mais recente no topo)**, que é o que este plano
-> assume (`ORDER BY last_activity_at DESC`). O comentário "conversas mais novas não subirem ao chegar
-> mensagem" pediria o contrário (ordem fixa por chegada). A confirmar antes da Fase 4; se mudar,
-> ajustar o `ORDER BY` e o keyset em §2.2/§6.
+> **Ordenação da lista — DECIDIDA (FQ4 encerra P81):** ordenar por **última atividade da conversa,
+> mais recente no topo** (a conversa sobe ao chegar/sair mensagem), válida para todas as abas. É o que
+> este plano assume (`ORDER BY last_activity_at DESC`). O comentário antigo "conversas não subirem ao
+> chegar mensagem" foi **retirado**. (Se um dia se quiser fila estrita por ordem de chegada só em "Não
+> atribuídas", é ajuste futuro no `ORDER BY`/keyset de §2.2/§6.)
 
 **Critério de pronto (Fase 1):** `GET /api/conversations?status=open&assignee=me&labels=lead`
 retorna a lista filtrada e paginada; `filter-schema` lista exatamente as dimensões presentes;
@@ -245,7 +314,7 @@ cobrindo filtros por status, assignee (me/unassigned/id), inbox, labels e `since
 
 ---
 
-## 3. Fase 2 — Query builder estruturado (payload Chatwoot) + OR + custom attrs
+## 3. Fase 2 — Query builder estruturado (payload Chatwoot) + OR + custom attrs  *(nao_feito)*
 
 **Objetivo:** OR explícito, atributos custom (doc 05), uniformidade entre campos nativos e custom,
 e base para views salvas.
@@ -296,7 +365,7 @@ Grupos OR aninhados só entram se houver demanda real (Fase 4 opcional).
 
 A coluna é `conversations.custom_attributes` / `contacts.custom_attributes`, tipada
 `JSON().with_variant(JSONB(), "postgresql")` (doc 05 §1). Extração via helper com switch por
-dialeto (precedente: `db/upsert.py:26`):
+dialeto (precedente: `db/upsert.py:26-27`):
 
 ```py
 def cattr_expr(conn, key: str, *, scope="conversation"):
@@ -316,9 +385,9 @@ def cattr_expr(conn, key: str, *, scope="conversation"):
 ### 3.4 Tags N:N (R4) — subquery (idêntico nos dois bancos)
 
 **Decisão P77: reusar a tag do contato para a conversa** — NÃO criar `conversation_tags` no MVP.
-Sem JSON: subquery sobre `contact_tags` + `tags` (já existem). A tag da conversa = tag do contato
-dono, então a cláusula casa `conversations.contact_id IN (subquery)`. (`conversation_tags` separada
-fica para o futuro, só se o produto pedir labels por conversa.)
+Sem JSON: subquery sobre `contact_tags` + `tags` (já existem em `db/tables.py:116/125`). A tag da
+conversa = tag do contato dono, então a cláusula casa `conversations.contact_id IN (subquery)`.
+(`conversation_tags` separada fica para o futuro, só se o produto pedir labels por conversa.)
 
 ```py
 def tag_clause(op, names):
@@ -340,7 +409,7 @@ operador/atributo inválido com 400.
 
 ---
 
-## 4. Fase 3 — Views / segmentos salvos
+## 4. Fase 3 — Views / segmentos salvos  *(nao_feito)*
 
 ### 4.1 Tabela `saved_filters` (`db/tables.py`)
 
@@ -350,11 +419,11 @@ saved_filters = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False),
     Column("scope", Text, nullable=False, server_default="user"),   # 'user' | 'global' (P79 — sem team/inbox no MVP)
-    Column("created_by", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True),  # doc 03 (nullable até existir)
+    Column("created_by", Integer, nullable=True),  # doc 03 — FK p/ users.id só quando a tabela existir (ver nota abaixo)
     Column("query_json", _json_type(), nullable=False),            # o payload §3.1 (JSON nativo; JSONB no PG)
     Column("sort", Text, nullable=False, server_default="-last_activity"),
     Column("position", Integer, nullable=False, server_default="0"),
-    Column("created_at", Float, nullable=False),                   # epoch float (padrão do projeto)
+    Column("created_at", Float, nullable=False),                   # epoch float (P56 — padrão do projeto)
     Column("updated_at", Float, nullable=False),
 )
 Index("idx_saved_filters_owner", saved_filters.c.created_by, saved_filters.c.scope)
@@ -362,17 +431,30 @@ Index("idx_saved_filters_owner", saved_filters.c.created_by, saved_filters.c.sco
 
 - `query_json` usa o helper `_json_type()` (`JSON().with_variant(JSONB,"postgresql")`) introduzido
   pelo doc 05 — **não** serializar à mão como `Text` (segue o precedente de `custom_attributes`).
-  Se o doc 05 ainda não tiver criado o helper, replicá-lo localmente em `db/tables.py`.
-- `created_at`/`updated_at` epoch `Float` (padrão do projeto, não `Text`).
-- `CORE_TABLES` (`db/tables.py:207`) inclui automaticamente — cobre a migração SQLite→Postgres.
+  Se o doc 05 ainda não tiver criado o helper, replicá-lo localmente em `db/tables.py`. *(Hoje
+  `db/tables.py` só tem JSON-as-Text em `messages.reactions:92`; o `_json_type()` ainda não existe —
+  é entregue pelo doc 05, ou replicado aqui.)*
+- `created_at`/`updated_at` epoch `Float` (**P56**, padrão do projeto, não `Text`).
+- **`created_by` — FK condicional**: declarar como `Integer` puro (sem `ForeignKey`) enquanto a tabela
+  `users` (doc 03) não existir na mesma `MetaData`. Um `ForeignKey("users.id")` para uma tabela ausente
+  passa na definição do `Table`, mas **quebra no `create_all`/migration** (a constraint referencia um
+  alvo inexistente). Adicionar o FK via `ALTER TABLE` (ou na própria migration) só depois que o doc 03
+  criar `users`. No MVP single-operator a coluna fica `NULL`.
+- `CORE_TABLES` (`db/tables.py:324`) inclui automaticamente — cobre a migração SQLite→Postgres.
 
-### 4.2 Migration Alembic
+### 4.2 Migration Alembic  *(encadeamento linear — P82, corrigido)*
 
 `db/alembic/versions/<data>_<n>_saved_filters.py`:
 
-- `down_revision` = a última revisão na cadeia (encadear **depois** das migrations dos docs 01/05).
-  **Encadeamento linear** (decisão **P82**): ao implementar, setar `down_revision` para o head real
-  do repositório naquele momento. **Sem branches Alembic.**
+- `down_revision` = **head real no momento de implementar** (hoje `0008_plugin_installed_deps`);
+  número = **próximo livre (≥ 0009)**. **NUNCA** usar 0006/0007/0008 como slot novo — eles já foram
+  consumidos (`0006_contact_mention`, `0007_ai_engine_tables`, `0008_plugin_installed_deps`) e
+  ramificar a cadeia **quebra o boot** (`alembic upgrade head` viraria branch).
+- **Coordenação inter-planos (P82):** este plano é **Onda 5+**, depois de 01 (`inbox_conversations`
+  → 0009, `backfill_conversations` → 0010) e 05 (`custom_attributes`). Então, na ordem real provável,
+  `saved_filters` **não** será 0009: encadeia no head produzido pelas migrations de 01/05 que entrarem
+  antes. **Regra prática:** rode `alembic heads` no momento de implementar, aponte `down_revision` para
+  o que sair, e use o próximo número sequencial livre. **Sem branches Alembic.**
 - `upgrade()`: `op.create_table("saved_filters", ...)` (escrever **à mão**, autogenerate não acerta
   `with_variant`/`server_default` JSON — espelhar `20260603_0005_contact_pinned.py`) + os índices.
 - `downgrade()`: `op.drop_table("saved_filters")`.
@@ -404,8 +486,9 @@ def reorder(ids: list[int]) -> None                    # position
 | POST | `/api/saved-filters/reorder` | Reordena no sidebar. |
 | POST | `/api/conversations/filter` | aceita `{"view_id": N}` como atalho (carrega `query_json` da view). |
 
-- Registrar no padrão: import na `server/app.py:18` + `saved_filters.register_routes(app, deps)`
-  junto das demais (`:304-319`).
+- Registrar no padrão: import na `server/app.py:18` (lista `from server.routes import …`) +
+  `saved_filters.register_routes(app, deps)` junto das demais no bloco **`server/app.py:328-344`**
+  *(plano antigo citava `:304-319` — drift de ~24 linhas)*.
 - RBAC: `scope=global` create/update/delete → `Depends(Require("..."))` admin (doc 03); resolver
   tempos relativos **na execução**, não na gravação.
 
@@ -429,7 +512,7 @@ relativos reavaliados a cada aplicação; bloco em `tests/test_endpoints.py` cob
 - **Tudo via SQLAlchemy Core** (`Table` objects de `db/tables.py`, bind params nomeados). Nunca
   `sqlite3` direto nem `?`/`%s`. Leitura `with get_engine().connect()`, escrita `.begin()`.
 - Operadores nativos (`==`, `.in_`, `.isnot`, `>`, `.between`, `.contains`) — dialect-agnósticos.
-- **Único switch por dialeto**: JSON custom attrs (`cattr_expr`, §3.3) — precedente `db/upsert.py:26`.
+- **Único switch por dialeto**: JSON custom attrs (`cattr_expr`, §3.3) — precedente `db/upsert.py:26-27`.
 - Tags N:N via subquery (§3.4) — idêntico nos dois bancos.
 - `_json_type()` (`JSON().with_variant(JSONB,"postgresql")`) para `saved_filters.query_json` e
   (do doc 05) para `custom_attributes` — **reatribuir o dict inteiro** no UPDATE (JSON não detecta
@@ -453,7 +536,7 @@ relativos reavaliados a cada aplicação; bloco em `tests/test_endpoints.py` cob
   backend de referência do Pro e filtros por custom attrs **podem exigi-lo** quando o volume crescer
   — JSONB+GIN é a solução boa, não contorcida pelo SQLite. **SQLite degrada com elegância**: sem
   GIN, usa *expression index* só para os campos `filterable` (`json_extract(custom_attributes,
-  '$.plano')` — P55, decidido junto deste plano) ou, em último caso, promover a coluna real
+  '$.plano')` — **P55**, decidido junto deste plano) ou, em último caso, promover a coluna real
   (decisão do doc 05). O `filter-schema` continua anunciando `cattr:*` nos dois; só a performance
   difere.
 - **Keyset pagination obrigatória** por `(last_activity_at, id)` (não `OFFSET` grande) — mantém o uso
@@ -481,6 +564,11 @@ lista responde paginada via cursor.
 - Enquanto o doc 03 não entregar `users`/`inbox_members`: instância single-operator, sem recorte;
   `assignee=me` → 501/no-op; `created_by` NULLABLE.
 
+> **Estado WF1:** `server/auth.py` ainda é **SHA-256 + senha única** (sem `users`, sem Argon2id, sem
+> `current_user`/`Require`). Todo o recorte desta seção fica como fallback single-operator até o
+> plano 03 (Onda 3) chegar. **Preservar as isenções `/api/webhook` e `/health`** quando o RBAC mexer
+> no `auth_middleware` (o GOWA posta sem credencial) — invariante crítico do plano 03.
+
 **Critério de pronto:** com doc 03 presente, atendente não-admin vê só conversas dos seus inboxes
 mesmo pedindo `inbox_id` de outro; admin vê tudo; teste em `tests/test_endpoints.py`.
 
@@ -500,13 +588,13 @@ mesmo pedindo `inbox_id` de outro; admin vê tudo; teste em `tests/test_endpoint
 
 ## 9. Faseamento (resumo) e critérios de pronto
 
-| Fase | Entrega | Critério de pronto |
-|---|---|---|
-| **0** (deps) | docs 01/02/05/03 criam colunas/tabelas/índices/`current_user` | `alembic upgrade head` cria `conversations`+`custom_attributes`+`users`; `tests/test_endpoints.py` verde |
-| **1 — MVP** | módulo `db/filters/*`, `GET /api/conversations` com params (status/assignee/inbox/labels/since/q), `filter-schema`, chips na UI, índices, keyset pagination | Lista filtrada+paginada; schema reflete o que existe; bloco de testes de filtros |
-| **2 — Query builder** | `POST /api/conversations/filter` (payload Chatwoot), AND/OR plano, `cattr:*` (SQLite+PG), tags set-ops, drawer avançado | Payload traduz nos dois bancos; rejeita inválidos com 400 |
-| **3 — Views salvas** | `saved_filters` + migration + repo + endpoints CRUD/reorder + UI salvar/listar, scope user/global RBAC | CRUD + aplicação 1-clique + scope global só admin |
-| **4 — Refinos** | atualização de view em tempo real via WS, ordenação configurável, (se houver demanda) grupos OR aninhados estilo Linear | Views reagem a eventos WS sem refetch |
+| Fase | Estado WF1 | Entrega | Critério de pronto |
+|---|---|---|---|
+| **0** (deps) | `nao_feito` | docs 01/02/05/03 criam colunas/tabelas/índices/`current_user` | `alembic upgrade head` cria `conversations`+`custom_attributes`+`users`; `tests/test_endpoints.py` verde |
+| **1 — MVP** | `nao_feito` | módulo `db/filters/*`, `GET /api/conversations` com params (status/assignee/inbox/labels/since/q), `filter-schema`, chips na UI, índices, keyset pagination | Lista filtrada+paginada; schema reflete o que existe; bloco de testes de filtros |
+| **2 — Query builder** | `nao_feito` | `POST /api/conversations/filter` (payload Chatwoot), AND/OR plano, `cattr:*` (SQLite+PG), tags set-ops, drawer avançado | Payload traduz nos dois bancos; rejeita inválidos com 400 |
+| **3 — Views salvas** | `nao_feito` | `saved_filters` + migration (head real, ≥0009) + repo + endpoints CRUD/reorder + UI salvar/listar, scope user/global RBAC | CRUD + aplicação 1-clique + scope global só admin |
+| **4 — Refinos** | `nao_feito` | atualização de view em tempo real via WS, ordenação configurável, (se houver demanda) grupos OR aninhados estilo Linear | Views reagem a eventos WS sem refetch |
 
 ---
 
@@ -515,16 +603,22 @@ mesmo pedindo `inbox_id` de outro; admin vê tudo; teste em `tests/test_endpoint
 (consolidado — ver tabela detalhada no topo)
 
 1. **`conversations` + `conversation_repo.list(filters)`** — doc 01 (bloqueante para o valor real;
-   fallback degradado sobre `contacts`).
-2. **`inboxes`** — doc 02 (stub no doc 01); sem ela, omitir `inbox` do schema.
+   fallback degradado sobre `contacts`). *(Onda 3)*
+2. **`inboxes`** — doc 02 (stub no doc 01); sem ela, omitir `inbox` do schema. *(Onda 5+)*
 3. **`users` + `inbox_members` + `current_user`/`Require`** — doc 03 (`assignee=me`, recorte por
-   inbox, `saved_filters.created_by`, scope global).
+   inbox, `saved_filters.created_by`, scope global). *(Onda 3)*
 4. **`custom_attribute_definitions` + `custom_attributes` JSON + `_json_type()`** — doc 05
-   (`cattr:*` + `query_json`).
+   (`cattr:*` + `query_json`). *(Onda 5+)*
+
+> **Migration `saved_filters` (P82):** `down_revision` = head real no momento de implementar
+> (≥0009, depois de 01 `inbox_conversations`/`backfill` e 05 `custom_attributes`). Rodar
+> `alembic heads` na hora; **não** usar 0006/0007/0008. Ver §4.2.
 
 ---
 
 ## Perguntas em aberto
+
+> Todas decididas (DECISOES.md §Tema H). Mantidas aqui para rastreabilidade.
 
 1. **Endpoint canônico: `/api/conversations` ou estender `/api/contacts`?**
    - **✅ DECIDIDO (2026-06-19): (a)** (P76) — filtros canônicos só em `/api/conversations`;
@@ -549,13 +643,15 @@ mesmo pedindo `inbox_id` de outro; admin vê tudo; teste em `tests/test_endpoint
 
 6. **`archived`: filtro ou toggle dedicado?**
    - **✅ DECIDIDO (2026-06-19): (a)** (P81) — **manter o toggle dedicado** + expor `archived`
-     como dimensão no `filter-schema`. Incorporado nas §2.3/§2.4. *(Ordenação da lista — "conversas
-     não subirem ao chegar mensagem" — ainda a esclarecer; o padrão de inbox é ordenar por última
-     mensagem, mais recente no topo. Ver §6/§8.)*
+     como dimensão no `filter-schema`. Incorporado nas §2.3/§2.4. **Ordenação encerrada por FQ4**:
+     ordenar por última atividade, mais recente no topo — a conversa sobe ao chegar mensagem.
+     Comentário "não subir" **retirado**. Ver §2.4/§6/§8.
 
 7. **Encadeamento de revisões Alembic.**
    - **✅ DECIDIDO (2026-06-19): (a)** (P82) — encadeamento **linear**; ao implementar, setar
-     `down_revision` para o head real do repositório naquele momento. Sem branches. Incorporado na §4.2.
+     `down_revision` para o **head real do repositório naquele momento** (hoje
+     `0008_plugin_installed_deps`; na prática ≥0009 depois de 01/05). Sem branches. **Nunca** reusar
+     0006/0007/0008 (já consumidos). Incorporado na §4.2.
 
 8. **Filtros expostos ao agente LLM como tool?**
    - **✅ DECIDIDO (2026-06-19): (a)** (P83) — **fora de escopo** agora; ideia registrada. A infra

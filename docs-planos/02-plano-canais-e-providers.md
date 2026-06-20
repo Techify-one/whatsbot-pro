@@ -1,78 +1,162 @@
 # Plano de Implementação — 02: Canais e Providers (abstração, capacidades de runtime, GOWA-plugin, multi-número)
 
 > Plano de execução derivado de [`docs-pesquisa/02-canais-e-providers.md`](../docs-pesquisa/02-canais-e-providers.md).
-> Escopo deste plano: **abstração genérica de canal/provider** (contrato + registry no core), as **3
-> capacidades de runtime CORE** (i lifecycle de plugin aguardado, ii supervisor de tasks de fundo, iii
-> serviço de subprocesso gerenciado), **extração do GOWA para provider-plugin** (`storages/plugins/gowa/`),
-> **suporte a multi-número**, e os **primeiros consumidores** (provider de teste + WhatsApp Cloud API
-> webhook-only). Respeita o sequenciamento decidido: (i)+(ii) primeiro com provider barato sem
-> subprocesso → (iii) + GOWA por último.
+> Escopo deste plano: **abstração genérica de canal/provider** (contrato + registry no core), o **consumo
+> das 3 capacidades de runtime CORE** (i lifecycle de plugin aguardado, ii supervisor de tasks de fundo,
+> iii serviço de subprocesso gerenciado — todas **entregues pelo plano 09**), **extração do GOWA para
+> provider-plugin** (`storages/plugins/gowa/`), **suporte a multi-número**, e os **primeiros consumidores**
+> (provider de teste + WhatsApp Cloud API webhook-only).
 >
 > **NÃO está no escopo deste plano** (vive em outros planos): o modelo de inbox/conversa de 3 níveis
 > (Contact → ContactInbox → Conversation) — ver `01-inbox-e-conversas.md`; RBAC/usuários — ver
-> `03-rbac-usuarios-permissoes.md`; motor multiagente/code-in-DB — ver `06`. Este plano referencia esses
-> pontos de integração mas não os implementa.
+> `03-rbac-usuarios-permissoes.md`; motor multiagente/code-in-DB — ver `06`; a **fundação de runtime**
+> (`runtime/supervisor.py`, `runtime/subprocess_service.py`, lifecycle aguardado de plugin) — ver
+> `09-plano-fundacao-runtime.md`. Este plano **consome** essas capacidades e referencia os pontos de
+> integração, mas não as implementa.
+
+---
+
+## Estado atual (WF1, 2026-06-20)
+
+> Reconciliado contra o working tree em `b673a61` (ver `_RECONCILIACAO-WF1.md §"Plano 02"`). Verificação
+> estática por `grep`/`ls` com evidência `arquivo:linha`. **Resumo: greenfield (5/5 fases `nao_feito`).**
+> Nada do pacote `channels/`, do `ChannelRegistry`, do ponto de extensão `entry.channels`, das tabelas
+> `channels`/`channel_credentials`, do pacote `runtime/`, do plugin `whatsapp_cloud` ou de
+> `server/routes/channels.py` existe. O `gowa/` segue **monolítico no core**, com **device singleton**.
+
+### Legenda de fases
+
+| Fase | Estado | Observação |
+|---|---|---|
+| **0** — Abstração `Channel` + registry + tabelas + `entry.channels` + migração "1 canal default" | ⬜ **nao_feito** | `ls channels/` → inexistente; `db/tables.py` tem 20 `Table` (13 originais + 7 `ai_*`), sem `channels`/`channel_credentials`; loader (`plugins/loader.py:188`) não reconhece `entry.channels`; webhook único em `server/routes/webhook.py:1093` (`@app.post("/api/webhook")`). |
+| **1** — Consumir (i) lifecycle aguardado + (ii) supervisor; provider de teste valida ambos | ⬜ **nao_feito** | Depende do plano 09 (Fases 1–3). `plugins/loader.py` não reconhece `entry.lifecycle`; `plugins/context.py:34` (`set_runtime`) não expõe loop/stop_event/cleanups; 4 tasks core ainda hardcoded em `server/app.py:188-191` e canceladas sem `await` (`:198`). |
+| **2** — WhatsApp Cloud API como provider-plugin webhook-only | ⬜ **nao_feito** | Sem `storages/plugins/whatsapp_cloud/`, sem `WhatsAppCloudChannel`, sem `ChannelsManager.js`. |
+| **3** — Consumir (iii) subprocesso gerenciado + extrair GOWA p/ plugin + multi-número | ⬜ **nao_feito** | Depende do plano 09 (Fase 4, `SubprocessService`). GOWA singleton: `gowa/client.py:12` (`_DEFAULT_DEVICE_NAME`), `:52` (`self.device_id` fixo), `:57` (`X-Device-Id` sempre igual), `:142` (`ensure_device` pega `devices[0]`). `gowa/manager.py` com `Popen` cru, sem process-group/pdeathsig/killpg/stale-kill. |
+| **4** — Telegram e demais providers (esboço) | ⬜ **nao_feito** | Fora do escopo de implementação; preparado pelo ponto de extensão. |
+
+### Onde este plano entra na sequência viva (relatório §4)
+
+> Ondas: **0** = endurecimento do que já shippou · **1** = plano 09 (`SubprocessService`) · **2** =
+> retrofit P62 (isolar code-in-DB) · **3** = RBAC (03) + Inbox (01) · **4** = completar 06 · **5+** =
+> **02 (este plano)**, 04, 05 (independentes) · 08 (após 01/05/03).
+
+Este plano é **Onda 5+**. Ele tem **duas dependências fortes que mudam o sequenciamento interno**:
+
+1. **Fases 1 e 3 dependem do plano 09 (Onda 1).** O lifecycle aguardado de plugin
+   (`plugins/lifecycle.py`, `PluginContext`/`on_unload`, teardown antes do `os._exit`), o
+   `TaskSupervisor` e o `SubprocessService` são **entregues pelo plano 09**, não por este. Quando este
+   plano chegar à fila (Onda 5+), o plano 09 **já terá entregue** essas capacidades; aqui só as
+   **consumimos** via `ctx`. **A Fase 0 (abstração + tabelas + registry) é autocontida e pode adiantar**
+   — só não fecha o ciclo de provider-plugin sem o runtime.
+2. **A FK `conversation.channel_id → channels.id` é do plano 01.** A migration `channels` deste plano
+   (`0009`+) **deve vir antes** da migration de conversas do plano 01 — coordenar a ordem (ver
+   "Dependências de outros planos").
 
 ---
 
 ## 0. Estado atual do código (baseline real, verificado)
 
-Pontos cravados que este plano vai mexer:
+> ⚠️ **Drift de linhas.** Os offsets abaixo foram reconfirmados por `grep` em `b673a61`. Onde divergem do
+> snapshot pré-AGNO original do plano, foram **corrigidos**. Na implementação, **âncore por `grep`** (nome
+> de função / registro de rota), nunca por número fixo — os offsets podem ter andado de novo.
 
-- **`main.py:48-71`** — instancia `GOWAManager(port, data_dir, webhook_url)`, `GOWAClient(port)`,
-  `AgentHandler(...)` e chama `create_app(settings, gowa_manager, gowa_client, agent_handler)`. Tudo
+Pontos cravados que este plano vai mexer (todos no estado **monolítico/singleton** atual):
+
+- **`main.py:48-73`** — importa e instancia `GOWAManager(port, data_dir, webhook_url)` (`:57`),
+  `GOWAClient(port)` (`:58`), `AgentHandler(...)` (`:60`) e chama `create_app(...)` (`:73`). Tudo
   singleton de 1 número.
 - **`gowa/manager.py`** — 1 `subprocess.Popen`, porta fixa, watchdog em thread daemon com rate-limit
-  (3 restarts/60s, `_max_restarts`/`_restart_window_sec` em `__init__`, linhas 45-48). `start()` monta
-  `--webhook <url>` único (linhas 68-90). `stop()` faz terminate→kill (sem process group, sem
-  die-with-parent). Limpeza de órfãos é externa (`pkill -f bin/gowa` no `linux_start.sh`).
-- **`gowa/client.py:12,52,57`** — `_DEFAULT_DEVICE_NAME = "whatsbot"`, `self.device_id` fixo,
-  `_headers` injeta `X-Device-Id` sempre o mesmo. `ensure_device()` (linhas 112-141) pega
-  `devices[0]` se houver — singleton de 1 device.
-- **`server/app.py`** — `ServerDeps` (linhas 46-60) carrega `gowa_manager`/`gowa_client` globais.
-  `create_app` faz discovery de plugins (linhas 84-101) e registra tools/prompts/events/filters. O
-  **lifespan** (linhas 142-183) cria 4 tasks HARDCODED numa lista local
-  (`start_gowa_task`, `status_poll_loop`, `qr_poll_loop`, `avatar_fetch_task` — linhas 163-168) e no
-  shutdown faz `task.cancel()` + `gowa_manager.stop()`. `group_mentions.init(gowa_client)` na linha 128.
-- **`server/routes/webhook.py:1065-1066`** — endpoint único `@app.post("/api/webhook")`. Usa
-  `gowa_client = deps.gowa_client` (linha 421) para responder — sempre o mesmo número. Parsing não lê
-  `device_id`.
-- **`plugins/loader.py`** — `_load_plugin_module` (linhas 166-260) reconhece `entry.tools`,
-  `entry.prompts`, `entry.events`, `entry.filters`, `entry.routes`, `entry.settings`. **Não existe**
-  `entry.channels`. **Não existe** gancho `setup()`/`teardown()`. O loader só importa o módulo.
-- **`plugins/manifest.py`** — `PluginManifest` (linhas 25-46) e `_build_manifest`. `entry` é
-  `dict[str,str]`. Não há campo de canais.
-- **`plugins/context.py`** — `set_runtime(ws_manager, loop)` (linha 34) + `broadcast`. `ToolContext`,
-  `PromptContext`, `EventContext`, `FilterContext`. **Não expõe** loop nem `stop_event` nem registro de
-  cleanup ao plugin.
-- **`plugins/restart.py`** — `schedule_restart()` toca trigger + `os._exit(0)` após 1.5s (linha 78).
-  `os._exit` **pula** finalizers → subprocesso de plugin viraria órfão.
-- **`plugins/events.py`** — `emit()` (linha 129) usa `run_coroutine_threadsafe(_fanout())` **sem**
-  `.result()` → fire-and-forget. `app.startup`/`app.shutdown` em `emit_with_filter` BYPASS lists
-  (linhas 53,79). Shutdown não aguarda handlers.
-- **`server/background.py`** — `start_gowa_task`, `status_poll_loop`, `qr_poll_loop` (loop em
-  `while not state.stop_event.is_set()`), `avatar_fetch_task` (`AVATAR_REFRESH_INTERVAL=1800`).
-- **`db/tables.py`** — 13 `Table` objects; última migration `20260603_0006_contact_mention.py`.
+  (3 restarts/60s, `_max_restarts=3`/`_restart_window_sec=60` em `__init__`, `:46-48`). `start()` (`:55`)
+  monta `--webhook <url>` único (`:74`) e `--webhook-events` (`:79`). `stop()` (`:137`) faz terminate→kill
+  (sem process group, sem die-with-parent). `_watchdog()` (`:169`) tem a lógica de rate-limit reaproveitável
+  (`:182-197`). Há `CREATE_NO_WINDOW` (`:102`) — **vira no-op POSIX** ao extrair (P29). Limpeza de órfãos é
+  externa (`pkill -f bin/gowa` no `linux_start.sh`).
+- **`gowa/client.py`** — `_DEFAULT_DEVICE_NAME = "whatsbot"` (`:12`), `self.device_id` fixo (`:52`),
+  `_headers` injeta `X-Device-Id` sempre o mesmo (`:57`). `ensure_device()` (`:127`) pega `devices[0]`
+  (`:142-145`) se houver — singleton de 1 device.
+- **`server/app.py`** — `ServerDeps` (`:48`) carrega `gowa_manager`/`gowa_client` globais. `create_app`
+  faz discovery de plugins (`:93`) e no loop de wiring (`:94-98`) registra tools/prompts (events/filters
+  em blocos adjacentes). `group_mentions.init(gowa_client)` no `:152`. O **lifespan** (`async def lifespan`
+  no `:167`) cria 4 tasks **HARDCODED** numa lista local (`start_gowa_task`, `status_poll_loop`,
+  `qr_poll_loop`, `avatar_fetch_task` — `:188-191`) e no shutdown faz `task.cancel()` (`:198`, **sem
+  await**) + `gowa_manager.stop()` (`:204`). `_AUTH_EXEMPT_PREFIXES` (`:231`), `_AUTH_EXEMPT_EXACT`
+  (`:232`, já contém `/api/webhook`), `_SPA_PATHS` (`:239`), `auth_middleware` (`:245`). Registro de rotas
+  (ex.: `admin_routes.register_routes` no `:343`); loop de `include_router` de plugins no `:347-349`.
+- **`server/routes/webhook.py`** — endpoint único `async def webhook(body)` (`:1094`) sob
+  `@app.post("/api/webhook")` (`:1093`). Usa `gowa_client = deps.gowa_client` (`:421`) para responder —
+  sempre o mesmo número (sites de send/presence/read em `:505,524,651,849,880,1017,…`). O **parsing
+  inbound** vive numa cadeia de `if media_type is None:` (`:43-313`+) e na lógica do handler até ~`:1480`;
+  o payload **não lê `device_id`**. Arquivo tem 1909 linhas.
+- **`plugins/loader.py`** — `LoadedPlugin` (`:33`); `_load_plugin_module` (`:188`) reconhece
+  `entry.tools` (`:198-211`), `entry.prompts` (`:213`), `entry.events` (`:222`), `entry.filters` (`:242`),
+  `entry.routes` (`:264`), `entry.settings` (`:270`). **Não existe** `entry.channels`. **Não existe**
+  `entry.lifecycle` (gancho `setup()`/`teardown()`). O loader só importa o módulo.
+- **`plugins/manifest.py`** — `PluginManifest` (`:26`); `entry` é `dict[str,str]` (`:35`), normalizado em
+  `_build_manifest` (`:91`, `entry_str` no `:118`). `to_public_dict` (`:48`). Não há campo de canais.
+- **`plugins/context.py`** — `set_runtime(ws_manager, loop)` (`:34`) + `broadcast` (`:41`). `ToolContext`
+  (`:74`), `PromptContext` (`:94`), `EventContext` (`:107`), `FilterContext` (`:125`). **Não expõe** loop
+  nem `stop_event` nem registro de cleanup ao plugin.
+- **`plugins/restart.py`** — `schedule_restart()` (`:42`) toca trigger + `os._exit(0)` (`:78`) após delay.
+  `os._exit` **pula** finalizers → subprocesso de plugin viraria órfão. **Não há** `on_before_exit`/
+  `run_teardown` (o gancho de teardown vem do plano 09).
+- **`plugins/events.py`** — `KNOWN_EVENTS` (`:39`); `app.startup`/`app.shutdown` em BYPASS lists (`:53`,
+  `:79`). `emit()` (`:129`) usa `run_coroutine_threadsafe(_fanout())` **sem** `.result()` → fire-and-forget
+  (`:172`). Shutdown não aguarda handlers.
+- **`server/background.py`** — `start_gowa_task` (`:19`), `status_poll_loop` (`:47`, loop em
+  `while not state.stop_event.is_set()` — `:55`), `qr_poll_loop` (`:136`), `avatar_fetch_task` (`:174`,
+  `AVATAR_REFRESH_INTERVAL=1800` — `:14`).
+- **`db/tables.py`** — **20** `Table` objects (13 originais + 7 `ai_*`: `ai_agents`/`ai_prompts`/
+  `ai_variables`/`ai_tools` + 3 `*_history`, a partir de `:222`). Última migration da cadeia:
+  `20260619_0008_plugin_installed_deps.py` (**HEAD**).
+
+---
+
+## Cadeia Alembic real e numeração (P82) — LEIA ANTES DE GERAR MIGRATION
+
+**Cadeia atual verificada** (`db/alembic/versions/`):
+
+```
+0001_baseline → 0002_message_revoked → 0003_message_reactions → 0004_message_reply_to
+  → 0005_contact_pinned → 0006_contact_mention → 0007_ai_engine_tables → 0008_plugin_installed_deps  (HEAD)
+```
+
+> **Os slots `0007` e `0008` JÁ FORAM CONSUMIDOS** (`ai_engine_tables` = AGNO; `plugin_installed_deps`
+> = pkg_deps), **após** a redação original deste plano. O plano antigo reservava `20260618_0007_channels.py`
+> — esse número **colide**. **NÃO** usar 0006/0007/0008 como slot novo: ramifica a cadeia e **quebra o boot**
+> (`alembic upgrade head` com duas cabeças).
+>
+> **Regra P82 (linear):** a migration `channels` deste plano usa
+> **`down_revision = head real no momento de implementar (hoje `0008_plugin_installed_deps`); número =
+> próximo livre (≥ 0009)`.** Como a sequência viva coloca 09 (sem migration) → 03 (`rbac_users`) → 01
+> (`inbox_conversations`/`backfill`) → 06 (`ai_agent_links`) **antes** deste plano, na prática o head real
+> quando este plano for implementado **muito provavelmente já será > 0008** — encadeie no head **daquele
+> momento**, não num número fixo. O nome de arquivo segue o padrão `AAAAMMDD_000N_channels.py`.
+
+Este plano cria **uma única migration** (`channels`). Se uma evolução futura precisar de uma 2ª migration,
+ela encadeia **na 1ª** (`down_revision = <a migration channels que acabou de entrar>`).
 
 ---
 
 ## Visão geral das fases
 
-| Fase | Entrega | Capacidade de runtime | Critério de pronto (resumo) |
+| Fase | Entrega | Capacidade de runtime (do plano 09) | Critério de pronto (resumo) |
 |---|---|---|---|
-| **0** | Contrato `Channel` + `ChannelRegistry` + tabelas `channels`/`channel_credentials` + ponto de extensão `entry.channels` no loader + migração "1 canal default" | — | Core fala com a interface; instalação atual roda como 1 canal GOWA via registry; um plugin pode registrar um provider |
-| **1** | Capacidade (i) lifecycle aguardado + (ii) supervisor de tasks; **provider de teste** valida ambos | (i)+(ii) | Provider de teste (plugin) sobe um loop gerenciado, é cancelado limpo no disable/shutdown |
+| **0** | Contrato `Channel` + `ChannelRegistry` + tabelas `channels`/`channel_credentials` + ponto de extensão `entry.channels` no loader + migração "1 canal default" | — (autocontida) | Core fala com a interface; instalação atual roda como 1 canal GOWA via registry; um plugin pode registrar um provider |
+| **1** | Consumir (i) lifecycle aguardado + (ii) supervisor de tasks; **provider de teste** valida ambos | (i)+(ii) — **plano 09 Fases 1–3** | Provider de teste (plugin) sobe um loop gerenciado, é cancelado limpo no disable/shutdown |
 | **2** | WhatsApp Cloud API como provider-plugin webhook-only | consome (i) | Cloud API conecta por token, recebe e responde dentro da janela 24h; tokens em **texto puro** (sem cifragem — P15) |
-| **3** | Capacidade (iii) subprocesso gerenciado + **GOWA extraído para `storages/plugins/gowa/`** + multi-número | (iii) | GOWA roda como plugin; N devices/N números; quem não usa GOWA não o roda |
+| **3** | Consumir (iii) subprocesso gerenciado + **GOWA extraído para `storages/plugins/gowa/`** + multi-número | (iii) — **plano 09 Fase 4** | GOWA roda como plugin; N devices/N números; quem não usa GOWA não o roda |
 | **4** | (esboço) Telegram e demais providers | usa (i)+(ii) | Fora do escopo de implementação deste plano; preparado pelo ponto de extensão |
 
-> **Princípio transversal:** o core ganha **contratos + registries + capacidades**; core e plugins
-> **registram implementações** nos mesmos. As 3 capacidades de runtime são CORE — infraestrutura que os
-> plugins consomem (não podem ser fornecidas por plugin).
+> **Princípio transversal:** o core ganha **contratos + registries**; core e plugins **registram
+> implementações** nos mesmos. As 3 capacidades de runtime são **CORE entregues pelo plano 09** —
+> infraestrutura que os plugins consomem (não podem ser fornecidas por plugin). Este plano **não as
+> reconstrói**; consome via `ctx`.
 
 ---
 
 ## Fase 0 — Abstração de canal + registry + tabelas + ponto de extensão
+
+> **Estado:** ⬜ **nao_feito** (greenfield). **Autocontida** — não depende do plano 09. Pode adiantar.
 
 Objetivo: pagar a dívida de acoplamento cedo. Introduzir o contrato e o registry, criar as tabelas
 core de canal, adicionar o ponto de extensão `entry.channels` ao loader, e migrar a instalação atual
@@ -81,7 +165,7 @@ para "1 canal default" — **sem** ainda extrair o GOWA (ele continua rodando co
 
 ### 0.1 Novo pacote `channels/` (core)
 
-Criar:
+Criar (hoje `ls channels/` → inexistente):
 
 - **`channels/__init__.py`** — exporta `Channel`, `SendResult`, `InboundEvent`, `ChannelCapabilities`.
 - **`channels/base.py`** — contrato `Channel` (ABC) conforme §3.2 da pesquisa. Importável de forma
@@ -128,7 +212,9 @@ envolvendo o `GOWAClient` existente:
 
 ### 0.3 Tabelas core (migration Alembic)
 
-Nova migration `db/alembic/versions/20260618_0007_channels.py` + 2 `Table` em `db/tables.py`:
+Nova migration `db/alembic/versions/<AAAAMMDD>_000N_channels.py` (**`down_revision` = head real no
+momento de implementar — hoje `0008_plugin_installed_deps`; número = próximo livre ≥ 0009**, P82) + 2
+`Table` em `db/tables.py`:
 
 ```
 channels (
@@ -137,7 +223,7 @@ channels (
   display_name  TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
   gowa_device_id TEXT,                    -- X-Device-Id (só gowa)
-  gowa_isolation TEXT DEFAULT 'shared',  -- shared | dedicated_process (Opção B, fallback)
+  gowa_isolation TEXT DEFAULT 'shared',  -- shared | dedicated_process (Opção B, fallback — P14)
   config        TEXT,                    -- JSON: prefs não-secretas por canal (modo polling/webhook etc.)
   connected     INTEGER NOT NULL DEFAULT 0,
   logged_in     INTEGER NOT NULL DEFAULT 0,
@@ -158,12 +244,13 @@ channel_credentials (
 > **P15 (⚠️ MUDANÇA, decidido 2026-06-19) — sem cifragem no MVP.** As credenciais (`channel_credentials.value`)
 > ficam em **texto puro** no banco. **Não** há chave mestra (`WHATSBOT_SECRET_KEY`), **não** há módulo
 > de cifragem (`channels/secrets.py` foi removido deste plano) e **não** há dependência `cryptography`.
-> A única proteção ainda exigida é **mascaramento na API** (`••••1234`) — segredos nunca voltam em claro
-> no `GET /api/channels` nem em logs. **Dívida/risco aceito conscientemente:** revisitar e cifrar em
-> repouso (Fernet ou pgcrypto) **antes de produção séria** — anotado em "Perguntas em aberto" §3.
+> A única proteção ainda exigida é **mascaramento na borda da API** (`••••1234`) — segredos nunca voltam
+> em claro no `GET /api/channels` nem em logs. Espelhar o mascaramento que **já existe** em `/api/config`
+> para a chave do LLM. **Dívida/risco aceito conscientemente:** revisitar e cifrar em repouso (Fernet ou
+> pgcrypto) **antes de produção séria** — anotado em "Perguntas em aberto" §3.
 
-> `messages.channel_id` e `conversation.channel_id`/idempotência por `(channel_id, external_msg_id)` são
-> **denormalizações de domínio de inbox** — pertencem ao plano 01. Aqui só criamos `channels`/
+> `messages.channel_id` e `conversation.channel_id`/idempotência por `(channel_id, external_msg_id)` (P18)
+> são **denormalizações de domínio de inbox** — pertencem ao plano 01. Aqui só criamos `channels`/
 > `channel_credentials`. (Ver "Dependências de outros planos".)
 
 Repos novos em `db/repositories/`:
@@ -176,46 +263,51 @@ Repos novos em `db/repositories/`:
 
 ### 0.4 Ponto de extensão `entry.channels` no loader
 
-- **`plugins/manifest.py`** — nenhuma mudança de schema obrigatória (`entry` já é `dict[str,str]`);
-  `entry.channels` cai automaticamente em `entry_str`. Opcional: documentar a chave. Acrescentar
-  `channels: list[str]` informativo em `to_public_dict` se quisermos exibir na UI de plugins.
-- **`plugins/loader.py`** — em `_load_plugin_module` (após o bloco `entry.routes`, ~linha 247), ler
-  `entry.channels`, importar o submódulo e coletar `CHANNEL_PROVIDERS = [cls, ...]` para um novo campo
-  `LoadedPlugin.channel_providers: list[type]` (espelhando `loaded.tools`).
-- **`server/app.py`** — no loop de wiring de plugins (linhas 93-101), para cada
-  `loaded.channel_providers`, chamar `channel_registry.register_provider(cls)`.
+- **`plugins/manifest.py`** — nenhuma mudança de schema obrigatória (`entry` já é `dict[str,str]`,
+  `:35`; `entry_str` no `:118`); `entry.channels` cai automaticamente em `entry_str`. Opcional: documentar
+  a chave. Acrescentar `channels: list[str]` informativo em `to_public_dict` (`:48`) se quisermos exibir
+  na UI de plugins.
+- **`plugins/loader.py`** — em `_load_plugin_module` (`:188`), **espelhando o bloco `entry.tools`
+  (`:198-211`)** e após o bloco `entry.routes` (`:264`), ler `manifest.entry.get("channels")`, importar o
+  submódulo e coletar `CHANNEL_PROVIDERS = [cls, ...]` para um novo campo
+  `LoadedPlugin.channel_providers: list[type]` (definido em `LoadedPlugin`, `:33`).
+- **`server/app.py`** — no loop de wiring de plugins (`:94-98`), para cada `loaded.channel_providers`,
+  chamar `channel_registry.register_provider(cls)`.
 
 ### 0.5 Webhook: extrair parsing e introduzir roteamento por canal
 
-- **Refatorar `server/routes/webhook.py`**: extrair a lógica de parsing inbound (hoje inline no handler
-  `webhook`, linhas ~1289-1480) para uma função pura `parse_gowa_inbound(raw) -> list[InboundEvent]`
-  reutilizada pelo `GOWAChannel.parse_inbound`. **Sem mudar comportamento** nesta fase.
-- Manter o endpoint legado `POST /api/webhook` funcionando (compat), mas internamente: ler
+- **Refatorar `server/routes/webhook.py`**: extrair a lógica de parsing inbound (hoje a cadeia
+  `if media_type is None:` a partir de `:43` + a lógica do handler `webhook` a partir de `:1094`, até
+  ~`:1480`) para uma função pura `parse_gowa_inbound(raw) -> list[InboundEvent]` reutilizada pelo
+  `GOWAChannel.parse_inbound`. **Sem mudar comportamento** nesta fase.
+- Manter o endpoint legado `POST /api/webhook` (`:1093`) funcionando (compat), mas internamente: ler
   `body.get("device_id")` → resolver `channel_id` via `channel_repo` → `registry.get(channel_id)`.
   Se não houver mapeamento, cair no **canal default** (migração 0.6).
 - Adicionar a **rota genérica** `POST/GET /api/webhook/{provider}/{channel_id}` (já preparando Cloud
   API e Telegram): resolve `registry.get(channel_id)`, chama `parse_inbound(raw)` → pipeline comum.
   GET é para handshakes (Cloud API `hub.challenge`, Fase 2).
-- **`server/app.py`** — adicionar `/api/webhook/` ao `_AUTH_EXEMPT_PREFIXES` (linha 207) — os webhooks
-  de provider não são autenticados por Bearer (validação é por verify_token/assinatura do provider).
+- **`server/app.py`** — adicionar o prefixo `/api/webhook/` a `_AUTH_EXEMPT_PREFIXES` (`:231`) — hoje só
+  `/api/webhook` **exato** é isento (`_AUTH_EXEMPT_EXACT`, `:232`). Os webhooks por-provider não são
+  autenticados por Bearer (validação é por verify_token/assinatura do provider). **Preservar** a isenção
+  exata de `/api/webhook` e `/health` (regressão crítica do RBAC plano 03 — o GOWA posta sem credencial).
 
 ### 0.6 Migração da instalação atual → "1 canal default"
 
-Na migration `0007` (data migration, parte Python do `upgrade()`):
+Na migration `channels` (data migration, parte Python do `upgrade()`):
 - Inserir 1 row em `channels`: `id="default"`, `provider="gowa"`, `gowa_device_id="whatsbot"`,
   `display_name="WhatsApp"`, `enabled=1`, `created_at/updated_at=now`.
 - (A propagação de `channel_id` para conversas/mensagens é do plano 01.)
 
 ### 0.7 Wiring no `main.py` / `server/app.py`
 
-- **`main.py`** — construir o `ChannelRegistry`, registrar o provider `gowa` (classe interna), instanciar
-  o canal default a partir da row, e passá-lo em `create_app`. `gowa_client`/`gowa_manager` continuam
-  existindo nesta fase (o `GOWAChannel` os envolve).
-- **`server/app.py`** — adicionar `channel_registry` ao `ServerDeps`. Substituir
-  `group_mentions.init(gowa_client)` por algo que continue funcionando (o gowa_client do canal default
-  por enquanto). Onde o webhook respondia via `deps.gowa_client`, passar a resolver via
-  `registry.get(channel_id).send_text(...)` (refactor incremental: começar pelo caminho de resposta da
-  IA; manter fallback).
+- **`main.py:48-73`** — construir o `ChannelRegistry`, registrar o provider `gowa` (classe interna),
+  instanciar o canal default a partir da row, e passá-lo em `create_app`. `gowa_client`/`gowa_manager`
+  continuam existindo nesta fase (o `GOWAChannel` os envolve).
+- **`server/app.py`** — adicionar `channel_registry` ao `ServerDeps` (`:48`). Substituir
+  `group_mentions.init(gowa_client)` (`:152`) por algo que continue funcionando (o gowa_client do canal
+  default por enquanto). Onde o webhook respondia via `deps.gowa_client` (`webhook.py:421` e sites de send
+  em `:524,651,…`), passar a resolver via `registry.get(channel_id).send_text(...)` (refactor incremental:
+  começar pelo caminho de resposta da IA; manter fallback).
 
 ### Critério de pronto — Fase 0
 - `channels`/`channel_credentials` existem (Alembic upgrade aplica do zero e em DB legado).
@@ -228,64 +320,66 @@ Na migration `0007` (data migration, parte Python do `upgrade()`):
 
 ---
 
-## Fase 1 — Capacidades de runtime CORE (i) lifecycle aguardado + (ii) supervisor de tasks
+## Fase 1 — Consumir capacidades de runtime CORE (i) lifecycle aguardado + (ii) supervisor de tasks
 
-Objetivo: construir e **validar** as duas capacidades baratas com um **provider de teste** (loop
-trivial, sem subprocesso). Destrava providers webhook-only e polling-leve como plugin.
+> **Estado:** ⬜ **nao_feito**. **Depende do plano 09 (Onda 1).** O lifecycle aguardado de plugin
+> (`plugins/lifecycle.py` / `PluginContext`/`on_unload` / teardown antes do `os._exit`) e o
+> `TaskSupervisor` são **entregues pelo plano 09 (Fases 1–3)**. Esta fase **consome** essas peças via
+> `ctx`; o **provider de teste** é o primeiro consumidor que as valida no domínio de canais.
 
-### 1.1 (i) Lifecycle de plugin aguardado — `setup(ctx)` / `teardown(ctx)`
+> **⚠️ Mudança de premissa vs. plano original.** A versão antiga deste plano descrevia a **construção** do
+> lifecycle e do supervisor aqui. Pela reconciliação WF1, essa construção foi **movida para o plano 09**
+> (capacidade fundacional, Onda 1). Esta fase agora é o **consumo** dessas capacidades. Os detalhes de
+> implementação do runtime ficam no plano 09; abaixo só o que o **canal** precisa delas e o estado atual
+> dos pontos de integração (para o plano 09 saber o que mexer).
 
-- **`plugins/loader.py`** — em `_load_plugin_module`, reconhecer `entry.lifecycle` (módulo opcional)
-  exportando `async def setup(ctx)` / `async def teardown(ctx)`; guardá-los em
+### 1.1 (i) Lifecycle de plugin aguardado — `setup(ctx)` / `teardown(ctx)` (consumir do plano 09)
+
+O que o plano 09 entrega e este plano consome:
+
+- **`plugins/loader.py`** — reconhecer `entry.lifecycle` (módulo opcional) exportando
+  `async def setup(ctx)` / `async def teardown(ctx)`; guardá-los em
   `LoadedPlugin.setup_fn`/`LoadedPlugin.teardown_fn`. **Contrato SÓ declarativo (P21):** via
   `entry.channels`/`entry.lifecycle` no manifest — **sem** registro imperativo (`register(registry)`)
-  no MVP (menos superfície de erro, consistente com `CORE_TOOLS`).
-- **`plugins/context.py`** — estender `set_runtime` para receber e guardar o **loop** e um **registro de
-  cleanups** (modelo Disposable do VS Code / `async_on_unload` do Home Assistant — §3.4.4). Criar um
-  `PluginRuntimeContext` (novo dataclass) passado a `setup/teardown` com: `plugin_id`, `loop`,
+  no MVP. (Hoje `_load_plugin_module` em `:188` **não** reconhece `entry.lifecycle`.)
+- **`plugins/context.py`** — estender `set_runtime` (`:34`) para receber e guardar o **loop** e um
+  **registro de cleanups** (modelo Disposable do VS Code / `async_on_unload` do Home Assistant — §3.4.4).
+  Um `PluginRuntimeContext` (novo dataclass) passado a `setup/teardown` com: `plugin_id`, `loop`,
   `stop_event` (por-plugin), `register_cleanup(callable)`, `register_task(coro_factory, *, restart=...)`
-  (delega ao supervisor 1.2), `channel_registry`, `plugin_db`, `broadcast`.
-- **`server/app.py` (lifespan)** — após emitir `plugin.loaded`/`app.startup` (linhas 150-162):
-  `await` o `setup(ctx)` de cada plugin carregado (sequencial, com try/except por plugin que registra
-  `load_error` sem derrubar o app). No **shutdown** (linhas 170-183): **antes** de `gowa_manager.stop()`,
-  `await` o `teardown(ctx)` de cada plugin (com **timeout fixo ~10s por plugin — P31**, depois segue),
-  executando os cleanups registrados — **mesmo se o setup falhou** (padrão HA).
-- **`plugins/restart.py`** — o ponto crítico: hoje `schedule_restart` faz `os._exit(0)` (linha 78) que
-  **pula** o teardown. Mudança: no caminho de **disable/enable de plugin**, rodar `teardown` do(s)
-  plugin(s) afetado(s) **antes** do `os._exit`. Implementar `schedule_restart` para, opcionalmente,
-  receber um callback async de teardown a ser aguardado (com timeout) antes do exit. **P22/P25 (decidido):
-  teardown aguardado antes do `os._exit` — restart-do-processo no MVP, sem hot-unload.** (Em dev com
-  `--reload`, o teardown roda no shutdown do worker antigo via lifespan; o `os._exit` é o
-  belt-and-suspenders + die-with-parent `PR_SET_PDEATHSIG` como rede de segurança.)
-- **`plugins/events.py`** — os eventos `app.shutdown` continuam fire-and-forget para handlers de
-  evento; o **lifecycle de provider** usa o caminho aguardado novo (não o bus de eventos). Documentar a
-  distinção.
+  (delega ao supervisor 1.2), **`channel_registry`** (peça-chave deste plano), `plugin_db`, `broadcast`.
+- **`server/app.py` (lifespan, `:167`)** — após emitir `plugin.loaded`/`app.startup`: `await` o
+  `setup(ctx)` de cada plugin carregado (sequencial, try/except por plugin que registra `load_error` sem
+  derrubar o app). No **shutdown** (antes de `gowa_manager.stop()` no `:204`): `await` o `teardown(ctx)`
+  de cada plugin (**timeout fixo ~10s por plugin — P31**), executando os cleanups registrados — **mesmo
+  se o setup falhou** (padrão HA).
+- **`plugins/restart.py`** — hoje `schedule_restart` (`:42`) faz `os._exit(0)` (`:78`) que **pula** o
+  teardown. O plano 09 muda: no caminho de **disable/enable de plugin**, rodar `teardown` do(s) plugin(s)
+  afetado(s) **antes** do `os._exit`. **P22/P25 (decidido): teardown aguardado antes do `os._exit` —
+  restart-do-processo no MVP, sem hot-unload.** + die-with-parent `PR_SET_PDEATHSIG` como rede de
+  segurança (P29, só Linux).
+- **`plugins/events.py`** — os eventos `app.shutdown` (`:53,79` BYPASS) continuam fire-and-forget para
+  handlers de evento; o **lifecycle de provider** usa o caminho aguardado novo (não o bus de eventos).
+  Documentar a distinção.
 
-### 1.2 (ii) Supervisor de tasks de fundo
+### 1.2 (ii) Supervisor de tasks de fundo (consumir do plano 09)
 
-- **Novo módulo `runtime/supervisor.py`** (P26 — supervisor e subprocesso vivem em **novo pacote
-  `runtime/`**; atualizar a árvore no CLAUDE.md) — `TaskSupervisor`:
-  - `register(name, coro_factory, *, restart="transient"|"permanent"|"temporary",
-    max_restarts=3, window_sec=60, backoff=...)` — registra uma corrotina de longa duração.
-  - `start_all()` / `cancel_all()` — usados pelo lifespan.
-  - Cada task roda em `asyncio.create_task`; ao terminar/excecionar, aplica a política de restart
-    classificado + rate-limit (padrão OTP — generaliza o que `gowa/manager._watchdog` já faz:
-    3 restarts/60s, linhas 180-209).
-  - **Cancelamento via `task.cancel()` nativo (P27)** — `state.stop_event` global mantido **só por
-    compat** durante a transição (loops legados ainda checam), mas o caminho canônico é o cancel nativo.
-  - **Emite eventos no bus (P28, só na transição):** `task.crashed`, `subprocess.crashed`,
-    `subprocess.restarted` — para observabilidade enquanto migramos. Pode sair depois.
-  - **Health = só memória (P30):** estado de tasks/subprocessos vive em memória no MVP (sem
-    persistência/healthcheck externo).
-- **`server/app.py` (lifespan)** — **generalizar as 4 tasks hardcoded** (linhas 163-168) para
-  registro no supervisor: `start_gowa_task`, `status_poll_loop`, `qr_poll_loop`, `avatar_fetch_task`
-  passam a `supervisor.register(...)`; `supervisor.start_all()` no startup; `supervisor.cancel_all()`
-  no shutdown (substitui o `for task in tasks: task.cancel()` — P27).
-- **`plugins/context.py`** — o `PluginRuntimeContext.register_task(...)` delega ao supervisor. Um
-  provider de polling registra seu loop por aí; o disable do plugin cancela suas tasks
-  (rastreadas por `plugin_id` no supervisor).
+O que o plano 09 entrega (`runtime/supervisor.py`, **P26 — pacote `runtime/`**) e este plano consome:
 
-### 1.3 Provider de teste (primeiro consumidor — valida i+ii)
+- `TaskSupervisor.register(name, coro_factory, *, restart="transient"|"permanent"|"temporary",
+  max_restarts=3, window_sec=60, backoff=...)`, `start_all()`, `cancel_all()`. Política de restart
+  classificado + rate-limit (padrão OTP — generaliza o watchdog do GOWA, `gowa/manager.py:182-197`:
+  3 restarts/60s). **Cancelamento via `task.cancel()` nativo (P27)**; `state.stop_event` global mantido
+  **só por compat** durante a transição. Emite no bus (**P28**) `task.crashed`/`subprocess.crashed`/
+  `subprocess.restarted`. **Health = só memória (P30).**
+- **`server/app.py` (lifespan)** — as 4 tasks hardcoded (`:188-191`: `start_gowa_task`,
+  `status_poll_loop`, `qr_poll_loop`, `avatar_fetch_task`) passam a `supervisor.register(...)`;
+  `supervisor.start_all()` no startup; `supervisor.cancel_all()` no shutdown (substitui o
+  `for task in tasks: task.cancel()` **sem await** do `:198` — P27).
+- **`plugins/context.py`** — `PluginRuntimeContext.register_task(...)` delega ao supervisor. Um provider
+  de polling registra seu loop por aí; o disable do plugin cancela suas tasks (rastreadas por `plugin_id`
+  no supervisor).
+
+### 1.3 Provider de teste (primeiro consumidor — valida i+ii) — **entrega deste plano**
 
 - **Plugin `assets/plugin_examples/channel_test/`** (bundled, `enabled=0` por default):
   - `plugin.yaml` com `entry: { channels: channels, lifecycle: lifecycle }`.
@@ -309,6 +403,9 @@ trivial, sem subprocesso). Destrava providers webhook-only e polling-leve como p
 ---
 
 ## Fase 2 — WhatsApp Cloud API (provider-plugin webhook-only)
+
+> **Estado:** ⬜ **nao_feito**. Consome (i) lifecycle (Fase 1), mas **não precisa de subprocesso** —
+> é webhook-only. Pode entrar logo após a Fase 1.
 
 Objetivo: primeiro provider de produção como plugin, validando o caminho webhook-only + as peças de
 segurança (handshake, janela 24h/templates). Tokens ficam em **texto puro** no MVP (P15 — sem cifragem).
@@ -362,26 +459,29 @@ whatsapp_cloud/
   o provider o usa internamente.
 - **Dívida/risco (revisitar antes de produção séria):** cifrar em repouso. Caminho previsto quando for
   feito — Fernet (`cryptography`) com chave de env no Docker/Coolify, **ou** `pgcrypto` no Postgres
-  (decisão global de banco permite exigir Postgres para a feature). A API do registry já centraliza o
+  (a decisão global de banco permite exigir Postgres para a feature). A API do registry já centraliza o
   acesso, então a cifragem entra num único ponto sem espalhar pelo código. Registrado em "Perguntas em
   aberto" §3.
 
 ### 2.5 Tela de Canais (frontend) — primeira versão
 
 - **`web/static/js/components/ChannelsManager.js`** — listagem de canais (cards: `display_name`,
-  provider, status, `own_phone`); ações adicionar/desativar/remover.
+  provider, status, `own_phone`); ações adicionar/desativar/remover. Tela **full-page** (FQ6).
 - **Adicionar canal Cloud API** — formulário: Phone Number ID, WABA ID, Access Token (mascarado),
   Verify Token (sugerido pela UI), App Secret opcional; exibe a **URL de webhook** a colar na Meta
   (`https://<host>/api/webhook/whatsapp_cloud/{channel_id}`). **Aba de templates (P19):** **upload pelo
   painel** + botão "sincronizar" que busca os templates aprovados do WABA **sob demanda** (ao abrir a
   aba / clicar). **Sem** sync periódico em segundo plano (submissão de novos templates para aprovação
   fica fora de escopo).
-- Rota SPA `/channels` registrada em `server/app.py` (lista `_SPA_PATHS`, linha 216) + handler `index`.
+- Rota SPA `/channels` registrada em `server/app.py` (`_SPA_PATHS`, `:239`) + handler `index`. Para o
+  indicador de canal no inbox: **nome do canal no header + ícone/cor do provider na linha da lista**
+  (FQ7) — alinhado com o plano 01/10.
 - **Endpoints REST core** (novo `server/routes/channels.py`):
   `GET/POST /api/channels`, `GET/PUT/DELETE /api/channels/{id}`,
   `GET /api/channels/{id}/status`, `GET /api/channels/{id}/qr` (204 se não-aplicável),
-  `GET /api/channels/{id}/templates` (Cloud). Registrar em `create_app` (após `admin_routes`,
-  linha 319). Permissões: admin (gancho do plano 03; por ora `auth_required`).
+  `GET /api/channels/{id}/templates` (Cloud). Registrar em `create_app` junto aos demais
+  `register_routes` (perto de `admin_routes.register_routes`, `:343`). Permissões: admin (gancho do plano
+  03; por ora `auth_required`).
 - **Modo escuro**: telas novas usam classes `wa-*`/`.wa-field` (regra obrigatória do CLAUDE.md).
 
 ### Critério de pronto — Fase 2
@@ -396,31 +496,40 @@ whatsapp_cloud/
 
 ---
 
-## Fase 3 — Capacidade (iii) subprocesso gerenciado + GOWA extraído para provider-plugin + multi-número
+## Fase 3 — Consumir (iii) subprocesso gerenciado + GOWA extraído para provider-plugin + multi-número
 
-Objetivo: construir o serviço de subprocesso gerenciado no core e **extrair** o GOWA de
-`gowa/manager.py`+`gowa/client.py` para `storages/plugins/gowa/`, ganhando multi-número. É o caso mais
-difícil — feito por último.
+> **Estado:** ⬜ **nao_feito**. **Depende do plano 09 (Onda 1, Fase 4)** — o `SubprocessService`
+> (`runtime/subprocess_service.py`) é entregue por ele. Esta fase **consome** o serviço para o GOWA. É o
+> caso mais difícil — feito por último.
 
-### 3.1 (iii) Serviço de subprocesso gerenciado (core)
+Objetivo: usar o serviço de subprocesso gerenciado do core (plano 09) e **extrair** o GOWA de
+`gowa/manager.py`+`gowa/client.py` para `storages/plugins/gowa/`, ganhando multi-número.
 
-- **Novo módulo `runtime/subprocess_service.py`** (P26 — pacote `runtime/`) — `ManagedSubprocess`:
-  - **Só Linux/Docker no MVP (P29, ⚠️ MUDANÇA).** Windows está **fora do escopo imediato** do Pro —
-    nada de Job Object / `CREATE_NEW_PROCESS_GROUP`. (Reintroduzir apenas se voltar a empacotar EXE.)
-  - `Popen` em **process group** (`start_new_session=True` no POSIX) para `os.killpg`/matar a árvore.
-  - **die-with-parent**: Linux **`PR_SET_PDEATHSIG`** (via `preexec_fn`/`ctypes`) — defesa contra o
-    `os._exit` do toggle (§3.4.4 iii). O **Job Object do Windows fica adiado** (P29) — só seria
-    necessário num empacotamento EXE futuro.
-  - Parada graciosa **SIGTERM → timeout → SIGKILL** (endurece o terminate→kill atual do
-    `gowa/manager.stop()`).
-  - **PID file + stale-kill no boot** — matar instância órfã antes de subir (resolve o conflito de
-    sessão WhatsApp de forma nativa; hoje é `pkill`/`taskkill` externo).
-  - **Watchdog com rate-limit** (reaproveitar a lógica de `gowa/manager._watchdog`) + **readiness
-    probe** (esperar `/app/status` responder antes de declarar "pronto" — padrão pytest-xprocess).
-  - Integra-se com o supervisor de tasks (1.2) para o watchdog assíncrono.
-- O **core passa a usar esse serviço para o próprio GOWA** (consumido pelo plugin via `ctx`).
+### 3.1 (iii) Serviço de subprocesso gerenciado (consumir do plano 09)
 
-### 3.2 Extrair o GOWA para `storages/plugins/gowa/`
+O que o plano 09 entrega (`runtime/subprocess_service.py`, **P26 — pacote `runtime/`**) e este plano
+consome — `ManagedSubprocess`:
+
+- **Só Linux/Docker no MVP (P29, ⚠️ MUDANÇA).** Windows está **fora do escopo imediato** do Pro —
+  nada de Job Object / `CREATE_NEW_PROCESS_GROUP`. (Reintroduzir apenas se voltar a empacotar EXE.) O
+  `CREATE_NO_WINDOW` atual (`gowa/manager.py:102`) vira no-op de compat.
+- `Popen` em **process group** (`start_new_session=True` no POSIX) para `os.killpg`/matar a árvore.
+- **die-with-parent**: Linux **`PR_SET_PDEATHSIG`** (via `preexec_fn`/`ctypes`) — defesa contra o
+  `os._exit` do toggle (`plugins/restart.py:78`; §3.4.4 iii). O **Job Object do Windows fica adiado**
+  (P29).
+- Parada graciosa **SIGTERM → timeout → SIGKILL** (endurece o terminate→kill atual do
+  `gowa/manager.stop()`, `:137`).
+- **PID file + stale-kill no boot** — matar instância órfã antes de subir (resolve o conflito de
+  sessão WhatsApp de forma nativa; hoje é `pkill`/`taskkill` externo).
+- **Watchdog com rate-limit** (a lógica de `gowa/manager._watchdog`, `:169`/`:182-197`, é reaproveitada
+  no plano 09) + **readiness probe** (esperar `/app/status` responder antes de declarar "pronto" — padrão
+  pytest-xprocess).
+- Integra-se com o `TaskSupervisor` (1.2) para o watchdog assíncrono.
+
+> **⚠️ Risco/cuidado (do relatório §4, item 9):** stale-kill errado mata PID reciclado → pode **perder a
+> sessão WhatsApp**. É a maior alavanca e o maior risco do plano 09; testar a extração do GOWA contra ele.
+
+### 3.2 Extrair o GOWA para `storages/plugins/gowa/` — **entrega deste plano**
 
 Layout:
 ```
@@ -434,24 +543,25 @@ gowa/                       # plugin (bundled em assets/plugin_examples/gowa/)
 ```
 
 Mudanças de código ao mover:
-- **`GOWAClient`** — remover `_DEFAULT_DEVICE_NAME` fixo (client.py:12,52); receber `device_id` no
-  construtor (ou por chamada). `_headers` usa o `device_id` da instância. `ensure_device()` deixa de
-  pegar `devices[0]` (linhas 126-131): garante **o device daquele canal** (`POST /devices` com o
-  `gowa_device_id` do canal se não existir).
+- **`GOWAClient`** — remover `_DEFAULT_DEVICE_NAME` fixo (`client.py:12`, `:52`); receber `device_id` no
+  construtor (ou por chamada). `_headers` (`:57`) usa o `device_id` da instância. `ensure_device()`
+  (`:127`) deixa de pegar `devices[0]` (`:142-145`): garante **o device daquele canal** (`POST /devices`
+  com o `gowa_device_id` do canal se não existir).
 - **`GOWAChannel(Channel)`** — um por canal/número; envolve um `GOWAClient(device_id=...)`. Consome o
   **serviço de subprocesso gerenciado do core** (não gerencia `Popen`/watchdog próprio).
 - **Subprocesso compartilhado**: Opção A do §4 (1 processo GOWA, N devices). O `setup` do plugin sobe
   **1** `ManagedSubprocess` GOWA (na 1ª inicialização) e cada `GOWAChannel` adiciona seu device via
   `POST /devices` (**P14** — MVP só Opção A, 1 processo N devices; coluna `gowa_isolation` já no schema
-  para habilitar dedicated depois). O `--webhook` aponta para o endpoint genérico; o **roteamento é por
-  `body["device_id"]` do payload + path por canal** (**P13** — opção a; GOWA não dá webhook por device,
-  §11.2). Confirmar nos testes que `device_id` vem em **todos** os tipos de evento (não só `message`).
+  para habilitar dedicated depois). O `--webhook` (`manager.py:74`) aponta para o endpoint genérico; o
+  **roteamento é por `body["device_id"]` do payload + path por canal** (**P13** — opção a; GOWA não dá
+  webhook por device, §11.2). Confirmar nos testes que `device_id` vem em **todos** os tipos de evento
+  (não só `message`).
 - **Remover** `gowa/manager.py` e `gowa/client.py` do core e `channels/providers/gowa_channel.py` (o
-  adapter temporário da Fase 0). Ajustar `main.py:48-71` (não instanciar `GOWAManager`/`GOWAClient`) e
-  `server/app.py` (remover `gowa_manager`/`gowa_client` de `ServerDeps`; `group_mentions.init` passa a
-  receber um client resolvido do canal). Limpar `start_gowa_task`/`qr_poll_loop`/`status_poll_loop` do
-  `server/background.py` (viram parte do plugin GOWA / do supervisor). `avatar_fetch_task` precisa
-  resolver o client por canal.
+  adapter temporário da Fase 0). Ajustar `main.py:48-73` (não instanciar `GOWAManager`/`GOWAClient`) e
+  `server/app.py` (remover `gowa_manager`/`gowa_client` de `ServerDeps` `:48`; `group_mentions.init`
+  `:152` passa a receber um client resolvido do canal). Limpar `start_gowa_task` (`background.py:19`)/
+  `qr_poll_loop` (`:136`)/`status_poll_loop` (`:47`) do `server/background.py` (viram parte do plugin GOWA
+  / do supervisor). `avatar_fetch_task` (`:174`) precisa resolver o client por canal.
 - **Bootstrap (P23 — bootstrap especial no upgrade):** o GOWA entra na lista de plugins bundled
   (`assets/plugin_examples/gowa/`). Para instalações **existentes** que migraram na Fase 0 (canal
   default GOWA), o `bootstrap_initial_plugins` (que só copia em pasta vazia) **não basta**. A
@@ -474,6 +584,8 @@ Mudanças de código ao mover:
   §11.4) **depois sem migration**. Não implementar dedicated no MVP.
 - **Sinais de saúde por canal** na UI: último erro, reconexões, ban temporário (`events.TemporaryBan`
   exposto pelo GOWA como status) — supre a lacuna de observabilidade-por-device (§11.2/§11.5).
+- **Rail de inboxes (FQ1):** o rail de ícones só aparece com **≥2 inboxes** — instalação migrada de 1
+  número fica idêntica ao hoje; o rail surge quando o admin adiciona o 2º canal. (UI no plano 01/10.)
 
 ### 3.4 `config/settings.py`
 
@@ -493,20 +605,23 @@ Mudanças de código ao mover:
 
 ## Fase 4 — Telegram e demais providers (esboço, fora do escopo de implementação)
 
-Preparado pelo ponto de extensão (`entry.channels`) + supervisor de tasks (polling) + webhook por path.
-Telegram entra como plugin webhook **ou** long-poll (`getUpdates` via `ctx.register_task`), validando
-(a) e (b) de uma vez. Instagram/Messenger (webhook-only, família Meta Graph) e Email (IMAP polling)
-seguem o mesmo molde. **Não implementado neste plano** — citado para garantir que nenhuma decisão das
-Fases 0-3 feche a porta.
+> **Estado:** ⬜ **nao_feito** (esboço). Preparado pelo ponto de extensão.
+
+Preparado pelo ponto de extensão (`entry.channels`) + supervisor de tasks (polling, plano 09) + webhook
+por path. Telegram entra como plugin webhook **ou** long-poll (`getUpdates` via `ctx.register_task`),
+validando (a) e (b) de uma vez. Instagram/Messenger (webhook-only, família Meta Graph) e Email (IMAP
+polling) seguem o mesmo molde. **Não implementado neste plano** — citado para garantir que nenhuma
+decisão das Fases 0-3 feche a porta.
 
 ---
 
 ## Resumo de artefatos por categoria
 
 ### Migrations Alembic
-- `20260618_0007_channels.py` — cria `channels` + `channel_credentials` + data migration "1 canal
-  default" (Fase 0). (Idempotência `(channel_id, external_msg_id)` e `channel_id` em conversas/mensagens
-  = plano 01.)
+- **`<AAAAMMDD>_000N_channels.py`** — cria `channels` + `channel_credentials` + data migration "1 canal
+  default" (Fase 0). **`down_revision` = head real no momento de implementar (hoje
+  `0008_plugin_installed_deps`); número = próximo livre (≥ 0009)** — P82, **NÃO** usar 0006/0007/0008.
+  (Idempotência `(channel_id, external_msg_id)` e `channel_id` em conversas/mensagens = plano 01.)
 
 ### Tabelas novas (`db/tables.py`)
 - `channels`, `channel_credentials` (Fase 0).
@@ -517,8 +632,8 @@ Fases 0-3 feche a porta.
 ### Pacotes/módulos core novos
 - `channels/` (`base.py`, `registry.py`, `events.py`, `providers/gowa_channel.py` temporário) —
   Fases 0/2. **Sem `secrets.py`** (P15 — cifragem removida do MVP).
-- `runtime/supervisor.py` (Fase 1), `runtime/subprocess_service.py` (Fase 3) — novo pacote `runtime/`
-  (P26).
+- **`runtime/`** (`supervisor.py`, `subprocess_service.py`) — **entregue pelo plano 09** (P26), **não por
+  este plano**. Este plano apenas **consome** via `ctx` (Fases 1 e 3).
 
 ### Endpoints REST novos (core)
 - `GET/POST /api/channels`, `GET/PUT/DELETE /api/channels/{id}`,
@@ -526,7 +641,8 @@ Fases 0-3 feche a porta.
 - `GET/POST /api/webhook/{provider}/{channel_id}` (Fase 0; handshake Cloud na Fase 2).
 
 ### Frontend (`web/static/js/components/`)
-- `ChannelsManager.js` + rota SPA `/channels` (Fase 2); QR por device (Fase 3). Tema `wa-*`/`.wa-field`.
+- `ChannelsManager.js` + rota SPA `/channels` (Fase 2, full-page FQ6); QR por device (Fase 3). Indicador
+  de canal: nome no header + ícone/cor por provider na lista (FQ7). Tema `wa-*`/`.wa-field`.
 
 ### Plugins (bundled em `assets/plugin_examples/`)
 - `channel_test/` (Fase 1), `whatsapp_cloud/` (Fase 2), `gowa/` (Fase 3).
@@ -536,34 +652,56 @@ Fases 0-3 feche a porta.
   só quando a dívida de cifrar em repouso for paga.) `pyyaml` já é opcional.
 - JS: nenhuma (frontend sem build step, vendorizado).
 
-### Pontos de integração (arquivo:linha)
-- `main.py:48-71` (wiring registry), `server/app.py:46-60` (ServerDeps), `:93-101` (wiring plugins),
-  `:142-183` (lifespan/supervisor/lifecycle), `:207,216` (auth exempt + SPA path), `:319` (rotas
-  channels), `:128` (group_mentions).
-- `plugins/loader.py:166-260` (entry.channels + lifecycle), `plugins/context.py:34` (runtime ctx),
-  `plugins/restart.py:78` (teardown antes do os._exit), `plugins/events.py:129` (distinção bus vs
-  lifecycle aguardado).
-- `gowa/manager.py:180-209` (lógica de watchdog reaproveitada no supervisor/subprocess service),
-  `gowa/client.py:12,52,57,126-131` (parametrizar device_id), `server/routes/webhook.py:1065,421,1289-1480`
-  (parsing extraído + roteamento por canal), `server/background.py` (4 tasks → supervisor).
+### Pontos de integração (arquivo:linha — reverificados em `b673a61`; âncore por `grep` na implementação)
+- `main.py:48-73` (wiring registry), `server/app.py:48` (ServerDeps), `:94-98` (wiring plugins —
+  `register_provider`), `:167` (lifespan — setup/teardown + supervisor), `:188-191` (4 tasks → supervisor),
+  `:198` (cancel sem await → `cancel_all`), `:204` (gowa stop), `:231-232` (auth exempt — preservar
+  `/api/webhook` e `/health`), `:239` (SPA path), `:343/:347-349` (registro de rotas channels + routers de
+  plugin), `:152` (group_mentions).
+- `plugins/loader.py:33` (LoadedPlugin.channel_providers), `:188` (`_load_plugin_module`:
+  `entry.channels` + `entry.lifecycle`), `:198-211` (espelhar bloco `entry.tools`), `:264` (após
+  `entry.routes`). `plugins/manifest.py:35,48,118` (entry/`to_public_dict`).
+  `plugins/context.py:34` (`set_runtime` → runtime ctx + `channel_registry`),
+  `plugins/restart.py:42,78` (teardown antes do `os._exit` — vem do 09),
+  `plugins/events.py:53,79,129,172` (distinção bus vs lifecycle aguardado).
+- `gowa/manager.py:46-48,55,74,102,137,169,182-197` (watchdog/start/stop/webhook reaproveitados no
+  09 + `CREATE_NO_WINDOW` no-op), `gowa/client.py:12,52,57,127,142-145` (parametrizar device_id),
+  `server/routes/webhook.py:1093-1094` (endpoint), `:421,524,651,…` (resposta via `deps.gowa_client`),
+  `:43-313,~1480` (parsing extraído + roteamento por canal), `server/background.py:14,19,47,136,174`
+  (4 tasks → supervisor / resolver client por canal).
 
 ---
 
 ## Dependências de outros planos
 
-1. **Plano 01 (Inbox e Conversas)** — o modelo de 3 níveis (Contact → ContactInbox → Conversation) e a
-   coluna `channel_id` em conversas/mensagens + idempotência `(channel_id, external_msg_id)` são **dele**.
-   Este plano cria as tabelas `channels`/`channel_credentials` e o roteamento; o "fechamento do ciclo
-   entrada→conversa→saída" depende do `channel_id` na conversa. **Coordenar a ordem das migrations**
-   (a FK `conversation.channel_id → channels.id` exige `channels` já criada — esta migration 0007 deve
-   vir antes da migration de conversas do plano 01).
-2. **Plano 03 (RBAC/Usuários)** — gerenciar canais (criar/editar, ver tokens, conectar QR) é ação
-   privilegiada (admin). Os endpoints `/api/channels/*` deste plano usam `auth_required` por ora; o
-   gating por papel (admin vs atendente) entra quando o RBAC existir. O modelo "dois níveis de chave"
-   da Evolution (global gerencia ciclo de vida; token por canal opera) casa com o plano 03.
-3. **Plano 06 (Motor multiagente / code-in-DB)** — não bloqueia este plano, mas o padrão híbrido
-   (contratos/capacidades no core, implementações em core e/ou plugin) é o mesmo; a capacidade (ii)
-   supervisor de tasks pode ser reusada por jobs do motor de IA.
+1. **Plano 09 (Fundação Runtime) — bloqueante das Fases 1 e 3.** O lifecycle aguardado de plugin
+   (`plugins/lifecycle.py`, `PluginContext`/`on_unload`, teardown antes do `os._exit`), o `TaskSupervisor`
+   e o `SubprocessService` são **dele**. Este plano só os **consome** via `ctx`. Como o 09 é **Onda 1** e
+   este plano é **Onda 5+**, na prática essas peças **já existirão** quando este plano for implementado —
+   mas o sequenciamento interno (Fase 0 antes; Fases 1/3 dependentes) deve refletir isso. A **Fase 0 é
+   autocontida** e pode adiantar.
+2. **Plano 01 (Inbox e Conversas) — acoplamento de migration.** O modelo de 3 níveis (Contact →
+   ContactInbox → Conversation) e a coluna `channel_id` em conversas/mensagens + idempotência
+   `(channel_id, external_msg_id)` (P18) são **dele**. Este plano cria `channels`/`channel_credentials` e
+   o roteamento; o "fechamento do ciclo entrada→conversa→saída" depende do `channel_id` na conversa.
+   **Coordenar a ordem das migrations (P82):** a FK `conversation.channel_id → channels.id` exige
+   `channels` **já criada** — a migration `channels` deste plano deve vir **antes** da migration de
+   conversas do plano 01. (Na sequência viva, 01 entra na Onda 3 e 02 na Onda 5+, então quando o 02 rodar
+   o 01 já existirá; garantir que o `channels` seja gerado e aplicado antes de qualquer ALTER que adicione
+   a FK — ou usar stub de FK, P1.)
+3. **Plano 03 (RBAC/Usuários) — gating dos endpoints.** Gerenciar canais (criar/editar, ver tokens,
+   conectar QR) é ação privilegiada (admin, `channels.manage`). Os endpoints `/api/channels/*` deste plano
+   usam `auth_required` por ora; o gating por papel entra quando o RBAC existir (03 é Onda 3, antes deste
+   plano). **⚠️ Preservar** as isenções `/api/webhook` e `/health` no `auth_middleware` (`server/app.py:
+   231-232`) — o GOWA posta sem credencial. O modelo "dois níveis de chave" da Evolution (global gerencia
+   ciclo de vida; token por canal opera) casa com o plano 03.
+4. **Plano 06 (Motor multiagente / code-in-DB) — sem bloqueio mútuo.** Não bloqueia este plano, mas o
+   padrão híbrido (contratos/capacidades no core, implementações em core e/ou plugin) é o mesmo; a
+   capacidade (ii) supervisor de tasks (plano 09) pode ser reusada por jobs do motor de IA, e o
+   `SubprocessService` (plano 09) é o alvo do **retrofit P62/P67** (isolar o `ai_tool_installer`
+   in-process — Onda 2). O acoplamento do motor AGNO ao roteamento de saída por canal **não foi avaliado**
+   no WF1 (incerteza registrada) — verificar na implementação que o handler responde via
+   `registry.get(conversa.channel_id).send_text(...)` e não por um `gowa_client` global.
 
 ---
 
@@ -632,7 +770,7 @@ Fases 0-3 feche a porta.
     - **✅ DECIDIDO (2026-06-19): opção (a) — teardown aguardado antes do `os._exit` (P22/P25,
       restart-do-processo).** `teardown` (aguardado, com timeout ~10s — P31) **antes** do `os._exit` +
       die-with-parent `PR_SET_PDEATHSIG` como rede de segurança (P29, só Linux). Hot-unload sem restart
-      (modelo Home Assistant) fica como evolução futura.
+      (modelo Home Assistant) fica como evolução futura. (Mecanismo entregue pelo plano 09.)
 
 11. **Bootstrap do GOWA-plugin em instalações existentes.**
     - **✅ DECIDIDO (2026-06-19): opção (a) — bootstrap especial no upgrade (P23).** Na migration/upgrade
