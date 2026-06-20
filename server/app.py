@@ -28,6 +28,7 @@ from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
 from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
 from channels.providers.gowa_channel import GOWAChannel
+from channels.providers.gowa_channel import build_gowa_channel
 from db.repositories import channel_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
@@ -119,15 +120,21 @@ def create_app(
         for provider_cls in getattr(loaded, "channel_providers", []):
             channel_registry.register_provider(provider_cls)
 
-    # Instantiate the "default" gowa channel from its DB row (created by the
-    # 0011_channels migration), wrapping the existing client/manager.
+    # Instantiate a live channel for every GOWA row in the DB. The "default"
+    # channel wraps the existing client/manager (device "whatsbot"); each extra
+    # GOWA channel gets its own per-device client on the same shared GOWA
+    # process, so several WhatsApp numbers can be connected at once.
     try:
-        default_row = channel_repo.get("default")
-        if default_row is not None:
+        for row in channel_repo.list_all():
+            if row.get("provider") != "gowa":
+                continue
             channel_registry.add_channel(
-                "default", GOWAChannel("default", gowa_client, gowa_manager))
+                row["id"],
+                build_gowa_channel(row["id"], row,
+                                   gowa_client=gowa_client, gowa_manager=gowa_manager),
+            )
     except Exception as e:
-        logger.warning("Could not instantiate default channel: %s", e)
+        logger.warning("Could not instantiate GOWA channels: %s", e)
 
     # AI engine (config-in-DB + code-in-DB). Seed the default agent/prompt from
     # the current config (idempotent), then materialise/install/register the

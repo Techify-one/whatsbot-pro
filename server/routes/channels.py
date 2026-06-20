@@ -14,9 +14,12 @@ live instance when present, else the stored flags.
 import asyncio
 import json
 import re
+import uuid
 
 from fastapi import Request
+from fastapi.responses import Response
 
+from channels.providers.gowa_channel import build_gowa_channel
 from db.repositories import channel_repo, channel_credential_repo
 from server.authz import permission_denied
 from server.helpers import _ok, _err
@@ -41,6 +44,20 @@ def _serialize(row: dict, creds: dict) -> dict:
 def register_routes(app, deps):
 
     registry = getattr(deps, "channel_registry", None)
+    gowa_client = getattr(deps, "gowa_client", None)
+    gowa_manager = getattr(deps, "gowa_manager", None)
+
+    def _register_live_gowa(cid: str, row: dict) -> None:
+        """Make a freshly-created GOWA channel operational without a restart, so
+        its QR/status endpoints work immediately."""
+        if registry is None or gowa_client is None:
+            return
+        try:
+            inst = build_gowa_channel(cid, row, gowa_client=gowa_client,
+                                      gowa_manager=gowa_manager)
+            registry.add_channel(cid, inst)
+        except Exception:
+            pass
 
     @app.get("/api/channels")
     async def list_channels(request: Request):
@@ -83,6 +100,11 @@ def register_routes(app, deps):
         gowa_device_id = body.get("gowa_device_id")
         if not gowa_device_id and isinstance(config, dict):
             gowa_device_id = config.get("gowa_device_id")
+        # GOWA device id is auto-generated, never user-chosen. Each channel maps
+        # to its own GOWA device (X-Device-Id) on the shared GOWA process. A
+        # random suffix keeps it unique even if a channel id is reused later.
+        if provider == "gowa" and not gowa_device_id:
+            gowa_device_id = f"{cid}_{uuid.uuid4().hex[:8]}"
         row = await asyncio.to_thread(
             channel_repo.create, id=cid, provider=provider,
             display_name=body.get("display_name", "") or cid,
@@ -93,6 +115,8 @@ def register_routes(app, deps):
         for key, value in creds.items():
             if value:  # never store an empty/placeholder secret
                 await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
+        if provider == "gowa":
+            _register_live_gowa(cid, row)
         stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
         return _ok(_serialize(row, stored))
 
@@ -128,6 +152,13 @@ def register_routes(app, deps):
             return denied
         if channel_id == "default":
             return _err("O canal default não pode ser removido.", 400)
+        # Best-effort: log the GOWA device out so the WhatsApp number is freed.
+        inst = registry.get(channel_id) if registry is not None else None
+        if inst is not None and getattr(inst, "_client", None) is not None:
+            try:
+                await asyncio.to_thread(inst._client.logout)
+            except Exception:
+                pass
         await asyncio.to_thread(channel_credential_repo.delete_all, channel_id)
         ok = await asyncio.to_thread(channel_repo.delete, channel_id)
         if not ok:
@@ -162,3 +193,31 @@ def register_routes(app, deps):
             "needs_qr": False,
             "error": row.get("last_error"),
         })
+
+    @app.get("/api/channels/{channel_id}/qr")
+    async def channel_qr(channel_id: str, request: Request):
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        if row.get("provider") != "gowa":
+            return _err("QR disponível apenas para canais GOWA.", 400)
+        inst = registry.get(channel_id) if registry is not None else None
+        # The channel may exist in the DB but not be live yet (created before this
+        # boot, or registry unavailable) — build/register it on demand.
+        if inst is None:
+            _register_live_gowa(channel_id, row)
+            inst = registry.get(channel_id) if registry is not None else None
+        if inst is None or not hasattr(inst, "qr"):
+            return _err("Canal GOWA indisponível.", 503)
+        try:
+            png = await asyncio.to_thread(inst.qr)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"Falha ao obter QR: {e}", 502)
+        if not png:
+            # Already logged in, or GOWA not ready yet — 204 tells the UI to poll status.
+            return Response(status_code=204)
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})

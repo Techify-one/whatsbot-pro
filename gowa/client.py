@@ -47,10 +47,17 @@ class GOWAClient:
     """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.8.0)."""
 
     def __init__(self, port: int = 3000, timeout: float = 15.0):
+        self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.timeout = timeout
         self.device_id: str = _DEFAULT_DEVICE_NAME
         self._device_ready = False
+        # When True, ensure_device() binds ONLY to this exact device_id (creating
+        # it if missing) and never adopts a pre-existing one. Required for
+        # per-channel clients so multiple WhatsApp numbers stay on distinct
+        # devices of the same GOWA process. The legacy singleton keeps it False
+        # (resilient "adopt whatever device exists" behaviour).
+        self.strict_device = False
 
     @property
     def _headers(self) -> dict:
@@ -138,14 +145,16 @@ class GOWAClient:
                     self._device_ready = True
                     logger.info("GOWA device '%s' already exists.", self.device_id)
                     return True
-            # Use the first existing device
-            first = devices[0]
-            self.device_id = first.get("id", first.get("device", self.device_id))
-            self._device_ready = True
-            logger.info("Using existing GOWA device '%s'.", self.device_id)
-            return True
+            # Legacy/non-strict: adopt the first existing device. Strict clients
+            # (per-channel) skip this and create their own device below.
+            if not self.strict_device:
+                first = devices[0]
+                self.device_id = first.get("id", first.get("device", self.device_id))
+                self._device_ready = True
+                logger.info("Using existing GOWA device '%s'.", self.device_id)
+                return True
 
-        # Create a new device
+        # Create a new device (the exact device_id for strict clients).
         result = self.create_device(self.device_id)
         if result:
             self._device_ready = True

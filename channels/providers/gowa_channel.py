@@ -35,6 +35,13 @@ class GOWAChannel(Channel):
     def start(self) -> None:
         if self._manager is not None:
             self._manager.start()
+        # Register this channel's device in the (shared) GOWA process so it can
+        # hold its own WhatsApp session — multi-device on a single GOWA process.
+        if self._client is not None:
+            try:
+                self._client.ensure_device()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("GOWAChannel.start: ensure_device failed: %s", e)
 
     def stop(self) -> None:
         if self._manager is not None:
@@ -43,12 +50,35 @@ class GOWAChannel(Channel):
     def status(self) -> dict:
         connected = bool(self._manager and self._manager.is_running)
         logged_in = False
+        own_phone = ""
         try:
             logged_in = bool(self._client and self._client.is_connected())
+            if logged_in:
+                own_phone = self._client.get_own_number() or ""
         except Exception:
             pass
         return {"connected": connected, "logged_in": logged_in,
-                "needs_qr": connected and not logged_in, "error": None}
+                "needs_qr": connected and not logged_in,
+                "own_phone": own_phone, "error": None}
+
+    def qr(self) -> bytes | None:
+        """PNG bytes of this device's login QR (None if logged in / unavailable).
+
+        Re-verifies the GOWA device exists before requesting a QR. A device that
+        was never paired can vanish from GOWA (dropped on a GOWA restart, or
+        removed by a prior logout), while this client still has it cached as
+        ready — which makes ``/app/login`` fail with DEVICE_NOT_FOUND. Clearing
+        the cache forces ``ensure_device`` to recreate it, so connecting an
+        existing channel behaves like connecting a freshly-created one.
+        """
+        if self._client is None:
+            return None
+        try:
+            self._client._device_ready = False
+            self._client.ensure_device()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("GOWAChannel.qr: ensure_device failed: %s", e)
+        return self._client.get_qr_code()
 
     # ── Outbound (delegates to the existing client) ──────────────────
     def send_text(self, chat_id: str, text: str, *, reply_to=None,
@@ -79,3 +109,23 @@ class GOWAChannel(Channel):
         # parsing is extracted to a pure function (plano 02 §0.5) it is reused
         # here. Returning [] keeps the contract valid without duplicating logic.
         return []
+
+
+def build_gowa_channel(channel_id: str, row: dict | None, *,
+                       gowa_client, gowa_manager) -> "GOWAChannel":
+    """Build a live ``GOWAChannel`` for a channel row.
+
+    The ``default`` channel reuses the singleton client (device ``whatsbot``)
+    that drives the legacy message pipeline. Every other GOWA channel gets its
+    own ``GOWAClient`` bound to its ``gowa_device_id`` but pointing at the same
+    (shared) GOWA process — i.e. N WhatsApp numbers as N devices on one GOWA.
+    """
+    if channel_id == "default":
+        return GOWAChannel(channel_id, gowa_client, gowa_manager)
+    device_id = ((row or {}).get("gowa_device_id") or channel_id)
+    # Import here to avoid a circular import at module load time.
+    from gowa.client import GOWAClient
+    client = GOWAClient(port=getattr(gowa_client, "port", 3000))
+    client.device_id = device_id
+    client.strict_device = True  # bind to its own device, never adopt another's
+    return GOWAChannel(channel_id, client, gowa_manager)

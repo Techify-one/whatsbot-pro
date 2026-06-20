@@ -7,7 +7,7 @@
 // the webhook URL to paste into the Meta App configuration.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
 import {
   listChannels,
@@ -15,6 +15,7 @@ import {
   updateChannel,
   deleteChannel,
   getChannelStatus,
+  getChannelQR,
 } from '../services/api.js';
 
 const html = htm.bind(h);
@@ -59,7 +60,9 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
   const [id, setId] = useState('');
   const [displayName, setDisplayName] = useState('');
   // Provider-specific credential/config fields.
-  const [gowaDeviceId, setGowaDeviceId] = useState('');
+  // The GOWA device id is auto-generated and read-only: each channel maps to its
+  // own GOWA device (one WhatsApp number) on the shared GOWA process.
+  const [gowaDeviceId, setGowaDeviceId] = useState(() => `gowa_${randomToken(10)}`);
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
@@ -126,10 +129,12 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
 
         ${provider === 'gowa' ? html`
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">GOWA Device ID <span class="text-wa-secondary">(opcional)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" placeholder="device id do GOWA" value=${gowaDeviceId}
-              onInput=${(e) => setGowaDeviceId(e.target.value)} />
+            <label class="block text-[12px] text-wa-secondary mb-1">GOWA Device ID <span class="text-wa-secondary">(gerado automaticamente)</span></label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] opacity-60 cursor-not-allowed"
+              type="text" value=${gowaDeviceId} readonly disabled />
+            <div class="text-[12px] text-wa-secondary mt-1">
+              Identifica este número dentro do GOWA. Após criar, leia o QR Code para conectar o WhatsApp.
+            </div>
           </div>
         ` : null}
 
@@ -209,12 +214,124 @@ function WebhookNotice({ channelId, onDismiss }) {
   `;
 }
 
+// ── QR connect panel (GOWA) ─────────────────────────────────────────
+// Polls the channel status + QR image until the device logs in. Shown right
+// after creating a GOWA channel, and reopenable from a card's "Conectar".
+function QRConnect({ channelId, displayName, onClose }) {
+  const [qrUrl, setQrUrl] = useState('');
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [ownPhone, setOwnPhone] = useState('');
+  const [waiting, setWaiting] = useState(true);
+  const urlRef = useRef('');
+  const aliveRef = useRef(true);
+  const doneRef = useRef(false);
+
+  function setQr(url) {
+    if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch (e) {} }
+    urlRef.current = url || '';
+    setQrUrl(url || '');
+  }
+
+  useEffect(() => {
+    aliveRef.current = true;
+    doneRef.current = false;
+    let statusTimer = null;
+    let qrTimer = null;
+
+    function stop() {
+      if (statusTimer) clearInterval(statusTimer);
+      if (qrTimer) clearInterval(qrTimer);
+      statusTimer = qrTimer = null;
+    }
+
+    // Fetch the QR. CRITICAL: each /app/login call mints a brand-new QR and
+    // restarts GOWA's pairing session, so we do this sparingly (once now, then
+    // ~every 20s before the 30s expiry) — NOT on every status poll, otherwise
+    // the session the user is scanning gets torn down before the handshake
+    // completes and the device never logs in.
+    async function fetchQR() {
+      if (!aliveRef.current || doneRef.current) return;
+      const url = await getChannelQR(channelId);
+      if (!aliveRef.current || doneRef.current) { if (url) URL.revokeObjectURL(url); return; }
+      if (url) { setQr(url); setWaiting(false); }
+    }
+
+    // Poll only the status frequently — cheap, and does NOT disturb pairing.
+    async function pollStatus() {
+      if (!aliveRef.current || doneRef.current) return;
+      const st = await getChannelStatus(channelId);
+      if (!aliveRef.current || doneRef.current) return;
+      const data = (st && st.ok && st.data) || {};
+      if (data.logged_in) {
+        doneRef.current = true;
+        stop();
+        setLoggedIn(true);
+        setOwnPhone(data.own_phone || '');
+        setWaiting(false);
+        setQr('');
+      }
+    }
+
+    fetchQR();
+    pollStatus();
+    statusTimer = setInterval(pollStatus, 2500);
+    qrTimer = setInterval(fetchQR, 20000);
+
+    return () => {
+      aliveRef.current = false;
+      stop();
+      setQr('');
+    };
+  }, [channelId]);
+
+  return html`
+    <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <div class="text-[14px] font-medium text-wa-text">
+          Conectar WhatsApp — ${displayName || channelId}
+        </div>
+        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+          onClick=${onClose}>Fechar</button>
+      </div>
+
+      ${loggedIn ? html`
+        <div class="flex flex-col items-center gap-2 py-4">
+          <div class="text-[40px]">✅</div>
+          <div class="text-[15px] font-medium text-green-600">Conectado!</div>
+          ${ownPhone ? html`<div class="text-[13px] text-wa-secondary">📱 ${ownPhone}</div>` : null}
+          <button class="mt-2 px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity"
+            onClick=${onClose}>Concluir</button>
+        </div>
+      ` : html`
+        <div class="flex flex-col items-center gap-3 py-2">
+          <p class="text-[13px] text-wa-secondary text-center max-w-sm">
+            Abra o WhatsApp no celular → <span class="font-medium">Aparelhos conectados</span> →
+            <span class="font-medium">Conectar um aparelho</span> e aponte para o código abaixo.
+          </p>
+          ${qrUrl ? html`
+            <img src=${qrUrl} alt="QR Code"
+              class="w-56 h-56 rounded-md bg-white p-2 border border-wa-border" />
+          ` : html`
+            <div class="w-56 h-56 rounded-md border border-wa-border flex items-center justify-center text-[13px] text-wa-secondary">
+              ${waiting ? 'Gerando QR Code…' : 'Aguardando GOWA…'}
+            </div>
+          `}
+          <div class="flex items-center gap-1.5 text-[12px] text-wa-secondary">
+            <${Dot} on=${false} /> Aguardando leitura…
+          </div>
+        </div>
+      `}
+    </div>
+  `;
+}
+
 // ── Single channel card ─────────────────────────────────────────────
-function ChannelCard({ channel, onToggle, onDelete, onRefresh, busyId }) {
+function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, busyId }) {
   const meta = providerMeta(channel.provider);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
   const busy = busyId === channel.id;
+  const canConnect = channel.provider === 'gowa' && !channel.logged_in;
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex items-start gap-3 flex-wrap">
@@ -256,6 +373,10 @@ function ChannelCard({ channel, onToggle, onDelete, onRefresh, busyId }) {
       </div>
 
       <div class="flex gap-1 shrink-0 flex-wrap justify-end">
+        ${canConnect ? html`
+          <button class="px-2 py-1 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+            onClick=${() => onConnect(channel)} disabled=${busy}>Conectar</button>
+        ` : null}
         <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onRefresh(channel)} disabled=${busy}>
           ${busy ? '…' : 'Atualizar'}</button>
@@ -279,6 +400,10 @@ export default function ChannelsManager() {
   const [busyId, setBusyId] = useState('');
   // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
   const [webhookFor, setWebhookFor] = useState(null);
+  // {id, display_name} of the GOWA channel whose QR-connect panel is open.
+  const [connectFor, setConnectFor] = useState(null);
+  const channelsRef = useRef([]);
+  channelsRef.current = channels;
 
   async function load() {
     setLoading(true);
@@ -287,9 +412,34 @@ export default function ChannelsManager() {
     if (res && res.ok) setChannels((res.data && res.data.channels) || res.data || []);
     else setError((res && res.error) || 'Falha ao carregar canais.');
     setLoading(false);
+    refreshStatuses();
+  }
+
+  // Pull live connected/logged-in status for every channel and merge into the
+  // cards (so they reflect the real GOWA session, not just the stored flags).
+  async function refreshStatuses() {
+    const list = channelsRef.current;
+    if (!list || !list.length) return;
+    const results = await Promise.all(
+      list.map(c => getChannelStatus(c.id).then(r => [c.id, r]).catch(() => [c.id, null]))
+    );
+    const byId = {};
+    for (const [id, r] of results) {
+      if (r && r.ok && r.data) byId[id] = r.data;
+    }
+    setChannels(prev => prev.map(c => byId[c.id]
+      ? { ...c, connected: !!byId[c.id].connected, logged_in: !!byId[c.id].logged_in,
+          own_phone: byId[c.id].own_phone || c.own_phone, last_error: byId[c.id].error || null }
+      : c));
   }
 
   useEffect(() => { load(); }, []);
+
+  // Keep card statuses live while the screen is open.
+  useEffect(() => {
+    const t = setInterval(refreshStatuses, 8000);
+    return () => clearInterval(t);
+  }, []);
 
   async function handleCreate(payload) {
     setCreateBusy(true); setCreateError('');
@@ -298,10 +448,18 @@ export default function ChannelsManager() {
     if (res && res.ok) {
       setCreating(false);
       if (payload.provider === 'whatsapp_cloud') setWebhookFor(payload.id);
+      // GOWA: open the QR-connect panel immediately so the user can scan it.
+      if (payload.provider === 'gowa') {
+        setConnectFor({ id: payload.id, display_name: payload.display_name });
+      }
       load();
     } else {
       setCreateError((res && res.error) || 'Falha ao criar o canal.');
     }
+  }
+
+  function handleConnect(channel) {
+    setConnectFor({ id: channel.id, display_name: channel.display_name || channel.id });
   }
 
   async function handleToggle(channel) {
@@ -353,6 +511,11 @@ export default function ChannelsManager() {
 
       ${webhookFor ? html`<${WebhookNotice} channelId=${webhookFor} onDismiss=${() => setWebhookFor(null)} />` : null}
 
+      ${connectFor ? html`<${QRConnect}
+        channelId=${connectFor.id}
+        displayName=${connectFor.display_name}
+        onClose=${() => { setConnectFor(null); refreshStatuses(); }} />` : null}
+
       ${creating ? html`<${ChannelForm}
         onCreated=${handleCreate}
         onCancel=${() => setCreating(false)}
@@ -375,6 +538,7 @@ export default function ChannelsManager() {
             onToggle=${handleToggle}
             onDelete=${handleDelete}
             onRefresh=${handleRefresh}
+            onConnect=${handleConnect}
             busyId=${busyId} />
         `)}
       </div>
