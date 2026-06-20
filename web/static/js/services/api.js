@@ -190,6 +190,14 @@ export async function getContact(phone, markRead = true) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
+// Conversa-cêntrico (plano 11 D1): carrega a thread de UMA conversa (um canal),
+// sem fundir os canais do mesmo número. Retorna {conversation, contact, messages,
+// channel_id, avatar_v}. markRead=false não zera o badge daquela conversa.
+export async function getConversationMessages(convId, markRead = true) {
+  const qs = markRead ? '' : '?mark_read=false';
+  return request('GET', `/api/conversations/${convId}/messages${qs}`);
+}
+
 export async function deleteContact(phone) {
   return request('DELETE', `/api/contacts/${encodeURIComponent(phone)}`);
 }
@@ -202,35 +210,41 @@ export async function pinContact(phone, pinned) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/pin`, { pinned });
 }
 
-export async function sendMessage(phone, message, replyTo = null) {
+// conversationId (plano 11 D1) roteia o envio pelo CANAL daquela conversa via
+// OutboundRouter; ausente cai no 'default' (GOWA), preservando o legado.
+export async function sendMessage(phone, message, replyTo = null, conversationId = null) {
   const body = { message };
   if (replyTo) body.reply_to = replyTo;
+  if (conversationId != null) body.conversation_id = conversationId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, body);
 }
 
-export async function retrySend(phone, message) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, { message });
+export async function retrySend(phone, message, conversationId = null) {
+  const body = { message };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, body);
 }
 
 // Delete a message. scope='me' (local) or scope='all' (revoke for everyone).
 // Pass msgId (GOWA id) and/or dbId (DB row id, for local messages without a msg_id).
-export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 'me' } = {}) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, {
-    msg_id: msgId, db_id: dbId, scope,
-  });
+export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 'me', conversationId = null } = {}) {
+  const body = { msg_id: msgId, db_id: dbId, scope };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, body);
 }
 
 // React to a message with an emoji. Empty emoji removes the operator's reaction.
-export async function reactToMessage(phone, msgId, emoji) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, {
-    msg_id: msgId, emoji,
-  });
+export async function reactToMessage(phone, msgId, emoji, conversationId = null) {
+  const body = { msg_id: msgId, emoji };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, body);
 }
 
 export async function sendPrivateMessage(phone, text, opts = {}) {
   const body = { text };
   if (opts.aiRead !== undefined) body.ai_read = !!opts.aiRead;
   if (opts.aiReply !== undefined) body.ai_reply = !!opts.aiReply;
+  if (opts.conversationId != null) body.conversation_id = opts.conversationId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/private-message`, body);
 }
 
@@ -263,10 +277,11 @@ export async function getGroupMembers(groupJid, force = false) {
   return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
-export async function sendImage(phone, file, caption = '') {
+export async function sendImage(phone, file, caption = '', conversationId = null) {
   const form = new FormData();
   form.append('image', file);
   form.append('caption', caption);
+  if (conversationId != null) form.append('conversation_id', String(conversationId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -280,9 +295,10 @@ export async function sendImage(phone, file, caption = '') {
   return res.json();
 }
 
-export async function sendAudio(phone, blob, filename = 'voice.ogg') {
+export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null) {
   const form = new FormData();
   form.append('audio', blob, filename);
+  if (conversationId != null) form.append('conversation_id', String(conversationId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -296,10 +312,11 @@ export async function sendAudio(phone, blob, filename = 'voice.ogg') {
   return res.json();
 }
 
-export async function sendDocument(phone, file, caption = '') {
+export async function sendDocument(phone, file, caption = '', conversationId = null) {
   const form = new FormData();
   form.append('document', file);
   form.append('caption', caption);
+  if (conversationId != null) form.append('conversation_id', String(conversationId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-document`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -313,8 +330,10 @@ export async function sendDocument(phone, file, caption = '') {
   return res.json();
 }
 
-export async function sendPresence(phone, action = 'start') {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, { action });
+export async function sendPresence(phone, action = 'start', conversationId = null) {
+  const body = { action };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, body);
 }
 
 export async function checkPhone(phone) {

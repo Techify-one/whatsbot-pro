@@ -83,9 +83,34 @@ function StatusBadge({ status }) {
   `;
 }
 
+// Per-provider visual identity for the channel indicator (plano 11 Fase 4).
+// Colour tints are limited to the set re-themed by custom.css's html.dark
+// fallback (blue/purple) + the semantic wa-* classes, so they stay legible in
+// dark mode (CLAUDE.md theming rule).
+const CHANNEL_META = {
+  gowa:           { label: 'WhatsApp',   cls: 'bg-wa-teal/15 text-wa-teal' },
+  whatsapp_cloud: { label: 'Cloud API',  cls: 'bg-blue-100 text-blue-700' },
+  telegram:       { label: 'Telegram',   cls: 'bg-blue-100 text-blue-700' },
+  test:           { label: 'Teste',      cls: 'bg-wa-hover text-wa-secondary' },
+};
+
+function ChannelBadge({ provider, name }) {
+  if (!provider) return null;
+  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
+  return html`
+    <span
+      class="px-2 py-0.5 rounded-full text-[11px] font-medium ${meta.cls} inline-flex items-center gap-1"
+      title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}
+    >
+      <span class="w-1.5 h-1.5 rounded-full bg-current opacity-70" aria-hidden="true"></span>
+      ${name || meta.label}
+    </span>
+  `;
+}
+
 // ── Single conversation row ─────────────────────────────────────────
 
-function ConversationRow({ convo, userNameById, currentUserId, canListUsers, onOpenChat, onAction }) {
+function ConversationRow({ convo, userNameById, currentUserId, canListUsers, onOpenChat, onAction, showChannel }) {
   const [busy, setBusy] = useState(false);
 
   const assigneeName = convo.assignee_user_id != null
@@ -131,6 +156,7 @@ function ConversationRow({ convo, userNameById, currentUserId, canListUsers, onO
         </button>
 
         <div class="flex items-center gap-2 shrink-0">
+          ${showChannel ? html`<${ChannelBadge} provider=${convo.channel_provider} name=${convo.channel_name} />` : null}
           <${StatusBadge} status=${convo.status} />
         </div>
       </div>
@@ -258,6 +284,14 @@ export function Conversations() {
     [richFilters],
   );
 
+  // Show the per-conversation channel badge only when ≥2 distinct channels are
+  // present (plano 11 Fase 4 / FQ1) — with a single channel it would be noise.
+  const showChannel = useMemo(() => {
+    const seen = new Set();
+    for (const c of conversations) if (c.channel_provider) seen.add(c.channel_provider);
+    return seen.size > 1;
+  }, [conversations]);
+
   const fetchConversations = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -310,11 +344,17 @@ export function Conversations() {
 
   useWebSocket({ onConversationChanged });
 
-  // Open the contact's chat in the main panel. Mirrors how the Contacts screen
-  // navigates: push /contacts/{id} and notify the router via popstate.
+  // Open THIS conversation's chat in the main panel (conversa-cêntrico, plano 11
+  // D1): push /conversations/{id} — não /contacts/{contact_id}, que fundiria os
+  // canais do mesmo número. Notifica o router via popstate.
   const openChat = useCallback((convo) => {
-    if (convo.contact_id == null) return;
-    history.pushState(null, '', `/contacts/${convo.contact_id}`);
+    if (convo.id != null) {
+      history.pushState(null, '', `/conversations/${convo.id}`);
+    } else if (convo.contact_id != null) {
+      history.pushState(null, '', `/contacts/${convo.contact_id}`);
+    } else {
+      return;
+    }
     window.dispatchEvent(new PopStateEvent('popstate'));
   }, []);
 
@@ -401,6 +441,7 @@ export function Conversations() {
                   canListUsers=${canListUsers}
                   onOpenChat=${openChat}
                   onAction=${handleAction}
+                  showChannel=${showChannel}
                 />
               `)}
             </div>`}

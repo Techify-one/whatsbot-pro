@@ -7,13 +7,15 @@ from pathlib import Path
 
 from fastapi import File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from gowa.client import GOWASendError, extract_msg_id
+from gowa.client import GOWASendError
 
-from db.repositories import contact_repo, message_repo, config_repo
+from db.repositories import contact_repo, message_repo, config_repo, conversation_repo
 from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from agent import group_mentions
+from server import system_notices
+from server.authz import current_user
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
@@ -35,6 +37,35 @@ def register_routes(app, deps):
     state = deps.state
     settings = deps.settings
     statics_senditems_dir = deps.statics_senditems_dir
+    outbound = deps.outbound_router
+
+    def _channel_for(phone: str, conversation_id=None) -> str:
+        """Channel a conversation belongs to (plano 11 D1). The conversa-cêntrica UI
+        passes ``conversation_id``; legacy callers fall back to 'default' (GOWA),
+        preserving the previous behavior exactly. Routing is by CHANNEL, never name."""
+        if conversation_id:
+            from db.repositories import conversation_repo as _cr
+            try:
+                conv = _cr.get_with_channel(int(conversation_id))
+            except (TypeError, ValueError):
+                conv = None
+            if conv and conv.get("channel_id"):
+                return conv["channel_id"]
+        return "default"
+
+    def _route_send_text(channel_id, phone, text, mentions=None, reply_to=None) -> str:
+        """Send text via the conversation's channel. Raises GOWASendError on failure
+        (so the existing handlers keep working); returns the external msg_id."""
+        res = outbound.send_text(channel_id, phone, text, reply_to=reply_to, mentions=mentions)
+        if not res.ok:
+            raise GOWASendError(res.error or "Falha no envio")
+        return res.external_msg_id or ""
+
+    def _route_send_media(channel_id, phone, kind, path, caption="", filename=None) -> str:
+        res = outbound.send_media(channel_id, phone, kind, path, caption=caption, filename=filename)
+        if not res.ok:
+            raise GOWASendError(res.error or "Falha no envio de mídia")
+        return res.external_msg_id or ""
 
     async def _send_read_receipts(phone: str, msg_ids: list[str]):
         """Send read receipts to GOWA in background (best-effort)."""
@@ -126,10 +157,10 @@ def register_routes(app, deps):
                 msg_ids = contact_repo.mark_as_read(contact_id)
                 data["unread_count"] = 0
                 data["unread_ai_count"] = 0
-                # Update in-memory cache
-                if phone in agent_handler._contacts:
-                    agent_handler._contacts[phone].unread_count = 0
-                    agent_handler._contacts[phone].unread_ai_count = 0
+                # Update in-memory cache (all channel-variants of this phone)
+                for cm in agent_handler.iter_cached_contacts(phone):
+                    cm.unread_count = 0
+                    cm.unread_ai_count = 0
             # Load messages
             data["messages"] = message_repo.get_all(contact_id)
             # Load usage for the full response
@@ -149,8 +180,8 @@ def register_routes(app, deps):
                     await asyncio.to_thread(
                         contact_repo.update, data["id"], can_send=1 if can_send else 0)
                     data["can_send"] = can_send
-                    if phone in agent_handler._contacts:
-                        agent_handler._contacts[phone].can_send = can_send
+                    for cm in agent_handler.iter_cached_contacts(phone):
+                        cm.can_send = can_send
             except Exception as e:
                 logger.warning("[Contact] Failed to check group send permission: %s", e)
         # Opening a conversation triggers a best-effort avatar refresh in the
@@ -168,8 +199,8 @@ def register_routes(app, deps):
             if data is None:
                 return False
             contact_repo.delete(data["id"])
-            # Clear in-memory cache
-            agent_handler._contacts.pop(phone, None)
+            # Clear in-memory cache (all channel-variants)
+            agent_handler.drop_cached_contact(phone)
             return True
         found = await asyncio.to_thread(_delete)
         if not found:
@@ -189,10 +220,10 @@ def register_routes(app, deps):
             if data is None:
                 return None
             contact_repo.set_archived(data["id"], bool(archived), by_app=True)
-            # Update in-memory cache
-            if phone in agent_handler._contacts:
-                agent_handler._contacts[phone].is_archived = bool(archived)
-                agent_handler._contacts[phone].archived_by_app = bool(archived)
+            # Update in-memory cache (all channel-variants of this phone)
+            for cm in agent_handler.iter_cached_contacts(phone):
+                cm.is_archived = bool(archived)
+                cm.archived_by_app = bool(archived)
             return bool(archived)
         result = await asyncio.to_thread(_archive)
         if result is None:
@@ -256,24 +287,25 @@ def register_routes(app, deps):
             logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
             return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
-        # Resolve @Name / @todos -> real mentions for group targets. `message`
-        # (friendly @Name) is saved/shown; `send_text` (inline @<number>) +
-        # mentions go on the wire.
+        channel_id = _channel_for(phone, body.get("conversation_id"))
+        # Resolve @Name / @todos -> real mentions for group targets, only on channels
+        # that support groups (Cloud is 1:1). `message` (friendly @Name) is saved/shown;
+        # `send_text` (inline @<number>) + mentions go on the wire.
         send_text, mentions = message, None
-        if "@g.us" in phone:
+        if "@g.us" in phone and outbound.supports(channel_id, "groups"):
             send_text, mentions = await asyncio.to_thread(
                 group_mentions.resolve_outgoing, phone, message)
 
-        # Track sent message to filter GOWA echo-backs (key on the wire text)
-        state.recently_sent[f"{phone}:{send_text[:120]}"] = time.time()
+        # Track sent message to filter echo-backs (key matches the webhook: channel:phone:text)
+        state.recently_sent[f"{channel_id}:{phone}:{send_text[:120]}"] = time.time()
 
-        # Try to send via GOWA — always save message (with status on failure)
+        # Send via the conversation's channel — always save message (status on failure)
         send_failed = False
         error_msg = ""
-        send_result = None
+        msg_id = None
         try:
-            send_result = await asyncio.to_thread(
-                gowa_client.send_message, phone, send_text, mentions, reply_to)
+            msg_id = await asyncio.to_thread(
+                _route_send_text, channel_id, phone, send_text, mentions, reply_to)
         except GOWASendError as e:
             logger.error("[Send] Failed to send message to %s: %s", phone, e)
             send_failed = True
@@ -283,7 +315,8 @@ def register_routes(app, deps):
             send_failed = True
             error_msg = str(e)
 
-        msg_id = extract_msg_id(send_result) if not send_failed else None
+        if send_failed:
+            msg_id = None
 
         # Always save to contact memory (with status="failed" if send failed)
         try:
@@ -313,6 +346,7 @@ def register_routes(app, deps):
         # Broadcast to all WS clients
         await ws_manager.broadcast("new_message", {
             "phone": phone,
+            "channel_id": channel_id,
             "message": msg_data,
         })
 
@@ -357,7 +391,8 @@ def register_routes(app, deps):
             if msg and msg.get("role") == "user":
                 return _err("Só é possível apagar para todos as suas próprias mensagens.", status=400)
             if not is_sandbox:
-                await asyncio.to_thread(gowa_client.revoke_message, msg_id, phone)
+                channel_id = _channel_for(phone, body.get("conversation_id"))
+                await asyncio.to_thread(outbound.revoke, channel_id, phone, msg_id)
             await asyncio.to_thread(message_repo.mark_revoked, msg_id, "all")
             await ws_manager.broadcast("message_revoked", {"phone": phone, "msg_id": msg_id})
             await emit_with_filter("message.revoked", {
@@ -375,7 +410,10 @@ def register_routes(app, deps):
             msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
             was_from_me = (msg or {}).get("role") != "user"
             if not is_sandbox:
-                await asyncio.to_thread(gowa_client.delete_message, msg_id, phone)
+                # "Delete for me" is a GOWA/linked-device local op; no Cloud equivalent.
+                channel_id = _channel_for(phone, body.get("conversation_id"))
+                if channel_id == "default":
+                    await asyncio.to_thread(gowa_client.delete_message, msg_id, phone)
             await asyncio.to_thread(message_repo.mark_revoked, msg_id, "me")
         if db_id:
             await asyncio.to_thread(message_repo.mark_revoked_by_id, int(db_id), "me")
@@ -401,7 +439,8 @@ def register_routes(app, deps):
             return _err("msg_id é obrigatório.")
 
         if not await asyncio.to_thread(_is_sandbox_contact, phone):
-            await asyncio.to_thread(gowa_client.react_to_message, msg_id, phone, emoji)
+            channel_id = _channel_for(phone, body.get("conversation_id"))
+            await asyncio.to_thread(outbound.react, channel_id, phone, msg_id, emoji)
         reactions = await asyncio.to_thread(message_repo.set_reaction, msg_id, emoji, "me")
         if reactions is None:
             return _err("Mensagem não encontrada.", status=404)
@@ -416,7 +455,8 @@ def register_routes(app, deps):
         logger.info("[React] %s reacted %r to msg %s", phone, emoji, msg_id)
         return _ok({"message": "Reação registrada.", "reactions": reactions})
 
-    async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True):
+    async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True,
+                              conversation_id=None):
         """Process a private message via the LLM.
 
         Triggered by the operator's "IA lê" toggle on the private-message panel.
@@ -495,13 +535,14 @@ def register_routes(app, deps):
                 await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
                 continue
 
-            state.recently_sent[f"{phone}:{part[:120]}"] = time.time()
+            channel_id = _channel_for(phone, conversation_id)
+            state.recently_sent[f"{channel_id}:{phone}:{part[:120]}"] = time.time()
             send_failed = False
             send_error = ""
-            send_result = None
+            msg_id = None
             try:
-                send_result = await asyncio.to_thread(
-                    gowa_client.send_message, phone, part)
+                msg_id = await asyncio.to_thread(
+                    _route_send_text, channel_id, phone, part)
             except GOWASendError as e:
                 logger.error("[PrivateAI] send failed for %s: %s", phone, e)
                 send_failed = True
@@ -511,7 +552,8 @@ def register_routes(app, deps):
                 send_failed = True
                 send_error = str(e)
 
-            msg_id = extract_msg_id(send_result) if not send_failed else None
+            if send_failed:
+                msg_id = None
             if msg_id:
                 state.processed_messages.add(msg_id)
 
@@ -537,7 +579,7 @@ def register_routes(app, deps):
                 })
                 return
             await ws_manager.broadcast("new_message", {
-                "phone": phone, "message": msg_data,
+                "phone": phone, "channel_id": channel_id, "message": msg_data,
             })
             await emit_with_filter("message.sent", {
                 "phone": phone, "text": part, "msg_id": msg_id,
@@ -583,7 +625,8 @@ def register_routes(app, deps):
         await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
 
         if ai_read:
-            asyncio.create_task(_run_private_ai(phone, text, reply_in_chat=ai_reply))
+            asyncio.create_task(_run_private_ai(phone, text, reply_in_chat=ai_reply,
+                                                conversation_id=body.get("conversation_id")))
 
         logger.info("[Private] Saved private note for %s (ai_read=%s, ai_reply=%s): %s",
                     phone, ai_read, ai_reply, text[:80])
@@ -596,12 +639,13 @@ def register_routes(app, deps):
         if not message:
             return _err("Campo 'message' é obrigatório.")
 
-        # Track for echo-back filtering
-        state.recently_sent[f"{phone}:{message[:120]}"] = time.time()
+        channel_id = _channel_for(phone, body.get("conversation_id"))
+        # Track for echo-back filtering (key matches the webhook: channel:phone:text)
+        state.recently_sent[f"{channel_id}:{phone}:{message[:120]}"] = time.time()
 
-        send_result = None
+        msg_id = None
         try:
-            send_result = await asyncio.to_thread(gowa_client.send_message, phone, message)
+            msg_id = await asyncio.to_thread(_route_send_text, channel_id, phone, message)
         except GOWASendError as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -625,7 +669,7 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao reenviar: {e}", status=500)
 
-        msg_id = extract_msg_id(send_result)
+        # msg_id is the channel's external id (string)
 
         # Mark the existing failed message as sent
         try:
@@ -648,6 +692,7 @@ def register_routes(app, deps):
         phone: str,
         image: UploadFile = File(...),
         caption: str = Form(""),
+        conversation_id: str = Form(""),
     ):
         """Send an image to a contact (operator-initiated)."""
         suffix = Path(image.filename or "img.png").suffix or ".png"
@@ -655,12 +700,14 @@ def register_routes(app, deps):
         content = await image.read()
         dest.write_bytes(content)
 
-        send_result = None
         # Sandbox/test contact — keep the image local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id)
+        msg_id = None
         try:
             if not is_sandbox:
-                send_result = await asyncio.to_thread(gowa_client.send_image, phone, str(dest), caption)
+                msg_id = await asyncio.to_thread(
+                    _route_send_media, channel_id, phone, "image", str(dest), caption)
         except GOWASendError as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -684,9 +731,8 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao enviar imagem: {e}", status=500)
 
-        msg_id = extract_msg_id(send_result)
-        # Filter GOWA echo-back: mark this msg_id as already processed so the
-        # webhook ignores it when the WhatsApp roundtrip echoes the message back.
+        # msg_id is the channel external id (None for sandbox). Mark it processed so
+        # the webhook ignores the WhatsApp echo of our own message.
         if msg_id:
             state.processed_messages.add(msg_id)
 
@@ -705,7 +751,7 @@ def register_routes(app, deps):
         contact.add_message("assistant", caption, media_type="image", media_path=rel_path,
                             status="operator", msg_id=msg_id)
 
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
         await emit_with_filter("message.sent", {
             "phone": phone, "text": caption, "msg_id": msg_id,
             "media_type": "image", "media_path": rel_path,
@@ -719,6 +765,7 @@ def register_routes(app, deps):
     async def send_audio_to_contact(
         phone: str,
         audio: UploadFile = File(...),
+        conversation_id: str = Form(""),
     ):
         """Send an audio file to a contact (operator-initiated)."""
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
@@ -726,12 +773,14 @@ def register_routes(app, deps):
         content = await audio.read()
         dest.write_bytes(content)
 
-        send_result = None
         # Sandbox/test contact — keep the audio local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id)
+        msg_id = None
         try:
             if not is_sandbox:
-                send_result = await asyncio.to_thread(gowa_client.send_audio, phone, str(dest))
+                msg_id = await asyncio.to_thread(
+                    _route_send_media, channel_id, phone, "audio", str(dest))
         except GOWASendError as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -755,9 +804,8 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao enviar áudio: {e}", status=500)
 
-        msg_id = extract_msg_id(send_result)
-        # Filter GOWA echo-back: mark this msg_id as already processed so the
-        # webhook ignores it when the WhatsApp roundtrip echoes the message back.
+        # msg_id is the channel external id (None for sandbox). Mark it processed so
+        # the webhook ignores the WhatsApp echo of our own message.
         if msg_id:
             state.processed_messages.add(msg_id)
 
@@ -775,7 +823,7 @@ def register_routes(app, deps):
         contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path,
                             status="operator", msg_id=msg_id)
 
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
         await emit_with_filter("message.sent", {
             "phone": phone, "text": "", "msg_id": msg_id,
             "media_type": "audio", "media_path": rel_path,
@@ -790,6 +838,7 @@ def register_routes(app, deps):
         phone: str,
         document: UploadFile = File(...),
         caption: str = Form(""),
+        conversation_id: str = Form(""),
     ):
         """Send an arbitrary file (document) to a contact (operator-initiated)."""
         filename = document.filename or "arquivo"
@@ -800,13 +849,14 @@ def register_routes(app, deps):
         content = await document.read()
         dest.write_bytes(content)
 
-        send_result = None
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id)
+        msg_id = None
         try:
             if not is_sandbox:
-                send_result = await asyncio.to_thread(
-                    gowa_client.send_file, phone, str(dest), caption, safe_name
-                )
+                msg_id = await asyncio.to_thread(
+                    _route_send_media, channel_id, phone, "document", str(dest),
+                    caption, safe_name)
         except GOWASendError as e:
             logger.error("[Send] Failed to send document to %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
@@ -830,7 +880,7 @@ def register_routes(app, deps):
             })
             return _err(f"Erro ao enviar documento: {e}", status=500)
 
-        msg_id = extract_msg_id(send_result)
+        # msg_id is the channel external id (None for sandbox).
         if msg_id:
             state.processed_messages.add(msg_id)
 
@@ -852,7 +902,7 @@ def register_routes(app, deps):
         contact.add_message("assistant", text_content, media_type="document",
                             media_path=rel_path, status="operator", msg_id=msg_id)
 
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
         await emit_with_filter("message.sent", {
             "phone": phone, "text": caption, "msg_id": msg_id,
             "media_type": "document", "media_path": rel_path,
@@ -864,9 +914,12 @@ def register_routes(app, deps):
 
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict):
-        """Send typing/stop presence indicator to a contact (operator-initiated)."""
+        """Send typing/stop presence indicator to a contact (operator-initiated).
+
+        Capability-gated: channels without presence (e.g. WhatsApp Cloud) no-op."""
         action = body.get("action", "start")
-        await asyncio.to_thread(gowa_client.send_chat_presence, phone, action)
+        channel_id = _channel_for(phone, body.get("conversation_id"))
+        await asyncio.to_thread(outbound.send_presence, channel_id, phone, action)
         return _ok({"status": "ok"})
 
     @app.post("/api/contacts/{phone}/read")
@@ -930,7 +983,7 @@ def register_routes(app, deps):
         return _ok({"members": members})
 
     @app.post("/api/contacts/{phone}/toggle-ai")
-    async def toggle_contact_ai(phone: str, body: dict):
+    async def toggle_contact_ai(phone: str, body: dict, request: Request):
         """Enable or disable AI auto-reply for a specific contact."""
         enabled = body.get("enabled")
         if enabled is None:
@@ -938,8 +991,8 @@ def register_routes(app, deps):
         def _toggle():
             contact = agent_handler._get_contact(phone)
             contact.set_ai_enabled(bool(enabled))
-            return contact.ai_enabled
-        result = await asyncio.to_thread(_toggle)
+            return contact.id, contact.ai_enabled
+        contact_id, result = await asyncio.to_thread(_toggle)
         await ws_manager.broadcast("contact_ai_toggled", {
             "phone": phone,
             "ai_enabled": result,
@@ -947,6 +1000,18 @@ def register_routes(app, deps):
         await emit_with_filter("contact.ai_toggled", {
             "phone": phone, "ai_enabled": result, "ts": time.time(),
         })
+        # Chat notice (plano 12, grupo `ai`): gate nível-contato. Ancora no fio da
+        # conversa aberta (fallback: a mais recente) do contato.
+        actor = (current_user(request) or {}).get("name") or None
+        conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact_id)
+        if conv is None:
+            conv = await asyncio.to_thread(conversation_repo.get_latest_for_contact, contact_id)
+        if conv is not None:
+            await asyncio.to_thread(
+                system_notices.emit_conversation_notice,
+                event_type="ai_on" if result else "ai_off",
+                conversation_id=conv["id"], contact_id=contact_id, phone=phone,
+                actor=actor)
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")

@@ -27,6 +27,7 @@ from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
 from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
+from channels.outbound import OutboundRouter
 from channels.providers.gowa_channel import GOWAChannel
 from db.repositories import channel_repo
 from plugins.events import (
@@ -66,8 +67,11 @@ class ServerDeps:
     plugins_dir: Path = None
     plugins_registry: PluginRegistry = None
     channel_registry: object = None
+    outbound_router: object = None
     # Dynamically set by webhook route for cross-module access
     broadcast_tool_calls: object = None
+    # Set by webhook.register_routes — provider-agnostic inbound funnel (plano 11).
+    ingest_event: object = None
 
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -119,15 +123,44 @@ def create_app(
         for provider_cls in getattr(loaded, "channel_providers", []):
             channel_registry.register_provider(provider_cls)
 
-    # Instantiate the "default" gowa channel from its DB row (created by the
-    # 0011_channels migration), wrapping the existing client/manager.
+    # Materialize a LIVE Channel instance for every configured channel (plano 11).
+    # Without this only "default" was instantiated, so inbound from a whatsapp_cloud
+    # channel had no provider to parse it. The "default" gowa channel wraps the
+    # existing client/manager; every other channel is built from its provider class
+    # (registered above) with the registry for credential access. A channel whose
+    # provider isn't loaded (e.g. whatsapp_cloud when its plugin isn't installed) is
+    # skipped — logged, never fatal.
     try:
-        default_row = channel_repo.get("default")
-        if default_row is not None:
-            channel_registry.add_channel(
-                "default", GOWAChannel("default", gowa_client, gowa_manager))
+        for row in channel_repo.list_all():
+            cid = row["id"]
+            provider = row.get("provider")
+            try:
+                if provider == "gowa":
+                    channel_registry.add_channel(
+                        cid, GOWAChannel(cid, gowa_client, gowa_manager))
+                    continue
+                if not row.get("enabled", 1):
+                    continue
+                provider_cls = channel_registry.get_provider(provider)
+                if provider_cls is None:
+                    logger.info(
+                        "Channel %s: provider %r not loaded; skipping live instance",
+                        cid, provider)
+                    continue
+                try:
+                    inst = provider_cls(cid, registry=channel_registry)
+                except TypeError:
+                    inst = provider_cls(cid)
+                channel_registry.add_channel(cid, inst)
+                logger.info("Channel %s (%s) live instance registered", cid, provider)
+            except Exception as e:
+                logger.warning("Could not instantiate channel %s (%s): %s", cid, provider, e)
     except Exception as e:
-        logger.warning("Could not instantiate default channel: %s", e)
+        logger.warning("Channel materialization failed: %s", e)
+
+    # Outbound router (plano 11): the single send surface the runtime uses instead
+    # of gowa_client, routing each reply to the conversation's own channel.
+    outbound_router = OutboundRouter(channel_registry)
 
     # AI engine (config-in-DB + code-in-DB). Seed the default agent/prompt from
     # the current config (idempotent), then materialise/install/register the
@@ -175,6 +208,7 @@ def create_app(
         plugins_dir=plugins_dir,
         plugins_registry=registry,
         channel_registry=channel_registry,
+        outbound_router=outbound_router,
     )
 
     # Group @mention resolution service (members lookup + name/number mapping).
@@ -320,7 +354,7 @@ def create_app(
         path = request.url.path
 
         # SPA pages, static assets, webhook, and auth endpoints are always open
-        if path in _SPA_PATHS or path.startswith(("/contacts/", "/executions/")):
+        if path in _SPA_PATHS or path.startswith(("/contacts/", "/conversations/", "/executions/")):
             return await call_next(request)
         if path in _AUTH_EXEMPT_EXACT:
             return await call_next(request)
@@ -419,8 +453,9 @@ def create_app(
     @app.get("/channels")
     @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
+    @app.get("/conversations/{conversation_id:int}")
     @app.get("/executions/{execution_id:int}")
-    async def index(contact_id: int | None = None, execution_id: int | None = None):
+    async def index(contact_id: int | None = None, conversation_id: int | None = None, execution_id: int | None = None):
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
@@ -478,4 +513,6 @@ def create_app(
                 name=f"plugin_{loaded.id}_static",
             )
 
+    # Expose the shared deps (registry, router, ingest funnel) for tests/tooling.
+    app.state.deps = deps
     return app

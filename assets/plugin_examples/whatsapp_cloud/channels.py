@@ -22,7 +22,9 @@ monitor, etc.) — no extra dependency.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -51,6 +53,7 @@ class WhatsAppCloudChannel(Channel):
                 reactions=True,
                 media=True,
                 inbound_route="path",
+                session_window_hours=24,  # free text only within 24h of last inbound
             ),
         )
         self.registry = registry
@@ -251,6 +254,56 @@ class WhatsAppCloudChannel(Channel):
             "template": template,
         }
         return self._post_message(payload)
+
+    # ── Inbound media download (plano 11 Fase 5 / P16) ───────────────
+    def download_media(self, media_id: str, dest_dir, *,
+                       mime_type: Optional[str] = None) -> Optional[str]:
+        """Resolve a Cloud media id → a cached local file in ``dest_dir``.
+
+        Two Graph calls: ``GET /{media_id}`` returns a short-lived ``url`` +
+        ``mime_type``; the bytes are then fetched from that url WITH the bearer
+        token. Writes ``cloud_<media_id>.<ext>`` into ``dest_dir`` and returns the
+        filename (the core composes the ``statics/media/<filename>`` media_path),
+        or ``None`` on any failure (caller falls back to a media placeholder).
+        """
+        if not media_id or not self._access_token:
+            return None
+        try:
+            meta_url = f"{self._base_url()}/{media_id}"
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                meta = client.get(meta_url, headers=self._headers())
+                if meta.status_code != 200:
+                    logger.warning("whatsapp_cloud media meta %s -> %s",
+                                   media_id, meta.status_code)
+                    return None
+                info = meta.json()
+                url = info.get("url")
+                mime = info.get("mime_type") or mime_type or ""
+                if not url:
+                    return None
+                # The CDN url requires the bearer token too (no Content-Type).
+                blob = client.get(url, headers={"Authorization": f"Bearer {self._access_token}"})
+                if blob.status_code != 200:
+                    logger.warning("whatsapp_cloud media blob %s -> %s",
+                                   media_id, blob.status_code)
+                    return None
+                data = blob.content
+            ext = mimetypes.guess_extension((mime or "").split(";")[0].strip() or "") or ""
+            # Normalise the two WhatsApp voice/ogg variants stdlib gets wrong.
+            if not ext and "ogg" in mime:
+                ext = ".ogg"
+            if not ext:
+                ext = ".bin"
+            dest = Path(dest_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            safe_id = "".join(c for c in str(media_id) if c.isalnum() or c in "-_")[:64]
+            filename = f"cloud_{safe_id}{ext}"
+            (dest / filename).write_bytes(data)
+            return filename
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud download_media failed for %s", media_id,
+                           exc_info=True)
+            return None
 
     # ── Inbound ──────────────────────────────────────────────────────
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
