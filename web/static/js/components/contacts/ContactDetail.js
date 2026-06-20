@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage } from '../../services/api.js';
+import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage, getQuickReplies } from '../../services/api.js';
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
 import { formatBubbleTime, isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
@@ -51,6 +51,10 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   const [members, setMembers] = useState([]);
   // mentionMenu: { query, start (index of '@' in input), index (highlighted) } | null
   const [mentionMenu, setMentionMenu] = useState(null);
+  // Quick replies (plano 04): global list loaded once + the "/atalho" menu.
+  // quickReplyMenu: { query, start (index of '/' in input), index (highlighted) } | null
+  const [quickReplies, setQuickReplies] = useState([]);
+  const [quickReplyMenu, setQuickReplyMenu] = useState(null);
   // Per-message context menu: { x, y, message, isFromMe } | null
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
@@ -229,11 +233,65 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     }, 0);
   }
 
+  // ── Quick replies (plano 04): load the global list once, refresh on change ──
+  useEffect(() => {
+    let alive = true;
+    function load() {
+      getQuickReplies().then(res => { if (alive && res && res.ok) setQuickReplies(res.data || []); });
+    }
+    load();
+    window.addEventListener('whatsbot:quick-replies-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:quick-replies-changed', load); };
+  }, []);
+
+  // Candidates for a typed "/query" (matches short_code or content; sliced to 8).
+  function getQuickReplyCandidates(query) {
+    const q = (query || '').toLowerCase();
+    return quickReplies.filter(qr =>
+      qr.short_code.toLowerCase().includes(q) || (qr.content || '').toLowerCase().includes(q)
+    ).slice(0, 8);
+  }
+
+  // Detect a "/token" at the cursor and open/close the quick-reply menu. Unlike
+  // @mention this works in ANY conversation; opens only when there are matches
+  // (so plain messages starting with "/" — e.g. URLs — aren't hijacked).
+  function updateQuickReplyMenu(el, val) {
+    if (sandbox) { setQuickReplyMenu(null); return; }
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : val.length;
+    const m = val.slice(0, pos).match(/(?:^|\s)\/([\w-]*)$/);
+    if (m && getQuickReplyCandidates(m[1]).length) {
+      setQuickReplyMenu({ query: m[1], start: pos - m[1].length - 1, index: 0 });
+    } else {
+      setQuickReplyMenu(null);
+    }
+  }
+
+  // Replace the typed "/token" with the chosen content (literal, NOT sent).
+  function applyQuickReply(cand) {
+    if (!cand || !quickReplyMenu) return;
+    const el = inputRef.current;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : input.length;
+    const before = input.slice(0, quickReplyMenu.start);
+    const after = input.slice(pos);
+    const insert = cand.content;
+    const newVal = before + insert + after;
+    setInput(newVal);
+    setQuickReplyMenu(null);
+    setTimeout(() => {
+      if (el) {
+        el.focus();
+        const caret = (before + insert).length;
+        el.setSelectionRange(caret, caret);
+      }
+    }, 0);
+  }
+
   // Send typing presence to contact (debounced)
   function handleInputChange(e) {
     const val = e.target.value;
     setInput(val);
     updateMentionMenu(e.target, val);
+    updateQuickReplyMenu(e.target, val);
     if (!phone || sandbox) return;
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
@@ -402,6 +460,29 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         }
       }
       if (e.key === 'Escape') { e.preventDefault(); setMentionMenu(null); return; }
+    }
+    // Quick-reply menu (plano 04): arrows/enter/tab/esc drive it (mutually
+    // exclusive with the mention menu — different trigger chars).
+    if (quickReplyMenu) {
+      const cands = getQuickReplyCandidates(quickReplyMenu.query);
+      if (cands.length) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setQuickReplyMenu(mm => ({ ...mm, index: Math.min((mm.index || 0) + 1, cands.length - 1) }));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setQuickReplyMenu(mm => ({ ...mm, index: Math.max((mm.index || 0) - 1, 0) }));
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          applyQuickReply(cands[Math.min(quickReplyMenu.index || 0, cands.length - 1)]);
+          return;
+        }
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setQuickReplyMenu(null); return; }
     }
     // Enter sends; Shift+Enter inserts a line break (default behavior).
     // Ignore while IME composition is in progress.
@@ -1282,6 +1363,26 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                         ${c.special ? 'todos — todos os membros' : mentionLabel(c)}
                         ${(!c.special && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
                       </span>
+                    </button>
+                  `)}
+                </div>
+              `;
+            })() : ''}
+            ${quickReplyMenu ? (() => {
+              const cands = getQuickReplyCandidates(quickReplyMenu.query);
+              if (!cands.length) return '';
+              const sel = Math.min(quickReplyMenu.index || 0, cands.length - 1);
+              return html`
+                <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] max-h-[210px] overflow-y-auto bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] z-30 wa-scrollbar">
+                  ${cands.map((c, i) => html`
+                    <button
+                      type="button"
+                      key=${c.id}
+                      onMouseDown=${(ev) => { ev.preventDefault(); applyQuickReply(c); }}
+                      class="w-full text-left px-[12px] py-[7px] text-[14px] flex items-start gap-[8px] ${i === sel ? 'bg-wa-hover' : ''} hover:bg-wa-hover"
+                    >
+                      <span class="text-wa-teal font-mono shrink-0">/${c.short_code}</span>
+                      <span class="text-wa-secondary truncate">${(c.content || '').replace(/\s+/g, ' ').slice(0, 60)}</span>
                     </button>
                   `)}
                 </div>

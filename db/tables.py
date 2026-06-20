@@ -131,6 +131,19 @@ contact_tags = Table(
 Index("idx_ct_tag", contact_tags.c.tag_id)
 
 
+# Quick replies (canned responses) — plano 04. Global single list (P42, no scope),
+# plain text (P47, no variables). short_code stored WITHOUT the leading slash.
+quick_replies = Table(
+    "quick_replies",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("short_code", Text, nullable=False, unique=True),  # atalho SEM a barra, UNIQUE global (P41)
+    Column("content", Text, nullable=False),                  # texto puro (sem placeholders, P47)
+    Column("created_at", Float, nullable=False),              # epoch (P56)
+    Column("updated_at", Float, nullable=False),
+)
+
+
 unread_msg_ids = Table(
     "unread_msg_ids",
     metadata,

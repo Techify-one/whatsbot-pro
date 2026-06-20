@@ -10,6 +10,7 @@ import { LoginScreen } from './components/LoginScreen.js';
 import { PluginsManager } from './components/PluginsManager.js';
 import { PluginScreen } from './components/PluginScreen.js';
 import { ToolsManager } from './components/ToolsManager.js';
+import QuickReplies from './components/QuickReplies.js';
 import { SetupWizard } from './components/SetupWizard.js';
 import { LowBalanceModal } from './components/LowBalanceModal.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
@@ -44,6 +45,7 @@ const CORE_ROUTES = {
   '/executions': 'executions',
   '/plugins': 'plugins',
   '/tools': 'tools',
+  '/quick-replies': 'quick-replies',
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
@@ -53,6 +55,7 @@ const CORE_TAB_PATHS = {
   executions: '/executions',
   plugins: '/plugins',
   tools: '/tools',
+  'quick-replies': '/quick-replies',
 };
 
 // Tab id used internally for plugin screens. We encode the plugin id and
@@ -184,6 +187,9 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} active=${tab === 'tools'} href=${CORE_TAB_PATHS.tools} onClick=${() => { onTabChange('tools'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>`}
           >Gerenciar Tools</${MenuItem}>
+          <${MenuItem} active=${tab === 'quick-replies'} href=${CORE_TAB_PATHS['quick-replies']} onClick=${() => { onTabChange('quick-replies'); close(); }}
+            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 9h-2V9h2v2zm0-4h-2V5h2v2zm4 4h-2V9h2v2zm0-4h-2V5h2v2zM9 11H7V9h2v2zm0-4H7V5h2v2z"/></svg>`}
+          >Respostas Rápidas</${MenuItem}>
           <${MenuItem} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>`}
           >Gerenciar Plugins</${MenuItem}>
@@ -499,6 +505,11 @@ function App({ onLogout, hasPassword }) {
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Tools" onBack=${() => setTab('contacts')} />
                 <${ToolsManager} />
+              </div>`
+            : tab === 'quick-replies'
+            ? html`<div class="max-w-5xl mx-auto p-4">
+                <${PageHeader} title="Respostas Rápidas" onBack=${() => setTab('contacts')} />
+                <${QuickReplies} />
               </div>`
             : tab === 'plugins'
             ? html`<div class="max-w-5xl mx-auto p-4">

@@ -50,6 +50,23 @@ export async function testApiKey(apiKey) {
   return request('POST', '/api/config/test-key', { api_key: apiKey });
 }
 
+// Quick replies (plano 04) — global single list, plain text.
+export async function getQuickReplies() {
+  return request('GET', '/api/quick-replies');
+}
+
+export async function createQuickReply(data) {
+  return request('POST', '/api/quick-replies', data);
+}
+
+export async function updateQuickReply(id, data) {
+  return request('PUT', `/api/quick-replies/${id}`, data);
+}
+
+export async function deleteQuickReply(id) {
+  return request('DELETE', `/api/quick-replies/${id}`);
+}
+
 export async function getStatus() {
   return request('GET', '/api/status');
 }
