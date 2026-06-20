@@ -836,6 +836,53 @@ check("GET /channels/default -> credential masked",
       _creds.get("access_token", "").startswith("••••") and "supersecret" not in _creds.get("access_token", ""))
 check("GET /channels/default -> mask keeps last 4", _creds.get("access_token", "").endswith("9876"))
 
+# CRUD (plano 02 Fase 2)
+r = client.post("/api/channels", json={
+    "id": "cloud_teste", "provider": "whatsapp_cloud", "display_name": "Cloud Teste",
+    "credentials": {"access_token": "EAAtokenSecreto123", "phone_number_id": "55123",
+                    "verify_token": "vtok_abc"}})
+check("POST /channels (cloud) -> 200", r.status_code == 200)
+check("POST /channels -> token mascarado na volta",
+      r.json()["data"]["credentials"].get("access_token", "").startswith("••••"))
+r = client.post("/api/channels", json={"id": "ID-INVALIDO", "provider": "whatsapp_cloud"})
+check("POST /channels id inválido -> 400", r.status_code == 400)
+r = client.post("/api/channels", json={"id": "x_prov", "provider": "telegrama"})
+check("POST /channels provider inválido -> 400", r.status_code == 400)
+r = client.post("/api/channels", json={"id": "cloud_teste", "provider": "whatsapp_cloud"})
+check("POST /channels id duplicado -> 409", r.status_code == 409)
+
+r = client.put("/api/channels/cloud_teste", json={"display_name": "Cloud Renomeado", "enabled": False})
+check("PUT /channels -> 200 atualiza", r.status_code == 200 and r.json()["data"]["display_name"] == "Cloud Renomeado")
+check("PUT /channels -> enabled=0", r.json()["data"]["enabled"] == 0)
+# placeholder mascarado não sobrescreve o segredo real
+client.put("/api/channels/cloud_teste", json={"credentials": {"access_token": "••••o123"}})
+check("PUT mask placeholder -> NÃO sobrescreve segredo",
+      _ccrepo.get("cloud_teste", "access_token") == "EAAtokenSecreto123")
+
+r = client.get("/api/channels/cloud_teste/status")
+check("GET /channels/{id}/status -> 200", r.status_code == 200 and "connected" in r.json()["data"])
+
+# Handshake do webhook por provider (Cloud API verification) — auth-exempt
+r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
+               params={"hub.mode": "subscribe", "hub.verify_token": "vtok_abc",
+                       "hub.challenge": "desafio42"})
+check("GET webhook handshake (token ok) -> ecoa challenge",
+      r.status_code == 200 and r.text == "desafio42")
+r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
+               params={"hub.mode": "subscribe", "hub.verify_token": "ERRADO",
+                       "hub.challenge": "desafio42"})
+check("GET webhook handshake (token errado) -> 403", r.status_code == 403)
+r = client.post("/api/webhook/whatsapp_cloud/cloud_teste", json={"entry": []})
+check("POST webhook inbound -> 200 (nunca 500)", r.status_code == 200)
+r = client.post("/api/webhook/whatsapp_cloud/inexistente", json={})
+check("POST webhook canal desconhecido -> 200 ignored", r.status_code == 200)
+
+r = client.delete("/api/channels/default")
+check("DELETE /channels/default -> 400 (protegido)", r.status_code == 400)
+r = client.delete("/api/channels/cloud_teste")
+check("DELETE /channels -> 200", r.status_code == 200)
+check("DELETE -> credenciais removidas", _ccrepo.get("cloud_teste", "access_token") is None)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15f. RBAC seed (plano 03 Fase 1)
 # ═══════════════════════════════════════════════════════════════════

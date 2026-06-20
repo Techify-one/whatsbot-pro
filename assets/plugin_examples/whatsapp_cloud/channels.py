@@ -1,0 +1,419 @@
+"""WhatsApp Cloud API channel provider (Plano 02 Fase 2).
+
+Implements the ``Channel`` contract for the official WhatsApp Cloud API (Meta
+Graph API). Unlike GOWA there is no QR / linked-device session: the channel
+authenticates with a permanent ``access_token`` against a ``phone_number_id``,
+so ``capabilities.qr = False`` and ``inbound_route = "path"`` (Meta delivers
+inbound messages to the core webhook the user registers in the Meta dashboard).
+
+Credentials model (P24 — provider never touches the channels tables by SQL):
+  * When a ``registry`` is given, secrets are read via
+    ``registry.get_credential(channel_id, key)`` — the same API the core uses.
+  * When ``registry is None`` (unit tests), an in-memory ``credentials`` dict
+    passed to ``__init__`` is used instead.
+
+Keys read: ``access_token``, ``phone_number_id`` and the optional
+``graph_api_version`` (default ``v21.0`` — also exposed as a plugin setting).
+
+HTTP uses ``httpx`` to match the rest of the core (gowa/client.py, balance
+monitor, etc.) — no extra dependency.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Optional
+
+import httpx
+
+from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.events import InboundEvent
+
+logger = logging.getLogger(__name__)
+
+GRAPH_BASE = "https://graph.facebook.com"
+DEFAULT_GRAPH_VERSION = "v21.0"
+HTTP_TIMEOUT = 20.0
+
+
+class WhatsAppCloudChannel(Channel):
+    provider = "whatsapp_cloud"
+
+    def __init__(self, channel_id: str, registry=None, credentials: Optional[dict] = None):
+        super().__init__(
+            channel_id,
+            ChannelCapabilities(
+                qr=False,
+                templates=True,
+                groups=False,         # Cloud API is 1:1 only (no group messaging)
+                presence=False,
+                reactions=True,
+                media=True,
+                inbound_route="path",
+            ),
+        )
+        self.registry = registry
+        # In-memory fallback for tests / registry-less usage.
+        self._credentials = dict(credentials or {})
+
+    # ── Credential access ────────────────────────────────────────────
+    def _cred(self, key: str) -> str:
+        if self.registry is not None:
+            try:
+                val = self.registry.get_credential(self.channel_id, key)
+            except Exception:  # noqa: BLE001
+                val = None
+            if val:
+                return val
+        return self._credentials.get(key, "") or ""
+
+    @property
+    def _graph_version(self) -> str:
+        return (
+            self._cred("graph_api_version")
+            or os.environ.get("WHATSAPP_CLOUD_GRAPH_VERSION")
+            or DEFAULT_GRAPH_VERSION
+        )
+
+    @property
+    def _phone_number_id(self) -> str:
+        return self._cred("phone_number_id")
+
+    @property
+    def _access_token(self) -> str:
+        return self._cred("access_token")
+
+    def _base_url(self) -> str:
+        return f"{GRAPH_BASE}/{self._graph_version}"
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+        }
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+    # Cloud API is stateless / push-based; nothing to start or stop. The
+    # base class no-op start()/stop() are inherited.
+
+    def status(self) -> dict:
+        """Ping the phone-number node to confirm token + id are valid."""
+        phone_id = self._phone_number_id
+        if not phone_id or not self._access_token:
+            return {
+                "connected": False,
+                "logged_in": False,
+                "needs_qr": False,
+                "error": "missing_credentials",
+            }
+        url = f"{self._base_url()}/{phone_id}"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "connected": True,
+                    "logged_in": True,
+                    "needs_qr": False,
+                    "error": None,
+                    "verified_name": data.get("verified_name"),
+                    "display_phone_number": data.get("display_phone_number"),
+                    "quality_rating": data.get("quality_rating"),
+                }
+            return {
+                "connected": False,
+                "logged_in": False,
+                "needs_qr": False,
+                "error": f"http_{resp.status_code}: {resp.text[:200]}",
+            }
+        except Exception as e:  # noqa: BLE001
+            return {
+                "connected": False,
+                "logged_in": False,
+                "needs_qr": False,
+                "error": str(e),
+            }
+
+    # ── Outbound ─────────────────────────────────────────────────────
+    def _post_message(self, payload: dict) -> SendResult:
+        phone_id = self._phone_number_id
+        if not phone_id or not self._access_token:
+            return SendResult(ok=False, error="missing_credentials")
+        url = f"{self._base_url()}/{phone_id}/messages"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.post(url, headers=self._headers(), json=payload)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                msgs = data.get("messages") or []
+                ext_id = msgs[0].get("id", "") if msgs else ""
+                return SendResult(ok=True, external_msg_id=ext_id)
+            return SendResult(ok=False, error=f"http_{resp.status_code}: {resp.text[:300]}")
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e))
+
+    def send_text(self, chat_id: str, text: str, *, reply_to=None,
+                  mentions=None) -> SendResult:
+        # Cloud API has no inline @mentions and replies use "context".
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": chat_id,
+            "type": "text",
+            "text": {"body": text, "preview_url": True},
+        }
+        if reply_to:
+            payload["context"] = {"message_id": reply_to}
+        return self._post_message(payload)
+
+    def send_media(self, chat_id: str, kind: str, path_or_url: str, *,
+                   caption: str = "", filename=None) -> SendResult:
+        # Cloud API accepts either an uploaded media id or a public link. We use
+        # ``link`` here; uploading local files to /media (to get a media id) is
+        # a later concern — see media-cache TODO in parse_inbound (P16).
+        kind = (kind or "").lower()
+        if kind == "image":
+            mtype = "image"
+            media_obj: dict = {"link": path_or_url}
+            if caption:
+                media_obj["caption"] = caption
+        elif kind in ("audio", "voice"):
+            mtype = "audio"
+            media_obj = {"link": path_or_url}
+        elif kind == "video":
+            mtype = "video"
+            media_obj = {"link": path_or_url}
+            if caption:
+                media_obj["caption"] = caption
+        elif kind == "sticker":
+            mtype = "sticker"
+            media_obj = {"link": path_or_url}
+        else:
+            mtype = "document"
+            media_obj = {"link": path_or_url}
+            if caption:
+                media_obj["caption"] = caption
+            if filename:
+                media_obj["filename"] = filename
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": chat_id,
+            "type": mtype,
+            mtype: media_obj,
+        }
+        return self._post_message(payload)
+
+    def react(self, chat_id: str, msg_id: str, emoji: str) -> None:
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": chat_id,
+            "type": "reaction",
+            "reaction": {"message_id": msg_id, "emoji": emoji or ""},
+        }
+        self._post_message(payload)
+
+    def mark_read(self, chat_id: str, msg_id: str) -> None:
+        # Cloud API marks-as-read by message id (chat_id unused but kept for
+        # contract parity).
+        phone_id = self._phone_number_id
+        if not phone_id or not self._access_token or not msg_id:
+            return
+        url = f"{self._base_url()}/{phone_id}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": msg_id,
+        }
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                client.post(url, headers=self._headers(), json=payload)
+        except Exception:  # noqa: BLE001
+            logger.debug("whatsapp_cloud mark_read failed", exc_info=True)
+
+    def send_template(self, chat_id: str, template_name: str, lang: str = "pt_BR",
+                      components=None) -> SendResult:
+        """Send an approved template (HSM) — required outside the 24h window."""
+        template: dict = {
+            "name": template_name,
+            "language": {"code": lang},
+        }
+        if components:
+            template["components"] = components
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": chat_id,
+            "type": "template",
+            "template": template,
+        }
+        return self._post_message(payload)
+
+    # ── Inbound ──────────────────────────────────────────────────────
+    def parse_inbound(self, raw: dict) -> list[InboundEvent]:
+        """Translate a Meta webhook payload into ``InboundEvent`` objects.
+
+        Walks ``entry[].changes[].value`` and emits:
+          * one ``kind="message"`` event per ``messages[]`` item
+          * one ``kind="receipt"`` event per ``statuses[]`` item
+
+        Media (image/audio/document/video/sticker) is recorded with its Cloud
+        API ``media id`` in ``media_extras`` — the actual download + cache to
+        ``statics/media/`` is P16 and intentionally NOT done here (see TODO).
+        """
+        events: list[InboundEvent] = []
+        if not isinstance(raw, dict):
+            return events
+
+        entries = raw.get("entry") or []
+        for entry in entries:
+            changes = (entry or {}).get("changes") or []
+            for change in changes:
+                value = (change or {}).get("value") or {}
+                metadata = value.get("metadata") or {}
+                phone_number_id = metadata.get("phone_number_id", "")
+
+                # Map waba phone-number-id → our channel id when it matches; we
+                # keep this channel's own id otherwise (the core routes by the
+                # webhook path, so channel_id is already known).
+                channel_id = self.channel_id
+
+                # contacts[].profile.name keyed by wa_id for sender_name lookup.
+                name_by_wa: dict[str, str] = {}
+                for contact in value.get("contacts") or []:
+                    wa_id = contact.get("wa_id", "")
+                    profile = contact.get("profile") or {}
+                    if wa_id and profile.get("name"):
+                        name_by_wa[wa_id] = profile["name"]
+
+                # ── messages ──────────────────────────────────────────
+                for msg in value.get("messages") or []:
+                    events.append(
+                        self._parse_message(
+                            msg, channel_id, phone_number_id, name_by_wa, change
+                        )
+                    )
+
+                # ── statuses (receipts) ───────────────────────────────
+                for status in value.get("statuses") or []:
+                    events.append(
+                        InboundEvent(
+                            channel_id=channel_id,
+                            provider=self.provider,
+                            kind="receipt",
+                            direction="out",
+                            external_msg_id=status.get("id", ""),
+                            chat_id=status.get("recipient_id", ""),
+                            sender_id=status.get("recipient_id", ""),
+                            ts=_to_float(status.get("timestamp")),
+                            media_extras={
+                                "status": status.get("status"),
+                                "conversation": status.get("conversation"),
+                                "pricing": status.get("pricing"),
+                                "errors": status.get("errors"),
+                            },
+                            raw=status,
+                        )
+                    )
+
+        return events
+
+    def _parse_message(self, msg: dict, channel_id: str, phone_number_id: str,
+                       name_by_wa: dict, change: dict) -> InboundEvent:
+        sender = msg.get("from", "")
+        msg_type = msg.get("type", "")
+        external_id = msg.get("id", "")
+        ts = _to_float(msg.get("timestamp"))
+        sender_name = name_by_wa.get(sender, "")
+
+        text = ""
+        media_type: Optional[str] = None
+        media_extras: dict = {}
+
+        if msg_type == "text":
+            text = (msg.get("text") or {}).get("body", "")
+        elif msg_type in ("image", "audio", "video", "document", "sticker", "voice"):
+            media_type = "audio" if msg_type == "voice" else msg_type
+            obj = msg.get(msg_type) or {}
+            # Record the Cloud API media id so a later phase (P16) can download
+            # it via GET /{media_id} + the returned URL and cache to
+            # statics/media/. TODO(P16): resolve media_id → bytes → media_path.
+            media_extras = {
+                "media_id": obj.get("id"),
+                "mime_type": obj.get("mime_type"),
+                "sha256": obj.get("sha256"),
+                "filename": obj.get("filename"),
+                "voice": obj.get("voice"),
+                "_todo": "download media via Graph /{media_id} and cache (P16)",
+            }
+            caption = obj.get("caption")
+            if caption:
+                text = caption
+                media_extras["caption"] = caption
+        elif msg_type == "location":
+            loc = msg.get("location") or {}
+            media_type = "location"
+            media_extras = {
+                "lat": loc.get("latitude"),
+                "lng": loc.get("longitude"),
+                "name": loc.get("name"),
+                "address": loc.get("address"),
+            }
+        elif msg_type == "reaction":
+            reaction = msg.get("reaction") or {}
+            return InboundEvent(
+                channel_id=channel_id,
+                provider=self.provider,
+                kind="reaction",
+                external_msg_id=external_id,
+                chat_id=sender,
+                sender_id=sender,
+                sender_name=sender_name,
+                ts=ts,
+                media_extras={
+                    "emoji": reaction.get("emoji"),
+                    "reacted_message_id": reaction.get("message_id"),
+                },
+                raw=msg,
+            )
+        elif msg_type in ("button", "interactive"):
+            inter = msg.get(msg_type) or {}
+            media_type = "interactive"
+            media_extras = {"payload": inter}
+            text = inter.get("text") or ""
+        else:
+            # Unknown/unsupported type — keep metadata, leave text empty.
+            media_type = msg_type or None
+            media_extras = {"unsupported_type": msg_type, "payload": msg.get(msg_type)}
+
+        return InboundEvent(
+            channel_id=channel_id,
+            provider=self.provider,
+            kind="message",
+            direction="in",
+            external_msg_id=external_id,
+            chat_id=sender,
+            sender_id=sender,
+            sender_name=sender_name,
+            is_group=False,            # Cloud API is 1:1 only
+            text=text,
+            media_type=media_type,
+            media_path=None,           # filled by the media-cache phase (P16)
+            media_extras=media_extras,
+            ts=ts,
+            raw=msg,
+        )
+
+
+def _to_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# Exported for the plugin loader (entry.channels → CHANNEL_PROVIDERS).
+CHANNEL_PROVIDERS = [WhatsAppCloudChannel]

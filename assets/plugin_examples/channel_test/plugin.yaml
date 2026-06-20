@@ -1,0 +1,16 @@
+id: channel_test
+name: Canal de Teste (lifecycle)
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Fixture viva (plano 02 Fase 1) que valida o lifecycle de plugin (setup/teardown)
+  e o supervisor de tasks (plano 09). Registra um canal "test" trivial e um loop
+  supervisionado de heartbeat — não injeta no pipeline de mensagens real.
+author: WhatsBot
+entry:
+  channels: channels
+  lifecycle: lifecycle
+permissions:
+  - channel.provider
+  - runtime.task
+dependencies: []
