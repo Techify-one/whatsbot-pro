@@ -453,6 +453,32 @@ def register_routes(app, deps):
     # Cache dir for inbound media downloaded from push-based providers (Cloud P16).
     media_dir = settings.data_dir / "statics" / "media"
 
+    def _resolve_presence_conv_id(phone: str) -> int | None:
+        """Resolve the GOWA conversation_id for a chat_presence event so the
+        frontend can scope the "digitando" indicator to that exact conversation
+        (a contact may have conversations on several channels — plano 11).
+
+        GOWA is always the ``default`` channel (its legacy webhook). Cached per
+        phone with a short TTL since presence events are frequent. Best-effort:
+        returns ``None`` on any failure (frontend falls back to channel::phone)."""
+        now = time.time()
+        cached = state.presence_conv_cache.get(phone)
+        if cached and cached[1] > now:
+            return cached[0]
+        conv_id: int | None = None
+        try:
+            contact = contact_repo.get_by_phone(phone)
+            if contact:
+                conv = conversation_repo.get_latest_for_contact_inbox(
+                    contact["id"], conversation_repo.DEFAULT_INBOX_ID)
+                if conv:
+                    conv_id = conv["id"]
+        except Exception:
+            logger.debug("presence conv_id resolution failed for %s", phone,
+                         exc_info=True)
+        state.presence_conv_cache[phone] = (conv_id, now + 30.0)
+        return conv_id
+
     # ── Group Mention Helpers ──────────────────────────────────────
 
     def _is_bot_mentioned(text: str, data: dict) -> bool:
@@ -1514,8 +1540,16 @@ def register_routes(app, deps):
                     "media": media,
                     "last_ts": time.time(),
                 }
+                # GOWA presence is scoped to the "default" channel. Resolve the exact
+                # GOWA conversation so the frontend marks ONLY that conversation as
+                # "digitando" — not every conversation sharing this phone (plano 11).
+                # Matching by conversation_id is unambiguous (channel_id strings /
+                # LID-vs-phone can diverge). Cached (TTL 30s) — presence is frequent.
+                conv_id = await asyncio.to_thread(_resolve_presence_conv_id, phone)
                 await ws_manager.broadcast("chat_presence", {
                     "phone": phone,
+                    "channel_id": "default",
+                    "conversation_id": conv_id,
                     "state": presence_state,
                     "media": media,
                 })

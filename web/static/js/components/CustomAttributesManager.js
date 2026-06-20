@@ -1,7 +1,8 @@
 // Custom attributes admin screen (plano 05) — full-page (FQ6).
-// Define contact (and later conversation) custom attributes: key, type, options…
-// attribute_key is identity: auto-derived from the name and immutable after create.
-// Dispatches `whatsbot:custom-attributes-changed` so open contact panels reload.
+// Define contact AND conversation custom attributes: key, type, options…
+// attribute_key + applies_to are identity: settable on create, immutable after.
+// Chatwoot-style: abas (Conversas | Contato) + tabela.
+// Dispatches `whatsbot:custom-attributes-changed` so open contact/conversation panels reload.
 
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
@@ -26,6 +27,29 @@ const TYPES = [
 
 const KEY_RE = /^[a-z][a-z0-9_]*$/;
 
+// The two scopes a custom attribute can apply to (P54). applies_to is identity:
+// settable on create, immutable on update (same as attribute_key/type).
+const SCOPES = [
+  ['contact', 'Contato'],
+  ['conversation', 'Conversa'],
+];
+
+// Tab order mirrors the Chatwoot layout (Conversas first, then Contato).
+const SCOPE_TABS = [
+  ['conversation', 'Conversas'],
+  ['contact', 'Contato'],
+];
+
+const PencilIcon = html`
+  <svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+  </svg>`;
+
+const TrashIcon = html`
+  <svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+    <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+  </svg>`;
+
 function slugify(name) {
   return (name || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip accents
@@ -39,11 +63,12 @@ function notifyChanged() {
   try { window.dispatchEvent(new Event('whatsbot:custom-attributes-changed')); } catch (e) {}
 }
 
-function AttributeForm({ editing, onSubmit, onCancel, busy }) {
+function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
   const [displayName, setDisplayName] = useState(editing ? editing.display_name : '');
   const [key, setKey] = useState(editing ? editing.attribute_key : '');
   const [keyTouched, setKeyTouched] = useState(!!editing);
   const [type, setType] = useState(editing ? editing.type : 'text');
+  const [appliesTo, setAppliesTo] = useState(editing ? editing.applies_to : (defaultScope || 'contact'));
   const [options, setOptions] = useState(editing && editing.options ? editing.options.join('\n') : '');
   const [required, setRequired] = useState(editing ? !!editing.required : false);
   const [description, setDescription] = useState(editing ? (editing.description || '') : '');
@@ -74,7 +99,7 @@ function AttributeForm({ editing, onSubmit, onCancel, busy }) {
         }
       : {
           attribute_key: key, display_name: displayName.trim(), type,
-          applies_to: 'contact', required: required ? 1 : 0, description: description.trim(),
+          applies_to: appliesTo, required: required ? 1 : 0, description: description.trim(),
           regex_pattern: regexPattern.trim() || null, regex_cue: regexCue.trim() || null,
           ...(type === 'list' ? { options: optionList } : {}),
         };
@@ -110,6 +135,19 @@ function AttributeForm({ editing, onSubmit, onCancel, busy }) {
             onChange=${(e) => setType(e.target.value)}>
             ${TYPES.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
           </select>
+        </div>
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Aplica-se a (identidade — não muda depois)</label>
+          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px] ${editing ? 'opacity-60' : ''}"
+            value=${appliesTo} disabled=${!!editing}
+            onChange=${(e) => setAppliesTo(e.target.value)}>
+            ${SCOPES.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
+          </select>
+          <div class="text-[12px] text-wa-secondary mt-1">
+            ${appliesTo === 'conversation'
+              ? 'Aparece no painel "Informações da conversa" — um valor por atendimento.'
+              : 'Aparece no painel "Informações do contato" — um valor por contato.'}
+          </div>
         </div>
         ${type === 'list' ? html`
           <div>
@@ -162,12 +200,24 @@ export default function CustomAttributesManager() {
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState('conversation');   // active scope tab (Chatwoot-style)
 
   async function load() {
     setLoading(true);
-    const res = await getCustomAttributes('contact');
-    if (res && res.ok) setItems(res.data || []);
-    else setError((res && res.error) || 'Falha ao carregar.');
+    // Both scopes (P54): contact + conversation, filtered per active tab below.
+    const [cRes, vRes] = await Promise.all([
+      getCustomAttributes('contact'),
+      getCustomAttributes('conversation'),
+    ]);
+    if ((cRes && cRes.ok) || (vRes && vRes.ok)) {
+      setItems([
+        ...((cRes && cRes.ok && cRes.data) || []),
+        ...((vRes && vRes.ok && vRes.data) || []),
+      ]);
+      setError('');
+    } else {
+      setError((cRes && cRes.error) || (vRes && vRes.error) || 'Falha ao carregar.');
+    }
     setLoading(false);
   }
 
@@ -197,12 +247,14 @@ export default function CustomAttributesManager() {
   }
 
   const typeLabel = (t) => (TYPES.find(([v]) => v === t) || [t, t])[1];
+  const tabLabel = (SCOPE_TABS.find(([v]) => v === tab) || ['', ''])[1];
+  const tabRows = items.filter(r => (r.applies_to || 'contact') === tab);
 
   return html`
     <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Campos personalizados do contato. Aparecem no painel de dados e a IA pode preenchê-los.
+          Campos personalizados de contato e de conversa. Aparecem nos painéis de informações e a IA pode preenchê-los.
         </p>
         ${!creating && !editing ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
@@ -212,39 +264,67 @@ export default function CustomAttributesManager() {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${AttributeForm} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+      <div class="flex items-center gap-6 border-b border-wa-border mb-4">
+        ${SCOPE_TABS.map(([scope, title]) => html`
+          <button key=${scope}
+            class="relative pb-2 text-[14px] transition-colors ${tab === scope ? 'text-wa-teal font-medium' : 'text-wa-secondary hover:text-wa-text'}"
+            onClick=${() => setTab(scope)}>
+            ${title}
+            ${tab === scope ? html`<span class="absolute left-0 right-0 -bottom-px h-0.5 bg-wa-teal rounded-full"></span>` : null}
+          </button>
+        `)}
+      </div>
+
+      ${creating ? html`<${AttributeForm} defaultScope=${tab} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
       ${editing ? html`<${AttributeForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
-      ${!loading && items.length === 0 && !creating ? html`
+      ${!loading && tabRows.length === 0 && !creating ? html`
         <div class="text-[14px] text-wa-secondary text-center py-8">
-          Nenhum atributo personalizado ainda. Clique em <span class="font-medium">+ Novo</span> para criar.
+          Nenhum atributo de ${tabLabel.toLowerCase()} ainda. Clique em <span class="font-medium">+ Novo</span> para criar.
         </div>
       ` : null}
 
-      <div class="flex flex-col gap-2">
-        ${items.map(row => html`
-          <div key=${row.id} class="bg-wa-panel border border-wa-border rounded-lg p-3 flex items-start gap-3">
-            <div class="flex-1 min-w-0">
-              <div class="text-[14px] text-wa-text font-medium">
-                ${row.display_name}
-                ${row.required ? html`<span class="text-red-500"> *</span>` : null}
-              </div>
-              <div class="text-[12px] text-wa-secondary mt-0.5">
-                <span class="font-mono">${row.attribute_key}</span> · ${typeLabel(row.type)}
-                ${row.type === 'list' && row.options ? html` · ${row.options.join(', ')}` : null}
-              </div>
-            </div>
-            <div class="flex gap-1 shrink-0">
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => { setEditing(row); setCreating(false); setError(''); }}>Editar</button>
-              <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
-                onClick=${() => handleDelete(row)}>Excluir</button>
-            </div>
-          </div>
-        `)}
-      </div>
+      ${!loading && tabRows.length > 0 ? html`
+        <div class="overflow-x-auto border border-wa-border rounded-lg">
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-wa-border text-[12px] text-wa-secondary uppercase tracking-wide">
+                <th class="px-4 py-3 font-medium">Nome</th>
+                <th class="px-4 py-3 font-medium">Descrição</th>
+                <th class="px-4 py-3 font-medium">Tipo</th>
+                <th class="px-4 py-3 font-medium">Chave</th>
+                <th class="px-4 py-3 font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tabRows.map(row => html`
+                <tr key=${row.id} class="border-b border-wa-border last:border-0 hover:bg-wa-hover transition-colors">
+                  <td class="px-4 py-3 text-[14px] text-wa-text">
+                    ${row.display_name}${row.required ? html`<span class="text-red-500"> *</span>` : null}
+                  </td>
+                  <td class="px-4 py-3 text-[14px] text-wa-secondary">${row.description || '—'}</td>
+                  <td class="px-4 py-3 text-[14px] text-wa-text">
+                    ${typeLabel(row.type)}${row.type === 'list' && row.options ? html` · ${row.options.join(', ')}` : null}
+                  </td>
+                  <td class="px-4 py-3 text-[13px] text-wa-secondary font-mono">${row.attribute_key}</td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center gap-1 justify-end">
+                      <button title="Editar" aria-label="Editar"
+                        class="p-1.5 rounded-md text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors"
+                        onClick=${() => { setEditing(row); setCreating(false); setError(''); }}>${PencilIcon}</button>
+                      <button title="Excluir" aria-label="Excluir"
+                        class="p-1.5 rounded-md text-red-500 hover:bg-red-500/10 transition-colors"
+                        onClick=${() => handleDelete(row)}>${TrashIcon}</button>
+                    </div>
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+      ` : null}
     </div>
   `;
 }

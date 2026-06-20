@@ -2240,9 +2240,309 @@ _alice_row = next((c for c in client.get("/api/contacts").json()["data"]
 check("GET /api/contacts -> Alice carries her conversation", _alice_row and _alice_row.get("conversation_id") == _cid)
 check("GET /api/contacts -> Alice conv_status open", _alice_row and _alice_row.get("conv_status") == "open")
 
+# chat_presence ("digitando") deve carregar o conversation_id EXATO da conversa
+# GOWA — assim o frontend escopa o indicador àquela conversa (e não a todas as
+# conversas do número em outros canais). Conversa-cêntrico (plano 11).
+_deps_pres = app.state.deps
+_deps_pres.state.presence_conv_cache.clear()  # garante resolução fresca
+_captured_pres = []
+_orig_bcast = _deps_pres.ws_manager.broadcast
+async def _capture_bcast(event, data):
+    if event == "chat_presence":
+        _captured_pres.append(data)
+    return await _orig_bcast(event, data)
+_deps_pres.ws_manager.broadcast = _capture_bcast
+try:
+    r = client.post("/api/webhook", json={
+        "event": "chat_presence",
+        "payload": {"from": "5511999990001@s.whatsapp.net", "state": "composing"},
+    })
+finally:
+    _deps_pres.ws_manager.broadcast = _orig_bcast
+check("POST /webhook chat_presence -> 200", r.status_code == 200)
+_pres = _captured_pres[-1] if _captured_pres else {}
+check("chat_presence broadcast -> channel_id default", _pres.get("channel_id") == "default")
+check("chat_presence broadcast -> conversation_id = conversa GOWA da Alice",
+      _pres.get("conversation_id") == _cid)
+# Contato sem conversa GOWA → conversation_id None (frontend cai no fallback canal::phone).
+_deps_pres.state.presence_conv_cache.clear()
+_captured_pres.clear()
+_deps_pres.ws_manager.broadcast = _capture_bcast
+try:
+    r = client.post("/api/webhook", json={
+        "event": "chat_presence",
+        "payload": {"from": "5511000000999@s.whatsapp.net", "state": "composing"},
+    })
+finally:
+    _deps_pres.ws_manager.broadcast = _orig_bcast
+check("chat_presence broadcast -> conversation_id None p/ contato sem conversa",
+      (_captured_pres[-1] if _captured_pres else {}).get("conversation_id") is None)
+
 # ═══════════════════════════════════════════════════════════════════
 #  Summary
 # ═══════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════
+#  Custom attributes — conversation scope value validation (Onda 1)
+# ═══════════════════════════════════════════════════════════════════
+section("Custom Attributes — conversation value validation (Onda 1)")
+
+client.post("/api/custom-attributes", json={
+    "attribute_key": "valor_conv", "display_name": "Valor", "type": "number",
+    "applies_to": "conversation"})
+r = client.put(f"/api/conversations/{_conv2['id']}/info",
+               json={"custom_attributes": {"valor_conv": "abc"}})
+check("conv attr number inválido -> 400", r.status_code == 400)
+r = client.put(f"/api/conversations/{_conv2['id']}/info",
+               json={"custom_attributes": {"valor_conv": "42"}})
+check("conv attr number normalizado -> 42.0",
+      r.status_code == 200 and
+      r.json()["data"]["conversation"]["custom_attributes"].get("valor_conv") == 42.0)
+check("conv attr não vaza p/ escopo contato",
+      "valor_conv" not in {d["attribute_key"]
+                           for d in client.get("/api/custom-attributes?applies_to=contact").json()["data"]})
+
+# ═══════════════════════════════════════════════════════════════════
+#  Conversation labels — registry + per-conversation (Onda 3)
+# ═══════════════════════════════════════════════════════════════════
+section("Conversation Labels (Onda 3)")
+
+r = client.post("/api/conversation-labels", json={"name": "Urgente", "color": "#ef4444"})
+check("POST /conversation-labels -> 200", r.status_code == 200)
+_lbl_urgente = r.json()["data"]
+check("create label -> id + name", bool(_lbl_urgente.get("id")) and _lbl_urgente["name"] == "Urgente")
+check("create label duplicada -> erro",
+      client.post("/api/conversation-labels", json={"name": "Urgente", "color": "#000"}).json().get("ok") is False)
+check("create label sem nome -> erro",
+      client.post("/api/conversation-labels", json={"name": "", "color": "#000"}).json().get("ok") is False)
+client.post("/api/conversation-labels", json={"name": "VIP", "color": "#8b5cf6"})
+
+r = client.get("/api/conversation-labels")
+check("GET /conversation-labels -> 200", r.status_code == 200)
+check("registro global lista Urgente+VIP",
+      {"Urgente", "VIP"} <= {l["name"] for l in r.json()["data"]})
+
+r = client.put(f"/api/conversation-labels/{_lbl_urgente['id']}", json={"color": "#dc2626"})
+check("PUT label cor -> 200 + atualizada", r.status_code == 200 and r.json()["data"]["color"] == "#dc2626")
+check("PUT label rename colisão -> erro",
+      client.put(f"/api/conversation-labels/{_lbl_urgente['id']}", json={"name": "VIP"}).json().get("ok") is False)
+check("PUT label inexistente -> 404",
+      client.put("/api/conversation-labels/999999", json={"name": "X"}).status_code == 404)
+
+r = client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["Urgente", "VIP"]})
+check("PUT conv labels -> 200 + snapshot",
+      r.status_code == 200 and set(r.json()["data"]["labels"]) == {"Urgente", "VIP"})
+r = client.get(f"/api/conversations/{_conv2['id']}/labels")
+check("GET conv labels -> 2 etiquetas", r.status_code == 200 and len(r.json()["data"]["labels"]) == 2)
+check("PUT conv labels remove p/ snapshot menor",
+      client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["VIP"]}).json()["data"]["labels"] == ["VIP"])
+check("PUT conv labels ignora nome inexistente",
+      set(client.put(f"/api/conversations/{_conv2['id']}/labels",
+                     json={"labels": ["VIP", "NaoExiste"]}).json()["data"]["labels"]) == {"VIP"})
+check("PUT conv labels não-lista -> erro",
+      client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": "x"}).json().get("ok") is False)
+check("PUT conv labels conversa inexistente -> 404",
+      client.put("/api/conversations/999999/labels", json={"labels": []}).status_code == 404)
+
+# delete cascades the link off the conversation
+_vip_id = next(l["id"] for l in client.get("/api/conversation-labels").json()["data"] if l["name"] == "VIP")
+check("DELETE label -> 200", client.delete(f"/api/conversation-labels/{_vip_id}").status_code == 200)
+check("delete label -> link removido da conversa (cascade)",
+      all(l["name"] != "VIP" for l in client.get(f"/api/conversations/{_conv2['id']}/labels").json()["data"]["labels"]))
+check("DELETE label inexistente -> 404",
+      client.delete("/api/conversation-labels/999999").status_code == 404)
+
+# ── Filter dimension conv_labels (separate from contact-tag `labels`) ──
+client.post("/api/conversation-labels", json={"name": "Filtravel", "color": "#06b6d4"})
+client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["Filtravel"]})
+check("filter-schema inclui conv_labels",
+      "conv_labels" in {d["key"] for d in client.get("/api/conversations/filter-schema").json()["data"]["dimensions"]})
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "conv_labels", "filter_operator": "in", "values": ["Filtravel"]}]})
+check("filter conv_labels:in -> acha a conversa",
+      r.status_code == 200 and any(c["id"] == _conv2["id"] for c in r.json()["data"]["conversations"]))
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "conv_labels", "filter_operator": "in", "values": ["Inexistente"]}]})
+check("filter conv_labels nome inexistente -> não acha",
+      all(c["id"] != _conv2["id"] for c in r.json()["data"]["conversations"]))
+check("filter conv_labels equal_to -> 400 (só 'in')",
+      client.post("/api/conversations/filter", json={
+          "filters": [{"attribute_key": "conv_labels", "filter_operator": "equal_to", "values": ["Filtravel"]}]}).status_code == 400)
+
+# ── System notice for conversation labels (grupo conv_labels) ──
+_sn_cfg.set("system_notice_conv_labels", True)
+client.post("/api/conversation-labels", json={"name": "Notif", "color": "#10b981"})
+_lblcm = _CM("5500077766655")
+_lblcm.add_message("user", "oi")
+_lblconv = _conv_repo.get_open_for_contact(_lblcm.id)
+_lbl_hdr = {"Authorization": f"Bearer {_mgrtok}"}
+client.put(f"/api/conversations/{_lblconv['id']}/labels", json={"labels": ["Notif"]}, headers=_lbl_hdr)
+_lbl_notices = [c for c in _notices(_lblconv["id"]) if "etiqueta" in c]
+check("conv label add -> aviso de sistema 'etiqueta'", len(_lbl_notices) >= 1)
+check("conv label add -> nomeia autor (Mgr)", any("Mgr" in c for c in _lbl_notices))
+_sn_cfg.set("system_notice_conv_labels", False)
+_before_lbl = len([c for c in _notices(_lblconv["id"]) if "etiqueta" in c])
+client.put(f"/api/conversations/{_lblconv['id']}/labels", json={"labels": []}, headers=_lbl_hdr)
+check("grupo conv_labels OFF -> nenhum aviso novo",
+      len([c for c in _notices(_lblconv["id"]) if "etiqueta" in c]) == _before_lbl)
+_sn_cfg.set("system_notice_conv_labels", True)
+
+# ═══════════════════════════════════════════════════════════════════
+#  Cloud API templates (Frente C)
+# ═══════════════════════════════════════════════════════════════════
+section("Cloud API Templates (Frente C)")
+
+from channels.base import Channel as _Ch, ChannelCapabilities as _Caps, SendResult as _SR
+from db.repositories import inbox_repo as _ibx_repo
+
+
+class _FakeTplChannel(_Ch):
+    provider = "fake_cloud"
+
+    def __init__(self, channel_id):
+        super().__init__(channel_id, _Caps(templates=True, session_window_hours=24))
+        self.sent = []
+        self._tpls = [{
+            "name": "boas_vindas", "language": "pt_BR", "category": "MARKETING",
+            "status": "APPROVED", "components": [
+                {"type": "header", "format": "image"},
+                {"type": "body", "text": "Olá {{1}}, pedido {{2}} confirmado!"},
+                {"type": "buttons", "buttons": [{"type": "url", "text": "Rastrear", "url": "https://x/{{1}}"}]},
+            ]}]
+
+    def status(self):
+        return {"connected": True, "logged_in": True, "needs_qr": False, "error": None}
+
+    def send_text(self, *a, **k):
+        return _SR(ok=True, external_msg_id="t")
+
+    def send_media(self, *a, **k):
+        return _SR(ok=True, external_msg_id="t")
+
+    def parse_inbound(self, raw):
+        return []
+
+    def list_templates(self):
+        return list(self._tpls)
+
+    def send_template(self, chat_id, template_name, lang="pt_BR", components=None):
+        self.sent.append({"chat_id": chat_id, "name": template_name, "lang": lang, "components": components})
+        return _SR(ok=True, external_msg_id="tpl_msg_99")
+
+
+_tpl_inbox = _ibx_repo.create(channel_id="cloud_test", name="Cloud Test")
+_tpl_ci = _ci_repo.get_or_create(inbox_id=_tpl_inbox["id"], contact_id=_cid, source_id=f"cloud:{_cid}")
+_tpl_conv = _conv_repo.create(inbox_id=_tpl_inbox["id"], contact_id=_cid, contact_inbox_id=_tpl_ci["id"])
+app.state.deps.channel_registry.add_channel("cloud_test", _FakeTplChannel("cloud_test"))
+
+check("GET templates (canal default GOWA) -> supported=false",
+      client.get(f"/api/conversations/{_conv2['id']}/templates").json()["data"]["supported"] is False)
+r = client.get(f"/api/conversations/{_tpl_conv['id']}/templates")
+check("GET templates (cloud) -> supported=true", r.json()["data"]["supported"] is True)
+check("GET templates (cloud) -> lista boas_vindas",
+      any(t["name"] == "boas_vindas" for t in r.json()["data"]["templates"]))
+check("GET templates conversa inexistente -> 404",
+      client.get("/api/conversations/999999/templates").status_code == 404)
+
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={
+    "template_name": "boas_vindas", "language": "pt_BR",
+    "components": [
+        {"type": "header", "parameters": [{"type": "image", "image": {"link": "https://x/i.jpg"}}]},
+        {"type": "body", "parameters": [{"type": "text", "text": "Alice"}, {"type": "text", "text": "123"}]},
+    ],
+    "preview_text": "Olá Alice, pedido 123 confirmado!"})
+check("POST send-template -> 200", r.status_code == 200)
+check("send-template -> msg_id retornado", r.json()["data"].get("msg_id") == "tpl_msg_99")
+_fake_ch = app.state.deps.channel_registry.get("cloud_test")
+check("send-template -> canal recebeu name + components",
+      bool(_fake_ch.sent) and _fake_ch.sent[-1]["name"] == "boas_vindas"
+      and len(_fake_ch.sent[-1]["components"]) == 2)
+with _get_engine().connect() as _conn:
+    _tpl_saved = _conn.execute(
+        _sa_select(_msgs_t.c.id)
+        .where(_msgs_t.c.contact_id == _cid)
+        .where(_msgs_t.c.content.like("%pedido 123%"))
+        .limit(1)).first()
+check("send-template -> mensagem persistida no fio", _tpl_saved is not None)
+
+check("send-template canal sem suporte -> 400",
+      client.post(f"/api/conversations/{_conv2['id']}/send-template",
+                  json={"template_name": "x"}).status_code == 400)
+check("send-template sem template_name -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={}).status_code == 400)
+check("send-template components não-lista -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/send-template",
+                  json={"template_name": "x", "components": "nope"}).status_code == 400)
+
+# Compositor hints on the chat-messages endpoint.
+r = client.get(f"/api/conversations/{_tpl_conv['id']}/messages")
+check("conv messages (cloud) -> templates_supported=true", r.json()["data"].get("templates_supported") is True)
+check("conv messages (cloud, sem inbound) -> session_open=false (janela 24h)",
+      r.json()["data"].get("session_open") is False)
+check("conv messages (default) -> templates_supported=false",
+      client.get(f"/api/conversations/{_conv2['id']}/messages").json()["data"].get("templates_supported") is False)
+
+# ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
+section("WhatsApp Cloud — list_templates parsing (Frente C)")
+import importlib.util as _ilu
+_wac_spec = _ilu.spec_from_file_location(
+    "wac_under_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
+_wac = _ilu.module_from_spec(_wac_spec)
+_wac_spec.loader.exec_module(_wac)
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._p = payload
+        self.text = ""
+
+    def json(self):
+        return self._p
+
+
+class _FakeHttpClient:
+    def __init__(self, pages):
+        self._pages = pages
+        self._i = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get(self, url, headers=None, params=None):
+        p = self._pages[min(self._i, len(self._pages) - 1)]
+        self._i += 1
+        return p
+
+
+_pages = [
+    _Resp(200, {"data": [
+        {"name": "t1", "status": "APPROVED", "language": "pt_BR", "category": "MARKETING",
+         "components": [{"type": "BODY", "text": "Oi {{1}}"}]},
+        {"name": "t2_pending", "status": "PENDING", "language": "pt_BR"},
+    ], "paging": {"next": "https://graph/next-page"}}),
+    _Resp(200, {"data": [
+        {"name": "t3", "status": "APPROVED", "language": "en", "category": "UTILITY", "components": []},
+    ]}),
+]
+_orig_httpx_client = _wac.httpx.Client
+_wac.httpx.Client = lambda *a, **k: _FakeHttpClient(_pages)
+try:
+    _ch = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+    _tpls = _ch.list_templates()
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("list_templates -> filtra APPROVED (PENDING fora)",
+      {t["name"] for t in _tpls} == {"t1", "t3"})
+check("list_templates -> seguiu paginação (2 páginas)", len(_tpls) == 2)
+check("list_templates -> normaliza type p/ minúsculas",
+      _tpls[0]["components"][0]["type"] == "body")
+check("list_templates sem waba_id -> []",
+      _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).list_templates() == [])
 
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")

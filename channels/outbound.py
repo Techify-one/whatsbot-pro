@@ -98,6 +98,25 @@ class OutboundRouter:
         except Exception as e:  # noqa: BLE001
             return SendResult(ok=False, error=str(e))
 
+    def list_templates(self, channel_id: str) -> list[dict]:
+        """Approved templates for a channel (capability-gated, mirrors send_template).
+
+        Returns ``[]`` when the channel doesn't support templates, isn't live, or the
+        provider call fails — so the picker degrades cleanly instead of erroring.
+        """
+        if not self.supports(channel_id, "templates"):
+            return []
+        inst = self.get(channel_id)
+        if inst is None:
+            return []
+        try:
+            return inst.list_templates() or []
+        except NotImplementedError:
+            return []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_templates failed on %s: %s", channel_id, e)
+            return []
+
     # ── Optional, capability-gated, best-effort ──────────────────────
     def send_presence(self, channel_id: str, chat_id: str, state: str) -> None:
         if not self.supports(channel_id, "presence"):

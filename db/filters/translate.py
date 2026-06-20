@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import and_, or_, not_, select
 
-from db.tables import conversations, contacts, contact_tags, tags
+from db.tables import (conversations, contacts, contact_tags, tags,
+                       conversation_labels, conversation_label_links)
 from db.filters.registry import (
     FilterError, DIMENSIONS, OPS, CATTR_PREFIX, CATTR_KEY_RE,
 )
@@ -78,6 +79,8 @@ def _build_clause(clause, ctx: FilterContext):
         return conversations.c.last_activity_at > threshold
     if kind == "labels":
         return _labels_clause(values)
+    if kind == "conv_labels":
+        return _conv_labels_clause(values)
     if kind == "q":
         return _q_clause(values[0] if values else "")
     raise FilterError(f"Tipo de dimensão não suportado: {kind!r}.")  # pragma: no cover
@@ -145,6 +148,18 @@ def _labels_clause(values: list):
            .join(tags, tags.c.id == contact_tags.c.tag_id)
            .where(tags.c.name.in_(names)))
     return conversations.c.contact_id.in_(sub)
+
+
+def _conv_labels_clause(values: list):
+    """Filter by CONVERSATION labels (separate from the contact-tag `labels` dim)."""
+    names = [str(v) for v in values if str(v).strip()]
+    if not names:
+        raise FilterError("Filtro de etiquetas da conversa requer ao menos um valor.")
+    sub = (select(conversation_label_links.c.conversation_id)
+           .join(conversation_labels,
+                 conversation_labels.c.id == conversation_label_links.c.label_id)
+           .where(conversation_labels.c.name.in_(names)))
+    return conversations.c.id.in_(sub)
 
 
 def _q_clause(term: str):
