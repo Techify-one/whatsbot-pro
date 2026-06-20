@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def _emit_changed(kind: str, key: str) -> None:
+    # Clear the config cache first so the very next message sees the edit, then
+    # broadcast for any other listeners (plugins, multi-worker invalidation).
+    try:
+        from ai_engine import dynamic_registry
+        dynamic_registry.invalidate()
+    except Exception:
+        pass
     try:
         emit_event("ai.config.changed", {"kind": kind, "key": key, "ts": time.time()})
     except Exception:

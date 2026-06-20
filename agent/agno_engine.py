@@ -84,8 +84,8 @@ def build_model(handler, model_id: str | None = None,
     variables = None
     if model_config:
         try:
-            from db.repositories import variable_repo
-            variables = variable_repo.as_map()
+            from ai_engine import dynamic_registry
+            variables = dynamic_registry.variables_map()
         except Exception:
             variables = None
     kwargs = model_factory.build_kwargs(

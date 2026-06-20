@@ -28,6 +28,7 @@ from db.repositories import (  # noqa: E402
 )
 from agent import agent_factory  # noqa: E402
 from agent.tools import transferir_agente, CORE_TOOLS  # noqa: E402
+from ai_engine import dynamic_registry  # noqa: E402  (config cache; API invalida via _emit_changed)
 
 _passed = 0
 _failed = 0
@@ -137,6 +138,7 @@ with get_engine().begin() as cn:
 conversation_repo.set_agent(conv["id"], "suporte")
 agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
                 model_config={"model": "test/model"}, tool_names=None, enabled=False)
+dynamic_registry.invalidate()  # a API faz isso via _emit_changed; aqui o save é direto
 spec = agent_factory.build_for_contact(handler_on, contact)
 check("agente vinculado desativado -> cai no default",
       spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)

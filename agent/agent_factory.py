@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from db.repositories import (
     agent_repo, prompt_repo, variable_repo, conversation_repo, inbox_repo,
 )
+from ai_engine import dynamic_registry
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +114,12 @@ def _resolve_active_agent(contact) -> dict | None:
     """Resolve the bound agent row, falling back to the default if absent/disabled."""
     key = resolve_active_agent_key(contact)
     if key:
-        agent = agent_repo.get(key)
+        agent = dynamic_registry.get_agent(key)
         if agent and agent.get("enabled"):
             return agent
         # Bound agent missing/disabled → não trava o atendimento, usa o default.
         logger.debug("AI engine: agente vinculado %r ausente/desativado; usando default", key)
-    return agent_repo.get_default()
+    return dynamic_registry.get_default_agent()
 
 
 def build_for_contact(handler, contact) -> AgentSpec | None:
@@ -136,14 +137,14 @@ def build_for_contact(handler, contact) -> AgentSpec | None:
             logger.debug("AI engine: default agent missing/disabled; using legacy path")
             return None
 
-        prompt_row = prompt_repo.get(agent.get("prompt_key") or DEFAULT_PROMPT_KEY)
+        prompt_row = dynamic_registry.get_prompt(agent.get("prompt_key") or DEFAULT_PROMPT_KEY)
         body = (prompt_row or {}).get("body") or ""
         if not body:
             # No prompt body in the DB — fall back to the in-code base prompt so
             # the agent never runs with an empty system prompt.
             body = handler.system_prompt
 
-        variables = variable_repo.as_map()
+        variables = dynamic_registry.variables_map()
         rendered = render_template(body, variables)
 
         model_config = dict(agent.get("model_config") or {})
