@@ -41,6 +41,28 @@ from server.balance_monitor import set_runtime as _set_balance_runtime
 
 logger = logging.getLogger(__name__)
 
+
+# ── Static files with mandatory revalidation ─────────────────────────────
+
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces browsers to revalidate every load (ETag 304s).
+
+    Plain StaticFiles emits only ETag/Last-Modified and no Cache-Control, so
+    browsers fall back to *heuristic* caching and may reuse a stale ES module
+    without revalidating. With the no-build-step frontend that surfaces as
+    "module does not provide an export named X" SyntaxErrors after an update:
+    a freshly edited component is loaded fresh while a module it imports is
+    served from the heuristic cache. `no-cache` means "cache but always
+    revalidate"; with the ETag the server answers 304 when nothing changed, so
+    the cost is one cheap conditional request per asset.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # ── In-memory log capture (attach to root logger) ────────────────────────
 
 _memory_log_handler = MemoryLogHandler()
@@ -64,7 +86,7 @@ class ServerDeps:
     ws_manager: ConnectionManager
     state: AppState
     memory_log_handler: MemoryLogHandler
-    statics_senditems_dir: Path
+    statics_outbox_dir: Path
     plugins_dir: Path = None
     plugins_registry: PluginRegistry = None
     channel_registry: object = None
@@ -92,9 +114,14 @@ def create_app(
     # Prepare statics directories
     statics_dir = settings.data_dir / "statics"
     statics_media_dir = statics_dir / "media"
-    statics_senditems_dir = statics_dir / "senditems"
+    # Operator-uploaded media (panel sends). MUST NOT be "senditems": the GOWA
+    # subprocess inherits our cwd and uses statics/senditems/ as its OWN outbound
+    # working dir — it writes new-<name>/thumbnails-<name> there and DELETES the
+    # file (incl. ours, same path) ~1.5s after a successful send. Use a separate
+    # GOWA-untouched folder so panel uploads survive.
+    statics_outbox_dir = statics_dir / "outbox"
     statics_media_dir.mkdir(parents=True, exist_ok=True)
-    statics_senditems_dir.mkdir(parents=True, exist_ok=True)
+    statics_outbox_dir.mkdir(parents=True, exist_ok=True)
 
     # Plugin discovery + load. Runs synchronously before route registration so
     # plugin routes/tools/prompts are wired into the app before the first request.
@@ -207,7 +234,7 @@ def create_app(
         ws_manager=ws_manager,
         state=state,
         memory_log_handler=_memory_log_handler,
-        statics_senditems_dir=statics_senditems_dir,
+        statics_outbox_dir=statics_outbox_dir,
         plugins_dir=plugins_dir,
         plugins_registry=registry,
         channel_registry=channel_registry,
@@ -328,7 +355,7 @@ def create_app(
     # Mount static files (frontend assets)
     static_dir = web_dir / "static"
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        app.mount("/static", NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
     # Avatar serving with graceful fallback. The frontend always points <img> at
     # /statics/avatars/<phone>.jpg; when the cache file is missing (cold cache, or
@@ -540,7 +567,7 @@ def create_app(
         if loaded.static_dir is not None:
             app.mount(
                 f"/plugins/{loaded.id}/static",
-                StaticFiles(directory=str(loaded.static_dir)),
+                NoCacheStaticFiles(directory=str(loaded.static_dir)),
                 name=f"plugin_{loaded.id}_static",
             )
 

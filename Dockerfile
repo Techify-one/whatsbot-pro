@@ -39,9 +39,14 @@ COPY main.py alembic.ini ./
 # Create bin/gowa symlink so gowa/manager.py finds the binary at expected path
 RUN mkdir -p bin && ln -s /usr/local/bin/gowa bin/gowa
 
-# Create runtime directories and declare as volumes for persistence
+# Create runtime directories. NOTE: persistence is NOT declared here on purpose.
+# A Dockerfile `VOLUME` creates an ANONYMOUS volume that Coolify (and `docker run`
+# without -v) DISCARDS when the container is recreated on redeploy — uploaded
+# media under statics/senditems/ and the SQLite DB would silently vanish.
+# Persist these by binding real host folders instead:
+#   - docker compose: ./data/{storages,statics,logs} (see docker-compose.yaml)
+#   - Coolify: map /app/storages and /app/statics to Persistent Storage
 RUN mkdir -p logs storages statics
-VOLUME ["/app/storages", "/app/statics", "/app/logs"]
 
 EXPOSE 8080
 

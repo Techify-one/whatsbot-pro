@@ -77,7 +77,18 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 }
 
 // ── Agent form ──────────────────────────────────────────────────────
-function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
+// Normalize free text into a valid agent_key slug: lowercase, non-alnum → "_".
+function slugifyKey(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+/, '').slice(0, 32);
+}
+
+function AgentForm({ agent, agents, prompts, tools, models, onSave, onCancel, busy }) {
+  // No agent_key => creation mode (the key is typed; otherwise it's fixed).
+  const isNew = !agent.agent_key;
+  const [agentKey, setAgentKey] = useState(agent.agent_key || '');
+  const existingKeys = (agents || []).map(a => a.agent_key);
+  const keyTrimmed = agentKey.trim();
+  const keyValid = /^[a-z][a-z0-9_]{0,31}$/.test(keyTrimmed) && !existingKeys.includes(keyTrimmed);
   const mc = agent.model_config || {};
   const [displayName, setDisplayName] = useState(agent.display_name || '');
   const [promptKey, setPromptKey] = useState(agent.prompt_key || '');
@@ -118,7 +129,7 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
   }
 
   function submit() {
-    onSave(agent.agent_key, {
+    onSave(isNew ? keyTrimmed : agent.agent_key, {
       display_name: displayName.trim(),
       prompt_key: promptKey,
       model_config: buildModelConfig(),
@@ -136,10 +147,27 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
       <div class="text-[14px] font-medium text-wa-text mb-3">
-        Editar agente <code class="text-[12px] text-wa-secondary">${agent.agent_key}</code>
-        <span class="text-[12px] text-wa-secondary font-normal"> · v${agent.version || 1}</span>
+        ${isNew
+          ? html`Novo agente`
+          : html`Editar agente <code class="text-[12px] text-wa-secondary">${agent.agent_key}</code>
+              <span class="text-[12px] text-wa-secondary font-normal"> · v${agent.version || 1}</span>`}
       </div>
       <div class="flex flex-col gap-3">
+        ${isNew ? html`
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Identificador (agent_key)</label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] font-mono"
+              type="text" value=${agentKey} placeholder="ex: vendas, suporte_n2"
+              onInput=${(e) => setAgentKey(slugifyKey(e.target.value))} />
+            <div class="text-[11px] mt-1 ${keyTrimmed && !keyValid ? 'text-red-500' : 'text-wa-secondary'}">
+              ${keyTrimmed && existingKeys.includes(keyTrimmed)
+                ? 'Já existe um agente com esse identificador.'
+                : keyTrimmed && !keyValid
+                  ? 'Use letras minúsculas, números e _ (começando por letra).'
+                  : 'Identidade fixa do agente — não muda depois de criado.'}
+            </div>
+          </div>
+        ` : null}
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
@@ -249,7 +277,7 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
             onClick=${onCancel} disabled=${busy}>Cancelar</button>
           <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick=${submit} disabled=${busy || !displayName.trim()}>${busy ? 'Salvando…' : 'Salvar'}</button>
+            onClick=${submit} disabled=${busy || !displayName.trim() || (isNew && !keyValid)}>${busy ? 'Salvando…' : (isNew ? 'Criar' : 'Salvar')}</button>
         </div>
       </div>
     </div>
@@ -317,15 +345,21 @@ export default function AgentsManager() {
 
   return html`
     <div>
-      <p class="text-[13px] text-wa-secondary mb-4">
-        Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
-        na próxima mensagem (sem reiniciar).
-      </p>
+      <div class="flex items-start justify-between gap-3 mb-4 flex-wrap">
+        <p class="text-[13px] text-wa-secondary flex-1 min-w-0">
+          Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
+          na próxima mensagem (sem reiniciar).
+        </p>
+        ${!editing ? html`
+          <button class="px-3 py-2 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
+            onClick=${() => { setEditing({}); setError(''); }}>+ Novo agente</button>
+        ` : null}
+      </div>
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
       ${editing ? html`
-        <${AgentForm} agent=${editing} prompts=${prompts} tools=${tools} models=${models}
+        <${AgentForm} agent=${editing} agents=${agents} prompts=${prompts} tools=${tools} models=${models}
           onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
       ` : null}
 
