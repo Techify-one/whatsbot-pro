@@ -18,6 +18,7 @@ from server import system_notices
 from server.authz import current_user
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
+from server.transcription import maybe_transcribe
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 
@@ -830,6 +831,30 @@ def register_routes(app, deps):
             "source": "operator", "status": "operator",
             "ts": time.time(),
         })
+
+        # Transcribe the operator-sent audio when enabled (audio_transcription_mode
+        # in sent/both) so the panel/AI can read what was said — same private card
+        # used for inbound media. Defensive: a transcription failure never breaks
+        # the send (the audio was already delivered above).
+        transcription = await maybe_transcribe(
+            "audio", str(dest),
+            settings=settings, agent_handler=agent_handler,
+            phone=phone, source="operator",
+            is_group=contact.is_group,
+            group_jid=phone if contact.is_group else None,
+        )
+        if transcription:
+            contact.add_message("transcription", transcription)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "channel_id": channel_id,
+                "message": {
+                    "role": "transcription",
+                    "content": transcription,
+                    "ts": time.time(),
+                },
+            })
+
         logger.info("[Send] Audio sent to %s", phone)
         return _ok({"message": "Áudio enviado."})
 

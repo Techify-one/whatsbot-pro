@@ -22,6 +22,7 @@ from agent import group_mentions
 from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
+from server.transcription import maybe_transcribe
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 
 logger = logging.getLogger(__name__)
@@ -751,67 +752,18 @@ def register_routes(app, deps):
         file_name: str = "",        # document only — original filename
         mimetype: str = "",         # document only — best-effort mime hint
     ) -> str:
-        """Run audio transcription / image description / document reading.
+        """Inbound-path wrapper around the shared transcription helper.
 
-        Wraps the transcribe call sites in the codebase, exposing two plugin
-        hooks: ``filter.transcription.should_run`` (bool, can pull the brake)
-        and ``filter.transcription.result`` (str, can rewrite the transcript).
-        Returns the final transcription string — empty when the action was
-        skipped, failed, or yielded nothing.
+        Delegates to ``server.transcription.maybe_transcribe`` so the gate +
+        plugin hooks (``filter.transcription.should_run`` / ``.result``) live in
+        one place, shared with the operator send routes.
         """
-        # Core enabled-by-config gate — keep semantics identical to before
-        # so plugins can only *narrow* the policy, never widen it.
-        if media_kind == "audio":
-            audio_mode = settings.get("audio_transcription_mode", "received")
-            allow = (source == "echo" and audio_mode in ("sent", "both")) or (
-                source != "echo" and audio_mode in ("received", "both")
-            )
-        elif media_kind == "document":
-            allow = bool(settings.get("document_transcription_enabled", True))
-        else:  # image
-            allow = bool(settings.get("image_transcription_enabled", True))
-        if not allow:
-            return ""
-
-        extras = {
-            "phone": phone,
-            "media_kind": media_kind,
-            "media_path": path,
-            "is_group": is_group,
-            "group_jid": group_jid,
-            "source": source,
-        }
-        should = await apply_filter(
-            "filter.transcription.should_run", True, extras
+        return await maybe_transcribe(
+            media_kind, path,
+            settings=settings, agent_handler=agent_handler,
+            phone=phone, source=source, is_group=is_group, group_jid=group_jid,
+            file_name=file_name, mimetype=mimetype,
         )
-        if not should:
-            return ""
-
-        try:
-            if media_kind == "audio":
-                raw = await asyncio.to_thread(agent_handler.transcribe_audio, path, phone)
-            elif media_kind == "document":
-                raw = await asyncio.to_thread(
-                    agent_handler.transcribe_document, path, phone, file_name, mimetype
-                )
-            else:
-                raw = await asyncio.to_thread(agent_handler.describe_image, path, phone)
-        except Exception as e:
-            logger.error(
-                "[Transcription] %s failed for %s: %s",
-                media_kind, phone, e,
-            )
-            return ""
-
-        extras["model"] = (
-            getattr(agent_handler, "audio_model", None) if media_kind == "audio"
-            else getattr(agent_handler, "document_model", None) if media_kind == "document"
-            else getattr(agent_handler, "image_model", None)
-        )
-        final = await apply_filter(
-            "filter.transcription.result", raw or "", extras
-        )
-        return final or ""
 
     # ── Batch Processing ──────────────────────────────────────────
 
