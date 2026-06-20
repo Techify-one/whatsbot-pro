@@ -568,6 +568,32 @@ ai_tools_history = Table(
 Index("idx_ai_tools_hist", ai_tools_history.c.name, ai_tools_history.c.version)
 
 
+# Audit trail (plano 07). Append-only "who did what, when, to which resource,
+# before/after". FK to users.id is LOGICAL (no ForeignKey/cascade — the trail
+# must survive user deletion). before/after are TEXT JSON, masked at ingestion
+# (P-LGPD). No UPDATE/DELETE by id in the repo — only purge() for retention.
+audit_log = Table(
+    "audit_log",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("actor_user_id", Integer, nullable=True),                       # logical FK -> users.id
+    Column("actor_type", Text, nullable=False, server_default="system"),   # system | user | ai
+    Column("actor_label", Text, nullable=True),                            # name snapshot at the time
+    Column("action", Text, nullable=False),                                # recurso.verbo (db/audit_actions)
+    Column("resource_type", Text, nullable=False),
+    Column("resource_id", Text, nullable=True),                            # string: phone/jid/uuid/id
+    Column("before_json", Text, nullable=True),                            # JSON, already masked
+    Column("after_json", Text, nullable=True),                             # JSON, already masked
+    Column("ip_address", Text, nullable=True),
+    Column("request_id", Text, nullable=True),
+    Column("created_at", Float, nullable=False),                           # epoch float (P56)
+)
+Index("idx_audit_created", audit_log.c.created_at)
+Index("idx_audit_actor", audit_log.c.actor_user_id, audit_log.c.created_at)
+Index("idx_audit_resource", audit_log.c.resource_type, audit_log.c.resource_id)
+Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
+
+
 # Set of core table names — used by the SQLite → Postgres migration helper to
 # distinguish what belongs to the app vs. plugin-owned tables.
 CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)
