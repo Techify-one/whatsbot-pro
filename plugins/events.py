@@ -63,6 +63,8 @@ KNOWN_EVENTS: set[str] = {
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",
+    # Runtime supervisor (plano 09 Fase 3)
+    "task.crashed",
 }
 
 # Subscription keys that are dispatch targets, not emission sources.

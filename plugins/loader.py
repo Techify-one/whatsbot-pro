@@ -44,6 +44,9 @@ class LoadedPlugin:
     router: object | None = None
     settings_cls: type | None = None
     static_dir: Path | None = None
+    # Lifecycle hooks (plano 09 Fase 1): captured here, called+awaited by the host.
+    setup_fn: callable | None = None
+    teardown_fn: callable | None = None
 
     @property
     def id(self) -> str:
@@ -272,6 +275,17 @@ def _load_plugin_module(
     if settings_modname:
         settings_mod = _import_submodule(package_name, settings_modname, plugin_dir)
         loaded.settings_cls = getattr(settings_mod, "Settings", None)
+
+    # lifecycle entry: module exporting setup(ctx)/teardown(ctx) — plano 09 Fase 1.
+    # Captured here but NOT called (no event loop at import time); the host
+    # lifespan calls and awaits them via plugins.lifecycle.manager.
+    lifecycle_modname = manifest.entry.get("lifecycle")
+    if lifecycle_modname:
+        lifecycle_mod = _import_submodule(package_name, lifecycle_modname, plugin_dir)
+        setup_fn = getattr(lifecycle_mod, "setup", None)
+        teardown_fn = getattr(lifecycle_mod, "teardown", None)
+        loaded.setup_fn = setup_fn if callable(setup_fn) else None
+        loaded.teardown_fn = teardown_fn if callable(teardown_fn) else None
 
     static_dir = plugin_dir / "static"
     if static_dir.is_dir():

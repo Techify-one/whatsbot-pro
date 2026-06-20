@@ -22,15 +22,19 @@ The delay gives the current HTTP response time to flush before the process dies.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
 import time
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 _RESTART_DELAY_SECONDS = 1.5
+# Max time we wait for the pre-exit hook (e.g. plugin teardown) before hard-exit (P31).
+_PRE_EXIT_TIMEOUT_SECONDS = 10.0
 _RESTART_PENDING = False
 _LOCK = threading.Lock()
 
@@ -39,10 +43,18 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RELOAD_TRIGGER = _REPO_ROOT / "server" / "_reload_trigger.py"
 
 
-def schedule_restart(reason: str = "") -> None:
+def schedule_restart(
+    reason: str = "",
+    on_before_exit: Optional[Callable[[], Awaitable[None]]] = None,
+) -> None:
     """Touch the reload trigger and schedule ``os._exit(0)`` shortly after.
 
     Idempotent: multiple concurrent calls only restart once.
+
+    ``on_before_exit`` (plano 09 Fase 2): an async callable run on the event loop
+    and awaited (with a fixed timeout) BEFORE the hard exit — so a plugin's
+    ``teardown`` runs instead of being skipped by ``os._exit``. Guarded against
+    a stopped/unresponsive loop: on timeout or error we fall through to exit.
     """
     global _RESTART_PENDING
     with _LOCK:
@@ -68,6 +80,8 @@ def schedule_restart(reason: str = "") -> None:
 
     def _exit_later():
         time.sleep(_RESTART_DELAY_SECONDS)
+        if on_before_exit is not None:
+            _run_pre_exit_hook(on_before_exit, reason)
         logger.warning("Restarting now (%s)", reason)
         # Some environments need a hard exit so background tasks don't block;
         # ``os._exit`` skips finalizers but is the only reliable way out of an
@@ -78,3 +92,24 @@ def schedule_restart(reason: str = "") -> None:
         os._exit(0)
 
     threading.Thread(target=_exit_later, daemon=True).start()
+
+
+def _run_pre_exit_hook(
+    on_before_exit: Callable[[], Awaitable[None]], reason: str
+) -> None:
+    """Run an async pre-exit hook on the live event loop, awaited with timeout.
+
+    The loop is the one the bus/context already hold. If it is gone or not
+    running, or the hook times out, we log and fall through to ``os._exit``.
+    """
+    try:
+        from plugins import context as _ctx
+        loop = getattr(_ctx, "_loop", None)
+        if loop is None or not loop.is_running():
+            logger.warning("Pre-exit hook skipped (%s): event loop unavailable", reason)
+            return
+        logger.info("Running pre-exit hook before restart (%s)", reason)
+        fut = asyncio.run_coroutine_threadsafe(on_before_exit(), loop)
+        fut.result(timeout=_PRE_EXIT_TIMEOUT_SECONDS)
+    except Exception as e:  # timeout, loop stopping, hook error — never block exit
+        logger.warning("Pre-exit hook failed/timeout (%s): %s", reason, e)

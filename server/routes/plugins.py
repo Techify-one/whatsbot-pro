@@ -22,6 +22,7 @@ from plugins.manifest import (
     load_manifest,
 )
 from plugins.restart import schedule_restart
+from plugins.lifecycle import manager as _lifecycle_manager
 from plugins.events import emit as emit_event
 from server.helpers import _err, _ok
 import time as _time
@@ -103,7 +104,11 @@ def register_routes(app, deps):
         if not ok:
             return _err("plugin não encontrado", 404)
         emit_event("plugin.disabled", {"plugin_id": plugin_id, "ts": _time.time()})
-        schedule_restart(reason=f"plugin {plugin_id} disabled")
+        # plano 09 Fase 2: run the plugin's teardown BEFORE the hard exit.
+        schedule_restart(
+            reason=f"plugin {plugin_id} disabled",
+            on_before_exit=lambda: _lifecycle_manager.run_teardown(plugin_id),
+        )
         return _ok({"id": plugin_id, "enabled": False, "restarting": True})
 
     @app.delete("/api/plugins/{plugin_id}")
@@ -127,7 +132,11 @@ def register_routes(app, deps):
             }
 
         result = await asyncio.to_thread(_do_delete)
-        schedule_restart(reason=f"plugin {plugin_id} deleted")
+        # plano 09 Fase 2: run teardown before exiting (cleanup before the folder is gone).
+        schedule_restart(
+            reason=f"plugin {plugin_id} deleted",
+            on_before_exit=lambda: _lifecycle_manager.run_teardown(plugin_id),
+        )
         return _ok({"id": plugin_id, **result, "restarting": True})
 
     # ── Settings ─────────────────────────────────────────────────────

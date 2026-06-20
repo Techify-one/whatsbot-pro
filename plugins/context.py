@@ -91,6 +91,54 @@ class ToolContext:
 
 
 @dataclasses.dataclass
+class PluginContext:
+    """Context handed to a plugin's ``setup(ctx)`` / ``teardown(ctx)`` (plano 09).
+
+    Unlike ``ToolContext`` (per tool call), this is a per-plugin, long-lived
+    object created once when the plugin's lifecycle runs. It exposes the event
+    loop, a DB opener, the broadcast bridge, and a VS Code-style disposable
+    registry: ``ctx.on_unload(fn)`` stacks cleanups run in reverse order at
+    teardown — even if ``setup`` later fails (Home Assistant principle).
+
+    ``spawn_task`` / ``spawn_subprocess`` are reserved here (plano 09 Fase 3/5):
+    they delegate to the runtime supervisor / subprocess service once wired.
+    """
+
+    plugin_id: str
+    handler: Optional[Any] = None
+    loop: Optional[asyncio.AbstractEventLoop] = None
+    plugin_db: Optional[Callable[[], Any]] = None
+    broadcast: Optional[Callable[[str, dict], None]] = None
+    _disposables: list = dataclasses.field(default_factory=list, repr=False)
+
+    def on_unload(self, fn: Callable[[], Any]) -> None:
+        """Register a cleanup callable (sync or async), run in reverse at teardown."""
+        if callable(fn):
+            self._disposables.append(fn)
+
+    async def _run_disposables(self) -> None:
+        """Run registered cleanups in reverse (LIFO). Each is isolated."""
+        while self._disposables:
+            fn = self._disposables.pop()
+            try:
+                result = fn()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:  # noqa: BLE001 — one bad cleanup must not block others
+                logger.warning("plugin %s on_unload cleanup failed: %s", self.plugin_id, e)
+
+    def spawn_task(self, *args, **kwargs):  # reserved — implemented in plano 09 Fase 5
+        raise NotImplementedError(
+            "ctx.spawn_task is wired by the runtime supervisor (plano 09 Fase 5)."
+        )
+
+    def spawn_subprocess(self, *args, **kwargs):  # reserved — plano 09 Fase 5
+        raise NotImplementedError(
+            "ctx.spawn_subprocess is wired by the subprocess service (plano 09 Fase 5)."
+        )
+
+
+@dataclasses.dataclass
 class PromptContext:
     """Context passed to a prompt fragment callable.
 

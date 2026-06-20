@@ -21,6 +21,8 @@ from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
 from plugins.context import set_runtime as _set_plugin_runtime
+from plugins.lifecycle import manager as _lifecycle_manager
+from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
 from plugins.events import (
     set_runtime as _set_events_runtime,
     register_plugin_events,
@@ -184,18 +186,43 @@ def create_app(
             "plugin_ids": list(registry.loaded.keys()),
             "ts": _time.time(),
         })
-        tasks = [
-            asyncio.create_task(start_gowa_task(deps)),
-            asyncio.create_task(status_poll_loop(deps)),
-            asyncio.create_task(qr_poll_loop(deps)),
-            asyncio.create_task(avatar_fetch_task(deps)),
-        ]
+
+        # Plugin lifecycle (plano 09 Fase 1): call+await setup() for plugins that
+        # declared entry.lifecycle. A failing setup() does not bring down the app.
+        for loaded in registry.loaded.values():
+            if getattr(loaded, "setup_fn", None) or getattr(loaded, "teardown_fn", None):
+                err = await _lifecycle_manager.run_setup(loaded, agent_handler, _loop)
+                if err:
+                    try:
+                        from db.repositories import plugin_repo
+                        plugin_repo.set_load_error(loaded.id, f"setup() failed: {err}")
+                    except Exception:
+                        pass
+
+        # Background task supervisor (plano 09 Fase 3): the 4 core tasks now run
+        # under classified restart + backoff instead of a bare create_task list.
+        supervisor = TaskSupervisor()
+        supervisor.register(TaskSpec(
+            "gowa_start", lambda: start_gowa_task(deps), policy=RestartPolicy.TRANSIENT))
+        supervisor.register(TaskSpec(
+            "status_poll", lambda: status_poll_loop(deps), policy=RestartPolicy.PERMANENT))
+        supervisor.register(TaskSpec(
+            "qr_poll", lambda: qr_poll_loop(deps), policy=RestartPolicy.PERMANENT))
+        supervisor.register(TaskSpec(
+            "avatar_fetch", lambda: avatar_fetch_task(deps), policy=RestartPolicy.PERMANENT))
+        state.task_supervisor = supervisor
+        await supervisor.start_all()
         yield
-        # Shutdown
+        # Shutdown — ordered (plano 09 Fase 2): app.shutdown → plugin teardown →
+        # stop tasks (awaited) → save → stop subprocess.
         emit_event("app.shutdown", {"ts": _time.time()})
-        state.stop_event.set()
-        for task in tasks:
-            task.cancel()
+        state.stop_event.set()  # legacy compat: loops checking stop_event exit
+        for loaded in list(registry.loaded.values()):
+            await _lifecycle_manager.run_teardown(loaded.id)
+        try:
+            await supervisor.stop_all()  # cancel + await (fixes the old no-await gap)
+        except Exception:
+            pass
         try:
             settings.save()
         except Exception:
