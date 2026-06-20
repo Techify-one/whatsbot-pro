@@ -81,6 +81,15 @@ class Channel(ABC):
     def send_template(self, *args, **kwargs) -> SendResult:
         raise NotImplementedError(f"{self.provider} does not support templates")
 
+    def list_templates(self) -> list[dict]:
+        """List approved message templates (HSM) for the account.
+
+        Optional, default raises NotImplementedError (like ``send_template``). Only
+        channels with ``capabilities.templates`` implement it. Each item is
+        normalized to ``{name, language, category, status, components:[...]}``.
+        """
+        raise NotImplementedError(f"{self.provider} does not support listing templates")
+
     # ── Inbound ──────────────────────────────────────────────────────
     @abstractmethod
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:

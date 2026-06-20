@@ -202,3 +202,21 @@ export function PlusIcon() {
     </svg>
   `;
 }
+
+// "Informações da conversa" trigger in the chat header (plano conversa Onda 2).
+export function InfoIcon() {
+  return html`
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+    </svg>
+  `;
+}
+
+// "Enviar template" trigger in the composer (Cloud API, Frente C).
+export function TemplateIcon() {
+  return html`
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+      <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5zm2 0v3h12V5H6zm0 5v2h8v-2H6zm0 4v2h12v-2H6zm0 4v2h8v-2H6z"/>
+    </svg>
+  `;
+}

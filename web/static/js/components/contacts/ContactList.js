@@ -43,6 +43,15 @@ function rowKeyFor(c) {
   return c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
 }
 
+// Chave do estado de "digitando". Conversa-cêntrico: a presença pertence a UMA
+// conversa específica (o canal GOWA que reportou) — casamos por conversation_id,
+// que é inequívoco. Linhas/eventos sem conversa (legado/sandbox) caem no par
+// canal::telefone. As duas pontas (broadcast e linha da sidebar) usam ESTA função.
+export function typingKey({ conversationId = null, channelId = null, phone = null } = {}) {
+  if (conversationId != null) return `conv:${conversationId}`;
+  return `${channelId || 'default'}::${phone}`;
+}
+
 // Per-provider channel chip (only shown when ≥2 channels exist). Colour tints stay
 // in the dark-mode-safe set (wa-*/blue) per CLAUDE.md theming rule.
 const CHANNEL_META = {
@@ -382,7 +391,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${rowKeyFor(c)}
                   onClick=${() => selectionMode ? onToggleSelect(c.phone) : onSelect(c, c.match_msg_id)}
-                  onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
+                  onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     (selectionMode && selectedSet.has(c.phone)) ? 'bg-wa-selected'
                       : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
@@ -447,9 +456,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                       </div>
                     ` : null}
                     <div class="flex justify-between items-center mt-[3px]">
-                      ${typingState && typingState[c.phone]
+                      ${typingState && typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })]
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
-                            ${typingState[c.phone] === 'audio' ? 'gravando áudio...' : 'digitando...'}
+                            ${typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
                         : c.match_snippet
                           ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">

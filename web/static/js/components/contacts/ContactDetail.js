@@ -2,13 +2,15 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage, getQuickReplies } from '../../services/api.js';
-import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon } from './icons.js';
+import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon, InfoIcon } from './icons.js';
 import { formatBubbleTime, isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, copyToClipboard } from './MessageContextMenu.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
+import { TemplatePicker } from './TemplatePicker.js';
+import { TemplateIcon } from './icons.js';
 
 const html = htm.bind(h);
 
@@ -27,7 +29,7 @@ function myReaction(message) {
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -40,6 +42,7 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
   const [recordDuration, setRecordDuration] = useState(0);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   // mode: 'reply' sends to the contact; 'private' stays in the panel only
   const [mode, setMode] = useState('reply');
   // Private-mode AI flags. aiReadPrivate=false → AI ignores the note entirely.
@@ -832,6 +835,10 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
   const isAutoName = !isGroup && rawName && rawName.startsWith('~');
   const displayName = isGroup ? (contact.group_name || phone) : (rawName ? rawName.replace(/^~/, '') : phone);
   const hasText = input.trim().length > 0;
+  // Template support (Frente C): capability flag from the conversation payload.
+  // sessionClosed → the 24h free-text window elapsed, so only a template may go out.
+  const templatesSupported = !sandbox && conversationId != null && !!(contact && contact.templates_supported);
+  const sessionClosed = templatesSupported && contact && contact.session_open === false;
 
   return html`
     <div class="flex flex-col h-full">
@@ -866,6 +873,18 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
 
         <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
         <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} />
+
+        <!-- Informações da conversa (Onda 2): abre o painel lateral da conversa. -->
+        ${!sandbox && onOpenConversationInfo ? html`
+          <button
+            type="button"
+            onClick=${onOpenConversationInfo}
+            class="shrink-0 ml-1 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
+            title="Informações da conversa"
+          >
+            <${InfoIcon} />
+          </button>
+        ` : null}
       </div>
 
       <!-- Chat area with doodle pattern -->
@@ -1326,6 +1345,14 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
             </div>
           `;
         })() : ''}
+        ${sessionClosed ? html`
+          <div class="px-[14px] py-[6px] bg-wa-panel shrink-0">
+            <div class="text-[12px] text-wa-secondary bg-wa-bg border border-wa-border rounded-[6px] px-3 py-1.5">
+              Fora da janela de 24h: só é possível enviar um ${' '}
+              <button type="button" onClick=${() => setShowTemplatePicker(true)} class="text-wa-teal underline font-medium">template aprovado</button>.
+            </div>
+          </div>
+        ` : ''}
         <form onSubmit=${handleSend} class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
           <div ref=${emojiRef} class="relative shrink-0">
             <button
@@ -1362,6 +1389,17 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
               ` : ''}
             </div>
           `}
+          ${templatesSupported && mode !== 'private' ? html`
+            <button
+              type="button"
+              class="p-[8px] ${sessionClosed ? 'text-wa-teal' : ''}"
+              tabindex="-1"
+              onClick=${() => setShowTemplatePicker(true)}
+              title="Enviar template"
+            >
+              <${TemplateIcon} />
+            </button>
+          ` : ''}
           <div class="flex-1 mx-[5px] relative">
             ${mentionMenu ? (() => {
               const cands = getMentionCandidates(mentionMenu.query);
@@ -1434,6 +1472,13 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
           `}
         </form>
       `}
+      ${showTemplatePicker ? html`
+        <${TemplatePicker}
+          conversationId=${conversationId}
+          onClose=${() => setShowTemplatePicker(false)}
+          onSent=${() => setShowTemplatePicker(false)}
+        />
+      ` : ''}
       ${msgMenu ? html`
         <${MessageContextMenu}
           x=${msgMenu.x}

@@ -389,6 +389,30 @@ conversation_counters = Table(
 )
 
 
+# Etiquetas de conversa (estilo Chatwoot labels) — registro GLOBAL próprio, SEPARADO
+# das tags de contato (tags/contact_tags). Decisão Thiago: etiquetas pertencem à
+# conversa, não ao contato. Atribuição N:N via conversation_label_links.
+conversation_labels = Table(
+    "conversation_labels",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("color", Text, nullable=False, server_default="#6b7280"),
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+)
+
+conversation_label_links = Table(
+    "conversation_label_links",
+    metadata,
+    Column("conversation_id", Integer,
+           ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+    Column("label_id", Integer,
+           ForeignKey("conversation_labels.id", ondelete="CASCADE"), primary_key=True),
+)
+Index("idx_conv_label_links_label", conversation_label_links.c.label_id)
+
+
 unread_msg_ids = Table(
     "unread_msg_ids",
     metadata,
