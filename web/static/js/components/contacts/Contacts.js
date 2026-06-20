@@ -11,6 +11,28 @@ import { ChannelPickerModal } from './ChannelPickerModal.js';
 import { NewConversationModal } from './NewConversationModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
+// ── Sidebar resize (barra lateral arrastável) ───────────────────────
+// Largura da lista de conversas: arrastável no desktop e persistida em
+// localStorage (mesmo padrão do tema). No mobile a barra é `w-full` e estes
+// valores não se aplicam.
+const SIDEBAR_WIDTH_KEY = 'whatsbot_sidebar_width';
+const SIDEBAR_MIN_WIDTH = 280;
+const SIDEBAR_MAX_WIDTH = 640;
+const SIDEBAR_DEFAULT_WIDTH = 400;
+const SIDEBAR_DRAG_THRESHOLD = 4;  // px p/ distinguir arraste de clique (colapsar)
+
+function clampSidebarWidth(px) {
+  if (!Number.isFinite(px)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
+}
+
+function readStoredSidebarWidth() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    return raw == null ? SIDEBAR_DEFAULT_WIDTH : clampSidebarWidth(parseInt(raw, 10));
+  } catch { return SIDEBAR_DEFAULT_WIDTH; }
+}
+
 // ── Conversation tab/filter helpers (plano 10 FF2) ──────────────────
 // All client-side over the enriched contact list (each row carries its active
 // conversation's status/assignee/agente), so switching tabs is instant.
@@ -142,6 +164,14 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const [openPanel, setOpenPanel] = useState(null);
   const openInfoAfterSelect = useRef(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  // Largura arrastável da barra (desktop). `isDesktop` decide se aplicamos o style
+  // inline — no mobile a barra é w-full e não deve receber largura fixa.
+  const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(() => {
+    try { return window.matchMedia('(min-width:1024px)').matches; } catch { return true; }
+  });
+  const resizeRef = useRef(null);  // { startX, startWidth, moved } durante o arraste
   const [ctxMenu, setCtxMenu] = useState(null);
   // Conversation-level data for the open context menu (assignee/resolve). Resolved
   // lazily on right-click since the sidebar rows are contact-level only.
@@ -298,6 +328,66 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       )));
     }
   }, [sortContacts]);
+
+  // ── Sidebar resize (barra lateral arrastável) ──────────────────────
+  // Acompanha o breakpoint lg: só aplicamos largura fixa no desktop.
+  useEffect(() => {
+    let mql;
+    try { mql = window.matchMedia('(min-width:1024px)'); } catch { return; }
+    const onChange = () => setIsDesktop(mql.matches);
+    onChange();
+    // addEventListener('change') é o moderno; addListener cobre navegadores antigos.
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else if (mql.addListener) mql.addListener(onChange);
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener('change', onChange);
+      else if (mql.removeListener) mql.removeListener(onChange);
+    };
+  }, []);
+
+  const endResize = useCallback(() => {
+    const st = resizeRef.current;
+    resizeRef.current = null;
+    setIsResizing(false);
+    document.removeEventListener('mousemove', onResizeMove);
+    document.removeEventListener('mouseup', endResize);
+    if (st && st.moved) {
+      // Persiste só quando houve arraste de fato (clique puro = colapsar/expandir).
+      setSidebarWidth(w => {
+        try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w)); } catch {}
+        return w;
+      });
+    } else if (st && !st.moved) {
+      // Clique sem arraste no handle: colapsa/expande a barra.
+      setSidebarHidden(h => !h);
+    }
+  }, []);
+
+  const onResizeMove = useCallback((e) => {
+    const st = resizeRef.current;
+    if (!st || st.hidden) return;  // barra colapsada: handle só expande no clique
+    const dx = e.clientX - st.startX;
+    if (!st.moved && Math.abs(dx) < SIDEBAR_DRAG_THRESHOLD) return;
+    st.moved = true;
+    setSidebarWidth(clampSidebarWidth(st.startWidth + dx));
+  }, []);
+
+  const startResize = useCallback((e) => {
+    // Só no desktop; com a barra colapsada o handle só expande (via clique).
+    if (!isDesktop) return;
+    e.preventDefault();
+    resizeRef.current = { startX: e.clientX, startWidth: sidebarWidth, moved: false,
+                          hidden: sidebarHidden };
+    setIsResizing(true);
+    document.addEventListener('mousemove', onResizeMove);
+    document.addEventListener('mouseup', endResize);
+  }, [isDesktop, sidebarWidth, sidebarHidden, onResizeMove, endResize]);
+
+  // Limpeza defensiva: se o componente desmontar no meio de um arraste.
+  useEffect(() => () => {
+    document.removeEventListener('mousemove', onResizeMove);
+    document.removeEventListener('mouseup', endResize);
+  }, [onResizeMove, endResize]);
 
   // ── Conversation actions from the context menu (assign attendant / resolve) ──
   // They act on the conversation resolved for the right-clicked contact (ctxConv)
@@ -1203,8 +1293,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
   return html`
     <div class="flex flex-col lg:flex-row h-full">
-      <!-- Sidebar -->
-      <div class="shrink-0 border-r border-wa-border transition-all duration-300 overflow-hidden ${sidebarHidden ? 'lg:w-0 lg:border-r-0' : 'lg:w-[400px]'} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}">
+      <!-- Sidebar (largura arrastável no desktop; w-full no mobile) -->
+      <div
+        class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
+        style=${isDesktop ? `width:${sidebarHidden ? 0 : sidebarWidth}px` : ''}
+      >
         <${ContactList}
           contacts=${displayedContacts}
           loading=${loading}
@@ -1253,14 +1346,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onBulkMarkUnread=${handleBulkMarkUnread}
         />
       </div>
-      <!-- Toggle sidebar button (desktop only) -->
-      <button
-        class="hidden lg:flex items-center justify-center w-[14px] shrink-0 bg-wa-panel hover:bg-wa-hover border-r border-wa-border cursor-pointer transition-colors"
-        onClick=${() => setSidebarHidden(h => !h)}
-        title=${sidebarHidden ? 'Mostrar contatos' : 'Esconder contatos'}
+      <!-- Divisória redimensionável (desktop): arraste p/ redimensionar, clique p/ esconder -->
+      <div
+        class="hidden lg:flex items-center justify-center w-[14px] shrink-0 bg-wa-panel border-r border-wa-border select-none transition-colors ${isResizing ? 'bg-wa-teal/40' : 'hover:bg-wa-hover'} ${sidebarHidden ? 'cursor-pointer' : 'cursor-col-resize'}"
+        onMouseDown=${startResize}
+        title=${sidebarHidden ? 'Mostrar contatos' : 'Arraste para redimensionar • clique para esconder'}
+        role="separator"
+        aria-orientation="vertical"
       >
-        <span class="text-wa-secondary text-[11px] select-none">${sidebarHidden ? '›' : '‹'}</span>
-      </button>
+        <span class="text-wa-secondary text-[11px] pointer-events-none">${sidebarHidden ? '›' : '‹'}</span>
+      </div>
       <!-- Chat panel -->
       <div class="flex-1 min-w-0 min-h-0 ${!selected ? 'hidden lg:flex' : 'flex'} relative">
         <div class="w-full h-full flex flex-col">
