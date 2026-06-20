@@ -11,8 +11,8 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  getContactConversation, getMe, getUsers,
-  setConversationStatus, assignConversation, assignMeConversation,
+  getContactConversation, getConversation, getMe, getUsers,
+  setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
@@ -28,7 +28,7 @@ function patchFromEvent(data) {
   return p;
 }
 
-export function ConversationHeaderActions({ phone, sandbox = false }) {
+export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false }) {
   const [conv, setConv] = useState(null);
   const [user, setUser] = useState(null);
   const [users, setUsers] = useState([]);   // for "Transferir" — degrades on 403
@@ -54,13 +54,22 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
     return () => { alive = false; };
   }, []);
 
-  // Resolve the open conversation for this phone.
+  // Resolve the open conversation. Conversa-cêntrico (plano 11 D1): quando o chat
+  // sabe a conversa aberta (um canal), carrega ELA por id — getContactConversation
+  // resolveria só uma das conversas do número e mostraria ações do canal errado.
   const load = useCallback(() => {
-    if (!phone || sandbox) { setConv(null); return; }
+    if (sandbox) { setConv(null); return; }
+    if (conversationId != null) {
+      getConversation(conversationId)
+        .then(r => { if (r && r.ok) setConv((r.data && r.data.conversation) || null); })
+        .catch(() => {});
+      return;
+    }
+    if (!phone) { setConv(null); return; }
     getContactConversation(phone)
       .then(r => { if (r && r.ok) setConv((r.data && r.data.conversation) || null); })
       .catch(() => {});
-  }, [phone, sandbox]);
+  }, [phone, conversationId, sandbox]);
   useEffect(() => { load(); }, [load]);
 
   // Live updates for THIS conversation (and pick up a freshly-created one).

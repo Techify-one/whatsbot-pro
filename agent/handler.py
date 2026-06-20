@@ -71,7 +71,8 @@ class AgentHandler:
         # (config-in-DB, see agent.agent_factory) instead of the in-code values.
         # Off → legacy behaviour (full parity).
         self.ai_engine_enabled = ai_engine_enabled
-        self._contacts: dict[str, ContactMemory] = {}
+        # Keyed by (channel_id, phone) — plano 11 D3.
+        self._contacts: dict[tuple[str, str], ContactMemory] = {}
         self._client: OpenAI | None = None
         self._async_client: AsyncOpenAI | None = None
         self.pricing_fn = pricing_fn
@@ -637,10 +638,28 @@ class AgentHandler:
             track_step("error", {"error": str(e), "phase": "document_transcription"}, status="error")
             return ""
 
-    def _get_contact(self, phone: str) -> ContactMemory:
-        if phone not in self._contacts:
-            self._contacts[phone] = ContactMemory(phone, default_ai_enabled=self.default_ai_enabled)
-        return self._contacts[phone]
+    def _get_contact(self, phone: str, *, channel_id: str = "default") -> ContactMemory:
+        # Cache key is (channel_id, phone) — plano 11 D3. The contact row stays
+        # unified by phone (same contact_id across channels), but each channel's
+        # ContactMemory carries its own inbox so the CONVERSATION is per-channel.
+        key = (channel_id, phone)
+        if key not in self._contacts:
+            self._contacts[key] = ContactMemory(
+                phone, default_ai_enabled=self.default_ai_enabled, channel_id=channel_id)
+        return self._contacts[key]
+
+    def iter_cached_contacts(self, phone: str) -> list[ContactMemory]:
+        """Every cached ContactMemory for ``phone`` across channels (plano 11).
+
+        Panel actions (mark-read, archive, …) update the DB and use this to keep
+        each channel-variant's in-memory cache coherent without resurrecting one.
+        """
+        return [cm for (_ch, ph), cm in self._contacts.items() if ph == phone]
+
+    def drop_cached_contact(self, phone: str) -> None:
+        """Evict all cached ContactMemory variants for ``phone`` (e.g. on delete)."""
+        for key in [k for k in self._contacts if k[1] == phone]:
+            self._contacts.pop(key, None)
 
     def _select_active_tools(self, agent_spec) -> list[dict]:
         """Return the effective tool schemas, restricted to the agent's selection.
@@ -906,16 +925,20 @@ class AgentHandler:
                                save_response: bool = True,
                                image_path: str | None = None,
                                audio_path: str | None = None,
-                               disable_tools: bool = False) -> ProcessResult:
+                               disable_tools: bool = False,
+                               channel_id: str = "default") -> ProcessResult:
         """Async cancellable equivalent of process_message.
 
         Uses AsyncOpenAI so that cancelling the surrounding asyncio task aborts the
         in-flight HTTP request instead of letting it complete in the background.
+
+        ``channel_id`` routes the contact/conversation to the originating channel's
+        inbox (plano 11) so agent resolution honours conversation→inbox→default.
         """
         if not self.api_key:
             return ProcessResult(reply="[WhatsBot] API key não configurada.")
 
-        contact = self._get_contact(sender)
+        contact = self._get_contact(sender, channel_id=channel_id)
 
         media_type: str | None = None
         media_path: str | None = None
@@ -1054,12 +1077,13 @@ class AgentHandler:
                         save_response: bool = True,
                         image_path: str | None = None,
                         audio_path: str | None = None,
-                        disable_tools: bool = False) -> ProcessResult:
+                        disable_tools: bool = False,
+                        channel_id: str = "default") -> ProcessResult:
         """Process an incoming message and return the AI response."""
         if not self.api_key:
             return ProcessResult(reply="[WhatsBot] API key não configurada.")
 
-        contact = self._get_contact(sender)
+        contact = self._get_contact(sender, channel_id=channel_id)
 
         # Determine media metadata for storage
         media_type: str | None = None
@@ -1197,9 +1221,10 @@ class AgentHandler:
 
     def save_assistant_message(self, phone: str, text: str, *,
                                msg_id: str | None = None,
-                               status: str = "sent") -> dict:
+                               status: str = "sent",
+                               channel_id: str = "default") -> dict:
         """Save an assistant (bot) message to contact memory after successful send."""
-        contact = self._get_contact(phone)
+        contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, msg_id=msg_id, status=status)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 

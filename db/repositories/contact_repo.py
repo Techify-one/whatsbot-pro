@@ -351,7 +351,7 @@ def _contact_ids_matching_message(folded_q: str, archived: bool) -> dict[int, di
         JOIN contacts c ON c.id = m.contact_id
         WHERE c.is_archived = :archived
           AND m.content <> ''
-          AND m.role NOT IN ('tool_call', 'system_notice')
+          AND m.role NOT IN ('tool_call', 'system_notice', 'conversation_event')
         ORDER BY m.ts DESC
     """)
     matched: dict[int, dict] = {}
@@ -399,7 +399,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
             INNER JOIN (
                 SELECT contact_id, MAX(ts) AS max_ts
                 FROM messages
-                WHERE role NOT IN ('transcription', 'system_notice')
+                WHERE role NOT IN ('transcription', 'system_notice', 'conversation_event')
                 GROUP BY contact_id
             ) m2 ON m1.contact_id = m2.contact_id AND m1.ts = m2.max_ts
         ) lm ON lm.contact_id = c.id

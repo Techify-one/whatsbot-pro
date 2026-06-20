@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { updateContactInfo, updateContactTags, createTag, getCustomAttributes, getContactConversation, updateConversationInfo } from '../../services/api.js';
+import { updateContactInfo, updateContactTags, createTag, getCustomAttributes, getContactConversation, getConversation, updateConversationInfo } from '../../services/api.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
@@ -16,7 +16,7 @@ const TAG_COLORS = [
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
 
-export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
+export function ContactInfoPanel({ phone, conversationId = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -86,20 +86,27 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     };
   }, []);
 
-  // Resolve the open conversation for this contact + seed its attribute values.
+  // Resolve the open conversation for this thread + seed its attribute values.
+  // Conversa-cêntrico (plano 11 D1): load THIS conversation by id when known (one
+  // channel); fall back to resolving by phone for legacy contact-only opens.
   useEffect(() => {
     let cancelled = false;
-    if (!phone) { setConvo(null); setConvValues({}); return; }
-    getContactConversation(phone)
-      .then((res) => {
-        if (cancelled) return;
-        const c = (res && res.ok && res.data) ? res.data.conversation : null;
-        setConvo(c || null);
-        setConvValues({ ...((c && c.custom_attributes) || {}) });
-      })
-      .catch(() => { if (!cancelled) { setConvo(null); setConvValues({}); } });
+    const apply = (res) => {
+      if (cancelled) return;
+      const c = (res && res.ok && res.data) ? res.data.conversation : null;
+      setConvo(c || null);
+      setConvValues({ ...((c && c.custom_attributes) || {}) });
+    };
+    const fail = () => { if (!cancelled) { setConvo(null); setConvValues({}); } };
+    if (conversationId != null) {
+      getConversation(conversationId).then(apply).catch(fail);
+    } else if (phone) {
+      getContactConversation(phone).then(apply).catch(fail);
+    } else {
+      setConvo(null); setConvValues({});
+    }
     return () => { cancelled = true; };
-  }, [phone]);
+  }, [phone, conversationId]);
 
   // Close dropdown on outside click
   useEffect(() => {

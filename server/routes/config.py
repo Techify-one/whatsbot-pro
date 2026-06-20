@@ -63,6 +63,10 @@ def register_routes(app, deps):
             "account_url": settings.get("account_url", ""),
             "low_balance_enabled": settings.get("low_balance_enabled", True),
             "low_balance_threshold": settings.get("low_balance_threshold", 0.50),
+            "system_notice_assignment": settings.get("system_notice_assignment", True),
+            "system_notice_tags": settings.get("system_notice_tags", True),
+            "system_notice_status": settings.get("system_notice_status", True),
+            "system_notice_ai": settings.get("system_notice_ai", True),
         })
 
     @app.put("/api/config")
@@ -81,6 +85,8 @@ def register_routes(app, deps):
             "max_executions", "default_ai_enabled", "setup_completed",
             "low_balance_enabled", "low_balance_threshold",
             "ai_engine_enabled", "ai_tools_code_enabled",
+            "system_notice_assignment", "system_notice_tags",
+            "system_notice_status", "system_notice_ai",
         }
         keys_changed = []
         for key, value in body.items():

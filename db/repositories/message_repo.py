@@ -62,9 +62,25 @@ def get_all(contact_id: int) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def get_by_conversation(conversation_id: int) -> list[dict]:
+    """Return all messages for ONE conversation ordered by ts (plano 11 D1).
+
+    Conversa-cêntrico: filtra por ``conversation_id`` (uma thread por canal),
+    ao contrário de :func:`get_all` que casa por ``contact_id`` e funde todos os
+    canais do mesmo número. Usa ``idx_msg_conversation_ts`` (db/tables.py).
+    """
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages)
+            .where(messages.c.conversation_id == conversation_id)
+            .order_by(messages.c.ts)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in rows]
+
+
 def get_context(contact_id: int, limit: int) -> list[dict]:
     """Return the last N eligible messages for LLM context."""
-    excluded = ("transcription", "tool_call", "system_notice")
+    excluded = ("transcription", "tool_call", "system_notice", "conversation_event")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
