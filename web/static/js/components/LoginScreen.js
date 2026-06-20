@@ -1,36 +1,79 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
-import { login } from '../services/api.js';
+import { login, bootstrapAdmin } from '../services/api.js';
 
 const html = htm.bind(h);
 
-export function LoginScreen({ onLogin }) {
+// Login screen. Supports three flows that coexist:
+//  - Legacy single-password login: leave the email blank, type the panel
+//    password. Sends {password}.
+//  - RBAC user login: fill in the email + password. Sends {email, password}.
+//  - First-access bootstrap: when there are no users yet (needsBootstrap),
+//    creates the first admin via /api/auth/bootstrap, then logs in.
+export function LoginScreen({ onLogin, needsBootstrap = false }) {
+  const [bootstrap, setBootstrap] = useState(!!needsBootstrap);
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e) {
+  function persistAndEnter(res) {
+    localStorage.setItem('whatsbot_token', res.data.token);
+    if (res.data.user) {
+      try { localStorage.setItem('whatsbot_user', JSON.stringify(res.data.user)); } catch (e) {}
+    } else {
+      try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
+    }
+    onLogin(res.data.user || null);
+  }
+
+  async function handleLogin(e) {
     e.preventDefault();
     if (!password.trim()) return;
-
     setLoading(true);
     setError('');
-
     try {
-      const res = await login(password);
+      const res = await login(password, email);
       if (res.ok) {
-        localStorage.setItem('whatsbot_token', res.data.token);
-        onLogin();
+        persistAndEnter(res);
       } else {
-        setError(res.error || 'Senha incorreta.');
+        setError(res.error || (email ? 'Email ou senha incorretos.' : 'Senha incorreta.'));
       }
     } catch {
       setError('Erro de conexão.');
     }
-
     setLoading(false);
   }
+
+  async function handleBootstrap(e) {
+    e.preventDefault();
+    if (!email.trim() || password.length < 8) return;
+    setLoading(true);
+    setError('');
+    try {
+      const res = await bootstrapAdmin({ email: email.trim().toLowerCase(), name: name.trim(), password });
+      if (!res.ok) {
+        setError(res.error || 'Falha ao criar o administrador.');
+        setLoading(false);
+        return;
+      }
+      // Bootstrap succeeded — log in immediately with the new credentials.
+      const loginRes = await login(password, email);
+      if (loginRes.ok) {
+        persistAndEnter(loginRes);
+      } else {
+        setError('Administrador criado. Faça login para continuar.');
+        setBootstrap(false);
+      }
+    } catch {
+      setError('Erro de conexão.');
+    }
+    setLoading(false);
+  }
+
+  const canBootstrap = email.trim() && password.length >= 8;
 
   return html`
     <div class="h-screen bg-wa-panel flex items-center justify-center">
@@ -42,31 +85,84 @@ export function LoginScreen({ onLogin }) {
             </svg>
           </div>
           <h1 class="text-xl font-semibold text-wa-text">WhatsBot</h1>
-          <p class="text-sm text-wa-secondary mt-1">Digite a senha para acessar o painel</p>
+          <p class="text-sm text-wa-secondary mt-1">
+            ${bootstrap
+              ? 'Crie o administrador para começar'
+              : 'Entre com seu acesso ao painel'}
+          </p>
         </div>
 
-        <form onSubmit=${handleSubmit}>
-          <input
-            type="password"
-            value=${password}
-            onInput=${(e) => setPassword(e.target.value)}
-            placeholder="Senha"
-            autofocus
-            class="w-full bg-wa-panel text-wa-text px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
-          />
+        ${bootstrap ? html`
+          <form onSubmit=${handleBootstrap}>
+            <input
+              type="email"
+              value=${email}
+              onInput=${(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              autofocus
+              class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
+            />
+            <input
+              type="text"
+              value=${name}
+              onInput=${(e) => setName(e.target.value)}
+              placeholder="Nome (opcional)"
+              class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
+            />
+            <input
+              type="password"
+              value=${password}
+              onInput=${(e) => setPassword(e.target.value)}
+              placeholder="Senha (mín. 8 caracteres)"
+              class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-1"
+            />
+            ${password && password.length < 8 ? html`
+              <p class="text-wa-secondary text-xs mb-2">A senha deve ter ao menos 8 caracteres.</p>
+            ` : html`<div class="mb-2"></div>`}
 
-          ${error ? html`
-            <p class="text-red-500 text-xs mb-3">${error}</p>
-          ` : null}
+            ${error ? html`<p class="text-red-500 text-xs mb-3">${error}</p>` : null}
 
-          <button
-            type="submit"
-            disabled=${loading || !password.trim()}
-            class="w-full py-3 bg-wa-teal hover:bg-wa-tealDark disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
-          >
-            ${loading ? 'Entrando...' : 'Entrar'}
-          </button>
-        </form>
+            <button
+              type="submit"
+              disabled=${loading || !canBootstrap}
+              class="w-full py-3 bg-wa-teal hover:bg-wa-tealDark disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+            >
+              ${loading ? 'Criando...' : 'Criar administrador'}
+            </button>
+          </form>
+        ` : html`
+          <form onSubmit=${handleLogin}>
+            <input
+              type="email"
+              value=${email}
+              onInput=${(e) => setEmail(e.target.value)}
+              placeholder="Email (opcional)"
+              class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
+            />
+            <input
+              type="password"
+              value=${password}
+              onInput=${(e) => setPassword(e.target.value)}
+              placeholder="Senha"
+              autofocus
+              class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
+            />
+
+            ${error ? html`<p class="text-red-500 text-xs mb-3">${error}</p>` : null}
+
+            <button
+              type="submit"
+              disabled=${loading || !password.trim()}
+              class="w-full py-3 bg-wa-teal hover:bg-wa-tealDark disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+            >
+              ${loading ? 'Entrando...' : 'Entrar'}
+            </button>
+
+            <p class="text-[11px] text-wa-secondary mt-3 text-center">
+              Deixe o email em branco para usar a senha única do painel.
+            </p>
+          </form>
+        `}
       </div>
     </div>
   `;

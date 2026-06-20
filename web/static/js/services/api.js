@@ -399,8 +399,25 @@ export async function performUpdate() {
 
 // ── Auth ──────────────────────────────────────────────────────────
 
-export async function login(password) {
-  return request('POST', '/api/auth/login', { password });
+// Login. With an email, performs an RBAC user login ({email, password});
+// without one, falls back to the legacy single-password login ({password}).
+export async function login(password, email = '') {
+  const body = email ? { email: email.trim(), password } : { password };
+  return request('POST', '/api/auth/login', body);
+}
+
+// Create the first admin user (only works while no users exist).
+export async function bootstrapAdmin(data) {
+  return request('POST', '/api/auth/bootstrap', data);
+}
+
+// Current identity for the bearer token (RBAC user, or legacy single-password).
+export async function getMe() {
+  return request('GET', '/api/auth/me');
+}
+
+export async function logoutSession() {
+  return request('POST', '/api/auth/logout');
 }
 
 export async function checkAuth() {
@@ -411,4 +428,30 @@ export async function checkAuth() {
   };
   const res = await fetch(`${BASE}/api/auth/check`, opts);
   return res.json();
+}
+
+// ── Users & roles (RBAC — plano 03) ───────────────────────────────
+
+export async function getUsers() {
+  return request('GET', '/api/users');
+}
+
+export async function getRoles() {
+  return request('GET', '/api/roles');
+}
+
+export async function createUser(data) {
+  return request('POST', '/api/users', data);
+}
+
+export async function updateUser(id, data) {
+  return request('PUT', `/api/users/${id}`, data);
+}
+
+export async function resetUserPassword(id, password) {
+  return request('POST', `/api/users/${id}/password`, { password });
+}
+
+export async function deleteUser(id) {
+  return request('DELETE', `/api/users/${id}`);
 }

@@ -13,11 +13,12 @@ import { ToolsManager } from './components/ToolsManager.js';
 import QuickReplies from './components/QuickReplies.js';
 import CustomAttributesManager from './components/CustomAttributesManager.js';
 import RuntimePanel from './components/RuntimePanel.js';
+import UsersManager from './components/UsersManager.js';
 import { SetupWizard } from './components/SetupWizard.js';
 import { LowBalanceModal } from './components/LowBalanceModal.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
-import { checkAuth, authHeaders, getUnreadCount } from './services/api.js';
+import { checkAuth, authHeaders, getUnreadCount, logoutSession } from './services/api.js';
 import { playTransferAlert } from './utils/alertSound.js';
 import { getNotifPref, playNotificationSound, showBrowserNotification } from './utils/notifications.js';
 
@@ -50,6 +51,7 @@ const CORE_ROUTES = {
   '/quick-replies': 'quick-replies',
   '/custom-attributes': 'custom-attributes',
   '/runtime': 'runtime',
+  '/users': 'users',
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
@@ -62,6 +64,7 @@ const CORE_TAB_PATHS = {
   'quick-replies': '/quick-replies',
   'custom-attributes': '/custom-attributes',
   runtime: '/runtime',
+  users: '/users',
 };
 
 // Tab id used internally for plugin screens. We encode the plugin id and
@@ -111,7 +114,7 @@ function MenuItem({ active, href, onClick, icon, children }) {
   `;
 }
 
-function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl }) {
+function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl, currentUser }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -202,6 +205,9 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} active=${tab === 'runtime'} href=${CORE_TAB_PATHS.runtime} onClick=${() => { onTabChange('runtime'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3a9 9 0 0 0-9 9H1l4 4 4-4H6a7 7 0 1 1 2 4.9l-1.4 1.4A9 9 0 1 0 13 3z"/></svg>`}
           >Runtime</${MenuItem}>
+          <${MenuItem} active=${tab === 'users'} href=${CORE_TAB_PATHS.users} onClick=${() => { onTabChange('users'); close(); }}
+            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`}
+          >Usuários</${MenuItem}>
           <${MenuItem} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>`}
           >Gerenciar Plugins</${MenuItem}>
@@ -220,8 +226,14 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
             </span>
           </button>
 
-          ${hasPassword ? html`
+          ${(hasPassword || currentUser) ? html`
             <div class="border-t border-wa-border my-1"></div>
+            ${currentUser ? html`
+              <div class="px-4 py-1.5">
+                <div class="text-[13px] text-wa-text font-medium truncate">${currentUser.name || currentUser.email}</div>
+                ${currentUser.name ? html`<div class="text-[11px] text-wa-secondary truncate">${currentUser.email}</div>` : null}
+              </div>
+            ` : null}
             <button
               onClick=${() => { onLogout(); close(); }}
               class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-red-50 transition-colors flex items-center gap-2 text-red-600"
@@ -252,7 +264,7 @@ function PageHeader({ title, onBack }) {
   `;
 }
 
-function App({ onLogout, hasPassword }) {
+function App({ onLogout, hasPassword, currentUser }) {
   const [status, setStatus] = useState({ connected: false, msg_count: 0, auto_reply_running: false });
   const [qrAvailable, setQrAvailable] = useState(false);
   const [qrVersion, setQrVersion] = useState(0);
@@ -505,7 +517,7 @@ function App({ onLogout, hasPassword }) {
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         ${activePluginScreen
@@ -532,6 +544,11 @@ function App({ onLogout, hasPassword }) {
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Runtime" onBack=${() => setTab('contacts')} />
                 <${RuntimePanel} />
+              </div>`
+            : tab === 'users'
+            ? html`<div class="max-w-5xl mx-auto p-4">
+                <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
+                <${UsersManager} />
               </div>`
             : tab === 'plugins'
             ? html`<div class="max-w-5xl mx-auto p-4">
@@ -597,17 +614,39 @@ function App({ onLogout, hasPassword }) {
   `;
 }
 
+function loadStoredUser() {
+  try {
+    const raw = localStorage.getItem('whatsbot_user');
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
 function AuthGate() {
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'login' | 'ready'
   const [hasPassword, setHasPassword] = useState(false);
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [currentUser, setCurrentUser] = useState(loadStoredUser);
 
   useEffect(() => {
     checkAuth().then(res => {
       if (res.ok) {
         setHasPassword(res.data.has_password);
+        // The backend echoes the authenticated user (RBAC) on the check; keep
+        // it so the gear menu can show who's logged in.
+        if (res.data.user) {
+          setCurrentUser(res.data.user);
+          try { localStorage.setItem('whatsbot_user', JSON.stringify(res.data.user)); } catch (e) {}
+        } else if (res.data.has_users === false) {
+          // Legacy single-password session with no users yet.
+          setCurrentUser(null);
+          try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
+        }
         setAuthState('ready');
       } else {
-        setHasPassword(true);
+        // Not authenticated → show login. Offer bootstrap when no users and no
+        // single-password is configured (truly fresh install needing an admin).
+        setHasPassword(res.data && res.data.has_password !== undefined ? res.data.has_password : true);
+        setNeedsBootstrap(!!(res.data && res.data.has_users === false && res.data.has_password === false));
         setAuthState('login');
       }
     }).catch(() => {
@@ -618,19 +657,25 @@ function AuthGate() {
   useEffect(() => {
     function onUnauthorized() {
       setHasPassword(true);
+      setCurrentUser(null);
+      try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
       setAuthState('login');
     }
     window.addEventListener('whatsbot:unauthorized', onUnauthorized);
     return () => window.removeEventListener('whatsbot:unauthorized', onUnauthorized);
   }, []);
 
-  function handleLogin() {
+  function handleLogin(user) {
+    setCurrentUser(user || null);
     setAuthState('ready');
     setHasPassword(true);
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try { await logoutSession(); } catch (e) { /* best-effort */ }
     localStorage.removeItem('whatsbot_token');
+    try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
+    setCurrentUser(null);
     setAuthState('login');
   }
 
@@ -643,10 +688,10 @@ function AuthGate() {
   }
 
   if (authState === 'login') {
-    return html`<${LoginScreen} onLogin=${handleLogin} />`;
+    return html`<${LoginScreen} onLogin=${handleLogin} needsBootstrap=${needsBootstrap} />`;
   }
 
-  return html`<${App} onLogout=${handleLogout} hasPassword=${hasPassword} />`;
+  return html`<${App} onLogout=${handleLogout} hasPassword=${hasPassword} currentUser=${currentUser} />`;
 }
 
 render(html`<${AuthGate} />`, document.getElementById('app'));
