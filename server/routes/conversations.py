@@ -14,7 +14,7 @@ from db import filters as conv_filters
 from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
 from server import system_notices
-from server.authz import permission_denied, current_user
+from server.authz import permission_denied, has_permission, current_user
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -442,9 +442,12 @@ def register_routes(app, deps):
 
     @app.get("/api/conversations/{conv_id}/templates")
     async def conversation_templates(conv_id: int, request: Request):
-        """Approved templates for the picker (Frente C). Channel-aware: resolves the
-        conversation's channel and returns ``{supported, templates}``. Non-template
-        channels (GOWA) return ``supported=False`` with no provider call."""
+        """Templates for the picker (Frente C). Channel-aware: resolves the
+        conversation's channel and returns ``{supported, templates, can_create,
+        can_delete}``. Lists templates of every status (the UI badges the status and
+        only lets approved ones be sent). ``can_create``/``can_delete`` are the
+        caller's RBAC capability flags so the UI shows/hides the manage actions.
+        Non-template channels (GOWA) return ``supported=False`` with no provider call."""
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
@@ -452,10 +455,14 @@ def register_routes(app, deps):
         if not conv:
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
+        can_create = has_permission(request, "template.create")
+        can_delete = has_permission(request, "template.delete")
         if not outbound.supports(channel_id, "templates"):
-            return _ok({"supported": False, "templates": []})
+            return _ok({"supported": False, "templates": [],
+                        "can_create": can_create, "can_delete": can_delete})
         templates = await asyncio.to_thread(outbound.list_templates, channel_id)
-        return _ok({"supported": True, "templates": templates})
+        return _ok({"supported": True, "templates": templates,
+                    "can_create": can_create, "can_delete": can_delete})
 
     @app.post("/api/conversations/{conv_id}/send-template")
     async def send_conversation_template(conv_id: int, body: dict, request: Request):
@@ -514,6 +521,79 @@ def register_routes(app, deps):
             "template_name": template_name, "ts": time.time(),
         })
         return _ok({"message": "Template enviado.", "msg_id": msg_id})
+
+    _TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+
+    @app.post("/api/conversations/{conv_id}/templates")
+    async def create_conversation_template(conv_id: int, body: dict, request: Request):
+        """Create a template on the conversation's channel (gated ``template.create``).
+
+        body: ``{name, category?, language?, body_text, header_text?, footer_text?,
+        body_examples?, header_examples?}``. The provider assembles the Graph
+        components (including the ``example`` arrays Meta requires for ``{{n}}``).
+        The template is created ``PENDING`` until Meta reviews it."""
+        denied = permission_denied(request, "template.create")
+        if denied:
+            return denied
+        name = (body.get("name") or "").strip().lower()
+        if not name or not name.isascii() or not all(c.isalnum() or c == "_" for c in name):
+            return _err("Nome inválido: use apenas letras minúsculas, números e _.", status=400)
+        body_text = (body.get("body_text") or "").strip()
+        if not body_text:
+            return _err("body_text é obrigatório.", status=400)
+        category = (body.get("category") or "UTILITY").strip().upper()
+        if category not in _TEMPLATE_CATEGORIES:
+            return _err(f"category deve ser uma de {sorted(_TEMPLATE_CATEGORIES)}.", status=400)
+        language = (body.get("language") or "pt_BR").strip() or "pt_BR"
+        body_examples = body.get("body_examples")
+        header_examples = body.get("header_examples")
+        if body_examples is not None and not isinstance(body_examples, list):
+            return _err("body_examples deve ser uma lista.", status=400)
+        if header_examples is not None and not isinstance(header_examples, list):
+            return _err("header_examples deve ser uma lista.", status=400)
+
+        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        channel_id = conv.get("channel_id") or "default"
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+
+        result = await asyncio.to_thread(
+            outbound.create_template, channel_id, name,
+            category=category, language=language, body_text=body_text,
+            header_text=(body.get("header_text") or "").strip() or None,
+            footer_text=(body.get("footer_text") or "").strip() or None,
+            body_examples=body_examples or None,
+            header_examples=header_examples or None)
+        if not result.get("ok"):
+            return _err(f"Falha ao criar template: {result.get('error')}", status=502)
+        return _ok({
+            "message": "Template enviado para aprovação da Meta.",
+            "id": result.get("id"), "status": result.get("status"),
+            "category": result.get("category"), "name": name,
+        })
+
+    @app.delete("/api/conversations/{conv_id}/templates/{name}")
+    async def delete_conversation_template(conv_id: int, name: str, request: Request):
+        """Delete a template (all language versions) on the conversation's channel
+        (gated ``template.delete``)."""
+        denied = permission_denied(request, "template.delete")
+        if denied:
+            return denied
+        name = (name or "").strip()
+        if not name:
+            return _err("name é obrigatório.", status=400)
+        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        channel_id = conv.get("channel_id") or "default"
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+        result = await asyncio.to_thread(outbound.delete_template, channel_id, name)
+        if not result.get("ok"):
+            return _err(f"Falha ao apagar template: {result.get('error')}", status=502)
+        return _ok({"message": "Template apagado.", "name": name})
 
     @app.get("/api/contacts/{phone}/conversation")
     async def contact_conversation(phone: str, request: Request,

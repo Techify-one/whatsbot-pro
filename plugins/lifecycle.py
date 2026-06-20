@@ -23,7 +23,8 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from plugins.context import PluginContext, broadcast, make_plugin_db
+from plugins.context import (PluginContext, broadcast, make_plugin_db,
+                             get_channel_runtime, get_deps)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,16 @@ class PluginLifecycleManager:
                         loop: asyncio.AbstractEventLoop) -> PluginContext:
         ctx = self._contexts.get(plugin_id)
         if ctx is None:
+            # Channel runtime (plano 13 Fase 1.1): read at context-build time so a
+            # provider plugin's setup() gets the live registry/router/funnel.
+            channel_registry, outbound_router, ingest_event = get_channel_runtime()
             ctx = PluginContext(
                 plugin_id=plugin_id, handler=handler, loop=loop,
                 plugin_db=make_plugin_db, broadcast=broadcast,
+                channel_registry=channel_registry,
+                outbound_router=outbound_router,
+                ingest_event=ingest_event,
+                deps=get_deps(),
             )
             self._contexts[plugin_id] = ctx
         return ctx

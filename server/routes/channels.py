@@ -59,6 +59,28 @@ def register_routes(app, deps):
         except Exception:
             pass
 
+    def _register_live_provider(cid: str, provider: str) -> None:
+        """Make a freshly-created non-GOWA channel (Cloud/Telegram/…) live without
+        a restart, when its provider plugin is loaded.
+
+        Mirrors the boot-time materialization in ``create_app``: instantiate the
+        registered provider class with ``(channel_id, registry=...)`` so status/QR/
+        send and (for Telegram) the long-poll loop pick it up immediately. Pure
+        constructor — no network — so it is safe and best-effort."""
+        if registry is None:
+            return
+        provider_cls = registry.get_provider(provider)
+        if provider_cls is None:
+            return
+        try:
+            try:
+                inst = provider_cls(cid, registry=registry)
+            except TypeError:
+                inst = provider_cls(cid)
+            registry.add_channel(cid, inst)
+        except Exception:
+            pass
+
     @app.get("/api/channels")
     async def list_channels(request: Request):
         denied = permission_denied(request, "channel.manage")
@@ -162,9 +184,13 @@ def register_routes(app, deps):
                 name=row.get("display_name") or cid)
         except Exception:
             pass
-        # Register the live GOWA channel now so QR/status work without a restart.
+        # Register the live channel now so status/QR/send work without a restart.
+        # GOWA needs its per-device client; other providers are built generically
+        # from the registered provider class (no-op if the plugin isn't loaded).
         if provider == "gowa":
             _register_live_gowa(cid, row)
+        else:
+            _register_live_provider(cid, provider)
         stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
         return _ok(_serialize(row, stored))
 

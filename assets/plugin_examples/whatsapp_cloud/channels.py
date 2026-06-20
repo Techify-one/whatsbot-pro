@@ -261,14 +261,15 @@ class WhatsAppCloudChannel(Channel):
 
     # ── Templates (HSM) listing ──────────────────────────────────────
     def list_templates(self) -> list[dict]:
-        """List APPROVED message templates for the WABA (Graph API).
+        """List message templates for the WABA (Graph API), ANY status.
 
         ``GET /{waba_id}/message_templates`` — note this uses ``waba_id`` (NOT
-        ``phone_number_id``, which send_template uses). Returns only APPROVED
-        templates, normalized for the UI, following ``paging.next``. Cached for
-        ~5 min so reopening the picker doesn't re-hit Meta. Returns ``[]`` on any
-        failure or missing ``waba_id`` (the UI then shows a "configure o WABA ID"
-        hint).
+        ``phone_number_id``, which send_template uses). Returns templates of every
+        status (APPROVED/PENDING/REJECTED/…) normalized for the UI — the picker
+        shows the status badge and only lets approved ones be sent. Follows
+        ``paging.next``. Cached for ~5 min so reopening the picker doesn't re-hit
+        Meta (invalidated by create/delete). Returns ``[]`` on any failure or
+        missing ``waba_id`` (the UI then shows a "configure o WABA ID" hint).
         """
         waba_id = self._cred("waba_id")
         token = self._access_token
@@ -297,8 +298,6 @@ class WhatsAppCloudChannel(Channel):
                         break
                     data = resp.json()
                     for tpl in data.get("data") or []:
-                        if (tpl.get("status") or "").upper() != "APPROVED":
-                            continue
                         results.append(self._normalize_template(tpl))
                     nxt = ((data.get("paging") or {}).get("next")) or ""
                     if not nxt:
@@ -311,6 +310,97 @@ class WhatsAppCloudChannel(Channel):
 
         self._templates_cache = (time.time(), results)
         return results
+
+    def _invalidate_templates_cache(self) -> None:
+        self._templates_cache = None
+
+    def create_template(self, name: str, *, category: str, language: str,
+                        body_text: str, header_text: Optional[str] = None,
+                        footer_text: Optional[str] = None,
+                        body_examples: Optional[list] = None,
+                        header_examples: Optional[list] = None) -> dict:
+        """Create a template via ``POST /{waba_id}/message_templates`` (Graph API).
+
+        Assembles the Graph ``components`` from a simple normalized definition so the
+        Graph-specific shape (UPPERCASE types, the nested ``example`` arrays Meta
+        requires for ``{{n}}`` placeholders) stays inside the provider. The created
+        template starts ``PENDING`` until Meta reviews it. Invalidates the list
+        cache on success. Returns ``{ok, id?, status?, category?, error?}``.
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not (name or "").strip() or not (body_text or "").strip():
+            return {"ok": False, "error": "name e body_text são obrigatórios"}
+
+        components: list[dict] = []
+        if header_text and header_text.strip():
+            header_comp: dict = {"type": "HEADER", "format": "TEXT",
+                                 "text": header_text.strip()}
+            if header_examples:
+                header_comp["example"] = {"header_text": list(header_examples)}
+            components.append(header_comp)
+        body_comp: dict = {"type": "BODY", "text": body_text.strip()}
+        if body_examples:
+            # Meta expects body_text as a list-of-lists (one inner list per example set).
+            body_comp["example"] = {"body_text": [list(body_examples)]}
+        components.append(body_comp)
+        if footer_text and footer_text.strip():
+            components.append({"type": "FOOTER", "text": footer_text.strip()})
+
+        payload = {
+            "name": name.strip(),
+            "language": (language or "pt_BR").strip(),
+            "category": (category or "UTILITY").strip().upper(),
+            "components": components,
+        }
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.post(url, headers=self._headers(), json=payload)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                self._invalidate_templates_cache()
+                return {
+                    "ok": True,
+                    "id": data.get("id"),
+                    "status": data.get("status"),
+                    "category": data.get("category"),
+                }
+            return {"ok": False, "error": _graph_error(resp)}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud create_template failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    def delete_template(self, name: str) -> dict:
+        """Delete a template (every language version) by name.
+
+        ``DELETE /{waba_id}/message_templates?name={name}`` removes ALL languages of
+        that template name. Invalidates the list cache on success. Returns
+        ``{ok, error?}``.
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not (name or "").strip():
+            return {"ok": False, "error": "name é obrigatório"}
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.delete(url, headers={"Authorization": f"Bearer {token}"},
+                                     params={"name": name.strip()})
+            if resp.status_code in (200, 201):
+                data = resp.json() if resp.content else {}
+                if data.get("success") is False:
+                    return {"ok": False, "error": _graph_error(resp)}
+                self._invalidate_templates_cache()
+                return {"ok": True}
+            return {"ok": False, "error": _graph_error(resp)}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud delete_template failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
 
     @staticmethod
     def _normalize_template(tpl: dict) -> dict:
@@ -546,6 +636,21 @@ def _to_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _graph_error(resp) -> str:
+    """Best-effort human-readable error from a Graph API error response.
+
+    Meta returns ``{"error": {"message": ..., "error_user_msg": ...}}``; prefer the
+    user-facing message when present, falling back to the raw body."""
+    try:
+        err = (resp.json() or {}).get("error") or {}
+        msg = err.get("error_user_msg") or err.get("message")
+        if msg:
+            return f"{msg}" + (f" ({err['error_user_title']})" if err.get("error_user_title") else "")
+    except Exception:  # noqa: BLE001
+        pass
+    return f"http_{resp.status_code}: {resp.text[:300]}"
 
 
 # Exported for the plugin loader (entry.channels → CHANNEL_PROVIDERS).

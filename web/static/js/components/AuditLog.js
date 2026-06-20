@@ -9,6 +9,7 @@ import { h, Fragment } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { listAudit, getAuditActions, downloadAuditExport } from '../services/api.js';
+import { SearchableSelect } from './SearchableSelect.js';
 
 const html = htm.bind(h);
 
@@ -235,19 +236,27 @@ export default function AuditLog() {
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">Recurso</label>
-            <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              value=${resourceType} onChange=${(e) => setResourceType(e.target.value)}>
-              <option value="">Todos os recursos</option>
-              ${resourceTypes.map((rt) => html`<option key=${rt} value=${rt}>${rt}</option>`)}
-            </select>
+            <${SearchableSelect}
+              value=${resourceType}
+              onChange=${setResourceType}
+              options=${resourceTypes.map((rt) => ({ value: rt, label: rt }))}
+              placeholder="Todos os recursos"
+              searchPlaceholder="Buscar recurso..."
+              allowEmpty=${true}
+              emptyLabel="Todos os recursos"
+            />
           </div>
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">Ação</label>
-            <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              value=${action} onChange=${(e) => setAction(e.target.value)}>
-              <option value="">Todas as ações</option>
-              ${actions.map((a) => html`<option key=${a} value=${a}>${a}</option>`)}
-            </select>
+            <${SearchableSelect}
+              value=${action}
+              onChange=${setAction}
+              options=${actions.map((a) => ({ value: a, label: a }))}
+              placeholder="Todas as ações"
+              searchPlaceholder="Buscar ação..."
+              allowEmpty=${true}
+              emptyLabel="Todas as ações"
+            />
           </div>
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">Tipo de ator</label>

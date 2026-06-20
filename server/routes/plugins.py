@@ -134,6 +134,11 @@ def register_routes(app, deps):
             dropped = plugin_repo.drop_plugin_tables(plugin_id)
             plugin_repo.delete(plugin_id)
             config_repo.delete_prefix(f"plugin.{plugin_id}.")
+            # Tombstone the bundled gowa plugin so the boot-time bootstrap does NOT
+            # resurrect it (the 'default' gowa channel row persists — plano 13 goal
+            # #2). Key lives OUTSIDE the 'plugin.gowa.' prefix just wiped above.
+            if plugin_id == "gowa":
+                config_repo.set("gowa_uninstalled", "1")
             overrides_removed = tool_override_repo.delete_for_plugin(plugin_id)
             return {
                 "folder_removed": had_dir,
@@ -281,6 +286,10 @@ def register_routes(app, deps):
 
         version = str(meta.get("version") or "0.0.0") if isinstance(meta, dict) else "0.0.0"
         await asyncio.to_thread(plugin_repo.upsert, pid, version, enabled=False)
+        # Reinstalling gowa is a deliberate "I want it back" — clear the uninstall
+        # tombstone so the boot-time bootstrap can manage it again (plano 13).
+        if pid == "gowa":
+            await asyncio.to_thread(config_repo.set, "gowa_uninstalled", "0")
         return _ok({"id": pid, "version": version, "enabled": False})
 
     @app.post("/api/plugins/restart")
