@@ -1210,6 +1210,23 @@ check("save agent c/ is_router+routing_targets -> 200", r.status_code == 200)
 check("agent is_router persistido", r.json()["data"]["is_router"] is True)
 check("agent routing_targets persistido", r.json()["data"]["routing_targets"] == ["vendas", "suporte"])
 
+# hooks_config (plano 06 migration 0016) + rollback restaura TODOS os campos de roteamento
+r = client.put("/api/ai/agents/default", json={
+    "display_name": "Com Hooks", "prompt_key": "default", "model_config": {}, "enabled": True,
+    "is_router": True, "routing_targets": ["vendas"],
+    "hooks_config": {"buscar_pedido": {"call_limit": 2}}})
+check("save agent c/ hooks_config -> 200", r.status_code == 200)
+check("hooks_config persistido", r.json()["data"]["hooks_config"] == {"buscar_pedido": {"call_limit": 2}})
+_v_hooks = r.json()["data"]["version"]
+# sobrescreve com agente simples (sem router/hooks), depois faz rollback para a versão com hooks
+client.put("/api/ai/agents/default", json={
+    "display_name": "Simples", "prompt_key": "default", "model_config": {}, "enabled": True})
+r = client.post(f"/api/ai/agents/default/rollback/{_v_hooks}")
+check("rollback restaura is_router", r.json()["data"]["is_router"] is True)
+check("rollback restaura routing_targets", r.json()["data"]["routing_targets"] == ["vendas"])
+check("rollback restaura hooks_config",
+      r.json()["data"]["hooks_config"] == {"buscar_pedido": {"call_limit": 2}})
+
 r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key": "default"})
 check("POST /conversations/{id}/agent -> 200", r.status_code == 200)
 check("conversa ganha active_agent_key", r.json()["data"]["conversation"]["active_agent_key"] == "default")

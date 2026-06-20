@@ -34,6 +34,7 @@ def _row_to_dict(row) -> dict:
     d["model_config"] = _decode_json(d.get("model_config"), {})
     d["tool_names"] = _decode_json(d.get("tool_names"), None)
     d["routing_targets"] = _decode_json(d.get("routing_targets"), None)
+    d["hooks_config"] = _decode_json(d.get("hooks_config"), {})
     d["enabled"] = bool(d.get("enabled", 1))
     d["is_router"] = bool(d.get("is_router", 0))
     return d
@@ -98,6 +99,7 @@ def save(
     description: str = "",
     is_router: bool = False,
     routing_targets: list[str] | None = None,
+    hooks_config: dict | None = None,
 ) -> dict:
     """Upsert an agent, bump version and snapshot to history. Returns the row."""
     now = time.time()
@@ -114,6 +116,7 @@ def save(
         "is_router": 1 if is_router else 0,
         "routing_targets": (None if routing_targets is None
                             else json.dumps(routing_targets, ensure_ascii=False)),
+        "hooks_config": json.dumps(hooks_config or {}, ensure_ascii=False),
         "version": version,
         "updated_at": now,
     }
@@ -122,7 +125,7 @@ def save(
             ai_agents, values, conflict_cols=["agent_key"],
             update_cols=["display_name", "prompt_key", "model_config",
                          "tool_names", "enabled", "description", "is_router",
-                         "routing_targets", "version", "updated_at"],
+                         "routing_targets", "hooks_config", "version", "updated_at"],
         ))
         conn.execute(ai_agents_history.insert().values(
             agent_key=agent_key,
@@ -166,4 +169,8 @@ def rollback(agent_key: str, version: int) -> dict | None:
         model_config=_decode_json(snap.get("model_config"), {}),
         tool_names=_decode_json(snap.get("tool_names"), None),
         enabled=bool(snap.get("enabled", 1)),
+        description=snap.get("description", ""),
+        is_router=bool(snap.get("is_router", 0)),
+        routing_targets=_decode_json(snap.get("routing_targets"), None),
+        hooks_config=_decode_json(snap.get("hooks_config"), {}),
     )

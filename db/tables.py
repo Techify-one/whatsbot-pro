@@ -399,6 +399,7 @@ executions = Table(
     Column("agent_key", Text),
     Column("total_tokens", Integer, nullable=False, server_default="0"),
     Column("total_cost_usd", Float, nullable=False, server_default="0.0"),
+    Column("routing_steps", Text),                             # plano 06: JSON dos saltos de handoff
 )
 Index("idx_exec_started", executions.c.started_at)
 
@@ -412,6 +413,7 @@ execution_steps = Table(
     Column("status", Text, nullable=False, server_default="ok"),
     Column("data", Text),
     Column("ts", Float, nullable=False),
+    Column("agent_key", Text),                                  # plano 06: qual agente executou o passo
 )
 Index("idx_step_exec", execution_steps.c.execution_id)
 
@@ -477,6 +479,7 @@ ai_agents = Table(
     Column("description", Text, nullable=False, server_default=""),
     Column("is_router", Integer, nullable=False, server_default="0"),
     Column("routing_targets", Text),                          # JSON array de agent_keys
+    Column("hooks_config", Text, nullable=False, server_default="{}"),  # plano 06: hooks declarativos
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
