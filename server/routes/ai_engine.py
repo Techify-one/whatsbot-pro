@@ -15,7 +15,10 @@ import asyncio
 import logging
 import time
 
+from fastapi import Request
+
 from server.helpers import _ok, _err
+from server.authz import permission_denied
 from db.repositories import agent_repo, prompt_repo, variable_repo, tool_repo
 from plugins.events import emit as emit_event
 from plugins.restart import schedule_restart
@@ -46,7 +49,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.put("/api/ai/agents/{agent_key}")
-    async def save_agent(agent_key: str, body: dict):
+    async def save_agent(agent_key: str, body: dict, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         model_config = body.get("model_config", {})
         if not isinstance(model_config, dict):
             return _err("model_config deve ser um objeto.")
@@ -77,7 +83,10 @@ def register_routes(app, deps):
         return _ok(await asyncio.to_thread(agent_repo.list_history, agent_key))
 
     @app.post("/api/ai/agents/{agent_key}/rollback/{version}")
-    async def agent_rollback(agent_key: str, version: int):
+    async def agent_rollback(agent_key: str, version: int, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         row = await asyncio.to_thread(agent_repo.rollback, agent_key, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -91,7 +100,10 @@ def register_routes(app, deps):
         return _ok(await asyncio.to_thread(prompt_repo.list_history, prompt_key))
 
     @app.post("/api/ai/prompts/{prompt_key}/rollback/{version}")
-    async def prompt_rollback(prompt_key: str, version: int):
+    async def prompt_rollback(prompt_key: str, version: int, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         row = await asyncio.to_thread(prompt_repo.rollback, prompt_key, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -103,7 +115,10 @@ def register_routes(app, deps):
         return _ok(await asyncio.to_thread(tool_repo.list_history, name))
 
     @app.post("/api/ai/tools/{name}/rollback/{version}")
-    async def tool_rollback(name: str, version: int):
+    async def tool_rollback(name: str, version: int, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         row = await asyncio.to_thread(tool_repo.rollback, name, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -124,7 +139,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.put("/api/ai/prompts/{prompt_key}")
-    async def save_prompt(prompt_key: str, body: dict):
+    async def save_prompt(prompt_key: str, body: dict, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         row = await asyncio.to_thread(prompt_repo.save, prompt_key, body.get("body", ""))
         _emit_changed("prompt", prompt_key)
         logger.info("AI prompt saved: %s (v%s)", prompt_key, row.get("version"))
@@ -137,7 +155,10 @@ def register_routes(app, deps):
         return _ok(rows)
 
     @app.put("/api/ai/variables/{name}")
-    async def save_variable(name: str, body: dict):
+    async def save_variable(name: str, body: dict, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         row = await asyncio.to_thread(
             variable_repo.save, name, body.get("value", ""), body.get("category", "")
         )
@@ -145,7 +166,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.delete("/api/ai/variables/{name}")
-    async def delete_variable(name: str):
+    async def delete_variable(name: str, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         deleted = await asyncio.to_thread(variable_repo.delete, name)
         if not deleted:
             return _err("Variável não encontrada.", status=404)
@@ -166,7 +190,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.put("/api/ai/tools/{name}")
-    async def save_ai_tool(name: str, body: dict):
+    async def save_ai_tool(name: str, body: dict, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         dependencies = body.get("dependencies", [])
         if dependencies is not None and not isinstance(dependencies, list):
             return _err("dependencies deve ser uma lista.")
@@ -189,7 +216,10 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.delete("/api/ai/tools/{name}")
-    async def delete_ai_tool(name: str):
+    async def delete_ai_tool(name: str, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         deleted = await asyncio.to_thread(tool_repo.delete, name)
         if not deleted:
             return _err("Tool não encontrada.", status=404)
@@ -197,8 +227,25 @@ def register_routes(app, deps):
         schedule_restart(f"ai_tool deleted: {name}")
         return _ok({"deleted": True})
 
+    @app.post("/api/ai/tools/{name}/reinstall")
+    async def reinstall_ai_tool(name: str, request: Request):
+        """Re-run the installer for one tool (status->pending + restart)."""
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(tool_repo.get, name)
+        if not row:
+            return _err("Tool não encontrada.", status=404)
+        await asyncio.to_thread(tool_repo.set_status, name, "pending", None)
+        _emit_changed("tool", name)
+        schedule_restart(f"ai_tool reinstall: {name}")
+        return _ok({"reinstalling": name})
+
     @app.post("/api/ai/restart")
-    async def restart_engine():
+    async def restart_engine(request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         """Restart the server so code-in-DB tool changes take effect."""
         schedule_restart("ai engine manual restart")
         return _ok({"restarting": True})

@@ -1217,6 +1217,31 @@ r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key
 check("POST agent null -> desvincula",
       r.json()["data"]["conversation"]["active_agent_key"] is None)
 
+# Inbox → agente default (plano 06 binding via API)
+r = client.get("/api/inboxes")
+check("GET /api/inboxes -> 200 lista", r.status_code == 200 and isinstance(r.json()["data"], list))
+check("GET /api/inboxes -> tem inbox default id=1",
+      any(i["id"] == 1 for i in r.json()["data"]))
+r = client.put("/api/inboxes/1/default-agent", json={"agent_key": "default"})
+check("PUT inbox default-agent -> 200", r.status_code == 200 and r.json()["data"]["default_agent_key"] == "default")
+r = client.put("/api/inboxes/1/default-agent", json={"agent_key": "nao_existe"})
+check("PUT inbox default-agent agente inexistente -> 400", r.status_code == 400)
+r = client.put("/api/inboxes/999/default-agent", json={"agent_key": "default"})
+check("PUT inbox default-agent inbox inexistente -> 404", r.status_code == 404)
+r = client.put("/api/inboxes/1/default-agent", json={"agent_key": None})
+check("PUT inbox default-agent null -> desvincula", r.json()["data"]["default_agent_key"] is None)
+
+# Reinstall de tool code-in-DB (não dispara restart real no teste)
+import server.routes.ai_engine as _aimod
+_aimod.schedule_restart = lambda *a, **k: None  # no-op: evita os._exit na suíte
+client.put("/api/ai/tools/tool_teste", json={
+    "description": "teste", "code": "SCHEMA={}\ndef execute(ctx,args):\n    return None",
+    "dependencies": [], "enabled": False, "restart": False})
+r = client.post("/api/ai/tools/tool_teste/reinstall")
+check("POST /api/ai/tools/{name}/reinstall -> 200", r.status_code == 200)
+r = client.post("/api/ai/tools/nao_existe/reinstall")
+check("reinstall tool inexistente -> 404", r.status_code == 404)
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
