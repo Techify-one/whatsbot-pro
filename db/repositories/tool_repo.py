@@ -105,6 +105,45 @@ def save(
     return _row_to_dict(values)
 
 
+def list_history(name: str) -> list[dict]:
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(ai_tools_history.c.version, ai_tools_history.c.created_at)
+            .where(ai_tools_history.c.name == name)
+            .order_by(ai_tools_history.c.version.desc())
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_snapshot(name: str, version: int) -> dict | None:
+    with get_engine().connect() as conn:
+        snap = conn.execute(
+            select(ai_tools_history.c.snapshot).where(
+                ai_tools_history.c.name == name,
+                ai_tools_history.c.version == version)
+        ).scalar()
+    if not snap:
+        return None
+    try:
+        return json.loads(snap)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def rollback(name: str, version: int) -> dict | None:
+    """Re-apply a past snapshot as a NEW version (install_status volta a pending)."""
+    snap = get_snapshot(name, version)
+    if not snap:
+        return None
+    return save(
+        name,
+        description=snap.get("description", ""),
+        code=snap.get("code", ""),
+        dependencies=_decode_list(snap.get("dependencies")),
+        enabled=bool(snap.get("enabled", 1)),
+    )
+
+
 def set_status(name: str, status: str, error: str | None = None) -> None:
     """Update install_status/install_error without bumping version."""
     with get_engine().begin() as conn:

@@ -65,6 +65,45 @@ def register_routes(app, deps):
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
         return _ok(row)
 
+    # ── History / rollback (plano 06) ───────────────────────────────────
+    @app.get("/api/ai/agents/{agent_key}/history")
+    async def agent_history(agent_key: str):
+        return _ok(await asyncio.to_thread(agent_repo.list_history, agent_key))
+
+    @app.post("/api/ai/agents/{agent_key}/rollback/{version}")
+    async def agent_rollback(agent_key: str, version: int):
+        row = await asyncio.to_thread(agent_repo.rollback, agent_key, version)
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        _emit_changed("agent", agent_key)
+        logger.info("AI agent rolled back: %s -> v%s (nova v%s)",
+                    agent_key, version, row.get("version"))
+        return _ok(row)
+
+    @app.get("/api/ai/prompts/{prompt_key}/history")
+    async def prompt_history(prompt_key: str):
+        return _ok(await asyncio.to_thread(prompt_repo.list_history, prompt_key))
+
+    @app.post("/api/ai/prompts/{prompt_key}/rollback/{version}")
+    async def prompt_rollback(prompt_key: str, version: int):
+        row = await asyncio.to_thread(prompt_repo.rollback, prompt_key, version)
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        _emit_changed("prompt", prompt_key)
+        return _ok(row)
+
+    @app.get("/api/ai/tools/{name}/history")
+    async def tool_history(name: str):
+        return _ok(await asyncio.to_thread(tool_repo.list_history, name))
+
+    @app.post("/api/ai/tools/{name}/rollback/{version}")
+    async def tool_rollback(name: str, version: int):
+        row = await asyncio.to_thread(tool_repo.rollback, name, version)
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        _emit_changed("tool", name)
+        return _ok(row)
+
     # ── Prompts ─────────────────────────────────────────────────────────
     @app.get("/api/ai/prompts")
     async def list_prompts():

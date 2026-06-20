@@ -67,3 +67,35 @@ def save(prompt_key: str, body: str) -> dict:
             created_at=now,
         ))
     return values
+
+
+def list_history(prompt_key: str) -> list[dict]:
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(ai_prompts_history.c.version, ai_prompts_history.c.created_at)
+            .where(ai_prompts_history.c.prompt_key == prompt_key)
+            .order_by(ai_prompts_history.c.version.desc())
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_snapshot(prompt_key: str, version: int) -> dict | None:
+    with get_engine().connect() as conn:
+        snap = conn.execute(
+            select(ai_prompts_history.c.snapshot).where(
+                ai_prompts_history.c.prompt_key == prompt_key,
+                ai_prompts_history.c.version == version)
+        ).scalar()
+    if not snap:
+        return None
+    try:
+        return json.loads(snap)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def rollback(prompt_key: str, version: int) -> dict | None:
+    snap = get_snapshot(prompt_key, version)
+    if not snap:
+        return None
+    return save(prompt_key, snap.get("body", ""))
