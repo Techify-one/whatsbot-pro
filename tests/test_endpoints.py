@@ -1529,6 +1529,44 @@ r = client.put("/api/config", json={"web_password": ""}, headers={"Authorization
 check("REMOVE password -> 200", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
+#  Audit trail (plano 07)
+# ═══════════════════════════════════════════════════════════════════
+from db.repositories import audit_repo as _audit_repo  # noqa: E402
+
+_audit_repo.add(action="config.update", resource_type="config", resource_id="k1",
+                after={"openrouter_api_key": "sk-x", "v": 1})
+_audit_repo.add(action="plugin.enable", resource_type="plugin", resource_id="lembretes",
+                actor_type="user", actor_user_id=3, actor_label="Op")
+
+r = client.get("/api/audit")
+check("GET /api/audit -> 200", r.status_code == 200)
+_d = r.json().get("data", {})
+check("audit list tem items+total", _d.get("total", 0) >= 2 and len(_d.get("items", [])) >= 2)
+check("audit segredo mascarado na listagem",
+      all("sk-x" not in (it.get("after_json") or "") for it in _d["items"]))
+
+r = client.get("/api/audit?action=plugin.enable")
+check("GET /api/audit filtro action", r.json()["data"]["total"] == 1)
+r = client.get("/api/audit?resource_type=config")
+check("GET /api/audit filtro resource_type", r.json()["data"]["total"] >= 1)
+
+r = client.get("/api/audit/actions")
+check("GET /api/audit/actions -> 200", r.status_code == 200)
+check("audit/actions lista actions",
+      "config.update" in r.json()["data"]["actions"])
+
+_before_export = _audit_repo.count()
+r = client.get("/api/audit/export?format=csv")
+check("GET /api/audit/export csv -> 200", r.status_code == 200)
+check("export csv content-type", "text/csv" in r.headers.get("content-type", ""))
+check("export csv tem header", "action" in r.text.splitlines()[0])
+check("export é auditado (data.export)", _audit_repo.count() == _before_export + 1)
+r = client.get("/api/audit/export?format=json")
+check("export json content-type", "application/json" in r.headers.get("content-type", ""))
+r = client.get("/api/audit/export?format=xml")
+check("export formato inválido -> erro", r.json().get("ok") is False)
+
+# ═══════════════════════════════════════════════════════════════════
 #  Summary
 # ═══════════════════════════════════════════════════════════════════
 

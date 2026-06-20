@@ -16,8 +16,8 @@ from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
-from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, conversations as conversations_routes
+from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task, audit_purge_loop
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, conversations as conversations_routes, audit as audit_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -229,6 +229,8 @@ def create_app(
             "qr_poll", lambda: qr_poll_loop(deps), policy=RestartPolicy.PERMANENT))
         supervisor.register(TaskSpec(
             "avatar_fetch", lambda: avatar_fetch_task(deps), policy=RestartPolicy.PERMANENT))
+        supervisor.register(TaskSpec(
+            "audit_purge", lambda: audit_purge_loop(deps), policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
         # Shared subprocess service for plugins (plano 09 Fase 5). GOWA keeps its
         # own ManagedProcess; this one tracks plugin-spawned subprocesses.
@@ -309,7 +311,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai", "/channels", "/wizard"}
+        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai", "/channels", "/auditoria", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -463,6 +465,7 @@ def create_app(
     tools_routes.register_routes(app, deps)
     admin_routes.register_routes(app, deps)
     ai_engine_routes.register_routes(app, deps)
+    audit_routes.register_routes(app, deps)
 
     # ── Plugin routers and static assets ──────────────────────────────
     for loaded in registry.loaded.values():
