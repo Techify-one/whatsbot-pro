@@ -77,8 +77,9 @@ class AppState:
         self.connected: bool = False
         self.auto_reply_running: bool = False
         self.stop_event: threading.Event = threading.Event()
-        # Runtime task supervisor (plano 09 Fase 3); set in the server lifespan.
+        # Runtime task supervisor + subprocess service (plano 09); set in lifespan.
         self.task_supervisor: object | None = None
+        self.subprocess_service: object | None = None
         self.processed_messages: set[str] = set()
         self.notification: str = "Iniciando..."
         # QR cache — avoid regenerating on every request

@@ -782,6 +782,19 @@ check("purge-orphans -> remove valor órfão 'plano'",
       "plano" not in r.json()["data"].get("custom_attributes", {}))
 
 # ═══════════════════════════════════════════════════════════════════
+#  15d. Runtime observability (plano 09 Fase 5)
+# ═══════════════════════════════════════════════════════════════════
+section("Runtime")
+
+r = client.get("/api/runtime/tasks")
+check("GET /runtime/tasks -> 200", r.status_code == 200)
+check("GET /runtime/tasks -> is list", isinstance(r.json()["data"], list))
+
+r = client.get("/api/runtime/subprocesses")
+check("GET /runtime/subprocesses -> 200", r.status_code == 200)
+check("GET /runtime/subprocesses -> is list", isinstance(r.json()["data"], list))
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
@@ -997,7 +1010,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies", "/custom-attributes"]:
+for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies", "/custom-attributes", "/runtime"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
 

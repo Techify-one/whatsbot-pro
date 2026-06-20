@@ -84,6 +84,15 @@ export async function deleteCustomAttribute(id) {
   return request('DELETE', `/api/custom-attributes/${id}`);
 }
 
+// ── Runtime observability (plano 09 Fase 5) ───────────────────────
+export async function getRuntimeTasks() {
+  return request('GET', '/api/runtime/tasks');
+}
+
+export async function getRuntimeSubprocesses() {
+  return request('GET', '/api/runtime/subprocesses');
+}
+
 export async function getStatus() {
   return request('GET', '/api/status');
 }

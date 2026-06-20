@@ -110,8 +110,27 @@ class PluginLifecycleManager:
                     await result
             except Exception:  # noqa: BLE001 — still run disposables below
                 logger.exception("Plugin %s: teardown() raised", ctx.plugin_id)
+        # Stop tasks/subprocesses the plugin spawned (plano 09 Fase 5) — no orphans.
+        await _stop_owned(ctx.plugin_id)
         await ctx._run_disposables()
         logger.info("Plugin %s: teardown completed", ctx.plugin_id)
+
+
+async def _stop_owned(plugin_id: str) -> None:
+    """Stop supervised tasks + managed subprocesses owned by a plugin."""
+    from plugins import context as _ctx
+    sup = getattr(_ctx, "_supervisor", None)
+    svc = getattr(_ctx, "_subprocess_service", None)
+    if sup is not None:
+        try:
+            await sup.stop_owner(plugin_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("stop_owner(tasks) failed for %s", plugin_id)
+    if svc is not None:
+        try:
+            svc.stop_owner(plugin_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("stop_owner(subprocesses) failed for %s", plugin_id)
 
 
 # Process-wide singleton (one manager per server process).
