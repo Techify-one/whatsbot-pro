@@ -1,13 +1,22 @@
-"""Code-in-DB tool installer.
+"""Code-in-DB tool installer (ISOLATED — retrofit P62/P67).
 
-Materialises ``ai_tools.code`` to ``storages/ai_tools/<name>.py``, resolves the
-declared dependencies (check-before-install, so pip only touches the network the
-first time a spec set changes), imports the module under the namespaced package
-``whatsbot_ai_tools.<name>`` (mirroring ``whatsbot_plugins.<id>``), validates the
-WhatsBot tool contract (``schema dict + execute(ctx, args)``) and registers it in
-the handler's tool registry.
+Materialises ``ai_tools.code`` to ``storages/ai_tools/<name>.py`` (for inspection),
+resolves the declared dependencies (check-before-install, so pip only touches the
+network the first time a spec set changes), discovers + validates the WhatsBot
+tool contract (``schema dict + execute(ctx, args)``) and registers it in the
+handler's tool registry — but BOTH schema discovery AND per-call execution run in
+an ISOLATED SUBPROCESS, not in the host process.
 
-Fail-closed: any problem (bad name, dep install failure, import error, contract
+The DB-stored Python NEVER runs in the host process:
+  • schema discovery → ``agent.tool_isolation.describe_isolated_tool`` spawns
+    ``python -m agent.tool_runner`` in *describe* mode (import + read schema only);
+  • each tool call → the registered executor is a thin wrapper that calls
+    ``agent.tool_isolation.run_isolated_tool`` in *execute* mode (process group +
+    die-with-parent + RLIMIT_CPU/RLIMIT_AS + wall-clock timeout). The wrapper
+    forwards only a SAFE snapshot of the ToolContext (contact phone/info), not the
+    handler/DB/LLM key.
+
+Fail-closed: any problem (bad name, dep install failure, discovery error, contract
 violation) marks the row ``install_status='failed'`` with the error and the tool
 is NOT registered — the app still boots and the webhook keeps working.
 
@@ -15,22 +24,23 @@ Precedence: the installer runs AFTER core + plugin tools are registered, so the
 registry's collision no-op gives code precedence over the DB (a DB tool can never
 hijack a core/plugin tool name).
 
-⚠️ SECURITY DEBT (P62): ``exec_module`` runs the DB-stored Python IN-PROCESS with
-full process privileges (DB, filesystem, network, LLM key). There is no subprocess
-isolation / RLIMIT / timeout yet. Until RBAC (plano 03) and an isolated runner land,
-this installer is gated behind the ``ai_tools_code_enabled`` kill-switch (OFF by
-default) at the call site in ``server/app.py`` — do not remove that gate.
+This whole path is still gated behind the ``ai_tools_code_enabled`` kill-switch
+(OFF by default) at the call site in ``server/app.py``. The retrofit removes the
+in-process ``exec_module`` RCE (former SECURITY DEBT P62); the remaining residual
+is RBAC (plano 03) for *who* may author code-in-DB tools.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import re
-import sys
 from pathlib import Path
-from types import ModuleType
 
+from agent.tool_isolation import (
+    IsolatedToolError,
+    describe_isolated_tool,
+    run_isolated_tool,
+)
 from db.repositories import tool_repo
 from plugins import pkg_deps
 
@@ -38,11 +48,10 @@ logger = logging.getLogger(__name__)
 
 # Tool name == schema function name == usage.call_type — keep it conservative.
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-PARENT_PACKAGE = "whatsbot_ai_tools"
 
 
 # --------------------------------------------------------------------------- #
-# Filesystem / import helpers
+# Filesystem
 # --------------------------------------------------------------------------- #
 def ai_tools_dir(data_dir) -> Path:
     d = Path(data_dir) / "storages" / "ai_tools"
@@ -50,75 +59,22 @@ def ai_tools_dir(data_dir) -> Path:
     return d
 
 
-def _ensure_parent_package(tools_dir: Path) -> None:
-    """Register ``whatsbot_ai_tools`` as a synthetic namespace package."""
-    existing = sys.modules.get(PARENT_PACKAGE)
-    if existing is not None:
-        # Keep the search path pointed at the current tools dir.
-        path = getattr(existing, "__path__", None)
-        if isinstance(path, list) and str(tools_dir) not in path:
-            path.append(str(tools_dir))
-        return
-    spec = importlib.util.spec_from_loader(PARENT_PACKAGE, loader=None)
-    module = importlib.util.module_from_spec(spec)
-    module.__path__ = [str(tools_dir)]  # type: ignore[attr-defined]
-    sys.modules[PARENT_PACKAGE] = module
-
-
-def _import_tool_module(name: str, path: Path) -> ModuleType:
-    full = f"{PARENT_PACKAGE}.{name}"
-    # Drop any stale module so an edited tool re-imports cleanly.
-    sys.modules.pop(full, None)
-    spec = importlib.util.spec_from_file_location(full, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not build import spec for {full}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[full] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 # --------------------------------------------------------------------------- #
-# Contract validation
+# Isolated executor factory
 # --------------------------------------------------------------------------- #
-def _validate_schema(schema, expected_name: str | None) -> str:
-    if not isinstance(schema, dict):
-        raise ValueError("tool schema must be a dict")
-    fn = schema.get("function")
-    if not isinstance(fn, dict) or not fn.get("name"):
-        raise ValueError("tool schema must be {'type':'function','function':{'name':...}}")
-    fname = fn["name"]
-    if expected_name is not None and fname != expected_name:
-        raise ValueError(
-            f"schema function name '{fname}' must equal the row name '{expected_name}'"
-        )
-    return fname
+def _make_isolated_executor(name: str, code: str):
+    """Build a registry executor that runs the tool in an isolated subprocess.
 
+    Signature matches a normal tool executor — ``execute(ctx, args) -> str|None``
+    — so the handler's generic dispatch (and all plugin filters/events around it)
+    works unchanged. The closure captures ``name``/``code`` so each call spawns a
+    fresh isolated runner.
+    """
 
-def _extract_tools(module: ModuleType, name: str) -> list[tuple[dict, callable]]:
-    """Pull (schema, executor) pairs from the tool module, validating contract."""
-    schema = getattr(module, "SCHEMA", None) or getattr(module, "TOOL", None)
-    execute = getattr(module, "execute", None)
-    if schema is not None and callable(execute):
-        _validate_schema(schema, name)
-        return [(schema, execute)]
+    def _isolated_execute(ctx, args):
+        return run_isolated_tool(name, code, ctx, args or {})
 
-    core = getattr(module, "CORE_TOOLS", None)
-    if core:
-        pairs: list[tuple[dict, callable]] = []
-        for entry in core:
-            if not (isinstance(entry, tuple) and len(entry) == 2 and callable(entry[1])):
-                raise ValueError("CORE_TOOLS entries must be (schema, executor) tuples")
-            _validate_schema(entry[0], None)
-            pairs.append(entry)
-        names = {(s.get("function") or {}).get("name") for s, _ in pairs}
-        if name not in names:
-            raise ValueError(f"CORE_TOOLS must define a tool named '{name}' (matching the row)")
-        return pairs
-
-    raise ValueError(
-        "module must define SCHEMA (dict) + execute(ctx, args), or CORE_TOOLS=[(schema, executor), ...]"
-    )
+    return _isolated_execute
 
 
 # --------------------------------------------------------------------------- #
@@ -148,11 +104,20 @@ def _process_tool(handler, row: dict, tools_dir: Path) -> int:
 
     _ensure_deps(row)
 
+    code = row.get("code") or ""
+    # Keep a copy on disk for inspection/debug (NOT imported in-process).
     path = tools_dir / f"{name}.py"
-    path.write_text(row.get("code") or "", encoding="utf-8")
+    path.write_text(code, encoding="utf-8")
 
-    module = _import_tool_module(name, path)
-    pairs = _extract_tools(module, name)
+    # Discover schema(s) in an isolated subprocess (import never runs in-process).
+    try:
+        schemas = describe_isolated_tool(name, code)
+    except IsolatedToolError as e:
+        raise ValueError(str(e)) from e
+
+    # Each schema gets the SAME isolated executor — the runner dispatches to the
+    # right ``execute``/``CORE_TOOLS`` entry by tool name on its side.
+    pairs = [(schema, _make_isolated_executor(name, code)) for schema in schemas]
     registered = handler.register_ai_tools(pairs)
     tool_repo.set_status(name, "ok", None)
     return registered
@@ -169,7 +134,6 @@ def install_and_register(handler, data_dir) -> None:
         return
 
     tools_dir = ai_tools_dir(data_dir)
-    _ensure_parent_package(tools_dir)
 
     ok = 0
     for row in rows:
@@ -183,4 +147,4 @@ def install_and_register(handler, data_dir) -> None:
             except Exception:
                 pass
     if ok:
-        logger.info("AI engine: registered %d code-in-DB tool(s)", ok)
+        logger.info("AI engine: registered %d isolated code-in-DB tool(s)", ok)
