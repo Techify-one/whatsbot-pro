@@ -2,8 +2,7 @@
 //
 // Self-contained: resolves the OPEN conversation for the current phone, shows its
 // status + assignee, and offers the per-conversation actions — Resolver/Reabrir,
-// Atribuir a mim, Transferir (when the user may list users) and the IA toggle
-// (conversation-level ai_active, distinct from the contact-level switch). Every
+// Atribuir a mim and Transferir (when the user may list users). Every
 // action is permission-gated (P48: hide, don't disable). Live-updates via the WS
 // conversation_* events for this conversation. Renders nothing in sandbox or when
 // the contact has no open conversation.
@@ -13,7 +12,7 @@ import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getContactConversation, getMe, getUsers,
-  setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
+  setConversationStatus, assignConversation, assignMeConversation,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
@@ -88,7 +87,6 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
   if (!conv) return null;
 
   const isOpen = conv.status === 'open';
-  const aiOn = conv.ai_active === 1 || conv.ai_active === true;
   const assignedToMe = user && conv.assignee_user_id != null && conv.assignee_user_id === user.id;
   const can = (p) => hasPermission(user, p);
   const userLabel = (id) => {
@@ -170,20 +168,6 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
             </div>
           ` : null}
         </div>
-      ` : null}
-
-      <!-- IA (conversation-level) -->
-      ${can('conversation.reply') ? html`
-        <button
-          disabled=${busy}
-          onClick=${() => run(() => setConversationAi(conv.id, !aiOn))}
-          class="px-2.5 py-1 rounded-md text-[12px] border transition-colors disabled:opacity-50 whitespace-nowrap ${aiOn
-            ? 'border-wa-teal/40 bg-wa-teal/15 text-wa-teal'
-            : 'border-wa-border text-wa-secondary hover:bg-wa-hover'}"
-          title=${aiOn ? 'IA ativa nesta conversa — clique para desativar' : 'IA desativada nesta conversa — clique para ativar'}
-        >
-          ${aiOn ? 'IA ✓' : 'IA'}
-        </button>
       ` : null}
     </div>
   `;

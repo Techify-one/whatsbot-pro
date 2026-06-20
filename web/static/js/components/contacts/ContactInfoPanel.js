@@ -5,6 +5,7 @@ import { updateContactInfo, updateContactTags, createTag, getCustomAttributes, g
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
+import { AssigneePicker } from './AssigneePicker.js';
 
 const html = htm.bind(h);
 
@@ -224,6 +225,15 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
               ? html`<div class="text-wa-secondary text-[14px] mt-0.5">Grupo</div>`
               : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
           </div>
+
+          <!-- Ações da conversa (plano 10) — atribuição de agente (humano ou IA).
+               Só aparece quando há uma conversa ativa para o contato. -->
+          ${convo ? html`
+            <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
+              <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Ações da conversa</div>
+              <${AssigneePicker} conv=${convo} onChange=${(c) => setConvo(c)} />
+            </div>
+          ` : null}
 
           <!-- Fields -->
           <div class="bg-wa-bg px-6 py-4 space-y-4">

@@ -417,6 +417,21 @@ export async function getContactConversation(phone) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
 }
 
+// Agents that can take a conversation (plano 10): {users:[...], ai_agents:[...]}.
+// Gated by conversation.read so attendants (not only admins) can transfer.
+export async function getAssignableAgents() {
+  return request('GET', '/api/conversations/assignable-agents');
+}
+
+// Unified assignment (plano 10): route a conversation to a human or an AI agent.
+// kind: 'user' (needs userId), 'ai' (needs agentKey) or 'none' (unassign).
+export async function assignAgent(id, { kind, userId = null, agentKey = null } = {}) {
+  const body = { kind };
+  if (kind === 'user') body.user_id = userId;
+  if (kind === 'ai') body.agent_key = agentKey;
+  return request('POST', `/api/conversations/${id}/assign-agent`, body);
+}
+
 // Update a conversation's custom_attributes (FF5). Server validates keys against
 // the conversation attribute definitions.
 export async function updateConversationInfo(id, body) {

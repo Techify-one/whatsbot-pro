@@ -150,6 +150,21 @@ class ContactMemory:
             conv = conversation_repo.resolve_for_contact(
                 self.id, self._jid(), reopen_if_closed=(role == "user"))
             conversation_id = conv["id"]
+            # New thread → tell the panel so the inbox row shows its assignee
+            # (e.g. "IA padrão") live, without waiting for a full refetch.
+            if conv.get("created"):
+                try:
+                    from plugins.context import broadcast
+                    broadcast("conversation_created", {
+                        "conversation_id": conv["id"],
+                        "contact_id": self.id,
+                        "status": conv.get("status"),
+                        "assignee_user_id": conv.get("assignee_user_id"),
+                        "active_agent_key": conv.get("active_agent_key"),
+                        "ai_active": conv.get("ai_active"),
+                    })
+                except Exception:
+                    logger.debug("conversation_created broadcast falhou para %s", self.phone)
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
         message_repo.add(

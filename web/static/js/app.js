@@ -691,6 +691,18 @@ function AuthGate() {
 
   useEffect(() => {
     checkAuth().then(res => {
+      // Migration to multi-user (plano 03/10): while NO users exist, force the
+      // first-admin bootstrap — even over a legacy/open session. The panel only
+      // becomes reachable after an admin (email + senha) is created.
+      const hasUsers = res && res.data && res.data.has_users;
+      if (hasUsers === false) {
+        setHasPassword(!!(res.data && res.data.has_password));
+        setNeedsBootstrap(true);
+        setCurrentUser(null);
+        try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
+        setAuthState('login');
+        return;
+      }
       if (res.ok) {
         setHasPassword(res.data.has_password);
         // The backend echoes the authenticated user (RBAC) on the check; keep
@@ -699,17 +711,12 @@ function AuthGate() {
           setCurrentUser(res.data.user);
           try { localStorage.setItem('whatsbot_user', JSON.stringify(res.data.user)); } catch (e) {}
           refreshPermissions();  // fetch permissions[] for menu gating
-        } else if (res.data.has_users === false) {
-          // Legacy single-password session with no users yet.
-          setCurrentUser(null);
-          try { localStorage.removeItem('whatsbot_user'); } catch (e) {}
         }
         setAuthState('ready');
       } else {
-        // Not authenticated → show login. Offer bootstrap when no users and no
-        // single-password is configured (truly fresh install needing an admin).
+        // Not authenticated and users exist → email + senha login (no bootstrap).
         setHasPassword(res.data && res.data.has_password !== undefined ? res.data.has_password : true);
-        setNeedsBootstrap(!!(res.data && res.data.has_users === false && res.data.has_password === false));
+        setNeedsBootstrap(false);
         setAuthState('login');
       }
     }).catch(() => {

@@ -835,7 +835,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   return html`
     <div class="flex flex-col h-full">
       <!-- Header -->
-      <div class="h-[59px] flex items-center px-4 bg-wa-panel border-b border-wa-border shrink-0">
+      <div class="h-[59px] flex items-center pl-4 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0">
         <button onClick=${onBack} class="lg:hidden text-wa-icon hover:text-wa-text mr-2 shrink-0">
           <${BackArrowIcon} />
         </button>

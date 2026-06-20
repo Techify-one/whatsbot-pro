@@ -6,7 +6,9 @@ import time
 
 from fastapi import Request
 
-from db.repositories import conversation_repo, custom_attribute_repo, contact_repo
+from db.repositories import (
+    conversation_repo, custom_attribute_repo, contact_repo, user_repo, agent_repo,
+)
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
@@ -33,8 +35,10 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
     payload = {
         "conversation_id": conv.get("id"),
         "display_id": conv.get("display_id"),
+        "contact_id": conv.get("contact_id"),
         "status": conv.get("status"),
         "assignee_user_id": conv.get("assignee_user_id"),
+        "active_agent_key": conv.get("active_agent_key"),
         "ai_active": conv.get("ai_active"),
         "is_archived": conv.get("is_archived"),
         "inbox_id": conv.get("inbox_id"),
@@ -108,6 +112,28 @@ def register_routes(app, deps):
             conversation_repo.list_filtered, where, limit=spec.limit, offset=spec.offset)
         return _ok({"conversations": rows, "count": len(rows)})
 
+    @app.get("/api/conversations/assignable-agents")
+    async def assignable_agents(request: Request):
+        """Agents that can take a conversation (plano 10): human users + AI agents,
+        in one list for the unified assignee picker. Gated by conversation.read so
+        attendants (not only users.manage) can transfer. Registered before the
+        ``/{conv_id}`` route so the literal path is matched first."""
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        users = await asyncio.to_thread(user_repo.list_all)
+        agents = await asyncio.to_thread(agent_repo.list_all)
+        human_list = [
+            {"id": u["id"], "name": u.get("name") or u.get("email"),
+             "email": u.get("email"), "is_admin": bool(u.get("is_admin"))}
+            for u in users if u.get("is_active")
+        ]
+        ai_list = [
+            {"agent_key": a["agent_key"], "display_name": a.get("display_name") or a["agent_key"]}
+            for a in agents if a.get("enabled")
+        ]
+        return _ok({"users": human_list, "ai_agents": ai_list})
+
     @app.get("/api/conversations/{conv_id}")
     async def get_conversation(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.read")
@@ -170,6 +196,65 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         await _broadcast(deps, "conversation_updated", "conversation.updated", conv,
                          fields={"active_agent_key": conv.get("active_agent_key")})
+        return _ok({"conversation": conv})
+
+    @app.post("/api/conversations/{conv_id}/assign-agent")
+    async def assign_agent(conv_id: int, body: dict, request: Request):
+        """Unified assignment (plano 10): route to a human OR an AI agent.
+
+        body: ``{"kind": "user"|"ai"|"none", "user_id"?: int, "agent_key"?: str}``
+        - ``user`` → set assignee, clear the AI agent, turn the IA OFF (a person took it).
+        - ``ai``   → set the AI agent, clear the human assignee, turn the IA ON.
+        - ``none`` → unassign (clear both); leave the IA gate as it is.
+
+        Assigning to a person/AI also flips the CONTACT-level ``ai_enabled`` so the
+        "IA OFF"/"IA" badge on the inbox row reflects who is handling the chat: a
+        human takes over → IA OFF; an AI agent takes over → IA back ON.
+        """
+        denied = permission_denied(request, "conversation.assign")
+        if denied:
+            return denied
+        kind = (body.get("kind") or "").strip()
+        contact_ai_enabled = None  # None = leave the contact-level gate untouched
+        if kind == "user":
+            uid = body.get("user_id")
+            if not isinstance(uid, int):
+                return _err("user_id é obrigatório para kind=user.", status=400)
+            conv = await asyncio.to_thread(
+                conversation_repo.assign_agent, conv_id,
+                assignee_user_id=uid, active_agent_key=None, ai_active=0)
+            contact_ai_enabled = False
+        elif kind == "ai":
+            agent_key = (body.get("agent_key") or "").strip()
+            if not agent_key:
+                return _err("agent_key é obrigatório para kind=ai.", status=400)
+            conv = await asyncio.to_thread(
+                conversation_repo.assign_agent, conv_id,
+                assignee_user_id=None, active_agent_key=agent_key, ai_active=1)
+            contact_ai_enabled = True
+        elif kind == "none":
+            conv = await asyncio.to_thread(
+                conversation_repo.assign_agent, conv_id,
+                assignee_user_id=None, active_agent_key=None, ai_active=None)
+        else:
+            return _err("kind deve ser 'user', 'ai' ou 'none'.", status=400)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        # Sync the contact-level AI gate + badge with the new owner.
+        if contact_ai_enabled is not None:
+            contact = await asyncio.to_thread(contact_repo.get, conv["contact_id"])
+            if contact:
+                await asyncio.to_thread(
+                    contact_repo.update, contact["id"],
+                    ai_enabled=1 if contact_ai_enabled else 0)
+                try:
+                    await deps.ws_manager.broadcast("contact_ai_toggled", {
+                        "phone": contact["phone"], "ai_enabled": contact_ai_enabled})
+                    await emit_with_filter("contact.ai_toggled", {
+                        "phone": contact["phone"], "ai_enabled": contact_ai_enabled})
+                except Exception as e:
+                    logger.debug("contact_ai_toggled broadcast failed: %s", e)
+        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/ai")
