@@ -215,4 +215,4 @@ set NO_COLOR=1
 :: uvicorn valida cada --reload-dir antes de subir; storages\plugins e criada
 :: em runtime, entao precisa existir antes (senao o uvicorn aborta).
 if not exist "storages\plugins" mkdir "storages\plugins"
-uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --reload-dir gowa --reload-dir db --reload-dir plugins --reload-dir storages\plugins --log-level warning
+uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --reload-dir gowa --reload-dir channels --reload-dir db --reload-dir plugins --reload-dir storages\plugins --log-level warning
