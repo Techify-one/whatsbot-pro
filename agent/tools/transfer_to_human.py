@@ -2,6 +2,8 @@
 
 import logging
 
+from db.repositories import conversation_repo
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +54,18 @@ def execute(ctx, args: dict) -> str | None:
         ctx.tag_registry.create("transferido_atendente", "#ef4444")
         ctx.contact.add_tag("transferido_atendente")
         ctx.contact.save()
+        # Unassign the conversation so it lands in the "Não atribuídas" inbox:
+        # clear both the human assignee and the bound AI agent, and pause the
+        # conversation-level AI gate (a human takes over from here).
+        try:
+            conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+            if conv:
+                conversation_repo.assign_agent(
+                    conv["id"], assignee_user_id=None,
+                    active_agent_key=None, ai_active=0)
+        except Exception as e:
+            logger.warning("transfer_to_human: falha ao desatribuir conversa de %s: %s",
+                           ctx.contact.phone, e)
         logger.info("Transfer to human for %s: %s", ctx.contact.phone, args.get("reason", ""))
     except Exception as e:
         logger.warning("transfer_to_human failed for %s: %s", ctx.contact.phone, e)

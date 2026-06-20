@@ -1023,6 +1023,7 @@ _conv2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id
 check("conversation_repo.create -> display_id sequencial",
       _conv2["display_id"] == _conv1["display_id"] + 1)
 check("create -> status open + ai_active", _conv1["status"] == "open" and _conv1["ai_active"] == 1)
+check("create -> bound to default AI agent (IA padrão)", _conv1["active_agent_key"] == "default")
 
 r = client.get("/api/conversations")
 check("GET /api/conversations -> 200", r.status_code == 200)
@@ -1082,6 +1083,20 @@ check("POST assign-me (admin) -> 200 + assignee=eu",
       r.status_code == 200 and r.json()["data"]["conversation"]["assignee_user_id"] == _mgr["id"])
 r = client.post(f"/api/conversations/{_conv2['id']}/assign-me")
 check("POST assign-me sem auth -> 401", r.status_code == 401)
+
+# reopen: resolver limpa o assignee; reabrir (status=open) deixa a conversa SEM
+# responsável, então ela cai na aba "Não atribuídas".
+client.post(f"/api/conversations/{_conv2['id']}/assign-me",
+            headers={"Authorization": f"Bearer {_mgrtok}"})
+client.post(f"/api/conversations/{_conv2['id']}/status", json={"status": "closed"})
+r = client.post(f"/api/conversations/{_conv2['id']}/status",
+                json={"status": "open"}, headers={"Authorization": f"Bearer {_mgrtok}"})
+check("POST reopen (status open) -> 200 + status open",
+      r.status_code == 200 and r.json()["data"]["conversation"]["status"] == "open")
+check("POST reopen -> sem responsável (cai em 'Não atribuídas')",
+      r.json()["data"]["conversation"]["assignee_user_id"] is None)
+check("POST reopen -> resolved_at limpo",
+      r.json()["data"]["conversation"]["resolved_at"] is None)
 
 r = client.post(f"/api/conversations/{_conv2['id']}/ai", json={"active": False})
 check("POST ai -> ai_active=0", r.json()["data"]["conversation"]["ai_active"] == 0)
@@ -1610,6 +1625,84 @@ r = client.get("/api/audit/export?format=json")
 check("export json content-type", "application/json" in r.headers.get("content-type", ""))
 r = client.get("/api/audit/export?format=xml")
 check("export formato inválido -> erro", r.json().get("ok") is False)
+
+# ═══════════════════════════════════════════════════════════════════
+#  Conversation tabs + unified agent assignment (plano 10)
+# ═══════════════════════════════════════════════════════════════════
+section("Conversation tabs + agent assignment (plano 10)")
+
+from db.repositories import conversation_repo
+import agent.agent_factory as _agent_factory
+
+# Enriched contact list: every row carries its active conversation's fields, so
+# the status/assignment tabs can filter + count client-side.
+_rows = client.get("/api/contacts").json()["data"]
+check("GET /api/contacts -> rows expose conversation_id", all("conversation_id" in c for c in _rows))
+check("GET /api/contacts -> rows expose conv_status", all("conv_status" in c for c in _rows))
+check("GET /api/contacts -> rows expose assignee_user_id", all("assignee_user_id" in c for c in _rows))
+check("GET /api/contacts -> rows expose active_agent_key", all("active_agent_key" in c for c in _rows))
+
+# Seed the default AI agent (lifespan is skipped in tests) so it's assignable.
+_agent_factory.seed_default_agent(settings)
+
+r = client.get("/api/conversations/assignable-agents")
+check("GET /api/conversations/assignable-agents -> 200", r.status_code == 200)
+_aa = r.json().get("data", {})
+check("assignable-agents -> has users list", isinstance(_aa.get("users"), list))
+check("assignable-agents -> has ai_agents list", isinstance(_aa.get("ai_agents"), list))
+check("assignable-agents -> default AI agent present",
+      any(a.get("agent_key") == "default" for a in _aa.get("ai_agents", [])))
+
+# Human agents (created earlier in the suite — bootstrap + /api/users) are listed.
+_users = client.get("/api/conversations/assignable-agents").json()["data"]["users"]
+check("assignable-agents -> lists human agents", len(_users) >= 1)
+_admin_id = _users[0]["id"]
+
+# Create a conversation for Alice and exercise the unified assign-agent endpoint.
+_alice = contact_repo.get_by_phone("5511999990001")
+_conv = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+_cid = _conv["id"]
+
+# Assign to a HUMAN → assignee set, AI agent cleared, IA turned OFF.
+r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "user", "user_id": _admin_id})
+check("assign-agent kind=user -> 200", r.status_code == 200)
+_c = r.json()["data"]["conversation"]
+check("assign-agent kind=user -> assignee set", _c.get("assignee_user_id") == _admin_id)
+check("assign-agent kind=user -> AI agent cleared", not _c.get("active_agent_key"))
+check("assign-agent kind=user -> IA desligada", _c.get("ai_active") in (0, False))
+# A human took over → contact-level AI gate OFF (drives the "IA OFF" badge).
+check("assign-agent kind=user -> contato IA OFF (badge)",
+      contact_repo.get(_alice["id"])["ai_enabled"] is False)
+
+# Assign to an AI agent → agent set, human cleared, IA turned ON.
+r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "ai", "agent_key": "default"})
+check("assign-agent kind=ai -> 200", r.status_code == 200)
+_c = r.json()["data"]["conversation"]
+check("assign-agent kind=ai -> agent set", _c.get("active_agent_key") == "default")
+check("assign-agent kind=ai -> human cleared", _c.get("assignee_user_id") is None)
+check("assign-agent kind=ai -> IA ligada", _c.get("ai_active") in (1, True))
+# An AI agent took over → contact-level AI gate back ON ("IA" badge).
+check("assign-agent kind=ai -> contato IA ON (badge)",
+      contact_repo.get(_alice["id"])["ai_enabled"] is True)
+
+# Unassign → both cleared.
+r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "none"})
+check("assign-agent kind=none -> 200", r.status_code == 200)
+_c = r.json()["data"]["conversation"]
+check("assign-agent kind=none -> human cleared", _c.get("assignee_user_id") is None)
+check("assign-agent kind=none -> agent cleared", not _c.get("active_agent_key"))
+
+# Validation.
+r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "user"})
+check("assign-agent kind=user sem user_id -> 400", r.status_code == 400)
+r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "bogus"})
+check("assign-agent kind inválido -> 400", r.status_code == 400)
+
+# The enriched contact list now reflects Alice's open conversation.
+_alice_row = next((c for c in client.get("/api/contacts").json()["data"]
+                   if c["phone"] == "5511999990001"), None)
+check("GET /api/contacts -> Alice carries her conversation", _alice_row and _alice_row.get("conversation_id") == _cid)
+check("GET /api/contacts -> Alice conv_status open", _alice_row and _alice_row.get("conv_status") == "open")
 
 # ═══════════════════════════════════════════════════════════════════
 #  Summary

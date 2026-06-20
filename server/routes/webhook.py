@@ -641,6 +641,20 @@ def register_routes(app, deps):
                 "phone": phone,
                 "tags": list(contact.tags),
             })
+            # The conversation was unassigned by the tool — push the change so the
+            # row moves to the "Não atribuídas" inbox live (plano 10).
+            conv = await asyncio.to_thread(
+                conversation_repo.get_open_for_contact, contact.id)
+            if conv:
+                await ws_manager.broadcast("conversation_assigned", {
+                    "conversation_id": conv["id"],
+                    "contact_id": contact.id,
+                    "status": conv.get("status"),
+                    "assignee_user_id": None,
+                    "active_agent_key": None,
+                    "ai_active": conv.get("ai_active"),
+                    "ts": time.time(),
+                })
 
     # Expose broadcast_tool_calls for sandbox route
     deps.broadcast_tool_calls = _broadcast_tool_calls
