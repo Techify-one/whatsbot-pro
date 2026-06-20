@@ -8,10 +8,24 @@ const html = htm.bind(h);
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDelete, onCreateTag, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDelete, onCreateTag, onClose }) {
   const ref = useRef(null);
   const [showTags, setShowTags] = useState(false);
+  const [showAssign, setShowAssign] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Conversation-level menu state (assign attendant / resolve). The sidebar rows
+  // are contact-level, so `conv` is resolved lazily by the parent on right-click.
+  const userList = Array.isArray(users) ? users : [];
+  const assigneeId = conv ? conv.assignee_user_id : null;
+  const isOpen = conv ? conv.status === 'open' : null;
+  const canAct = !!(conv && conv.id != null) && !convLoading;
+  // Hide the whole assign section in legacy single-password mode (no identity and
+  // no listable users) — assignment is meaningless there.
+  const showAssignSection = currentUserId != null || userList.length > 0;
+  const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
+  const assignee = assigneeId != null ? userList.find(u => u.id === assigneeId) : null;
+  const assigneeLabel = assigneeId != null ? (assignee ? userName(assignee) : `#${assigneeId}`) : null;
 
   useEffect(() => {
     function handleClick(e) {
@@ -116,6 +130,92 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           onToggle=${toggleTag}
           onCreateTag=${onCreateTag}
         />
+      ` : null}
+
+      <!-- Conversation: assign attendant (submenu) -->
+      ${showAssignSection ? html`
+        <div class="border-t border-wa-border">
+          <button
+            onClick=${() => setShowAssign(prev => !prev)}
+            class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+            </svg>
+            <span class="shrink-0">Atribuir atendente</span>
+            ${assigneeLabel ? html`<span class="text-[11px] text-wa-secondary truncate" title=${assigneeLabel}>${assigneeLabel}</span>` : null}
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0 transition-transform ${showAssign ? 'rotate-180' : ''}">
+              <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
+            </svg>
+          </button>
+          ${showAssign ? html`
+            <div class="border-t border-wa-border">
+              ${convLoading ? html`
+                <div class="px-4 py-[8px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
+              ` : !conv ? html`
+                <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma conversa para este contato</div>
+              ` : html`
+                ${(currentUserId != null && assigneeId !== currentUserId) ? html`
+                  <button
+                    onClick=${() => onAssignConversation && onAssignConversation(conv.id, currentUserId)}
+                    class="w-full text-left px-4 py-[8px] text-[13px] text-wa-teal hover:bg-wa-hover transition-colors flex items-center gap-3"
+                  >
+                    <span class="w-[16px] h-[16px] shrink-0"></span>
+                    Atribuir a mim
+                  </button>
+                ` : null}
+                <div class="max-h-[200px] overflow-y-auto wa-scrollbar">
+                  ${userList.length === 0 ? html`
+                    <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Sem usuários para listar</div>
+                  ` : userList.map(u => {
+                    const active = u.id === assigneeId;
+                    return html`
+                      <button
+                        key=${u.id}
+                        onClick=${() => onAssignConversation && onAssignConversation(conv.id, u.id)}
+                        class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+                        title=${active ? 'Atribuída a este atendente' : 'Atribuir a este atendente'}
+                      >
+                        <span class="w-[16px] h-[16px] shrink-0 flex items-center justify-center text-wa-teal">
+                          ${active ? html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>` : ''}
+                        </span>
+                        <span class="truncate ${active ? 'font-medium' : ''}">${userName(u)}</span>
+                      </button>
+                    `;
+                  })}
+                </div>
+                ${assigneeId != null ? html`
+                  <button
+                    onClick=${() => onAssignConversation && onAssignConversation(conv.id, null)}
+                    class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-3 border-t border-wa-border"
+                  >
+                    <span class="w-[16px] h-[16px] shrink-0"></span>
+                    Remover atribuição
+                  </button>
+                ` : null}
+              `}
+            </div>
+          ` : null}
+        </div>
+      ` : null}
+
+      <!-- Conversation: resolve / reopen -->
+      <button
+        disabled=${!canAct}
+        onClick=${() => { if (canAct && onResolveConversation) onResolveConversation(conv.id, isOpen ? 'closed' : 'open'); }}
+        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3 disabled:opacity-50 border-t border-wa-border"
+      >
+        ${isOpen === false ? html`
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
+          Reabrir conversa
+        ` : html`
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+          ${convLoading ? 'Carregando...' : 'Marcar como resolvida'}
+        `}
+      </button>
+
+      ${convError ? html`
+        <div class="px-4 py-[6px] text-[12px] text-red-400">${convError}</div>
       ` : null}
 
       <!-- Archive / Delete separator -->

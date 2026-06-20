@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag } from '../../services/api.js';
+import { getContacts, getContact, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getUsers, getContactConversation, assignConversation, assignMeConversation, setConversationStatus } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -24,6 +24,12 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const openInfoAfterSelect = useRef(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
+  // Conversation-level data for the open context menu (assignee/resolve). Resolved
+  // lazily on right-click since the sidebar rows are contact-level only.
+  const [ctxConv, setCtxConv] = useState({ loading: false, conv: null });
+  // Identity + users for the "assign attendant" submenu (degrade gracefully on 403).
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [users, setUsers] = useState([]);
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
   const [showArchived, setShowArchived] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
@@ -137,6 +143,35 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       )));
     }
   }, [sortContacts]);
+
+  // ── Conversation actions from the context menu (assign attendant / resolve) ──
+  // They act on the conversation resolved for the right-clicked contact (ctxConv)
+  // and patch it in place so the menu reflects the new assignee/status without
+  // reopening. Errors (e.g. 403 for a role without conversation.assign) surface on
+  // the menu via ctxConv.error.
+  const patchCtxConv = useCallback((patch) => {
+    setCtxConv(prev => prev.conv
+      ? { ...prev, conv: { ...prev.conv, ...patch }, error: null }
+      : prev);
+  }, []);
+
+  const handleAssignConversation = useCallback(async (convId, userId) => {
+    const res = await assignConversation(convId, userId);
+    if (res && res.ok && res.data && res.data.conversation) {
+      patchCtxConv({ assignee_user_id: res.data.conversation.assignee_user_id });
+    } else {
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
+    }
+  }, [patchCtxConv]);
+
+  const handleResolveConversation = useCallback(async (convId, status) => {
+    const res = await setConversationStatus(convId, status);
+    if (res && res.ok && res.data && res.data.conversation) {
+      patchCtxConv({ status: res.data.conversation.status });
+    } else {
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atualizar status.' }));
+    }
+  }, [patchCtxConv]);
 
   // ── Selection mode (bulk actions) ───────────────────────────────
   const enterSelection = useCallback(() => { setSelectionMode(true); setSelectedPhones([]); }, []);
@@ -340,6 +375,40 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   useEffect(() => {
     getTags().then(res => { if (res.ok) setGlobalTags(res.data); });
   }, []);
+
+  // Identity + users for the context-menu "assign attendant" submenu. Both are
+  // best-effort: legacy single-password mode has no user (currentUserId stays
+  // null → the submenu hides "assign to me"); a 403 on /users (role without
+  // users.manage) just leaves the user list empty (names degrade to #id).
+  useEffect(() => {
+    let alive = true;
+    getMe().then((res) => {
+      if (alive && res && res.ok && res.data && res.data.user) {
+        setCurrentUserId(res.data.user.id);
+      }
+    }).catch(() => {});
+    getUsers().then((res) => {
+      if (alive && res && res.ok && res.data && Array.isArray(res.data.users)) {
+        setUsers(res.data.users);
+      }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  // Resolve the contact's conversation whenever the context menu opens, so the
+  // menu can show the current assignee and the resolve/reopen state. include_closed
+  // so a resolved thread still resolves (lets us show "Reabrir conversa").
+  useEffect(() => {
+    if (!ctxMenu || !ctxMenu.phone) { setCtxConv({ loading: false, conv: null }); return; }
+    const phone = ctxMenu.phone;
+    let alive = true;
+    setCtxConv({ loading: true, conv: null });
+    getContactConversation(phone, { includeClosed: true }).then((res) => {
+      if (!alive) return;
+      setCtxConv({ loading: false, conv: (res && res.ok && res.data) ? res.data.conversation : null });
+    }).catch(() => { if (alive) setCtxConv({ loading: false, conv: null }); });
+    return () => { alive = false; };
+  }, [ctxMenu]);
 
   // Reload when archive filter changes (and drop any active selection)
   useEffect(() => { fetchContacts(search); setSelectionMode(false); setSelectedPhones([]); }, [showArchived]);
@@ -843,6 +912,13 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           isArchived=${ctxMenu.isArchived}
           isUnread=${ctxMenu.isUnread}
           isPinned=${ctxMenu.isPinned}
+          conv=${ctxConv.conv}
+          convLoading=${ctxConv.loading}
+          convError=${ctxConv.error}
+          users=${users}
+          currentUserId=${currentUserId}
+          onAssignConversation=${handleAssignConversation}
+          onResolveConversation=${handleResolveConversation}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => {
             if (selectedRef.current === phone) {

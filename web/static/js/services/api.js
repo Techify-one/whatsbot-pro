@@ -412,9 +412,13 @@ export async function setConversationAi(id, active) {
   return request('POST', `/api/conversations/${id}/ai`, { active });
 }
 
-// Resolve the open conversation for a contact by phone (feeds the chat header).
-export async function getContactConversation(phone) {
-  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
+// Resolve the conversation for a contact by phone (feeds the chat header and the
+// sidebar right-click menu). With { includeClosed: true } the server returns the
+// latest conversation regardless of status, so a resolved thread still resolves
+// (lets the menu show its assignee and a "reopen" action).
+export async function getContactConversation(phone, { includeClosed = false } = {}) {
+  const qs = includeClosed ? '?include_closed=true' : '';
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation${qs}`);
 }
 
 // Update a conversation's custom_attributes (FF5). Server validates keys against
