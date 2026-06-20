@@ -4,6 +4,7 @@ import htm from 'htm';
 import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
+import { Conversations } from './components/Conversations.js';
 import { CostsDashboard } from './components/CostsDashboard.js';
 import { Executions } from './components/Executions.js';
 import { LoginScreen } from './components/LoginScreen.js';
@@ -42,6 +43,7 @@ const html = htm.bind(h);
 // Core (built-in) routes. Plugin screens are merged in dynamically below.
 const CORE_ROUTES = {
   '/': 'contacts',
+  '/conversations': 'conversations',
   '/painel': 'dashboard',
   '/sandbox': 'sandbox',
   '/costs': 'costs',
@@ -55,6 +57,7 @@ const CORE_ROUTES = {
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
+  conversations: '/conversations',
   dashboard: '/painel',
   sandbox: '/sandbox',
   costs: '/costs',
@@ -163,6 +166,9 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`}
           >Execuções</${MenuItem}>
+          <${MenuItem} active=${tab === 'conversations'} href=${CORE_TAB_PATHS.conversations} onClick=${() => { onTabChange('conversations'); close(); }}
+            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>`}
+          >Conversas</${MenuItem}>
 
           ${(pluginScreens && pluginScreens.length > 0) ? html`
             <div class="border-t border-wa-border my-1"></div>
@@ -599,7 +605,12 @@ function App({ onLogout, hasPassword, currentUser }) {
                         }} />
                         <${Executions} />
                       </div>`
-                    : html`<${Sandbox} newMessage=${newMessage} />`
+                    : tab === 'conversations'
+                      ? html`<div class="max-w-5xl mx-auto p-4">
+                          <${PageHeader} title="Conversas" onBack=${() => setTab('contacts')} />
+                          <${Conversations} />
+                        </div>`
+                      : html`<${Sandbox} newMessage=${newMessage} />`
         }
       </main>
 
