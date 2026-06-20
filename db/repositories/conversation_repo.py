@@ -14,6 +14,7 @@ from db.engine import get_engine
 from db.tables import conversations, contacts, conversation_counters
 
 _COUNTER = "conversation_display_id"
+DEFAULT_INBOX_ID = 1  # inbox semeado na migration 0013
 
 
 def _next_display_id(conn) -> int:
@@ -69,6 +70,37 @@ def get_open_for_contact(contact_id: int) -> dict | None:
             .order_by(conversations.c.last_activity_at.desc())
         ).mappings().first()
     return dict(row) if row else None
+
+
+def get_latest_for_contact(contact_id: int) -> dict | None:
+    """Most recent conversation for a contact, regardless of status."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(conversations)
+            .where(conversations.c.contact_id == contact_id)
+            .order_by(conversations.c.last_activity_at.desc())
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
+                        opened_at: float | None = None) -> dict:
+    """Return the active conversation for a contact, creating one if needed (plano 01 F2).
+
+    Idempotent: get_or_creates the contact_inbox on the default inbox (JID = source_id,
+    espelhando o backfill da migration 0013) e a conversa. Quando reopen_if_closed e a
+    última conversa está closed, reabre — uma nova mensagem inbound reativa o atendimento.
+    """
+    from db.repositories import contact_inbox_repo
+    ci = contact_inbox_repo.get_or_create(
+        inbox_id=DEFAULT_INBOX_ID, contact_id=contact_id, source_id=jid, source_jid=jid)
+    conv = get_latest_for_contact(contact_id)
+    if conv is None:
+        return create(inbox_id=DEFAULT_INBOX_ID, contact_id=contact_id,
+                      contact_inbox_id=ci["id"], opened_at=opened_at)
+    if reopen_if_closed and conv["status"] == "closed":
+        conv = set_status(conv["id"], "open")
+    return conv
 
 
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,

@@ -15,8 +15,13 @@ def add(contact_id: int, role: str, content: str, *,
         media_type: str | None = None, media_path: str | None = None,
         status: str | None = None, msg_id: str | None = None,
         reply_to_msg_id: str | None = None,
+        conversation_id: int | None = None,
         ts: float | None = None) -> dict:
-    """Insert a message and return it as a dict."""
+    """Insert a message and return it as a dict.
+
+    conversation_id (plano 01 Fase 2) liga a mensagem à thread de atendimento;
+    aditivo e nullable — contact_id permanece a chave de pertencimento.
+    """
     ts = ts or time.time()
     with get_engine().begin() as conn:
         result = conn.execute(sa_insert(messages).values(
@@ -29,6 +34,7 @@ def add(contact_id: int, role: str, content: str, *,
             status=status,
             msg_id=msg_id,
             reply_to_msg_id=reply_to_msg_id,
+            conversation_id=conversation_id,
         ))
         new_id = result.inserted_primary_key[0]
     return {
@@ -41,6 +47,7 @@ def add(contact_id: int, role: str, content: str, *,
         "status": status,
         "msg_id": msg_id,
         "reply_to_msg_id": reply_to_msg_id,
+        "conversation_id": conversation_id,
     }
 
 
