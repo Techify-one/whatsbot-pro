@@ -208,6 +208,14 @@ def register_routes(app, deps):
             fields["config"] = json.dumps(cfg) if isinstance(cfg, (dict, list)) else cfg
         if fields:
             row = await asyncio.to_thread(channel_repo.update, channel_id, **fields)
+        # A config edit may change the GOWA JID-type filter — drop its cache so
+        # the webhook picks up the new allowed types without waiting for the TTL.
+        if "config" in body:
+            try:
+                from server.routes.webhook import reset_allowed_jid_cache
+                reset_allowed_jid_cache()
+            except Exception:
+                pass
         # Credentials: a non-empty value replaces; the masked placeholder (••••) is ignored.
         for key, value in (body.get("credentials") or {}).items():
             if value and not str(value).startswith("••••"):
