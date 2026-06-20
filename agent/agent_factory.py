@@ -16,7 +16,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from db.repositories import agent_repo, prompt_repo, variable_repo
+from db.repositories import (
+    agent_repo, prompt_repo, variable_repo, conversation_repo, inbox_repo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,44 @@ def seed_default_agent(settings) -> None:
         logger.warning("AI engine seed failed: %s", e)
 
 
+def resolve_active_agent_key(contact) -> str | None:
+    """Which agent should handle this contact's open conversation? (plano 06)
+
+    Precedência: conversation.active_agent_key → inbox.default_agent_key → None
+    (None = cair no agente default em :func:`build_for_contact`). Tudo best-effort:
+    qualquer falha devolve None e o caller usa o default.
+    """
+    cid = getattr(contact, "id", None)
+    if cid is None:
+        return None
+    try:
+        conv = conversation_repo.get_open_for_contact(cid)
+        if not conv:
+            return None
+        if conv.get("active_agent_key"):
+            return conv["active_agent_key"]
+        inbox_id = conv.get("inbox_id")
+        if inbox_id:
+            inbox = inbox_repo.get(inbox_id)
+            if inbox and inbox.get("default_agent_key"):
+                return inbox["default_agent_key"]
+    except Exception as e:  # pragma: no cover - defensivo
+        logger.debug("AI engine: resolve_active_agent_key failed (%s)", e)
+    return None
+
+
+def _resolve_active_agent(contact) -> dict | None:
+    """Resolve the bound agent row, falling back to the default if absent/disabled."""
+    key = resolve_active_agent_key(contact)
+    if key:
+        agent = agent_repo.get(key)
+        if agent and agent.get("enabled"):
+            return agent
+        # Bound agent missing/disabled → não trava o atendimento, usa o default.
+        logger.debug("AI engine: agente vinculado %r ausente/desativado; usando default", key)
+    return agent_repo.get_default()
+
+
 def build_for_contact(handler, contact) -> AgentSpec | None:
     """Resolve the DB-driven agent for a request, or ``None`` to use legacy path.
 
@@ -91,7 +131,7 @@ def build_for_contact(handler, contact) -> AgentSpec | None:
     if not getattr(handler, "ai_engine_enabled", False):
         return None
     try:
-        agent = agent_repo.get_default()
+        agent = _resolve_active_agent(contact)
         if not agent or not agent.get("enabled"):
             logger.debug("AI engine: default agent missing/disabled; using legacy path")
             return None
