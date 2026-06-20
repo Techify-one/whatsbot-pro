@@ -4,7 +4,7 @@ import mimetypes
 import time
 from pathlib import Path
 
-from db.repositories import contact_repo, message_repo, tag_repo, usage_repo
+from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo
 
 logger = logging.getLogger(__name__)
 
@@ -133,15 +133,36 @@ class ContactMemory:
             unread_ai_count=self.unread_ai_count,
         )
 
+    def _jid(self) -> str:
+        """Reconstruct the WhatsApp JID, mirroring the 0013 backfill (source_id)."""
+        suffix = "g.us" if self.is_group else "s.whatsapp.net"
+        return f"{self.phone}@{suffix}"
+
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
                     reply_to_msg_id: str | None = None):
+        # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
+        # save site (inbound batch/media/group + outbound) links conversation_id sem
+        # tocar webhook.py. Inbound user message reabre uma conversa closed.
+        conversation_id = None
+        try:
+            conv = conversation_repo.resolve_for_contact(
+                self.id, self._jid(), reopen_if_closed=(role == "user"))
+            conversation_id = conv["id"]
+        except Exception:
+            logger.exception("Falha ao resolver conversa para %s", self.phone)
         message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
+            conversation_id=conversation_id,
         )
+        if conversation_id is not None:
+            try:
+                conversation_repo.touch_activity(conversation_id)
+            except Exception:
+                logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
         # Touch updated_at
         contact_repo.update(self.id)
 

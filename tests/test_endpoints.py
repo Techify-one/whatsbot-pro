@@ -1023,6 +1023,34 @@ check("atendente assign -> 403 (lacks conversation.assign)", r.status_code == 40
 r = client.get("/api/conversations", headers={"Authorization": f"Bearer {_attok}"})
 check("atendente list -> 200 (has conversation.read)", r.status_code == 200)
 
+# ── Fluxo vivo (Fase 2): ContactMemory.add_message resolve+stampa conversation_id ──
+from agent.memory import ContactMemory as _CM
+from db.tables import messages as _msgs_t
+_cm = _CM("5500011122233")  # fresh phone -> cria contato + conversa
+_cm.add_message("user", "olá mundo")
+with _get_engine().connect() as _conn:
+    _last = _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id, _msgs_t.c.content)
+        .where(_msgs_t.c.contact_id == _cm.id)
+        .order_by(_msgs_t.c.id.desc()).limit(1)).mappings().first()
+check("add_message -> mensagem ganha conversation_id", _last["conversation_id"] is not None)
+_live_conv = _conv_repo.get(_last["conversation_id"])
+check("add_message -> conversa criada p/ o contato", _live_conv["contact_id"] == _cm.id)
+_act0 = _live_conv["last_activity_at"]
+
+# assistant message stampa a MESMA conversa
+_cm.add_message("assistant", "oi, tudo bem?")
+with _get_engine().connect() as _conn:
+    _conv_ids = {r[0] for r in _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id).where(_msgs_t.c.contact_id == _cm.id))}
+check("add_message assistant -> mesma conversa (1 thread)", _conv_ids == {_live_conv["id"]})
+
+# reopen: fechar e mandar inbound reabre
+_conv_repo.set_status(_live_conv["id"], "closed")
+_cm.add_message("user", "voltei")
+check("inbound reabre conversa closed",
+      _conv_repo.get(_live_conv["id"])["status"] == "open")
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
