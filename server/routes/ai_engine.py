@@ -88,6 +88,36 @@ def register_routes(app, deps):
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
         return _ok(row)
 
+    @app.delete("/api/ai/agents/{agent_key}")
+    async def delete_agent(agent_key: str, request: Request):
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
+        if agent_key == agent_repo.DEFAULT_AGENT_KEY:
+            return _err("O agente padrão não pode ser excluído.", status=400)
+        # Refuse while the agent is still a routing target of some router, so a
+        # router never points at a vanished agent. The user removes it there first.
+        try:
+            agents = await asyncio.to_thread(agent_repo.list_all)
+            routers = [
+                a["agent_key"] for a in agents
+                if a.get("is_router") and agent_key in (a.get("routing_targets") or [])
+            ]
+            if routers:
+                return _err(
+                    "Agente é destino de roteamento de: " + ", ".join(routers)
+                    + ". Remova-o desses roteadores antes de excluir.",
+                    status=409,
+                )
+        except Exception:
+            pass
+        deleted = await asyncio.to_thread(agent_repo.delete, agent_key)
+        if not deleted:
+            return _err("Agente não encontrado.", status=404)
+        _emit_changed("agent", agent_key)
+        logger.info("AI agent deleted: %s", agent_key)
+        return _ok({"deleted": True})
+
     # ── History / rollback (plano 06) ───────────────────────────────────
     @app.get("/api/ai/agents/{agent_key}/history")
     async def agent_history(agent_key: str):

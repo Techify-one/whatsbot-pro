@@ -1,9 +1,12 @@
-// AI Engine — agents editor (plano 06). Lists and edits agents:
-// display_name, prompt_key (select dos prompts), model (select de /api/models),
-// model_config (temperature/top_p/max_tokens → objeto), tool_names (todas|null
-// ou multiselect das tools de código), enabled, description, is_router toggle
-// e routing_targets (multiselect de agent_keys quando router).
-// Cada save bumpa a versão; o botão Histórico lista versões com Reverter.
+// AI Engine — agents editor (plano 06). Lists, CREATES, edits, duplicates and
+// deletes agents: display_name, prompt_key (select dos prompts), model (select
+// de /api/models), model_config (temperature/top_p/max_tokens → objeto),
+// tool_names (todas|null ou multiselect do registry completo — core + plugin +
+// code-in-DB), enabled, description, is_router toggle e routing_targets
+// (multiselect de agent_keys quando router). Criar um agente = mesmo PUT do
+// editar (upsert no backend), só com uma agent_key nova. Cada save bumpa a
+// versão; o botão Histórico lista versões com Reverter. O agente `default` é o
+// fallback do motor e não pode ser excluído.
 
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
@@ -11,14 +14,19 @@ import htm from 'htm';
 import {
   listAgents,
   saveAgent,
+  deleteAgent,
   getAgentHistory,
   rollbackAgent,
   listPrompts,
-  listTools,
+  listRegisteredTools,
   getModels,
 } from '../../services/api.js';
 
 const html = htm.bind(h);
+
+// agent_key é IDENTIDADE — não pode ser renomeada depois (quebra executions.agent_key
+// e o histórico de usage). Mesmo padrão de prompts/tools.
+const KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
 function fmtDate(epochOrIso) {
   if (epochOrIso == null) return '—';
@@ -76,9 +84,13 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
   `;
 }
 
-// ── Agent form ──────────────────────────────────────────────────────
-function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
+// ── Agent form (create + edit) ──────────────────────────────────────
+// `isNew` toggles the agent_key field. For "create" the parent passes a blank
+// template ({}); for "duplicate" it passes an existing agent's config with the
+// key stripped, so every field comes pre-filled but the user picks a new key.
+function AgentForm({ isNew, agent, existingKeys, prompts, tools, models, onSave, onCancel, busy }) {
   const mc = agent.model_config || {};
+  const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
   const [promptKey, setPromptKey] = useState(agent.prompt_key || '');
   const [model, setModel] = useState(mc.model || '');
@@ -97,11 +109,18 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
     Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []
   );
 
+  const trimmedKey = key.trim();
+  const keyFormatErr = isNew && trimmedKey && !KEY_RE.test(trimmedKey)
+    ? 'Use minúsculas, números e _ (começando por letra).' : '';
+  const keyCollision = isNew && trimmedKey && (existingKeys || []).includes(trimmedKey)
+    ? 'Já existe um agente com essa chave.' : '';
+  const keyErr = keyFormatErr || keyCollision;
+
   function toggleTool(name) {
     setToolNames(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
   }
-  function toggleTarget(key) {
-    setRoutingTargets(prev => prev.includes(key) ? prev.filter(t => t !== key) : [...prev, key]);
+  function toggleTarget(k) {
+    setRoutingTargets(prev => prev.includes(k) ? prev.filter(t => t !== k) : [...prev, k]);
   }
 
   function buildModelConfig() {
@@ -117,8 +136,13 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
     return out;
   }
 
+  const canSave = !busy && displayName.trim()
+    && (isNew ? (trimmedKey && !keyErr) : true);
+
   function submit() {
-    onSave(agent.agent_key, {
+    if (!canSave) return;
+    const finalKey = isNew ? trimmedKey : agent.agent_key;
+    onSave(finalKey, {
       display_name: displayName.trim(),
       prompt_key: promptKey,
       model_config: buildModelConfig(),
@@ -131,15 +155,28 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
   }
 
   // Routing targets: other agents only (can't route to itself).
-  const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== agent.agent_key);
+  const selfKey = isNew ? trimmedKey : agent.agent_key;
+  const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== selfKey);
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
       <div class="text-[14px] font-medium text-wa-text mb-3">
-        Editar agente <code class="text-[12px] text-wa-secondary">${agent.agent_key}</code>
-        <span class="text-[12px] text-wa-secondary font-normal"> · v${agent.version || 1}</span>
+        ${isNew
+          ? 'Novo agente'
+          : html`Editar agente <code class="text-[12px] text-wa-secondary">${agent.agent_key}</code>
+              <span class="text-[12px] text-wa-secondary font-normal"> · v${agent.version || 1}</span>`}
       </div>
       <div class="flex flex-col gap-3">
+        ${isNew ? html`
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Chave (agent_key) — não pode mudar depois</label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] font-mono"
+              type="text" placeholder="ex: financeiro" value=${key}
+              onInput=${(e) => setKey(e.target.value)} />
+            ${keyErr ? html`<div class="text-[12px] text-red-500 mt-1">${keyErr}</div>` : null}
+          </div>
+        ` : null}
+
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
@@ -150,9 +187,12 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
           <label class="block text-[12px] text-wa-secondary mb-1">Prompt</label>
           <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
             value=${promptKey} onChange=${(e) => setPromptKey(e.target.value)}>
-            <option value="">— selecione —</option>
+            <option value="">— padrão do app —</option>
             ${(prompts || []).map(p => html`<option key=${p.prompt_key} value=${p.prompt_key}>${p.prompt_key}</option>`)}
           </select>
+          <div class="text-[11px] text-wa-secondary mt-1">
+            Sem prompt selecionado, o agente usa o system prompt padrão do app. Crie prompts na aba <span class="font-medium">Prompts</span>.
+          </div>
         </div>
 
         <div>
@@ -196,16 +236,18 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
           ${!allTools ? html`
             <div class="flex flex-col gap-1 max-h-40 overflow-y-auto border border-wa-border rounded-md p-2">
               ${(tools || []).length === 0
-                ? html`<div class="text-[12px] text-wa-secondary">Nenhuma tool code-in-DB cadastrada.</div>`
+                ? html`<div class="text-[12px] text-wa-secondary">Nenhuma tool registrada.</div>`
                 : (tools || []).map(t => html`
                   <label key=${t.name} class="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" checked=${toolNames.includes(t.name)} onChange=${() => toggleTool(t.name)} />
                     <span class="text-[14px] text-wa-text font-mono">${t.name}</span>
+                    ${t.current_label ? html`<span class="text-[12px] text-wa-secondary truncate">${t.current_label}</span>` : null}
+                    ${t.plugin_id ? html`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-wa-teal/10 text-wa-teal shrink-0">${t.plugin_id}</span>` : null}
                   </label>
                 `)}
             </div>
             <div class="text-[11px] text-wa-secondary mt-1">
-              Lista os nomes exatos das tools. Deixe "Todas" marcado para herdar todo o registry.
+              Lista todas as tools registradas (core, plugin e code-in-DB). Deixe "Todas" marcado para herdar o registry inteiro.
             </div>
           ` : null}
         </div>
@@ -249,7 +291,7 @@ function AgentForm({ agent, prompts, tools, models, onSave, onCancel, busy }) {
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
             onClick=${onCancel} disabled=${busy}>Cancelar</button>
           <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick=${submit} disabled=${busy || !displayName.trim()}>${busy ? 'Salvando…' : 'Salvar'}</button>
+            onClick=${submit} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
         </div>
       </div>
     </div>
@@ -264,6 +306,8 @@ export default function AgentsManager() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
+  // creating: null = closed; true = blank new agent; object = duplicate seed.
+  const [creating, setCreating] = useState(null);
   const [busy, setBusy] = useState(false);
   // History modal state
   const [historyFor, setHistoryFor] = useState(null);
@@ -274,7 +318,7 @@ export default function AgentsManager() {
     setLoading(true);
     setError('');
     const [aRes, pRes, tRes, mRes] = await Promise.all([
-      listAgents(), listPrompts(), listTools(), getModels(),
+      listAgents(), listPrompts(), listRegisteredTools(), getModels(),
     ]);
     if (aRes && aRes.ok) {
       const list = aRes.data || [];
@@ -295,8 +339,28 @@ export default function AgentsManager() {
     setBusy(true); setError('');
     const res = await saveAgent(key, data);
     setBusy(false);
-    if (res && res.ok) { setEditing(null); load(); }
+    if (res && res.ok) { setEditing(null); setCreating(null); load(); }
     else setError((res && res.error) || 'Falha ao salvar o agente.');
+  }
+
+  function startDuplicate(a) {
+    // Strip identity / versioning; keep the config so every field is pre-filled.
+    const { agent_key, version, updated_at, ...rest } = a;
+    setCreating({ ...rest, display_name: `${a.display_name || a.agent_key} (cópia)` });
+    setEditing(null); setError('');
+  }
+
+  async function handleDelete(a) {
+    if (a.agent_key === 'default') return;
+    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Conversas vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
+    setError('');
+    const res = await deleteAgent(a.agent_key);
+    if (res && res.ok) {
+      if (editing && editing.agent_key === a.agent_key) setEditing(null);
+      load();
+    } else {
+      setError((res && res.error) || 'Falha ao excluir o agente.');
+    }
   }
 
   async function openHistory(agent) {
@@ -315,24 +379,42 @@ export default function AgentsManager() {
     else setError((res && res.error) || 'Falha ao reverter a versão.');
   }
 
+  const formOpen = !!editing || !!creating;
+
   return html`
     <div>
-      <p class="text-[13px] text-wa-secondary mb-4">
-        Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
-        na próxima mensagem (sem reiniciar).
-      </p>
+      <div class="flex items-center justify-between mb-4 gap-2">
+        <p class="text-[13px] text-wa-secondary">
+          Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
+          na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
+        </p>
+        ${!formOpen ? html`
+          <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
+            onClick=${() => { setCreating(true); setEditing(null); setError(''); }}>+ Novo agente</button>
+        ` : null}
+      </div>
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
+      ${creating ? html`
+        <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
+          existingKeys=${agents.map(a => a.agent_key)}
+          prompts=${prompts} tools=${tools} models=${models}
+          onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
+      ` : null}
+
       ${editing ? html`
-        <${AgentForm} agent=${editing} prompts=${prompts} tools=${tools} models=${models}
+        <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
+          prompts=${prompts} tools=${tools} models=${models}
           onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
       ` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
-      ${!loading && agents.length === 0 ? html`
-        <div class="text-[14px] text-wa-secondary text-center py-8">Nenhum agente cadastrado.</div>
+      ${!loading && agents.length === 0 && !creating ? html`
+        <div class="text-[14px] text-wa-secondary text-center py-8">
+          Nenhum agente cadastrado. Clique em <span class="font-medium">+ Novo agente</span>.
+        </div>
       ` : null}
 
       <div class="flex flex-col gap-2">
@@ -346,6 +428,7 @@ export default function AgentsManager() {
                   ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Ativo</span>`
                   : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>`}
                 ${a.is_router ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal">router</span>` : null}
+                ${a.agent_key === 'default' ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
               </div>
               <div class="text-[12px] text-wa-secondary mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                 <span>prompt: <span class="font-mono">${a.prompt_key || '—'}</span></span>
@@ -357,9 +440,15 @@ export default function AgentsManager() {
             </div>
             <div class="flex gap-1 shrink-0 flex-wrap justify-end">
               <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => { setEditing(a); setError(''); }}>Editar</button>
+                onClick=${() => { setEditing(a); setCreating(null); setError(''); }}>Editar</button>
+              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                onClick=${() => startDuplicate(a)}>Duplicar</button>
               <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                 onClick=${() => openHistory(a)}>Histórico</button>
+              ${a.agent_key !== 'default' ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
+                  onClick=${() => handleDelete(a)}>Excluir</button>
+              ` : null}
             </div>
           </div>
         `)}

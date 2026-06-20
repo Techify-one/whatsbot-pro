@@ -174,3 +174,24 @@ def rollback(agent_key: str, version: int) -> dict | None:
         routing_targets=_decode_json(snap.get("routing_targets"), None),
         hooks_config=_decode_json(snap.get("hooks_config"), {}),
     )
+
+
+def delete(agent_key: str) -> bool:
+    """Remove an agent and its version history. Returns ``True`` if a row went.
+
+    The ``default`` agent is the engine fallback (``_resolve_active_agent``) and
+    must never be removed — refuse defensively even though the route guards too.
+    Conversations/inboxes still pointing at the deleted key degrade gracefully to
+    the default; ``executions.agent_key`` is historical and intentionally left
+    untouched (no FK), so usage history survives.
+    """
+    if agent_key == DEFAULT_AGENT_KEY:
+        return False
+    with get_engine().begin() as conn:
+        conn.execute(
+            ai_agents_history.delete().where(ai_agents_history.c.agent_key == agent_key)
+        )
+        result = conn.execute(
+            ai_agents.delete().where(ai_agents.c.agent_key == agent_key)
+        )
+    return (result.rowcount or 0) > 0
