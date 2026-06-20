@@ -47,6 +47,73 @@ def pdeathsig_preexec():
     return _set_pdeathsig
 
 
+def rlimit_preexec(cpu_seconds: int | None = None, address_space_bytes: int | None = None):
+    """Return a ``preexec_fn`` that applies POSIX resource limits, or None.
+
+    Used by the one-shot tool runner (retrofit P62/P67) to bound an isolated
+    code-in-DB subprocess: ``RLIMIT_CPU`` caps CPU time (the kernel sends
+    ``SIGXCPU`` then ``SIGKILL``) and ``RLIMIT_AS`` caps the virtual address
+    space (an absurd allocation then fails with ``MemoryError`` instead of
+    OOM-killing the host).
+
+    POSIX only — the ``resource`` module is Unix-only. On Windows we return None
+    and degrade safely; the wall-clock timeout in the one-shot runner is the
+    remaining guard there. Each limit is best-effort: if the platform rejects a
+    given ``setrlimit`` we swallow it rather than abort the spawn.
+
+    NOTE: the returned closure runs in the forked child between fork and exec —
+    keep it tiny and signal-safe (no logging, no allocation beyond ``resource``).
+    """
+    if IS_WINDOWS:
+        return None
+    try:
+        import resource  # noqa: F401 — probe availability before building the closure
+    except ImportError:
+        return None
+    if cpu_seconds is None and address_space_bytes is None:
+        return None
+
+    def _apply_limits():  # pragma: no cover — runs in the forked child
+        import resource as _res
+        if cpu_seconds is not None and cpu_seconds > 0:
+            try:
+                # Soft = the requested cap; hard = soft + 1s grace so a SIGXCPU
+                # handler could run before the hard SIGKILL.
+                _res.setrlimit(_res.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+            except (ValueError, OSError):
+                pass
+        if address_space_bytes is not None and address_space_bytes > 0:
+            try:
+                _res.setrlimit(_res.RLIMIT_AS, (address_space_bytes, address_space_bytes))
+            except (ValueError, OSError):
+                pass
+
+    return _apply_limits
+
+
+def combine_preexec(*fns):
+    """Chain several ``preexec_fn`` closures into one, skipping ``None``.
+
+    ``subprocess.Popen`` accepts a single ``preexec_fn``; the one-shot runner
+    needs both die-with-parent (``pdeathsig_preexec``) and resource limits
+    (``rlimit_preexec``). Returns None if every input is None.
+    """
+    active = [fn for fn in fns if fn is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def _chained():  # pragma: no cover — runs in the forked child
+        for fn in active:
+            try:
+                fn()
+            except Exception:
+                pass
+
+    return _chained
+
+
 def kill_process_group(pid: int, sig: int) -> None:
     """Send ``sig`` to the whole process group of ``pid`` (POSIX), else to the pid.
 
