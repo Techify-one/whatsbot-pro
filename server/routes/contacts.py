@@ -37,7 +37,7 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
     state = deps.state
     settings = deps.settings
-    statics_senditems_dir = deps.statics_senditems_dir
+    statics_outbox_dir = deps.statics_outbox_dir
     outbound = deps.outbound_router
 
     def _channel_for(phone: str, conversation_id=None, channel_id=None) -> str:
@@ -748,7 +748,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         suffix = Path(image.filename or "img.png").suffix or ".png"
-        dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await image.read()
         dest.write_bytes(content)
 
@@ -789,7 +789,7 @@ def register_routes(app, deps):
             state.processed_messages.add(msg_id)
 
         # Relative path for storage and frontend
-        rel_path = f"statics/senditems/{dest.name}"
+        rel_path = f"statics/outbox/{dest.name}"
         msg_data = {
             "role": "assistant",
             "content": caption,
@@ -826,7 +826,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
-        dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
         dest.write_bytes(content)
 
@@ -866,7 +866,7 @@ def register_routes(app, deps):
         if msg_id:
             state.processed_messages.add(msg_id)
 
-        rel_path = f"statics/senditems/{dest.name}"
+        rel_path = f"statics/outbox/{dest.name}"
         msg_data = {
             "role": "assistant",
             "content": "[Áudio]",
@@ -931,7 +931,7 @@ def register_routes(app, deps):
         safe_name = Path(filename).name
         suffix = Path(safe_name).suffix
         stem = Path(safe_name).stem or "arquivo"
-        dest = statics_senditems_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
         content = await document.read()
         dest.write_bytes(content)
 
@@ -970,7 +970,7 @@ def register_routes(app, deps):
         if msg_id:
             state.processed_messages.add(msg_id)
 
-        rel_path = f"statics/senditems/{dest.name}"
+        rel_path = f"statics/outbox/{dest.name}"
         text_content = f"[Documento enviado: {safe_name}]"
         if caption.strip():
             text_content = f"{text_content}\n{caption.strip()}"
@@ -1127,7 +1127,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
-        avatars_dir = statics_senditems_dir.parent / "avatars"
+        avatars_dir = statics_outbox_dir.parent / "avatars"
         avatars_dir.mkdir(parents=True, exist_ok=True)
         avatar_path = avatars_dir / f"{phone}.jpg"
 
@@ -1195,6 +1195,9 @@ def register_routes(app, deps):
                 result_attrs = ca_repo.get_values(contacts_table, contact.id)
             return contact.info
         info = await asyncio.to_thread(_update)
+        # Surface the persisted custom_attributes under `info` so the panel and the
+        # resolve guard read a single, reliable source (matches get_full_contact).
+        info = {**info, "custom_attributes": result_attrs}
         await emit_with_filter("contact.updated", {
             "phone": phone, "info": info, "custom_attributes": result_attrs, "ts": time.time(),
         })

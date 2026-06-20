@@ -180,7 +180,7 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
         </div>
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked=${required} onChange=${(e) => setRequired(e.target.checked)} />
-          <span class="text-[14px] text-wa-text">Obrigatório</span>
+          <span class="text-[14px] text-wa-text">Obrigatório preencher</span>
         </label>
         <div class="flex gap-2 justify-end">
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"

@@ -416,32 +416,59 @@ class ContactMemory:
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
         # Custom attributes (plano 05): tell the AI which attributes it may fill
-        # (via set_custom_attribute) and the values already set.
+        # (via set_custom_attribute) and the values already set. Both scopes:
+        # contact-level and the currently-open conversation (plano 54).
+        parts.extend(self._custom_attr_lines("contact"))
+        parts.extend(self._custom_attr_lines("conversation"))
+        return "\n".join(parts)
+
+    def _custom_attr_lines(self, applies_to: str) -> list[str]:
+        """Prompt lines for custom attributes the AI may fill in the given scope.
+
+        Lists each defined attribute with type hints + the current value so the
+        AI can fill it via set_custom_attribute. Conversation-scoped attributes
+        are read from the contact's currently-open conversation; if there is no
+        open conversation, the section is omitted.
+        """
         try:
             from db.repositories import custom_attribute_repo as _ca_repo
-            from db.tables import contacts as _contacts_tbl
-            defs = _ca_repo.list_definitions("contact")
-            if defs and self.id:
-                values = _ca_repo.get_values(_contacts_tbl, self.id)
-                lines = []
-                for d in defs:
-                    key = d["attribute_key"]
-                    hint = ""
-                    if d.get("type") == "list" and d.get("options"):
-                        hint = f" (opções: {', '.join(map(str, d['options']))})"
-                    elif d.get("type") == "checkbox":
-                        hint = " (true/false)"
-                    cur = values.get(key)
-                    cur_str = f" = {cur}" if cur not in (None, "") else ""
-                    lines.append(f"- {key}{hint}{cur_str}")
-                if lines:
-                    parts.append(
-                        "Atributos personalizados que você pode preencher (use set_custom_attribute):"
-                    )
-                    parts.extend(lines)
+            defs = _ca_repo.list_definitions(applies_to)
+            if not defs or not self.id:
+                return []
+            if applies_to == "conversation":
+                from db.tables import conversations as _entity_tbl
+                conv = conversation_repo.get_open_for_contact(self.id)
+                if not conv:
+                    return []
+                entity_id = conv["id"]
+                label = (
+                    "Atributos personalizados DESTA CONVERSA que você pode preencher "
+                    "(use set_custom_attribute com scope='conversation'):"
+                )
+            else:
+                from db.tables import contacts as _entity_tbl
+                entity_id = self.id
+                label = (
+                    "Atributos personalizados do contato que você pode preencher "
+                    "(use set_custom_attribute):"
+                )
+            values = _ca_repo.get_values(_entity_tbl, entity_id)
+            lines = []
+            for d in defs:
+                key = d["attribute_key"]
+                hint = ""
+                if d.get("type") == "list" and d.get("options"):
+                    hint = f" (opções: {', '.join(map(str, d['options']))})"
+                elif d.get("type") == "checkbox":
+                    hint = " (true/false)"
+                cur = values.get(key)
+                cur_str = f" = {cur}" if cur not in (None, "") else ""
+                lines.append(f"- {key}{hint}{cur_str}")
+            if not lines:
+                return []
+            return [label, *lines]
         except Exception:
-            pass
-        return "\n".join(parts)
+            return []
 
     def get_tags_summary(self) -> str:
         """Return comma-separated list of tag names for prompt injection."""

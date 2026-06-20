@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getConversation, getContactConversation, getCustomAttributes,
@@ -9,7 +9,9 @@ import { CloseIcon } from './icons.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { AssigneePicker } from './AssigneePicker.js';
 import { ConversationLabelEditor } from './ConversationLabelEditor.js';
+import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 
 const html = htm.bind(h);
 
@@ -35,14 +37,18 @@ function fmtTs(ts) {
   }
 }
 
-export function ConversationInfoPanel({ phone, conversationId = null, onClose }) {
+export function ConversationInfoPanel({ phone, conversationId = null, onClose, onOpenContactInfo = null, contactInfo = null }) {
   const [conv, setConv] = useState(null);
   const [loading, setLoading] = useState(true);
   const [convDefs, setConvDefs] = useState([]);
+  const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
   const [convValues, setConvValues] = useState({});
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [user, setUser] = useState(null);
+  const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
+  const [highlightAttrs, setHighlightAttrs] = useState(false);
+  const attrsRef = useRef(null);
 
   // Identity — permission gating for the Resolver/Reabrir action (P48: hide).
   useEffect(() => {
@@ -51,12 +57,18 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose })
     return () => { alive = false; };
   }, []);
 
-  // Conversation-scoped attribute definitions; reload when the admin edits them.
+  // Attribute definitions (conversation shown here + contact scope for the resolve
+  // guard); reload when the admin edits them.
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const res = await getCustomAttributes('conversation');
-      if (!cancelled && res.ok) setConvDefs(res.data || []);
+      const [cRes, kRes] = await Promise.all([
+        getCustomAttributes('conversation'),
+        getCustomAttributes('contact'),
+      ]);
+      if (cancelled) return;
+      if (cRes.ok) setConvDefs(cRes.data || []);
+      if (kRes.ok) setContactDefs(kRes.data || []);
     }
     load();
     window.addEventListener('whatsbot:custom-attributes-changed', load);
@@ -94,13 +106,44 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose })
 
   async function toggleStatus() {
     if (!conv || busy) return;
+    const closing = conv.status === 'open';
+    // Resolver guard: every required ("Obrigatório preencher") attribute must have
+    // a value before closing — conversation attributes first (priority), then the
+    // contact's. Conversation values use the live (edited) state so the operator
+    // can fill them right here; contact values come from the contact panel. Pending
+    // conversation edits are persisted before closing. Reopening is never blocked.
+    if (closing) {
+      const convMissing = missingRequiredAttributes(convDefs, convValues);
+      if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+      const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
+      if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
+    }
     setBusy(true);
     try {
-      const r = await setConversationStatus(conv.id, conv.status === 'open' ? 'closed' : 'open');
+      if (closing) {
+        // Persist pending attribute edits first; abort the close if it fails
+        // (e.g. regex validation) so nothing is silently lost.
+        const saveRes = await updateConversationInfo(conv.id, { custom_attributes: convValues });
+        if (!(saveRes && saveRes.ok)) return;
+        if (saveRes.data && saveRes.data.conversation) mergeConv(saveRes.data.conversation);
+      }
+      const r = await setConversationStatus(conv.id, closing ? 'closed' : 'open');
       if (r && r.ok && r.data && r.data.conversation) mergeConv(r.data.conversation);
     } finally {
       setBusy(false);
     }
+  }
+
+  // Modal "OK": route to where the pending attributes live. Conversation ones are
+  // already on this panel — scroll to and briefly highlight them; contact ones
+  // require switching to the contact panel ("Dados do contato").
+  function onMissingConfirm() {
+    const target = missingAttrs && missingAttrs.target;
+    setMissingAttrs(null);
+    if (target === 'contact') { if (onOpenContactInfo) onOpenContactInfo(); return; }
+    setHighlightAttrs(true);
+    try { attrsRef.current && attrsRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+    setTimeout(() => setHighlightAttrs(false), 2500);
   }
 
   async function handleSaveAttrs() {
@@ -169,7 +212,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose })
 
             <!-- Atributos da conversa -->
             ${convDefs.length > 0 ? html`
-              <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
+              <div ref=${attrsRef} class="bg-wa-bg px-6 py-4 border-b border-wa-border transition-all duration-300 ${highlightAttrs ? 'ring-2 ring-inset ring-red-500' : ''}">
                 <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados desta conversa</div>
                 <div class="space-y-4">
                   ${convDefs.map(def => html`
@@ -224,6 +267,10 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose })
           ` : null}
         </div>
       </div>
+
+      ${missingAttrs ? html`
+        <${RequiredAttributesModal} missing=${missingAttrs.list} onConfirm=${onMissingConfirm} />
+      ` : null}
     </div>
   `;
 }
