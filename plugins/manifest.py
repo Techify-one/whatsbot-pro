@@ -32,6 +32,9 @@ class PluginManifest:
     description: str = ""
     author: str = ""
     whatsbot_api_version: str = "*"
+    # Module names the loader imports per capability. Recognized keys:
+    # tools, prompts, events, filters, routes, settings, lifecycle.
+    # ``lifecycle`` (plano 09) → module exporting setup(ctx)/teardown(ctx).
     entry: dict[str, str] = dataclasses.field(default_factory=dict)
     migrations: str | None = None
     screens: list[dict] = dataclasses.field(default_factory=list)
