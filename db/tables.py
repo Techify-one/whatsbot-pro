@@ -23,6 +23,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -219,6 +220,73 @@ channel_credentials = Table(
     Column("value", Text, nullable=False),                # TEXT in MVP (P15 — masked at API edge)
     UniqueConstraint("channel_id", "key", name="uq_channel_credentials"),
 )
+
+
+# ── RBAC (plano 03 Fase 1) ────────────────────────────────────────────────
+# Users, roles, permissions + sessions. Argon2id password hashes (PHC string,
+# salt embedded). admin is a short-circuit (role key == 'admin' ⇒ bypass) and is
+# NOT seeded into role_permissions. inbox_members comes with plano 01.
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("email", Text, nullable=False, unique=True),
+    Column("name", Text, nullable=False, server_default=""),
+    Column("password_hash", Text, nullable=False),       # Argon2id PHC string
+    Column("is_active", Integer, nullable=False, server_default="1"),
+    Column("last_login_at", Float),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+Index("idx_users_email", users.c.email)
+
+roles = Table(
+    "roles",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("key", Text, nullable=False, unique=True),     # admin|gestor|atendente
+    Column("name", Text, nullable=False),
+    Column("is_system", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+)
+
+permissions = Table(
+    "permissions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("key", Text, nullable=False, unique=True),     # conversation.reply etc.
+    Column("description", Text, nullable=False, server_default=""),
+)
+
+role_permissions = Table(
+    "role_permissions",
+    metadata,
+    Column("role_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False),
+    Column("permission_id", Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False),
+    PrimaryKeyConstraint("role_id", "permission_id"),
+)
+
+user_roles = Table(
+    "user_roles",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("role_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False),
+    PrimaryKeyConstraint("user_id", "role_id"),
+)
+
+user_sessions = Table(
+    "user_sessions",
+    metadata,
+    Column("id", Text, primary_key=True),                 # secrets.token_urlsafe(32)
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", Float, nullable=False),
+    Column("expires_at", Float, nullable=False),
+    Column("last_seen_at", Float),
+    Column("user_agent", Text),
+    Column("ip", Text),
+)
+Index("idx_sessions_user", user_sessions.c.user_id)
+Index("idx_sessions_expires", user_sessions.c.expires_at)
 
 
 unread_msg_ids = Table(

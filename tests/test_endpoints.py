@@ -823,6 +823,23 @@ check("GET /channels/default -> credential masked",
 check("GET /channels/default -> mask keeps last 4", _creds.get("access_token", "").endswith("9876"))
 
 # ═══════════════════════════════════════════════════════════════════
+#  15f. RBAC seed (plano 03 Fase 1)
+# ═══════════════════════════════════════════════════════════════════
+section("RBAC seed")
+
+from sqlalchemy import select as _sa_select, func as _sa_func
+from db.engine import get_engine as _get_engine
+from db.tables import roles as _roles_t, permissions as _perms_t, role_permissions as _rp_t
+with _get_engine().connect() as _conn:
+    _role_keys = {r[0] for r in _conn.execute(_sa_select(_roles_t.c.key))}
+    _perm_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_perms_t)).scalar()
+    _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
+check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
+      _role_keys == {"admin", "gestor", "atendente"})
+check("RBAC seed -> 16 permissions", _perm_count == 16)
+check("RBAC seed -> role_permissions populated (gestor 13 + atendente 5)", _rp_count == 18)
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
