@@ -162,6 +162,11 @@ def set_assignee(conv_id: int, assignee_user_id: int | None) -> dict | None:
     return _update(conv_id, {"assignee_user_id": assignee_user_id})
 
 
+def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
+    """Pause/resume the AI for a specific conversation (gate nível conversa)."""
+    return _update(conv_id, {"ai_active": ai_active})
+
+
 def touch_activity(conv_id: int, ts: float | None = None) -> None:
     with get_engine().begin() as conn:
         conn.execute(update(conversations).where(conversations.c.id == conv_id)

@@ -64,6 +64,17 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
+    @app.post("/api/conversations/{conv_id}/ai")
+    async def set_ai(conv_id: int, body: dict, request: Request):
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        active = 1 if body.get("active") else 0
+        conv = await asyncio.to_thread(conversation_repo.set_ai_active, conv_id, active)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        return _ok({"conversation": conv})
+
     @app.post("/api/conversations/{conv_id}/archive")
     async def archive(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.read")
