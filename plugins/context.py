@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _ws_manager: Optional[Any] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
+# Runtime services (plano 09 Fase 5): the task supervisor + subprocess service,
+# wired at lifespan so PluginContext.spawn_* can delegate to them.
+_supervisor: Optional[Any] = None
+_subprocess_service: Optional[Any] = None
 
 
 def set_runtime(ws_manager: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -36,6 +40,13 @@ def set_runtime(ws_manager: Any, loop: asyncio.AbstractEventLoop) -> None:
     global _ws_manager, _loop
     _ws_manager = ws_manager
     _loop = loop
+
+
+def set_runtime_services(supervisor: Any, subprocess_service: Any) -> None:
+    """Wire the task supervisor + subprocess service (plano 09 Fase 5)."""
+    global _supervisor, _subprocess_service
+    _supervisor = supervisor
+    _subprocess_service = subprocess_service
 
 
 def broadcast(event: str, data: dict) -> None:
@@ -127,15 +138,39 @@ class PluginContext:
             except Exception as e:  # noqa: BLE001 — one bad cleanup must not block others
                 logger.warning("plugin %s on_unload cleanup failed: %s", self.plugin_id, e)
 
-    def spawn_task(self, *args, **kwargs):  # reserved — implemented in plano 09 Fase 5
-        raise NotImplementedError(
-            "ctx.spawn_task is wired by the runtime supervisor (plano 09 Fase 5)."
-        )
+    def spawn_task(self, name, coro_factory, *, policy=None, max_restarts=3,
+                   window_sec=60.0):
+        """Register + start a supervised background task owned by this plugin.
 
-    def spawn_subprocess(self, *args, **kwargs):  # reserved — plano 09 Fase 5
-        raise NotImplementedError(
-            "ctx.spawn_subprocess is wired by the subprocess service (plano 09 Fase 5)."
+        Call only from inside ``setup(ctx)`` (a loop is running and ``owner`` is
+        set). The task is auto-stopped on disable/teardown via ``stop_owner``.
+        Returns the fully-qualified task name (``<plugin_id>:<name>``).
+        """
+        if _supervisor is None:
+            raise RuntimeError("runtime supervisor not wired (plano 09 Fase 5)")
+        from runtime.supervisor import TaskSpec, RestartPolicy
+        full = f"{self.plugin_id}:{name}"
+        spec = TaskSpec(
+            name=full, coro_factory=coro_factory,
+            policy=policy or RestartPolicy.PERMANENT,
+            max_restarts=max_restarts, window_sec=window_sec, owner=self.plugin_id,
         )
+        _supervisor.register(spec)
+        loop = self.loop or _loop
+        if loop is not None:
+            loop.create_task(_supervisor.start(full))
+        return full
+
+    def spawn_subprocess(self, spec):
+        """Spawn a managed subprocess owned by this plugin (auto-stopped on teardown).
+
+        ``spec`` is a ``runtime.subprocess_service.SubprocessSpec``; ``owner`` is
+        forced to this plugin's id. May block briefly during spawn/readiness.
+        """
+        if _subprocess_service is None:
+            raise RuntimeError("subprocess service not wired (plano 09 Fase 5)")
+        spec.owner = self.plugin_id
+        return _subprocess_service.spawn(spec)
 
 
 @dataclasses.dataclass

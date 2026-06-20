@@ -15,14 +15,15 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
-from plugins.context import set_runtime as _set_plugin_runtime
+from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
+from runtime.subprocess_service import SubprocessService
 from plugins.events import (
     set_runtime as _set_events_runtime,
     register_plugin_events,
@@ -211,6 +212,11 @@ def create_app(
         supervisor.register(TaskSpec(
             "avatar_fetch", lambda: avatar_fetch_task(deps), policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
+        # Shared subprocess service for plugins (plano 09 Fase 5). GOWA keeps its
+        # own ManagedProcess; this one tracks plugin-spawned subprocesses.
+        subprocess_service = SubprocessService()
+        state.subprocess_service = subprocess_service
+        _set_runtime_services(supervisor, subprocess_service)
         await supervisor.start_all()
         yield
         # Shutdown — ordered (plano 09 Fase 2): app.shutdown → plugin teardown →
@@ -221,6 +227,10 @@ def create_app(
             await _lifecycle_manager.run_teardown(loaded.id)
         try:
             await supervisor.stop_all()  # cancel + await (fixes the old no-await gap)
+        except Exception:
+            pass
+        try:
+            subprocess_service.stop_all()  # stop plugin subprocesses (GOWA stopped below)
         except Exception:
             pass
         try:
@@ -264,7 +274,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/wizard"}
+        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -331,6 +341,7 @@ def create_app(
     @app.get("/tools")
     @app.get("/quick-replies")
     @app.get("/custom-attributes")
+    @app.get("/runtime")
     @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/executions/{execution_id:int}")
@@ -367,6 +378,7 @@ def create_app(
     tags.register_routes(app, deps)
     quick_replies_routes.register_routes(app, deps)
     custom_attributes_routes.register_routes(app, deps)
+    runtime_routes.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
     plugins_routes.register_routes(app, deps)
