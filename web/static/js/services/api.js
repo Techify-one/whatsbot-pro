@@ -642,6 +642,20 @@ export async function rollbackAgent(key, version) {
   return request('POST', `/api/ai/agents/${encodeURIComponent(key)}/rollback/${version}`);
 }
 
+export async function deleteAgent(key) {
+  return request('DELETE', `/api/ai/agents/${encodeURIComponent(key)}`);
+}
+
+// Full registry of tools registered in the handler (core + plugin + installed
+// code-in-DB), used by the agent editor's per-agent tool selection. The agent's
+// `tool_names` filter applies over THIS set, not just code-in-DB tools, so the
+// picker must read from here. Normalised to {ok, data: array} like the others.
+export async function listRegisteredTools() {
+  const res = await request('GET', '/api/tools');
+  if (res && res.ok) return { ok: true, data: (res.data && res.data.tools) || [] };
+  return res;
+}
+
 export async function listPrompts() {
   return request('GET', '/api/ai/prompts');
 }
