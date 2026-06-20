@@ -417,6 +417,12 @@ export async function getContactConversation(phone) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
 }
 
+// Update a conversation's custom_attributes (FF5). Server validates keys against
+// the conversation attribute definitions.
+export async function updateConversationInfo(id, body) {
+  return request('PUT', `/api/conversations/${id}/info`, body);
+}
+
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
 // Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
 // Credentials are ALWAYS returned masked by the backend; sending a new
