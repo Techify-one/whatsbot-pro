@@ -27,7 +27,7 @@ function myReaction(message) {
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -583,7 +583,7 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
     } : prev);
 
     try {
-      const res = await _api.sendText(phone, text, replyTo, conversationId);
+      const res = await _api.sendText(phone, text, replyTo, conversationId, channelId);
       if (res.ok) {
         const msgId = res.data?.msg_id || null;
         if (sandbox) {
@@ -618,7 +618,7 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
   async function handleRetry(localId, text) {
     updateMsgByLocalId(localId, () => ({ _status: 'sending', status: 'operator' }));
     try {
-      const res = await retrySend(phone, text, conversationId);
+      const res = await retrySend(phone, text, conversationId, channelId);
       if (res.ok) {
         updateMsgByLocalId(localId, () => ({ _status: null, status: 'operator' }));
       } else {
@@ -706,15 +706,15 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
     let optimistic, sendPromise;
     if (media.type === 'image') {
       optimistic = { ...base, content: '', media_type: 'image', media_path: localUrl };
-      sendPromise = _api.sendImage(phone, media.file, '', conversationId);
+      sendPromise = _api.sendImage(phone, media.file, '', conversationId, channelId);
     } else if (media.type === 'document') {
       const verb = sandbox ? 'recebido' : 'enviado';
       optimistic = { ...base, content: `[Documento ${verb}: ${media.filename}]`,
                      media_type: 'document', media_path: localUrl };
-      sendPromise = _api.sendDocument(phone, media.file, '', conversationId);
+      sendPromise = _api.sendDocument(phone, media.file, '', conversationId, channelId);
     } else {
       optimistic = { ...base, content: '[Áudio]', media_type: 'audio', media_path: localUrl };
-      sendPromise = _api.sendAudio(phone, media.blob, media.filename, conversationId);
+      sendPromise = _api.sendAudio(phone, media.blob, media.filename, conversationId, channelId);
     }
     optimistic = { ...optimistic, ts: Date.now() / 1000, _localId: localId,
                    _status: 'sending', _isLocalBlob: true };

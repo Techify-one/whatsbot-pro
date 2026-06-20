@@ -71,6 +71,44 @@ def register_routes(app, deps):
             out.append(_serialize(row, creds))
         return _ok(out)
 
+    @app.get("/api/channels/connected")
+    async def list_connected_channels(request: Request):
+        """Connected + logged-in channels an operator can start a conversation on.
+
+        Lighter and lower-privileged than ``GET /api/channels`` (gated by
+        ``conversation.reply`` instead of ``channel.manage``, no credentials): the
+        "start conversation" inbox picker needs only id/provider/name/status.
+        Status prefers the live registry instance, falling back to the stored flags.
+        Disconnected or disabled channels are filtered out.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        rows = await asyncio.to_thread(channel_repo.list_all)
+        out = []
+        for row in rows:
+            if not row.get("enabled"):
+                continue
+            connected = bool(row.get("connected"))
+            logged_in = bool(row.get("logged_in"))
+            inst = registry.get(row["id"]) if registry is not None else None
+            if inst is not None:
+                try:
+                    st = await asyncio.to_thread(inst.status)
+                    connected = bool(st.get("connected"))
+                    logged_in = bool(st.get("logged_in"))
+                except Exception:
+                    pass
+            if not (connected and logged_in):
+                continue
+            out.append({
+                "id": row["id"],
+                "provider": row.get("provider"),
+                "display_name": row.get("display_name") or "",
+                "own_phone": row.get("own_phone"),
+            })
+        return _ok(out)
+
     @app.get("/api/channels/{channel_id}")
     async def get_channel(channel_id: str, request: Request):
         denied = permission_denied(request, "channel.manage")

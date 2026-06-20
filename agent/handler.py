@@ -1264,9 +1264,14 @@ class AgentHandler:
     def save_operator_message(self, phone: str, text: str, *,
                               status: str | None = None,
                               msg_id: str | None = None,
-                              reply_to_msg_id: str | None = None) -> dict:
-        """Save a manually sent message (from the operator) without LLM processing."""
-        contact = self._get_contact(phone)
+                              reply_to_msg_id: str | None = None,
+                              channel_id: str = "default") -> dict:
+        """Save a manually sent message (from the operator) without LLM processing.
+
+        ``channel_id`` decides which inbox owns the conversation the message lands
+        in (plano 11) — so an operator-initiated message routed through a specific
+        channel is saved in that channel's conversation, not always 'default'."""
+        contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, status=status, msg_id=msg_id,
                             reply_to_msg_id=reply_to_msg_id)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
