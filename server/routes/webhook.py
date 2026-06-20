@@ -19,6 +19,12 @@ from pathlib import Path
 from channels.events import InboundEvent
 from db.repositories import contact_repo, conversation_repo, message_repo
 from agent import group_mentions
+# Media/reply parsing helpers live in gowa.inbound (plano 13 Fase 0); re-imported
+# here so the legacy /api/webhook handler keeps behaving identically while the
+# generic /api/webhook/gowa/{channel_id} path is validated.
+from gowa.inbound import (_extract_media, _extract_reply_to, _coerce_path,
+                          _deep_find_reply_id, _PATHED_MEDIA,
+                          _REPLY_ID_KEYS, _REPLY_CTX_KEYS)
 from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
@@ -41,403 +47,6 @@ def _conversation_ai_active(contact) -> bool:
     except Exception:
         logger.exception("Falha no gate ai_active para %s", getattr(contact, "phone", "?"))
         return True
-
-
-# Media types whose payload contains a downloadable ``path`` and can be
-# rendered with a player/preview in the chat panel.
-_PATHED_MEDIA: tuple[str, ...] = (
-    "image", "audio", "video", "sticker", "document",
-)
-
-
-def _coerce_path(raw):
-    """Accept either a string path or a dict ``{path, ...}`` from GOWA."""
-    if isinstance(raw, str):
-        return raw, {}
-    if isinstance(raw, dict):
-        return (raw.get("path") or ""), dict(raw)
-    return "", {}
-
-
-def _extract_media(data: dict, *, is_from_me: bool, existing_text: str) -> dict:
-    """Inspect a GOWA payload and resolve which media (if any) it carries.
-
-    Returns a dict with:
-
-    * ``media_type`` — one of ``image|audio|video|sticker|document|location|
-      live_location|poll|interactive|order|product|contact|contacts`` or ``None``.
-    * ``media_path`` — path on disk for playable media; ``"geo:lat,lng"`` for
-      location/live_location; ``None`` for non-pathed types.
-    * ``media_extras`` — type-specific metadata (caption, duration, lat/lng,
-      name, options, button_id, …) or ``None`` if there's nothing extra.
-    * ``text`` — final placeholder text (existing_text plus any extracted
-      caption or auto-generated placeholder like ``"[Vídeo recebido]"``).
-    * ``audio_path`` / ``image_path`` / ``document_path`` / ``document_name``
-      — back-compat fields. Other call sites still read these individually
-      to decide branches (transcription kind, batch path, etc.).
-
-    Detection order matches the original implementation for ``image, audio,
-    video_note, document`` then extends it with the new types.
-    """
-    text = existing_text or ""
-    media_type: str | None = None
-    media_path: str | None = None
-    extras: dict | None = None
-    audio_path = image_path = document_path = None
-    document_name: str | None = None
-
-    def _placeholder(noun: str) -> str:
-        return f"[{noun} enviado]" if is_from_me else f"[{noun} recebido]"
-
-    # — image ————————————————————————————————————————————
-    raw = data.get("image")
-    if raw:
-        p, info = _coerce_path(raw)
-        if p:
-            image_path = p
-            media_type = "image"
-            media_path = p
-            caption = (info.get("caption") or "").strip()
-            if not text and caption:
-                text = caption
-            elif not text and is_from_me:
-                text = "[Imagem enviada]"
-            if caption or info.get("mimetype"):
-                extras = {
-                    k: v for k, v in {
-                        "caption": caption or None,
-                        "mimetype": info.get("mimetype"),
-                    }.items() if v is not None
-                } or None
-
-    # — audio ————————————————————————————————————————————
-    if media_type is None:
-        raw = data.get("audio")
-        if raw:
-            p, info = _coerce_path(raw)
-            if p:
-                audio_path = p
-                media_type = "audio"
-                media_path = p
-                if not text:
-                    text = _placeholder("Áudio")
-                if info.get("duration") or info.get("mimetype"):
-                    extras = {
-                        k: v for k, v in {
-                            "duration_ms": info.get("duration"),
-                            "mimetype": info.get("mimetype"),
-                        }.items() if v is not None
-                    } or None
-
-    # — video_note (voice) — treated as audio ————————————————
-    if media_type is None:
-        raw = data.get("video_note")
-        if raw:
-            p, info = _coerce_path(raw)
-            if p:
-                audio_path = p
-                media_type = "audio"
-                media_path = p
-                if not text:
-                    text = _placeholder("Áudio")
-                extras = {"is_voice_note": True}
-
-    # — video ————————————————————————————————————————————
-    if media_type is None:
-        raw = data.get("video")
-        if raw:
-            p, info = _coerce_path(raw)
-            if p:
-                media_type = "video"
-                media_path = p
-                caption = (info.get("caption") or "").strip()
-                if not text and caption:
-                    text = caption
-                elif not text:
-                    text = _placeholder("Vídeo")
-                extras = {
-                    k: v for k, v in {
-                        "caption": caption or None,
-                        "duration_ms": info.get("duration"),
-                        "mimetype": info.get("mimetype"),
-                    }.items() if v is not None
-                } or None
-
-    # — sticker ——————————————————————————————————————————
-    if media_type is None:
-        raw = data.get("sticker")
-        if raw:
-            p, info = _coerce_path(raw)
-            if p:
-                media_type = "sticker"
-                media_path = p
-                if not text:
-                    text = "[Sticker]"
-                if info.get("is_animated") is not None or info.get("mimetype"):
-                    extras = {
-                        k: v for k, v in {
-                            "is_animated": info.get("is_animated"),
-                            "mimetype": info.get("mimetype"),
-                        }.items() if v is not None
-                    } or None
-
-    # — document —————————————————————————————————————————
-    if media_type is None:
-        raw = data.get("document")
-        if raw:
-            p, info = _coerce_path(raw)
-            if p:
-                document_path = p
-                media_type = "document"
-                media_path = p
-                document_name = (info.get("file_name")
-                                 or info.get("filename") or "")
-                # GOWA echoes the document caption into the top-level body,
-                # so `existing_text` may already equal it.
-                caption = (info.get("caption") or "").strip() or text
-                # With auto-download ON, the GOWA webhook does NOT carry the
-                # original filename and the on-disk path is UUID-based, so it
-                # can't be recovered here. The webhook layer resolves the real
-                # name via GOWA's chat-storage API and rebuilds `text`.
-                label = document_name or "documento"
-                verb = "enviado" if is_from_me else "recebido"
-                text = (f"[Documento {verb}: {label}]"
-                        + (f"\n{caption}" if caption else ""))
-                extras = {
-                    k: v for k, v in {
-                        "file_name": document_name or None,
-                        "mimetype": info.get("mimetype"),
-                        "caption": caption or None,
-                    }.items() if v is not None
-                } or None
-
-    # — location ——————————————————————————————————————————
-    if media_type is None:
-        loc = data.get("location")
-        if isinstance(loc, dict):
-            lat = loc.get("latitude") or loc.get("lat")
-            lng = loc.get("longitude") or loc.get("lng")
-            if lat is not None and lng is not None:
-                name = (loc.get("name") or "").strip()
-                address = (loc.get("address") or "").strip()
-                media_type = "location"
-                media_path = f"geo:{lat},{lng}"
-                if not text:
-                    if name:
-                        text = f"[Localização: {name}]"
-                    elif address:
-                        text = f"[Localização: {address}]"
-                    else:
-                        text = f"[Localização: {lat},{lng}]"
-                extras = {
-                    "lat": lat, "lng": lng,
-                    **({"name": name} if name else {}),
-                    **({"address": address} if address else {}),
-                }
-
-    # — live_location —————————————————————————————————————
-    if media_type is None:
-        live = data.get("live_location")
-        if isinstance(live, dict):
-            lat = live.get("latitude") or live.get("lat")
-            lng = live.get("longitude") or live.get("lng")
-            if lat is not None and lng is not None:
-                media_type = "live_location"
-                media_path = f"geo:{lat},{lng}"
-                if not text:
-                    text = "[Localização ao vivo]"
-                extras = {"lat": lat, "lng": lng}
-
-    # — poll ——————————————————————————————————————————————
-    if media_type is None:
-        poll = data.get("poll")
-        if isinstance(poll, dict):
-            name = (poll.get("name") or "").strip()
-            options = poll.get("options") or []
-            opt_titles = [
-                (o.get("name") or o.get("optionName") or "").strip()
-                for o in options if isinstance(o, dict)
-            ]
-            if name or opt_titles:
-                media_type = "poll"
-                if not text:
-                    text = f"[Enquete: {name or 'sem título'}]"
-                extras = {"name": name, "options": opt_titles}
-
-    # — interactive responses (buttons / list) ———————————————
-    if media_type is None:
-        br = data.get("buttons_response") or data.get("buttonsResponse")
-        if isinstance(br, dict):
-            title = (br.get("title") or br.get("display_text") or "").strip()
-            button_id = (br.get("button_id") or br.get("selected_id") or "").strip()
-            media_type = "interactive"
-            if not text:
-                text = f"[Resposta: {title or button_id or 'sem id'}]"
-            extras = {"button_id": button_id, "title": title}
-    if media_type is None:
-        lr = data.get("list_response") or data.get("listResponse")
-        if isinstance(lr, dict):
-            title = (lr.get("title") or "").strip()
-            row_id = (lr.get("row_id") or lr.get("selected_id") or "").strip()
-            media_type = "interactive"
-            if not text:
-                text = f"[Seleção: {title or row_id or 'sem id'}]"
-            extras = {"row_id": row_id, "title": title}
-
-    # — order ————————————————————————————————————————————
-    if media_type is None:
-        order = data.get("order")
-        if isinstance(order, dict):
-            item_count = order.get("item_count") or order.get("itemCount")
-            media_type = "order"
-            if not text:
-                if item_count is not None:
-                    text = f"[Pedido: {item_count} item(ns)]"
-                else:
-                    text = "[Pedido recebido]"
-            extras = {
-                k: v for k, v in {
-                    "item_count": item_count,
-                    "total": order.get("total"),
-                    "currency": order.get("currency"),
-                }.items() if v is not None
-            } or None
-
-    # — product ——————————————————————————————————————————
-    if media_type is None:
-        prod = data.get("product")
-        if isinstance(prod, dict):
-            media_type = "product"
-            if not text:
-                text = "[Produto compartilhado]"
-            extras = {
-                "product_id": prod.get("product_id") or prod.get("id"),
-                "title": prod.get("title"),
-            }
-
-    # — contact / vCard (single or array) ——————————————————
-    if media_type is None and not text:
-        shared: list[tuple[str, str]] = []
-        single = data.get("contact")
-        if isinstance(single, dict):
-            n = (single.get("displayName") or single.get("display_name")
-                 or single.get("name") or "").strip()
-            ph = (single.get("phone_number") or single.get("phoneNumber") or "").strip()
-            shared.append((n, ph))
-        arr = data.get("contacts_array") or data.get("contactsArray")
-        if isinstance(arr, list):
-            for c in arr:
-                if not isinstance(c, dict):
-                    continue
-                n = (c.get("displayName") or c.get("display_name")
-                     or c.get("name") or "").strip()
-                ph = (c.get("phone_number") or c.get("phoneNumber") or "").strip()
-                shared.append((n, ph))
-        if shared:
-            media_type = "contact" if len(shared) == 1 else "contacts"
-            if len(shared) == 1:
-                n, ph = shared[0]
-                label = n or ph or "sem nome"
-                suffix = f" ({ph})" if ph and n else ""
-                text = f"[Contato compartilhado: {label}{suffix}]"
-            else:
-                names = ", ".join(n or p or "?" for n, p in shared)
-                text = f"[Contatos compartilhados ({len(shared)}): {names}]"
-            extras = {"contacts": [
-                {"name": n, "phone": ph} for n, ph in shared
-            ]}
-
-    return {
-        "media_type": media_type,
-        "media_path": media_path,
-        "media_extras": extras,
-        "text": text,
-        "audio_path": audio_path,
-        "image_path": image_path,
-        "document_path": document_path,
-        "document_name": document_name,
-    }
-
-
-# Keys that hold the id of the quoted message (the message being replied to).
-_REPLY_ID_KEYS = (
-    "reply_message_id", "quoted_message_id", "quotedMessageId",
-    "replied_id", "repliedId", "reply_to", "reply_to_id", "in_reply_to",
-    "quoted_id", "quotedId",
-)
-# Keys that hold the quoted message id *inside* a context-info object (whatsmeow's
-# ContextInfo.StanzaID). Here a bare ``id`` IS the quoted id (unlike a `message`
-# wrapper, where ``id`` is the current message's own id).
-_REPLY_CTX_KEYS = ("stanza_id", "stanzaId", "StanzaID", "quoted_message_id", "id", "Id")
-
-
-def _deep_find_reply_id(obj) -> str | None:
-    """Recursively scan a payload for a key that clearly names a quoted/replied
-    message id (e.g. ``replied_id``, ``reply_message_id``, ``stanza_id``). Requires
-    the key to mention repl/quot/stanza AND id, so plain ``id`` or the quoted *text*
-    (``quoted_message``) are never mistaken for it."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, (str, int)) and v != "" and isinstance(k, str):
-                kl = k.lower()
-                if (("repl" in kl or "quot" in kl or "stanza" in kl) and "id" in kl):
-                    return str(v)
-        for v in obj.values():
-            if isinstance(v, (dict, list)):
-                found = _deep_find_reply_id(v)
-                if found:
-                    return found
-    elif isinstance(obj, list):
-        for it in obj:
-            found = _deep_find_reply_id(it)
-            if found:
-                return found
-    return None
-
-
-def _extract_reply_to(data: dict) -> str | None:
-    """Best-effort extraction of the quoted message id from a GOWA webhook payload.
-
-    GOWA is not consistent about exposing this for inbound messages (and nests it
-    differently across versions), so we probe, in order: flat keys, a nested
-    ``message`` object, a ``context_info`` object (flat or inside ``message``), and
-    finally a guarded recursive scan. Returns None when nothing quoted-looking is
-    present.
-    """
-    if not isinstance(data, dict):
-        return None
-
-    # 1) Flat well-known keys.
-    for key in _REPLY_ID_KEYS:
-        val = data.get(key)
-        if val:
-            return str(val)
-
-    # 2) Some GOWA builds nest the text + reply id under a `message` object.
-    msg = data.get("message")
-    if isinstance(msg, dict):
-        for key in _REPLY_ID_KEYS:
-            val = msg.get(key)
-            if val:
-                return str(val)
-
-    # 3) A container describing the quoted message (context info / quoted / reply).
-    #    Inside one of these a bare ``id`` IS the quoted message id. Probe both at
-    #    the top level and nested under ``message``.
-    container_names = ("context_info", "contextInfo", "ContextInfo",
-                       "quoted", "quoted_message", "quotedMessage", "reply")
-    scopes = [data] + ([msg] if isinstance(msg, dict) else [])
-    for scope in scopes:
-        for name in container_names:
-            ctx = scope.get(name)
-            if isinstance(ctx, dict):
-                for key in _REPLY_CTX_KEYS:
-                    val = ctx.get(key)
-                    if val:
-                        return str(val)
-
-    # 4) Last resort: scan the whole payload for a reply/quote *id* key.
-    return _deep_find_reply_id(data)
 
 
 def register_routes(app, deps):
@@ -1192,19 +801,114 @@ def register_routes(app, deps):
         audio_path = media_path if event.media_type == "audio" else None
         return media_path, image_path, audio_path
 
+    def _apply_contact_metadata(contact, event: InboundEvent) -> None:
+        """Persist provider-resolved chat metadata onto the contact (plano 13 Fase 0).
+
+        GOWA resolves a group's name / can-send / archive status from its client and
+        carries them on the event; other providers leave them ``None`` (no-op).
+        Sync — call via ``asyncio.to_thread``."""
+        changed = False
+        if event.is_group:
+            if event.group_name and getattr(contact, "group_name", None) != event.group_name:
+                contact.is_group = True
+                contact.group_name = event.group_name
+                changed = True
+            if event.can_send is not None and getattr(contact, "can_send", None) != event.can_send:
+                contact.can_send = event.can_send
+                changed = True
+        if (event.is_archived is not None
+                and not getattr(contact, "archived_by_app", False)
+                and getattr(contact, "is_archived", None) != event.is_archived):
+            contact.is_archived = event.is_archived
+            changed = True
+        if changed:
+            contact.save()
+
+    async def _ingest_echo(event: InboundEvent, channel_id: str, phone: str):
+        """Sync a message sent from the user's own device (``direction='out'``).
+
+        Mirror of the GOWA webhook's ``is_from_me`` branch, provider-agnostic: save
+        as an operator message + broadcast + ``message.sent`` (source echo), honoring
+        ``filter.message.outgoing``. (Outgoing-audio transcription is a follow-up.)"""
+        msg_id = event.external_msg_id or str(uuid.uuid4())
+        dedup_key = f"{channel_id}:{event.external_msg_id}" if event.external_msg_id else None
+        if dedup_key:
+            if dedup_key in state.processed_messages:
+                return
+            state.processed_messages.add(dedup_key)
+        text = (event.text or "").strip()
+        media_type = event.media_type
+        media_path, _img, _aud = await _resolve_inbound_media(event)
+        media_extras = event.media_extras or None
+        if not text and not media_type:
+            return
+        # Suppress the echo of a message WE just sent through the app.
+        if text:
+            sent_key = f"{channel_id}:{phone}:{text[:120]}"
+            sent_at = state.recently_sent.pop(sent_key, None)
+            if sent_at and (time.time() - sent_at) < 30:
+                logger.info("[Ingest] Ignoring echo-back for %s/%s", channel_id, phone)
+                return
+
+        outgoing_msg = {
+            "phone": phone, "channel_id": channel_id, "text": text, "msg_id": msg_id,
+            "media_type": media_type, "media_path": media_path, "media_extras": media_extras,
+            "reply_to_msg_id": event.reply_to_msg_id, "is_from_me": True,
+            "source": "echo", "raw": event.raw or {}, "ts": event.ts or time.time(),
+        }
+        outgoing_msg = await apply_filter(
+            "filter.message.outgoing", outgoing_msg, {"phone": phone})
+        if outgoing_msg is None:
+            logger.info("[Ingest] outgoing echo from %s filtered out", phone)
+            return
+        text = outgoing_msg.get("text", text)
+        msg_id = outgoing_msg.get("msg_id", msg_id)
+        media_type = outgoing_msg.get("media_type", media_type)
+        media_path = outgoing_msg.get("media_path", media_path)
+        media_extras = outgoing_msg.get("media_extras", media_extras)
+        reply_to = outgoing_msg.get("reply_to_msg_id", event.reply_to_msg_id)
+
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
+        await asyncio.to_thread(
+            contact.add_message, "assistant", text,
+            media_type=media_type, media_path=media_path, msg_id=msg_id,
+            reply_to_msg_id=reply_to, status="operator")
+        broadcast_msg: dict = {"role": "assistant", "content": text, "ts": time.time(),
+                               "msg_id": msg_id, "status": "operator"}
+        if reply_to:
+            broadcast_msg["reply_to_msg_id"] = reply_to
+        if media_type:
+            broadcast_msg["media_type"] = media_type
+            broadcast_msg["media_path"] = media_path
+        await ws_manager.broadcast("new_message", {
+            "phone": phone, "channel_id": channel_id, "message": broadcast_msg})
+        await emit_with_filter("message.sent", {
+            "phone": phone, "channel_id": channel_id, "text": text, "msg_id": msg_id,
+            "media_type": media_type, "media_path": media_path, "media_extras": media_extras,
+            "source": "echo", "status": "operator", "ts": time.time(),
+        })
+
     async def ingest_event(event: InboundEvent):
-        """Single ingress for ANY channel's inbound message (plano 11).
+        """Single ingress for ANY channel's inbound message (plano 11 / plano 13).
 
         Mirrors the GOWA webhook's pre-batch steps for a canonical ``InboundEvent``
         (dedup, contact resolution, broadcast, plugin filter/event) and feeds the
         SAME typing-aware orchestrator, keyed by ``(channel_id, chat_id)``. The
-        reply is later routed back out through the channel's own adapter.
+        reply is later routed back out through the channel's own adapter. GOWA
+        enrichment (group @mention prefix → ``display_text``, ``trigger_ai`` gate
+        for group-no-mention, echo via ``direction='out'``, group/archive metadata)
+        is carried on the event; defaults keep Cloud/Telegram identical.
         """
         if getattr(event, "kind", "message") != "message":
             return
         channel_id = event.channel_id or "default"
         phone = event.chat_id or event.sender_id
         if not phone:
+            return
+
+        # Echo of a message sent from the user's own device (plano 13 Fase 0).
+        if getattr(event, "direction", "in") == "out":
+            await _ingest_echo(event, channel_id, phone)
             return
 
         # Idempotency by (channel_id, external_msg_id) — providers re-deliver (P18).
@@ -1216,9 +920,13 @@ def register_routes(app, deps):
             state.processed_messages.add(dedup_key)
 
         text = (event.text or "").strip()
+        # display_text = operator/LLM-facing text (GOWA group "[Nome]: …"); falls
+        # back to text for providers that don't set it.
+        display_text = (event.display_text or text)
         media_type = event.media_type
         media_path, image_path, audio_path = await _resolve_inbound_media(event)
         media_extras = event.media_extras or None
+        reply_to = event.reply_to_msg_id
 
         if not text and not media_type:
             return
@@ -1232,21 +940,25 @@ def register_routes(app, deps):
                 return
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        if event.sender_name and not contact.is_group:
+        if event.sender_name and not event.is_group and not contact.is_group:
             await asyncio.to_thread(contact.set_wa_name, event.sender_name)
+        # Provider-resolved chat metadata (group name / can-send / archive).
+        await asyncio.to_thread(_apply_contact_metadata, contact, event)
         await asyncio.to_thread(contact.increment_unread, msg_id)
+        if event.is_group and event.mentioned:
+            await asyncio.to_thread(contact.mark_mention)
 
         logger.info("[Ingest] %s/%s: %s", channel_id, phone,
-                    text[:80] if text else f"[{media_type}]")
+                    display_text[:80] if display_text else f"[{media_type}]")
 
         parsed_msg = {
             "phone": phone,
             "channel_id": channel_id,
             "name": event.sender_name,
-            "text": text,
+            "text": display_text,
             "raw_text": text,
             "msg_id": msg_id,
-            "reply_to_msg_id": None,
+            "reply_to_msg_id": reply_to,
             "media_type": media_type,
             "media_path": media_path,
             "media_extras": media_extras,
@@ -1262,33 +974,70 @@ def register_routes(app, deps):
         if parsed_msg is None:
             logger.info("[Ingest] inbound from %s filtered out before save", phone)
             return
-        text = parsed_msg.get("text", text)
+        display_text = parsed_msg.get("text", display_text)
         msg_id = parsed_msg.get("msg_id", msg_id)
+        reply_to = parsed_msg.get("reply_to_msg_id", reply_to)
         media_type = parsed_msg.get("media_type", media_type)
         media_path = parsed_msg.get("media_path", media_path)
         media_extras = parsed_msg.get("media_extras", media_extras)
 
-        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time(), "msg_id": msg_id}
+        broadcast_msg: dict = {"role": "user", "content": display_text,
+                               "ts": time.time(), "msg_id": msg_id}
+        if reply_to:
+            broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:
             broadcast_msg["media_type"] = media_type
             broadcast_msg["media_path"] = media_path
+        if event.is_group and event.mentioned:
+            broadcast_msg["mentioned"] = True
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": broadcast_msg})
 
         await emit_with_filter("message.received", parsed_msg)
 
+        # Group message with no @mention (group_reply_mode): save to history +
+        # message.saved, but do NOT run the agent (plano 13 Fase 0 — trigger_ai).
+        if not getattr(event, "trigger_ai", True):
+            await asyncio.to_thread(
+                contact.add_message, "user", display_text,
+                media_type=media_type, media_path=media_path,
+                msg_id=msg_id, reply_to_msg_id=reply_to)
+            await emit_with_filter("message.saved", {
+                "phone": phone, "channel_id": channel_id, "text": display_text,
+                "msg_id": msg_id, "media_type": media_type, "media_path": media_path,
+                "media_extras": media_extras, "is_group": event.is_group,
+                "group_jid": event.chat_id if event.is_group else None,
+                "source": "group_no_mention", "ts": time.time(),
+            })
+            return
+
         key = (channel_id, phone)
+        # A real message proves the contact finished typing — clear any stale
+        # `composing` flag so the orchestrator doesn't block on it until the 25s
+        # stale timeout (mirror of the legacy GOWA handler; no-op for channels
+        # without presence, which never set typing_state).
+        ts = state.typing_state.get(key)
+        if ts and ts.get("active"):
+            state.typing_state[key] = {**ts, "active": False}
         state.pending_messages.setdefault(key, []).append({
-            "text": text,
+            "text": display_text,
             "image_path": image_path if event.media_type == "image" else None,
             "audio_path": audio_path if event.media_type == "audio" else None,
             "media_type": media_type,
             "media_path": media_path,
             "media_extras": media_extras,
             "msg_id": msg_id,
-            "reply_to_msg_id": None,
+            "reply_to_msg_id": reply_to,
         })
         _schedule_orchestrator(channel_id, phone)
+
+        # Bound the dedup + recently-sent sets (mirror of the legacy GOWA handler).
+        if len(state.processed_messages) > 5000:
+            for item in list(state.processed_messages)[:2500]:
+                state.processed_messages.discard(item)
+        now = time.time()
+        for k in [k for k, v in state.recently_sent.items() if now - v > 60]:
+            state.recently_sent.pop(k, None)
 
     # Expose the ingress for the per-channel webhook route (Cloud/Telegram/…).
     deps.ingest_event = ingest_event

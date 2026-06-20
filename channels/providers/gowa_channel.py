@@ -135,10 +135,23 @@ class GOWAChannel(Channel):
 
     # ── Inbound ──────────────────────────────────────────────────────
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
-        # Placeholder: the live webhook still parses inline. When the GOWA
-        # parsing is extracted to a pure function (plano 02 §0.5) it is reused
-        # here. Returning [] keeps the contract valid without duplicating logic.
-        return []
+        """Translate a raw GOWA webhook body into InboundEvents (plano 13 Fase 0).
+
+        Delegates to ``gowa.inbound.parse_gowa_inbound`` (the extracted pure-ish
+        parser), passing this channel's client + the configured group_reply_mode.
+        Bot identity defaults to what ``group_mentions`` holds (set by the status
+        poll). Blocking client/DB lookups happen inside — callers run it via
+        ``asyncio.to_thread``.
+        """
+        from gowa.inbound import parse_gowa_inbound
+        group_mode = "mention_only"
+        try:
+            from db.repositories import config_repo
+            group_mode = config_repo.get("group_reply_mode", "mention_only") or "mention_only"
+        except Exception:  # noqa: BLE001
+            pass
+        return parse_gowa_inbound(raw, channel_id=self.channel_id,
+                                  client=self._client, group_mode=group_mode)
 
 
 def build_gowa_channel(channel_id: str, row: dict | None, *,

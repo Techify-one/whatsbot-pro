@@ -16,13 +16,13 @@ from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
-from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task, audit_purge_loop
+from server.background import audit_purge_loop
 from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, audit as audit_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
-from plugins.loader import bootstrap_initial_plugins, discover_and_load, PluginRegistry
-from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services
+from plugins.loader import bootstrap_initial_plugins, bootstrap_gowa_upgrade, discover_and_load, PluginRegistry
+from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services, set_channel_runtime as _set_channel_runtime, set_deps as _set_deps
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
 from runtime.subprocess_service import SubprocessService
@@ -100,10 +100,12 @@ def create_app(
     # plugin routes/tools/prompts are wired into the app before the first request.
     plugins_dir = settings.data_dir / "storages" / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    bootstrap_initial_plugins(
-        plugins_dir,
-        settings.data_dir / "assets" / "plugin_examples",
-    )
+    _plugin_examples_dir = settings.data_dir / "assets" / "plugin_examples"
+    bootstrap_initial_plugins(plugins_dir, _plugin_examples_dir)
+    # plano 13: existing installs (storages/plugins already populated, so the
+    # bootstrap above no-ops) that actually use GOWA get the bundled gowa plugin
+    # installed+enabled here, once. WHATSBOT_TEST-guarded (no-op in the suite).
+    bootstrap_gowa_upgrade(plugins_dir, _plugin_examples_dir)
     registry = discover_and_load(plugins_dir)
 
     # Channel registry (plano 02 Fase 0). Core registers the internal GOWA
@@ -258,14 +260,20 @@ def create_app(
         # plugin can register a supervised task via ctx.spawn_task() during setup
         # (plano 02 Fase 1 — channel providers register their polling loop there).
         supervisor = TaskSupervisor()
-        supervisor.register(TaskSpec(
-            "gowa_start", lambda: start_gowa_task(deps), policy=RestartPolicy.TRANSIENT))
-        supervisor.register(TaskSpec(
-            "status_poll", lambda: status_poll_loop(deps), policy=RestartPolicy.PERMANENT))
-        supervisor.register(TaskSpec(
-            "qr_poll", lambda: qr_poll_loop(deps), policy=RestartPolicy.PERMANENT))
-        supervisor.register(TaskSpec(
-            "avatar_fetch", lambda: avatar_fetch_task(deps), policy=RestartPolicy.PERMANENT))
+        # GOWA's bring-up + 3 polling loops are owned by the gowa PLUGIN when it's
+        # loaded (its lifecycle.setup spawns them with owner='gowa', auto-stopped on
+        # disable/uninstall). The core registers them ONLY when the gowa plugin is
+        # absent — never both (plano 13 Fase 2 double-start footgun guard).
+        # registry.loaded is fixed at create_app (before lifespan), so this is a
+        # single deterministic decision. With gowa disabled/absent neither side
+        # runs them → the core boots with zero channels by design.
+        # GOWA's bring-up + status/QR/avatar polling are owned EXCLUSIVELY by the
+        # gowa plugin (its lifecycle.setup spawns them with owner='gowa'). The core
+        # NEVER registers them — so disabling/uninstalling the plugin truly stops
+        # GOWA (goal #2) and the core boots + operates with zero channels (goal #3).
+        # A core fallback keyed on registry.loaded would resurrect GOWA on disable
+        # (the channel row persists), which is exactly the bug to avoid.
+        # audit_purge is not a channel concern and stays core, always registered.
         supervisor.register(TaskSpec(
             "audit_purge", lambda: audit_purge_loop(deps), policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
@@ -274,6 +282,16 @@ def create_app(
         subprocess_service = SubprocessService()
         state.subprocess_service = subprocess_service
         _set_runtime_services(supervisor, subprocess_service)
+        # Channel runtime (plano 13 Fase 1.1): wire the registry/router/inbound
+        # funnel into the plugin context BEFORE plugin setup() runs, so a channel
+        # provider plugin (GOWA/Telegram) can register live channels and push
+        # inbound via ctx.ingest_event. deps.ingest_event was set by
+        # webhook.register_routes during create_app.
+        _set_channel_runtime(channel_registry, outbound_router,
+                             getattr(deps, "ingest_event", None))
+        # Server deps (plano 13 Fase 1.2): wired BEFORE plugin setup() so a
+        # first-party lifecycle plugin (GOWA) can own its subprocess + polling.
+        _set_deps(deps)
 
         # Plugin lifecycle (plano 09 Fase 1): call+await setup() for plugins that
         # declared entry.lifecycle. A failing setup() does not bring down the app.

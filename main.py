@@ -53,7 +53,11 @@ def main():
     port = settings.get("gowa_port", 3000)
     web_port = settings.get("web_port", 8080)
 
-    webhook_url = f"http://127.0.0.1:{web_port}/api/webhook"
+    # GOWA ingresses through the generic per-channel route (plano 13 Fase 0):
+    # POST → registry.get("default").parse_inbound → _dispatch_events → ingest_event,
+    # the SAME funnel as Cloud/Telegram. The legacy exact /api/webhook handler is
+    # kept registered as a fallback — to revert, point this back at "/api/webhook".
+    webhook_url = f"http://127.0.0.1:{web_port}/api/webhook/gowa/default"
     gowa_manager = GOWAManager(port=port, data_dir=settings.data_dir, webhook_url=webhook_url)
     gowa_client = GOWAClient(port=port)
 

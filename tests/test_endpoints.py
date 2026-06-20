@@ -18,6 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load-bearing (plano 13): the test's Settings() resolves data_dir to the repo
+# root, so create_app reads the REAL storages/plugins + assets/plugin_examples.
+# This flag makes bootstrap_gowa_upgrade a no-op so the suite never copies/enables
+# the bundled gowa plugin into the git-ignored storages/plugins (which would change
+# create_app behavior and dirty the tree). Set BEFORE importing server.app.
+os.environ["WHATSBOT_TEST"] = "1"
+
 # Initialize the engine in a temp directory before importing anything else.
 # Default: SQLite. Override with ``WHATSBOT_TEST_DB_URL`` to run the same
 # assertions against Postgres (e.g. via testcontainers).
@@ -94,6 +101,12 @@ mock_gowa_client.react_to_message = MagicMock(return_value=None)
 mock_gowa_client.reconnect = MagicMock(return_value=None)
 mock_gowa_client.logout = MagicMock(return_value=None)
 mock_gowa_client.get_own_number = MagicMock(return_value="5511999990001")
+# Lookups parse_gowa_inbound makes via the client (return concrete values, not
+# bare MagicMocks, so contact.save() doesn't try to persist a Mock — plano 13).
+mock_gowa_client.get_group_name = MagicMock(return_value="Grupo Teste")
+mock_gowa_client.can_bot_send_in_group = MagicMock(return_value=True)
+mock_gowa_client.is_chat_archived = MagicMock(return_value=False)
+mock_gowa_client.get_message_filename = MagicMock(return_value="")
 
 # Create real Settings and AgentHandler (backed by test DB)
 settings = Settings()
@@ -927,8 +940,12 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 16 permissions", _perm_count == 16)
-check("RBAC seed -> role_permissions populated (gestor 13 + atendente 5)", _rp_count == 18)
+check("RBAC seed -> 18 permissions", _perm_count == 18)
+check("RBAC seed -> role_permissions populated (gestor 15 + atendente 5)", _rp_count == 20)
+with _get_engine().connect() as _conn:
+    _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
+check("RBAC seed -> template.create/template.delete present",
+      {"template.create", "template.delete"} <= _perm_keys)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15g. RBAC users + login (plano 03 Fases 2-3, aditivo)
@@ -963,7 +980,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 16 permissions", len([p for p in _perms if p != "*"]) == 16)
+check("admin me -> all 18 permissions", len([p for p in _perms if p != "*"]) == 18)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -981,15 +998,17 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 13 perms, no '*'", "*" not in _gperms and len(_gperms) == 13)
+check("gestor resolver -> 15 perms, no '*'", "*" not in _gperms and len(_gperms) == 15)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
+check("gestor has template.create/template.delete",
+      {"template.create", "template.delete"} <= _gperms)
 check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_admin["id"]))
 
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 16 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 16)
+check("GET /api/roles -> 3 roles + 18 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 18)
 
 r = client.get("/api/users")
 check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
@@ -1102,9 +1121,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 13)
-check("GET /api/roles -> admin shows all 16",
-      len(_by_key["admin"]["permission_keys"]) == 16)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 15)
+check("GET /api/roles -> admin shows all 18",
+      len(_by_key["admin"]["permission_keys"]) == 18)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1158,7 +1177,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 13 perms", len(_rrepo.get_role_permissions("gestor")) == 13)
+check("gestor restored to 15 perms", len(_rrepo.get_role_permissions("gestor")) == 15)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
@@ -1754,6 +1773,14 @@ _deps = app.state.deps
 _registry = _deps.channel_registry
 _router = _deps.outbound_router
 
+# plano 13: this suite's GOWA coverage rides on the UNCONDITIONAL 'default' gowa
+# channel that create_app materializes with the MOCK client — NOT on the gowa
+# PLUGIN, which must never load here (bootstrap_gowa_upgrade is WHATSBOT_TEST-
+# guarded and a freshly-discovered gowa row defaults to disabled). Pin it: a guard
+# or default-enable regression then fails HERE, not as unexplained count drift.
+check("plano 13: gowa plugin NOT loaded under WHATSBOT_TEST (sole-owner suite invariant)",
+      "gowa" not in _deps.plugins_registry.loaded)
+
 
 class _FakeChannel(_Channel):
     """In-test provider — records sends, parses a trivial inbound payload."""
@@ -1911,6 +1938,298 @@ settings.set("message_batch_delay", _old_bd)
 check("POST /api/webhook/test/fake_ch -> 200", r.status_code == 200)
 check("POST inbound -> 1 evento parseado", r.json()["data"].get("events") == 1)
 check("POST inbound -> evento ingerido (handled>=1)", r.json()["data"].get("handled", 0) >= 1)
+
+# ═══════════════════════════════════════════════════════════════════
+#  19c. Telegram plugin (plano 13 Fase 3) — canal 100% sobre o ponto de extensão
+# ═══════════════════════════════════════════════════════════════════
+section("Telegram plugin (plano 13)")
+
+import importlib.util as _ilu
+_tg_path = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / "telegram" / "channels.py"
+_tg_spec = _ilu.spec_from_file_location("tg_channels_test", str(_tg_path))
+_tg_mod = _ilu.module_from_spec(_tg_spec); _tg_spec.loader.exec_module(_tg_mod)
+_TelegramChannel = _tg_mod.TelegramChannel
+
+_tg = _TelegramChannel("tg_ch", credentials={"bot_token": "123:ABC"})
+
+# Capabilities dirigem o comportamento (sem if provider ==)
+check("telegram caps: sem QR, sem templates, grupos on, janela 0h",
+      (not _tg.capabilities.qr) and (not _tg.capabilities.templates)
+      and _tg.capabilities.groups and _tg.capabilities.session_window_hours == 0)
+check("telegram é um Channel registrável (CHANNEL_PROVIDERS)",
+      _tg_mod.CHANNEL_PROVIDERS == [_TelegramChannel])
+
+# parse_inbound: texto privado
+_ev = _tg.parse_inbound({"update_id": 1, "message": {
+    "message_id": 11, "date": 1700000000, "chat": {"id": 555, "type": "private"},
+    "from": {"id": 555, "first_name": "João", "last_name": "Silva"}, "text": "oi bot"}})[0]
+check("telegram parse: texto privado -> message", _ev.kind == "message" and _ev.text == "oi bot")
+check("telegram parse: chat_id/sender_id/nome resolvidos",
+      _ev.chat_id == "555" and _ev.sender_id == "555" and _ev.sender_name == "João Silva")
+check("telegram parse: external_msg_id + ts", _ev.external_msg_id == "11" and _ev.ts == 1700000000.0)
+check("telegram parse: privado não é grupo", _ev.is_group is False)
+
+# foto com caption (media_id alimenta o download da pipeline; caption vira texto)
+_evp = _tg.parse_inbound({"message": {"message_id": 12, "date": 1, "chat": {"id": 5, "type": "private"},
+    "from": {"id": 5, "first_name": "J"}, "photo": [{"file_id": "small"}, {"file_id": "BIG"}], "caption": "olha"}})[0]
+check("telegram parse: foto -> image + maior file_id + caption como texto",
+      _evp.media_type == "image" and _evp.media_extras.get("media_id") == "BIG" and _evp.text == "olha")
+
+# voz em grupo -> audio (transcrição roda na pipeline)
+_evv = _tg.parse_inbound({"message": {"message_id": 13, "date": 1, "chat": {"id": 9, "type": "supergroup", "title": "G"},
+    "from": {"id": 7, "username": "ze"}, "voice": {"file_id": "V", "duration": 5, "mime_type": "audio/ogg"}}})[0]
+check("telegram parse: voz -> audio + is_voice_note + grupo",
+      _evv.media_type == "audio" and _evv.media_extras.get("is_voice_note") and _evv.is_group)
+
+# localização: media_path geo: (NÃO tenta download)
+_evl = _tg.parse_inbound({"message": {"message_id": 14, "date": 1, "chat": {"id": 9, "type": "private"},
+    "from": {"id": 7}, "location": {"latitude": -23.5, "longitude": -46.6}}})[0]
+check("telegram parse: location -> geo media_path",
+      _evl.media_type == "location" and _evl.media_path == "geo:-23.5,-46.6")
+
+# reação e updates ignorados
+_evr = _tg.parse_inbound({"message_reaction": {"message_id": 20, "date": 1, "chat": {"id": 9},
+    "user": {"id": 7}, "new_reaction": [{"type": "emoji", "emoji": "👍"}]}})[0]
+check("telegram parse: message_reaction -> reaction event",
+      _evr.kind == "reaction" and _evr.media_extras.get("emoji") == "👍"
+      and _evr.media_extras.get("reacted_message_id") == "20")
+check("telegram parse: update sem mensagem -> []", _tg.parse_inbound({"update_id": 99}) == [])
+check("telegram parse: raw não-dict -> []", _tg.parse_inbound(None) == [])
+
+# Outbound/status sem rede: patch do _request
+_tg_calls = []
+def _tg_fake_request(method, payload=None, files=None):
+    _tg_calls.append((method, payload, files))
+    if method == "getMe":
+        return {"ok": True, "result": {"id": 1, "username": "meubot", "first_name": "Bot"}}
+    return {"ok": True, "result": {"message_id": 42}}
+_tg._request = _tg_fake_request
+
+_tsr = _tg.send_text("555", "resposta", reply_to="11")
+check("telegram send_text -> ok + external_msg_id", _tsr.ok and _tsr.external_msg_id == "42")
+check("telegram send_text -> sendMessage + reply_parameters",
+      _tg_calls[-1][0] == "sendMessage"
+      and _tg_calls[-1][1].get("reply_parameters", {}).get("message_id") == 11)
+
+_tst = _tg.status()
+check("telegram status -> conectado via getMe",
+      _tst["connected"] and _tst["logged_in"] and _tst.get("own_username") == "meubot")
+
+_tg.react("555", "11", "❤️")
+check("telegram react -> setMessageReaction com emoji",
+      _tg_calls[-1][0] == "setMessageReaction"
+      and _tg_calls[-1][1]["reaction"][0]["emoji"] == "❤️")
+
+_tsm = _tg.send_media("555", "image", "https://x/y.jpg", caption="cap")
+check("telegram send_media(url) -> sendPhoto com link no campo photo",
+      _tg_calls[-1][0] == "sendPhoto" and _tg_calls[-1][1].get("photo") == "https://x/y.jpg")
+
+# Token ausente -> erro limpo, sem rede (nunca derruba o core)
+_tg_noTok = _TelegramChannel("tg2")
+check("telegram sem token -> status missing_bot_token",
+      _tg_noTok.status().get("error") == "missing_bot_token")
+check("telegram sem token -> send_text not ok", not _tg_noTok.send_text("1", "x").ok)
+
+# ── Runtime exposto ao contexto do plugin (plano 13 Fase 1.1) ──
+from plugins.context import (set_channel_runtime as _scr, get_channel_runtime as _gcr,
+                             PluginContext as _PluginCtx)
+from plugins.lifecycle import manager as _lcm11
+_prev_rt = _gcr()
+def _sentinel_ingest(ev):
+    return None
+_scr(_registry, _router, _sentinel_ingest)
+check("Fase 1.1: get_channel_runtime devolve o que foi wired",
+      _gcr() == (_registry, _router, _sentinel_ingest))
+check("Fase 1.1: PluginContext expõe os campos de canal",
+      all(hasattr(_PluginCtx("x"), a)
+          for a in ("channel_registry", "outbound_router", "ingest_event")))
+_ctx11 = _lcm11._ensure_context("telegram_rt_test", None, None)
+check("Fase 1.1: _ensure_context injeta channel_registry no ctx",
+      _ctx11.channel_registry is _registry)
+check("Fase 1.1: _ensure_context injeta outbound_router no ctx",
+      _ctx11.outbound_router is _router)
+check("Fase 1.1: _ensure_context injeta ingest_event no ctx",
+      _ctx11.ingest_event is _sentinel_ingest)
+_lcm11._contexts.pop("telegram_rt_test", None)
+_scr(*_prev_rt)  # restaura o estado anterior do runtime de canal
+
+# ═══════════════════════════════════════════════════════════════════
+#  19d. GOWA atrás do contrato (plano 13 Fase 0) — parse_gowa_inbound + ingest
+# ═══════════════════════════════════════════════════════════════════
+section("GOWA contrato (plano 13)")
+
+from gowa.inbound import parse_gowa_inbound as _pgi
+
+
+class _FakeGowaClient:
+    def get_message_filename(self, jid, mid):
+        return "nota.pdf"
+
+    def get_group_name(self, jid):
+        return "Equipe"
+
+    def can_bot_send_in_group(self, jid, bot):
+        return True
+
+    def is_chat_archived(self, jid):
+        return False
+
+
+_gc = _FakeGowaClient()
+
+# private text
+_g = _pgi({"event": "message", "payload": {
+    "from": "5511666660001@s.whatsapp.net", "id": "g1", "body": "oi", "from_name": "Ana"}},
+    client=_gc)[0]
+check("gowa parse: privado -> message in + chat_id digits",
+      _g.kind == "message" and _g.direction == "in" and _g.chat_id == "5511666660001"
+      and _g.text == "oi" and _g.display_text == "oi" and _g.trigger_ai)
+
+# group sem menção (mention_only) -> trigger_ai False + prefixo [Nome]
+_g = _pgi({"event": "message", "payload": {
+    "chat_id": "120363001@g.us", "from": "5511666660002@s.whatsapp.net", "id": "g2",
+    "body": "bom dia", "from_name": "Bia"}}, client=_gc, group_mode="mention_only")[0]
+check("gowa parse: grupo sem menção -> trigger_ai=False + display_text [Nome]:",
+      _g.is_group and _g.trigger_ai is False
+      and _g.display_text == "[Bia]: bom dia" and _g.group_name == "Equipe")
+
+# group com menção -> trigger_ai True + menção removida do display
+_g = _pgi({"event": "message", "payload": {
+    "chat_id": "120363001@g.us", "from": "5511666660002@s.whatsapp.net", "id": "g3",
+    "body": "@5599 oi bot", "from_name": "Bia"}}, client=_gc, bot_phone="5599",
+    group_mode="mention_only")[0]
+check("gowa parse: grupo com @menção -> trigger_ai=True + mentioned",
+      _g.mentioned and _g.trigger_ai and _g.display_text == "[Bia]: oi bot")
+
+# echo (is_from_me) -> direction out
+_g = _pgi({"event": "message", "payload": {
+    "from": "5511666660001@s.whatsapp.net", "id": "g4", "body": "resp", "is_from_me": True}},
+    client=_gc)[0]
+check("gowa parse: echo (is_from_me) -> direction=out", _g.direction == "out")
+
+# document -> filename resolvido via client
+_g = _pgi({"event": "message", "payload": {
+    "from": "5511666660001@s.whatsapp.net", "id": "g5", "document": {"path": "/x/u.bin"}}},
+    client=_gc)[0]
+check("gowa parse: documento -> filename resolvido",
+      _g.media_type == "document" and _g.media_extras.get("file_name") == "nota.pdf")
+
+# reaction / presence / ack(normalizado) / revoked / ignorado
+check("gowa parse: reaction",
+      _pgi({"event": "message.reaction", "payload": {
+          "chat_id": "5511@s.whatsapp.net", "reaction": "👍", "reacted_message_id": "r1"}})[0].kind == "reaction")
+check("gowa parse: presence",
+      _pgi({"event": "chat_presence", "payload": {
+          "from": "5511@s.whatsapp.net", "state": "composing"}})[0].media_extras.get("state") == "composing")
+_acks = _pgi({"event": "message.ack", "payload": {"receipt_type": "read", "ids": ["a1", "a2"],
+                                                  "chat_id": "5511@s.whatsapp.net"}})
+check("gowa parse: ack normalizado -> 1 receipt por id, status=read",
+      len(_acks) == 2 and all(a.kind == "receipt" and a.media_extras.get("status") == "read" for a in _acks))
+check("gowa parse: revoked", _pgi({"event": "message.revoked", "payload": {
+    "revoked_message_id": "v1", "chat_id": "5511@s.whatsapp.net"}})[0].kind == "revoked")
+check("gowa parse: evento desconhecido -> []", _pgi({"event": "nope", "payload": {}}) == [])
+
+# ── ingest_event honra os campos GOWA (via fake_ch, channel-agnostic) ──
+settings.set("message_batch_delay", 0)
+settings.set("auto_reply", True)
+agent_handler.api_key = "test-key-fake"
+
+
+async def _drive_one(ev):
+    await _deps.ingest_event(ev)
+    t = _deps.state.processing_tasks.get((ev.channel_id, ev.chat_id or ev.sender_id))
+    if t:
+        await t
+
+
+# display_text é o que vai pro histórico/LLM (prefixo [Nome]: preservado)
+_fake.sent.clear()
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=_PR(reply="ok grupo"))):
+    _aio.run(_drive_one(_InboundEvent(
+        channel_id="fake_ch", provider="test", kind="message",
+        external_msg_id="gi_disp", chat_id="5511666661111", sender_id="5511666661111",
+        text="olá", display_text="[Ana]: olá", trigger_ai=True)))
+_fc_disp = _contact11.get_by_phone("5511666661111")
+check("ingest: display_text salvo no histórico (prefixo [Nome]:)",
+      bool(_fc_disp) and any(m["content"] == "[Ana]: olá" for m in message_repo.get_all(_fc_disp["id"])))
+
+# trigger_ai=False (grupo sem menção): salva, NÃO agenda orquestrador, NÃO responde
+_fake.sent.clear()
+_aio.run(_drive_one(_InboundEvent(
+    channel_id="fake_ch", provider="test", kind="message",
+    external_msg_id="gi_noai", chat_id="5511666662222@g.us", sender_id="5511666662299",
+    is_group=True, text="oi grupo", display_text="[Zé]: oi grupo", trigger_ai=False)))
+_fc_noai = _contact11.get_by_phone("5511666662222@g.us")
+check("ingest: trigger_ai=False salva a mensagem no histórico",
+      bool(_fc_noai) and any(m["content"] == "[Zé]: oi grupo" for m in message_repo.get_all(_fc_noai["id"])))
+check("ingest: trigger_ai=False NÃO responde (sem envio pelo canal)",
+      not any("oi grupo" in t for _, t in _fake.sent))
+check("ingest: trigger_ai=False NÃO deixa task de orquestrador ativa",
+      _deps.state.processing_tasks.get(("fake_ch", "5511666662222@g.us")) is None)
+
+# echo (direction=out): salva como assistant/operator, não responde
+_fake.sent.clear()
+_aio.run(_drive_one(_InboundEvent(
+    channel_id="fake_ch", provider="test", kind="message", direction="out",
+    external_msg_id="gi_echo", chat_id="5511666663333", sender_id="5511666663333",
+    text="enviado do celular")))
+_fc_echo = _contact11.get_by_phone("5511666663333")
+_echo_msgs = message_repo.get_all(_fc_echo["id"]) if _fc_echo else []
+check("ingest: echo (direction=out) salvo como assistant",
+      any(m["content"] == "enviado do celular" and m["role"] == "assistant" for m in _echo_msgs))
+check("ingest: echo não dispara envio pelo canal",
+      not any("enviado do celular" in t for _, t in _fake.sent))
+
+# ── HTTP real: GOWA pela rota genérica /api/webhook/gowa/default (Fase 0.3) ──
+# Exatamente o caminho que o subprocesso GOWA passa a usar ao vivo:
+# POST → GOWAChannel.parse_inbound → parse_gowa_inbound → _dispatch_events → ingest.
+settings.set("message_batch_delay", 0)
+
+# Privado: contato com IA off (não dispara LLM no ciclo de fundo); só validamos o wiring.
+_contact11.get_or_create("5511707070001")
+_contact11.update(_contact11.get_by_phone("5511707070001")["id"], ai_enabled=0)
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message", "payload": {
+        "from": "5511707070001@s.whatsapp.net", "id": "gw_http_1", "body": "oi gowa",
+        "from_name": "Cliente"}})
+check("HTTP gowa: POST /api/webhook/gowa/default -> 200", r.status_code == 200)
+check("HTTP gowa: 1 evento parseado + ingerido",
+      r.json()["data"].get("events") == 1 and r.json()["data"].get("handled", 0) >= 1)
+
+# Grupo sem menção: salva no histórico de forma síncrona (trigger_ai=False), sem resposta
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message", "payload": {
+        "chat_id": "120363707070@g.us", "from": "5511707070099@s.whatsapp.net",
+        "id": "gw_http_grp", "body": "bom dia grupo", "from_name": "Membro"}})
+check("HTTP gowa: grupo sem menção -> 200", r.status_code == 200)
+_grp = _contact11.get_by_phone("120363707070@g.us")
+check("HTTP gowa: grupo sem menção salvo com prefixo [Nome]:",
+      bool(_grp) and any(m["content"] == "[Membro]: bom dia grupo"
+                         for m in message_repo.get_all(_grp["id"])))
+
+# Echo (is_from_me) pela rota genérica -> salvo como assistant/operator (síncrono)
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message", "payload": {
+        "from": "5511707070002@s.whatsapp.net", "id": "gw_http_echo",
+        "body": "msg do meu celular", "is_from_me": True}})
+check("HTTP gowa: echo -> 200", r.status_code == 200)
+_echo_http = _contact11.get_by_phone("5511707070002")
+check("HTTP gowa: echo salvo como assistant/operator",
+      bool(_echo_http) and any(m["content"] == "msg do meu celular" and m["role"] == "assistant"
+                               for m in message_repo.get_all(_echo_http["id"])))
+
+# Reaction pela rota genérica
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.reaction", "payload": {
+        "chat_id": "5511707070001@s.whatsapp.net", "from": "5511707070001@s.whatsapp.net",
+        "reaction": "🔥", "reacted_message_id": "gw_http_1"}})
+check("HTTP gowa: reaction -> 200 + handled", r.status_code == 200
+      and r.json()["data"].get("handled", 0) >= 1)
+
+# Canal desconhecido nunca derruba (200 ignored)
+check("HTTP gowa: canal inexistente -> 200 ignored",
+      client.post("/api/webhook/gowa/nao_existe", json={"event": "message", "payload": {}}).status_code == 200)
 
 # ── Conversa-cêntrico (plano 11 D1): leitura + unread + saída POR CONVERSA ──
 section("Conversa-cêntrico (plano 11 D1)")
@@ -2432,6 +2751,8 @@ class _FakeTplChannel(_Ch):
     def __init__(self, channel_id):
         super().__init__(channel_id, _Caps(templates=True, session_window_hours=24))
         self.sent = []
+        self.created = None
+        self.deleted = None
         self._tpls = [{
             "name": "boas_vindas", "language": "pt_BR", "category": "MARKETING",
             "status": "APPROVED", "components": [
@@ -2458,6 +2779,18 @@ class _FakeTplChannel(_Ch):
     def send_template(self, chat_id, template_name, lang="pt_BR", components=None):
         self.sent.append({"chat_id": chat_id, "name": template_name, "lang": lang, "components": components})
         return _SR(ok=True, external_msg_id="tpl_msg_99")
+
+    def create_template(self, name, *, category, language, body_text,
+                        header_text=None, footer_text=None,
+                        body_examples=None, header_examples=None):
+        self.created = {"name": name, "category": category, "language": language,
+                        "body_text": body_text, "header_text": header_text,
+                        "footer_text": footer_text, "body_examples": body_examples}
+        return {"ok": True, "id": "TPLNEW", "status": "PENDING", "category": category}
+
+    def delete_template(self, name):
+        self.deleted = name
+        return {"ok": True}
 
 
 _tpl_inbox = _ibx_repo.create(channel_id="cloud_test", name="Cloud Test")
@@ -2504,6 +2837,39 @@ check("send-template components não-lista -> 400",
       client.post(f"/api/conversations/{_tpl_conv['id']}/send-template",
                   json={"template_name": "x", "components": "nope"}).status_code == 400)
 
+# ── Create / delete templates (gated template.create / template.delete) ──
+_rt = client.get(f"/api/conversations/{_tpl_conv['id']}/templates").json()["data"]
+check("GET templates (cloud) -> can_create/can_delete flags (open install)",
+      _rt.get("can_create") is True and _rt.get("can_delete") is True)
+
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/templates", json={
+    "name": "pedido_ok", "category": "UTILITY", "language": "pt_BR",
+    "body_text": "Olá {{1}}, pedido {{2}} ok", "body_examples": ["João", "123"]})
+check("POST create template -> 200", r.status_code == 200)
+check("create template -> status PENDING retornado", r.json()["data"].get("status") == "PENDING")
+check("create template -> canal recebeu a definição",
+      _fake_ch.created and _fake_ch.created["name"] == "pedido_ok"
+      and _fake_ch.created["category"] == "UTILITY"
+      and _fake_ch.created["body_examples"] == ["João", "123"])
+check("create template nome inválido (maiúsc/espaço) -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "Pedido OK", "body_text": "x"}).status_code == 400)
+check("create template sem body_text -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "ok"}).status_code == 400)
+check("create template categoria inválida -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "ok", "body_text": "x", "category": "NOPE"}).status_code == 400)
+check("create template canal sem suporte -> 400",
+      client.post(f"/api/conversations/{_conv2['id']}/templates",
+                  json={"name": "ok", "body_text": "x"}).status_code == 400)
+
+r = client.delete(f"/api/conversations/{_tpl_conv['id']}/templates/pedido_ok")
+check("DELETE template -> 200", r.status_code == 200)
+check("delete template -> canal recebeu name", _fake_ch.deleted == "pedido_ok")
+check("delete template canal sem suporte -> 400",
+      client.delete(f"/api/conversations/{_conv2['id']}/templates/x").status_code == 400)
+
 # Compositor hints on the chat-messages endpoint.
 r = client.get(f"/api/conversations/{_tpl_conv['id']}/messages")
 check("conv messages (cloud) -> templates_supported=true", r.json()["data"].get("templates_supported") is True)
@@ -2526,6 +2892,7 @@ class _Resp:
         self.status_code = status
         self._p = payload
         self.text = ""
+        self.content = b"{}"
 
     def json(self):
         return self._p
@@ -2566,13 +2933,78 @@ try:
     _tpls = _ch.list_templates()
 finally:
     _wac.httpx.Client = _orig_httpx_client
-check("list_templates -> filtra APPROVED (PENDING fora)",
-      {t["name"] for t in _tpls} == {"t1", "t3"})
-check("list_templates -> seguiu paginação (2 páginas)", len(_tpls) == 2)
+check("list_templates -> inclui todos os status (PENDING incluso)",
+      {t["name"] for t in _tpls} == {"t1", "t2_pending", "t3"})
+check("list_templates -> seguiu paginação (2 páginas)", len(_tpls) == 3)
 check("list_templates -> normaliza type p/ minúsculas",
       _tpls[0]["components"][0]["type"] == "body")
+check("list_templates -> preserva status p/ badge",
+      next(t for t in _tpls if t["name"] == "t2_pending")["status"] == "PENDING")
 check("list_templates sem waba_id -> []",
       _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).list_templates() == [])
+
+
+# ── WhatsAppCloudChannel.create_template / delete_template (mock Graph) ──
+class _FakeWriteClient:
+    def __init__(self, resp):
+        self.resp = resp
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def post(self, url, headers=None, json=None):
+        self.calls.append(("post", url, json))
+        return self.resp
+
+    def delete(self, url, headers=None, params=None):
+        self.calls.append(("delete", url, params))
+        return self.resp
+
+
+_fwc = _FakeWriteClient(_Resp(200, {"id": "TPL123", "status": "PENDING", "category": "UTILITY"}))
+_wac.httpx.Client = lambda *a, **k: _fwc
+try:
+    _ch2 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+    _cres = _ch2.create_template(
+        "pedido_ok", category="UTILITY", language="pt_BR",
+        body_text="Olá {{1}}, pedido {{2}} ok", header_text="Aviso {{1}}",
+        footer_text="Equipe", body_examples=["João", "123"], header_examples=["Promo"])
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("create_template -> ok + id/status",
+      _cres.get("ok") and _cres.get("id") == "TPL123" and _cres.get("status") == "PENDING")
+_sent_payload = _fwc.calls[-1][2]
+check("create_template -> componentes HEADER/BODY/FOOTER uppercase",
+      [c["type"] for c in _sent_payload["components"]] == ["HEADER", "BODY", "FOOTER"])
+_body_comp = next(c for c in _sent_payload["components"] if c["type"] == "BODY")
+check("create_template -> body example aninhado [[...]]",
+      _body_comp["example"]["body_text"] == [["João", "123"]])
+_hdr_comp = next(c for c in _sent_payload["components"] if c["type"] == "HEADER")
+check("create_template -> header TEXT + example",
+      _hdr_comp["format"] == "TEXT" and _hdr_comp["example"]["header_text"] == ["Promo"])
+check("create_template -> payload name/category/language",
+      _sent_payload["name"] == "pedido_ok" and _sent_payload["category"] == "UTILITY"
+      and _sent_payload["language"] == "pt_BR")
+check("create_template sem waba_id -> ok=False",
+      _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).create_template(
+          "n", category="UTILITY", language="pt_BR", body_text="b").get("ok") is False)
+
+_fwc_del = _FakeWriteClient(_Resp(200, {"success": True}))
+_wac.httpx.Client = lambda *a, **k: _fwc_del
+try:
+    _ch3 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+    _dres = _ch3.delete_template("pedido_ok")
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("delete_template -> ok", _dres.get("ok") is True)
+check("delete_template -> chamou DELETE com name",
+      _fwc_del.calls[-1][0] == "delete" and _fwc_del.calls[-1][2] == {"name": "pedido_ok"})
 
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")

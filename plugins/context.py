@@ -33,6 +33,20 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 # wired at lifespan so PluginContext.spawn_* can delegate to them.
 _supervisor: Optional[Any] = None
 _subprocess_service: Optional[Any] = None
+# Channel runtime (plano 13 Fase 1.1): the channel registry, outbound router and
+# the provider-agnostic inbound funnel, wired at lifespan so a channel-provider
+# plugin (GOWA, Telegram, …) can register/look up live channels and push inbound
+# events through the SAME orchestrator the GOWA webhook uses — without the core
+# knowing the provider. Read by PluginContext (and, when useful, tools).
+_channel_registry: Optional[Any] = None
+_outbound_router: Optional[Any] = None
+_ingest_event: Optional[Any] = None
+# Server dependencies (plano 13 Fase 1.2): the ServerDeps container, wired at
+# lifespan BEFORE plugin setup() runs. A first-party lifecycle plugin (GOWA) reads
+# it to own the subprocess + polling loops that the core used to register itself
+# (deps already holds gowa_manager/gowa_client/ws_manager/state/settings). Optional
+# — None in the test harness (lifespan is skipped) and for zero-channel boots.
+_deps: Optional[Any] = None
 
 
 def set_runtime(ws_manager: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -47,6 +61,44 @@ def set_runtime_services(supervisor: Any, subprocess_service: Any) -> None:
     global _supervisor, _subprocess_service
     _supervisor = supervisor
     _subprocess_service = subprocess_service
+
+
+def set_channel_runtime(channel_registry: Any, outbound_router: Any,
+                        ingest_event: Any) -> None:
+    """Wire the channel runtime for plugin providers (plano 13 Fase 1.1).
+
+    Called once at lifespan, BEFORE plugin ``setup()`` runs, so a channel plugin
+    can materialise its live channels and feed inbound through ``ctx.ingest_event``.
+    """
+    global _channel_registry, _outbound_router, _ingest_event
+    _channel_registry = channel_registry
+    _outbound_router = outbound_router
+    _ingest_event = ingest_event
+
+
+def get_channel_runtime() -> tuple:
+    """Return the wired ``(channel_registry, outbound_router, ingest_event)``.
+
+    Reads the live module globals (re-bound by :func:`set_channel_runtime`), so a
+    consumer always sees the current wiring rather than a stale import-time copy.
+    """
+    return (_channel_registry, _outbound_router, _ingest_event)
+
+
+def set_deps(deps: Any) -> None:
+    """Wire the server ``ServerDeps`` for first-party lifecycle plugins (plano 13).
+
+    Called once at lifespan, BEFORE plugin ``setup()`` runs, so the GOWA plugin
+    can reach gowa_manager/gowa_client/ws_manager/state/settings to own its
+    subprocess + polling loops. Other plugins ignore it.
+    """
+    global _deps
+    _deps = deps
+
+
+def get_deps() -> Optional[Any]:
+    """Return the wired ``ServerDeps`` (None until :func:`set_deps`, e.g. in tests)."""
+    return _deps
 
 
 def broadcast(event: str, data: dict) -> None:
@@ -120,6 +172,18 @@ class PluginContext:
     loop: Optional[asyncio.AbstractEventLoop] = None
     plugin_db: Optional[Callable[[], Any]] = None
     broadcast: Optional[Callable[[str, dict], None]] = None
+    # Channel runtime (plano 13 Fase 1.1) — populated from the wired module
+    # globals by the lifecycle manager. A channel-provider plugin uses these to
+    # register/find live channels and to push inbound events through the shared
+    # orchestrator. ``ingest_event`` is an ``async`` callable: ``await
+    # ctx.ingest_event(InboundEvent(...))``.
+    channel_registry: Optional[Any] = None
+    outbound_router: Optional[Any] = None
+    ingest_event: Optional[Callable[[Any], Any]] = None
+    # ServerDeps (plano 13 Fase 1.2) — populated from the wired module global by the
+    # lifecycle manager. A first-party lifecycle plugin (GOWA) uses it to own the
+    # subprocess + polling loops. None in tests / zero-channel boots.
+    deps: Optional[Any] = None
     _disposables: list = dataclasses.field(default_factory=list, repr=False)
 
     def on_unload(self, fn: Callable[[], Any]) -> None:

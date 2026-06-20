@@ -82,13 +82,33 @@ class Channel(ABC):
         raise NotImplementedError(f"{self.provider} does not support templates")
 
     def list_templates(self) -> list[dict]:
-        """List approved message templates (HSM) for the account.
+        """List message templates (HSM) for the account, any status.
 
         Optional, default raises NotImplementedError (like ``send_template``). Only
         channels with ``capabilities.templates`` implement it. Each item is
         normalized to ``{name, language, category, status, components:[...]}``.
         """
         raise NotImplementedError(f"{self.provider} does not support listing templates")
+
+    def create_template(self, name: str, *, category: str, language: str,
+                        body_text: str, header_text: Optional[str] = None,
+                        footer_text: Optional[str] = None,
+                        body_examples: Optional[list] = None,
+                        header_examples: Optional[list] = None) -> dict:
+        """Create a message template (HSM) at the provider, returning the raw result.
+
+        Optional, default raises NotImplementedError. Only channels with
+        ``capabilities.templates`` implement it. Returns
+        ``{ok, id?, status?, category?, error?}``.
+        """
+        raise NotImplementedError(f"{self.provider} does not support creating templates")
+
+    def delete_template(self, name: str) -> dict:
+        """Delete a message template (all language versions) by name.
+
+        Optional, default raises NotImplementedError. Returns ``{ok, error?}``.
+        """
+        raise NotImplementedError(f"{self.provider} does not support deleting templates")
 
     # ── Inbound ──────────────────────────────────────────────────────
     @abstractmethod

@@ -25,6 +25,7 @@ import { h } from 'preact';
 import { useEffect, useState, useMemo, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { getConversationFilterSchema, getUsers, getMe, getTags } from '../services/api.js';
+import { SearchableSelect } from './SearchableSelect.js';
 
 const html = htm.bind(h);
 
@@ -271,22 +272,26 @@ export function FilterBar({ onChange }) {
     }
 
     if (dim.kind === 'assignee') {
+      // Materialize the fixed buckets + one option per user, then let
+      // SearchableSelect filter — the list grows with the team.
+      const assigneeOptions = [
+        ...(currentUserId != null ? [{ value: 'me', label: 'Minhas' }] : []),
+        { value: 'present', label: 'Atribuídas' },
+        { value: 'none', label: 'Não atribuídas' },
+        ...users.map((u) => ({ value: String(u.id), label: u.name || u.email })),
+      ];
       return html`
-        <div class="flex flex-col" key=${dim.key}>
+        <div class="flex flex-col min-w-[180px]" key=${dim.key}>
           <label class="text-[11px] text-wa-secondary mb-1">${dim.label || 'Responsável'}</label>
-          <select
-            class="wa-field px-3 py-2 rounded-md text-[14px]"
+          <${SearchableSelect}
             value=${value}
-            onChange=${(e) => setFilter(dim.key, e.target.value)}
-          >
-            <option value="">Todas</option>
-            ${currentUserId != null ? html`<option value="me">Minhas</option>` : null}
-            <option value="present">Atribuídas</option>
-            <option value="none">Não atribuídas</option>
-            ${users.map((u) => html`
-              <option key=${u.id} value=${String(u.id)}>${u.name || u.email}</option>
-            `)}
-          </select>
+            onChange=${(v) => setFilter(dim.key, v)}
+            options=${assigneeOptions}
+            placeholder="Todas"
+            searchPlaceholder="Buscar responsável..."
+            allowEmpty=${true}
+            emptyLabel="Todas"
+          />
         </div>
       `;
     }

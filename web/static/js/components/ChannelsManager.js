@@ -67,6 +67,7 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
   const [appSecret, setAppSecret] = useState('');
+  const [botToken, setBotToken] = useState('');
 
   const idErr = id && !ID_RE.test(id)
     ? 'Use apenas letras minúsculas, números e _ (começando por letra).'
@@ -89,6 +90,8 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
       if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
       if (appSecret.trim()) credentials.app_secret = appSecret.trim();
       if (Object.keys(credentials).length) payload.credentials = credentials;
+    } else if (provider === 'telegram') {
+      if (botToken.trim()) payload.credentials = { bot_token: botToken.trim() };
     }
     return payload;
   }
@@ -167,6 +170,19 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="password" placeholder="App Secret do app Meta" value=${appSecret}
               onInput=${(e) => setAppSecret(e.target.value)} />
+          </div>
+        ` : null}
+
+        ${provider === 'telegram' ? html`
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Bot Token</label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              type="password" placeholder="123456:ABC-DEF... (do @BotFather)" value=${botToken}
+              onInput=${(e) => setBotToken(e.target.value)} />
+            <div class="text-[12px] text-wa-secondary mt-1">
+              Crie um bot com o <span class="font-medium">@BotFather</span> (<code>/newbot</code>) e cole o token.
+              Recebe por long-poll (sem host público) — basta criar e mandar mensagem ao bot.
+            </div>
           </div>
         ` : null}
 

@@ -20,6 +20,8 @@ PERMISSION_CATALOG = [
     ("billing.manage",        "Recargas/saldo (Techify)"),
     ("agent.manage",          "Prompt/modelo/tools do agente"),
     ("quickreply.manage",     "Respostas rápidas"),
+    ("template.create",       "Criar templates (WhatsApp Cloud)"),
+    ("template.delete",       "Apagar templates (WhatsApp Cloud)"),
     ("users.manage",          "Criar/editar/desativar usuários e papéis"),
     ("audit.read",            "Ler trilha de auditoria"),
 ]
@@ -37,7 +39,7 @@ ROLE_DEFAULTS = {
         "conversation.read", "conversation.reply", "conversation.assign",
         "conversation.resolve", "contact.read", "contact.write", "channel.manage",
         "settings.manage", "plugins.manage", "billing.manage", "agent.manage",
-        "quickreply.manage", "audit.read",
+        "quickreply.manage", "template.create", "template.delete", "audit.read",
     },
     "atendente": {
         "conversation.read", "conversation.reply", "conversation.resolve",

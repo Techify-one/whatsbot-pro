@@ -514,6 +514,18 @@ export async function sendConversationTemplate(convId, payload) {
   return request('POST', `/api/conversations/${convId}/send-template`, payload);
 }
 
+// Create a template (WhatsApp Cloud) — gated by template.create.
+// body: {name, category?, language?, body_text, header_text?, footer_text?,
+//        body_examples?, header_examples?}
+export async function createConversationTemplate(convId, payload) {
+  return request('POST', `/api/conversations/${convId}/templates`, payload);
+}
+
+// Delete a template (all languages) by name — gated by template.delete.
+export async function deleteConversationTemplate(convId, name) {
+  return request('DELETE', `/api/conversations/${convId}/templates/${encodeURIComponent(name)}`);
+}
+
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
 // Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
 // Credentials are ALWAYS returned masked by the backend; sending a new

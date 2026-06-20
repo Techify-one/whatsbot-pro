@@ -20,32 +20,12 @@ AUDIT_RETENTION_DAYS_DEFAULT = 365
 logger = logging.getLogger(__name__)
 
 
-async def start_gowa_task(deps):
-    """Start GOWA subprocess and register device."""
-    gowa_manager = deps.gowa_manager
-    gowa_client = deps.gowa_client
-    ws_manager = deps.ws_manager
-    state = deps.state
-    try:
-        await asyncio.to_thread(gowa_manager.start)
-        for _ in range(10):
-            await asyncio.sleep(1)
-            if await asyncio.to_thread(gowa_client.health_check):
-                break
-        if await asyncio.to_thread(gowa_client.ensure_device):
-            state.notification = "GOWA pronto, aguardando QR..."
-            await ws_manager.broadcast("gowa_status", {"message": state.notification})
-        else:
-            state.notification = "Erro ao registrar device no GOWA"
-            await ws_manager.broadcast("gowa_status", {"message": state.notification})
-    except FileNotFoundError:
-        state.notification = "GOWA não encontrado — modo sandbox disponível"
-        logger.info("GOWA binary not found, sandbox-only mode.")
-        await ws_manager.broadcast("gowa_status", {"message": state.notification})
-    except Exception as e:
-        state.notification = "GOWA indisponível — modo sandbox disponível"
-        logger.info("GOWA failed to start (%s), sandbox-only mode.", e)
-        await ws_manager.broadcast("gowa_status", {"message": state.notification})
+# NOTE: GOWA bring-up (subprocess start + device register) is owned EXCLUSIVELY by
+# the gowa plugin (assets/plugin_examples/gowa/lifecycle.py → ctx.spawn_subprocess +
+# _post_spawn_init). The old core ``start_gowa_task`` was removed (plano 13): it
+# called ``gowa_manager.start()`` which builds a SECOND ManagedProcess named "gowa"
+# — re-attaching it anywhere would double-spawn GOWA over the same pid/session. The
+# 3 polling loops below ARE imported by the plugin (it owns them too).
 
 
 async def status_poll_loop(deps):

@@ -117,6 +117,41 @@ class OutboundRouter:
             logger.warning("list_templates failed on %s: %s", channel_id, e)
             return []
 
+    def create_template(self, channel_id: str, name: str, **kwargs) -> dict:
+        """Create a template on a channel (capability-gated, mirrors list_templates).
+
+        Returns ``{ok, ...}``; ``{ok: False, error}`` when the channel can't manage
+        templates, isn't live, or the provider call fails — so the caller maps it to
+        a clean API error instead of a 500.
+        """
+        if not self.supports(channel_id, "templates"):
+            return {"ok": False, "error": "templates_not_supported"}
+        inst = self.get(channel_id)
+        if inst is None:
+            return {"ok": False, "error": "channel_not_registered"}
+        try:
+            return inst.create_template(name, **kwargs)
+        except NotImplementedError:
+            return {"ok": False, "error": "templates_not_supported"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("create_template failed on %s: %s", channel_id, e)
+            return {"ok": False, "error": str(e)}
+
+    def delete_template(self, channel_id: str, name: str) -> dict:
+        """Delete a template (all languages) on a channel (capability-gated)."""
+        if not self.supports(channel_id, "templates"):
+            return {"ok": False, "error": "templates_not_supported"}
+        inst = self.get(channel_id)
+        if inst is None:
+            return {"ok": False, "error": "channel_not_registered"}
+        try:
+            return inst.delete_template(name)
+        except NotImplementedError:
+            return {"ok": False, "error": "templates_not_supported"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("delete_template failed on %s: %s", channel_id, e)
+            return {"ok": False, "error": str(e)}
+
     # ── Optional, capability-gated, best-effort ──────────────────────
     def send_presence(self, channel_id: str, chat_id: str, state: str) -> None:
         if not self.supports(channel_id, "presence"):

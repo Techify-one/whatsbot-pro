@@ -19,8 +19,9 @@ import {
   rollbackAgent,
   listPrompts,
   listRegisteredTools,
-  getModels,
 } from '../../services/api.js';
+import { ModelSelect } from '../ModelSelect.js';
+import { SearchableSelect } from '../SearchableSelect.js';
 
 const html = htm.bind(h);
 
@@ -88,7 +89,7 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, prompts, tools, models, onSave, onCancel, busy }) {
+function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCancel, busy }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
@@ -185,11 +186,15 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, models, onSave,
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Prompt</label>
-          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            value=${promptKey} onChange=${(e) => setPromptKey(e.target.value)}>
-            <option value="">— padrão do app —</option>
-            ${(prompts || []).map(p => html`<option key=${p.prompt_key} value=${p.prompt_key}>${p.prompt_key}</option>`)}
-          </select>
+          <${SearchableSelect}
+            value=${promptKey}
+            onChange=${setPromptKey}
+            options=${(prompts || []).map(p => ({ value: p.prompt_key, label: p.prompt_key }))}
+            placeholder="— padrão do app —"
+            searchPlaceholder="Buscar prompt..."
+            allowEmpty=${true}
+            emptyLabel="— padrão do app —"
+          />
           <div class="text-[11px] text-wa-secondary mt-1">
             Sem prompt selecionado, o agente usa o system prompt padrão do app. Crie prompts na aba <span class="font-medium">Prompts</span>.
           </div>
@@ -197,13 +202,13 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, models, onSave,
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Modelo</label>
-          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            value=${model} onChange=${(e) => setModel(e.target.value)}>
-            <option value="">— padrão do app —</option>
-            ${(models || []).map(m => html`<option key=${m.id} value=${m.id}>${m.name || m.id}</option>`)}
-            ${(model && !(models || []).some(m => m.id === model))
-              ? html`<option value=${model}>${model} (atual)</option>` : null}
-          </select>
+          <${ModelSelect}
+            value=${model}
+            onChange=${setModel}
+            placeholder="— padrão do app —"
+            allowEmpty=${true}
+            emptyLabel="— padrão do app —"
+          />
         </div>
 
         <div class="grid grid-cols-3 gap-2">
@@ -302,7 +307,6 @@ export default function AgentsManager() {
   const [agents, setAgents] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [tools, setTools] = useState([]);
-  const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
@@ -317,8 +321,8 @@ export default function AgentsManager() {
   async function load() {
     setLoading(true);
     setError('');
-    const [aRes, pRes, tRes, mRes] = await Promise.all([
-      listAgents(), listPrompts(), listRegisteredTools(), getModels(),
+    const [aRes, pRes, tRes] = await Promise.all([
+      listAgents(), listPrompts(), listRegisteredTools(),
     ]);
     if (aRes && aRes.ok) {
       const list = aRes.data || [];
@@ -329,7 +333,6 @@ export default function AgentsManager() {
     }
     if (pRes && pRes.ok) setPrompts(pRes.data || []);
     if (tRes && tRes.ok) setTools(tRes.data || []);
-    if (mRes && mRes.ok) setModels(mRes.data || []);
     setLoading(false);
   }
 
@@ -399,13 +402,13 @@ export default function AgentsManager() {
       ${creating ? html`
         <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
           existingKeys=${agents.map(a => a.agent_key)}
-          prompts=${prompts} tools=${tools} models=${models}
+          prompts=${prompts} tools=${tools}
           onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
       ` : null}
 
       ${editing ? html`
         <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-          prompts=${prompts} tools=${tools} models=${models}
+          prompts=${prompts} tools=${tools}
           onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
       ` : null}
 
