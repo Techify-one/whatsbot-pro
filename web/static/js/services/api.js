@@ -213,16 +213,21 @@ export async function pinContact(phone, pinned) {
 
 // conversationId (plano 11 D1) roteia o envio pelo CANAL daquela conversa via
 // OutboundRouter; ausente cai no 'default' (GOWA), preservando o legado.
-export async function sendMessage(phone, message, replyTo = null, conversationId = null) {
+// channelId roteia o envio quando a conversa AINDA não existe (1ª mensagem de uma
+// conversa nova iniciada pelo picker de caixa de entrada). Quando há conversationId,
+// o backend ignora channelId e usa o canal da conversa.
+export async function sendMessage(phone, message, replyTo = null, conversationId = null, channelId = null) {
   const body = { message };
   if (replyTo) body.reply_to = replyTo;
   if (conversationId != null) body.conversation_id = conversationId;
+  if (channelId != null) body.channel_id = channelId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, body);
 }
 
-export async function retrySend(phone, message, conversationId = null) {
+export async function retrySend(phone, message, conversationId = null, channelId = null) {
   const body = { message };
   if (conversationId != null) body.conversation_id = conversationId;
+  if (channelId != null) body.channel_id = channelId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, body);
 }
 
@@ -278,11 +283,12 @@ export async function getGroupMembers(groupJid, force = false) {
   return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
-export async function sendImage(phone, file, caption = '', conversationId = null) {
+export async function sendImage(phone, file, caption = '', conversationId = null, channelId = null) {
   const form = new FormData();
   form.append('image', file);
   form.append('caption', caption);
   if (conversationId != null) form.append('conversation_id', String(conversationId));
+  if (channelId != null) form.append('channel_id', String(channelId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -296,10 +302,11 @@ export async function sendImage(phone, file, caption = '', conversationId = null
   return res.json();
 }
 
-export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null) {
+export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null, channelId = null) {
   const form = new FormData();
   form.append('audio', blob, filename);
   if (conversationId != null) form.append('conversation_id', String(conversationId));
+  if (channelId != null) form.append('channel_id', String(channelId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -313,11 +320,12 @@ export async function sendAudio(phone, blob, filename = 'voice.ogg', conversatio
   return res.json();
 }
 
-export async function sendDocument(phone, file, caption = '', conversationId = null) {
+export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
   const form = new FormData();
   form.append('document', file);
   form.append('caption', caption);
   if (conversationId != null) form.append('conversation_id', String(conversationId));
+  if (channelId != null) form.append('channel_id', String(channelId));
   const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-document`, {
     method: 'POST',
     headers: _authHeaders(),
@@ -337,8 +345,10 @@ export async function sendPresence(phone, action = 'start', conversationId = nul
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, body);
 }
 
-export async function checkPhone(phone) {
-  return request('POST', '/api/contacts/check-phone', { phone });
+// create=false apenas valida o número sem materializar o contato (usado pela
+// verificação ao vivo do modal "Nova conversa" — o contato só nasce no envio).
+export async function checkPhone(phone, create = true) {
+  return request('POST', '/api/contacts/check-phone', { phone, create });
 }
 
 // ── Tags ─────────────────────────────────────────────────────────────
@@ -511,6 +521,13 @@ export async function sendConversationTemplate(convId, payload) {
 
 export async function listChannels() {
   return request('GET', '/api/channels');
+}
+
+// Canais conectados (connected + logged_in + enabled) que um operador pode usar
+// para iniciar uma conversa nova. Mais leve e com menos privilégio que listChannels
+// (gated por conversation.reply, sem credenciais). Itens: {id, provider, display_name, own_phone}.
+export async function listConnectedChannels() {
+  return request('GET', '/api/channels/connected');
 }
 
 export async function getChannel(id) {

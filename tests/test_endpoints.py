@@ -862,6 +862,36 @@ check("PUT mask placeholder -> NÃO sobrescreve segredo",
 r = client.get("/api/channels/cloud_teste/status")
 check("GET /channels/{id}/status -> 200", r.status_code == 200 and "connected" in r.json()["data"])
 
+# Canais conectados (picker "iniciar conversa"): só connected+logged_in+enabled.
+from db.repositories import channel_repo as _chrepo
+r = client.get("/api/channels/connected")
+check("GET /channels/connected -> 200", r.status_code == 200)
+_conn = r.json()["data"]
+check("GET /channels/connected -> is list", isinstance(_conn, list))
+check("GET /channels/connected -> sem credenciais expostas",
+      all("credentials" not in c for c in _conn))
+# Um canal explicitamente desconectado não aparece
+_chrepo.create(id="off_teste", provider="whatsapp_cloud", display_name="Desconectado", enabled=1)
+_chrepo.set_status("off_teste", connected=0, logged_in=0)
+r = client.get("/api/channels/connected")
+check("GET /channels/connected -> exclui desconectados",
+      not any(c["id"] == "off_teste" for c in r.json()["data"]))
+_chrepo.delete("off_teste")
+# Marcar um canal cloud como conectado+logado faz ele aparecer
+_chrepo.create(id="conn_teste", provider="whatsapp_cloud", display_name="Conectado", enabled=1)
+_chrepo.set_status("conn_teste", connected=1, logged_in=1)
+r = client.get("/api/channels/connected")
+_conn = r.json()["data"]
+_ct = next((c for c in _conn if c["id"] == "conn_teste"), None)
+check("GET /channels/connected -> inclui conectado+logado", _ct is not None)
+check("GET /channels/connected -> carrega display_name", _ct and _ct.get("display_name") == "Conectado")
+# Desabilitar remove da lista mesmo conectado
+_chrepo.update("conn_teste", enabled=0)
+r = client.get("/api/channels/connected")
+check("GET /channels/connected -> exclui desabilitado",
+      not any(c["id"] == "conn_teste" for c in r.json()["data"]))
+_chrepo.delete("conn_teste")
+
 # Handshake do webhook por provider (Cloud API verification) — auth-exempt
 r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
                params={"hub.mode": "subscribe", "hub.verify_token": "vtok_abc",
