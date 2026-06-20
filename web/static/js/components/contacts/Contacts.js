@@ -1,12 +1,14 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus } from '../../services/api.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels } from '../../services/api.js';
 import { ContactList, typingKey } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
 import { ContextMenu } from './ContextMenu.js';
+import { ChannelPickerModal } from './ChannelPickerModal.js';
+import { NewConversationModal } from './NewConversationModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 // ── Conversation tab/filter helpers (plano 10 FF2) ──────────────────
@@ -58,6 +60,12 @@ const html = htm.bind(h);
 // Construímos as linhas cruzando os contatos (riqueza: tags/avatar/IA/nome) com as
 // conversas (canal + preview e não-lidas POR CONVERSA). A identidade da linha é a
 // `conversation_id`; contatos sem conversa ainda aparecem como linha única (phone).
+
+// 55 85 97360559 → +55 (85) 97360-559 (espelha o helper da ContactList).
+function formatPhoneDisplay(phone) {
+  if (!phone || phone.length < 12) return phone || '';
+  return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
+}
 
 function buildRows(contacts, conversations) {
   const byContact = new Map();
@@ -154,6 +162,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
   const [checkingPhone, setCheckingPhone] = useState(false);
   const [checkPhoneError, setCheckPhoneError] = useState(null);
+  // Popup de escolha de caixa de entrada ao iniciar uma conversa nova (multicanal).
+  const [channelPicker, setChannelPicker] = useState(null);  // {phone, phoneDisplay, channels} | null
+  // Modal "Iniciar conversa" (compor número + canal + 1ª mensagem) — menu da engrenagem.
+  const [showNewConversation, setShowNewConversation] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedPhones, setSelectedPhones] = useState([]);
   const pendingWsMessages = useRef({});
@@ -517,16 +529,66 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
       // Number is valid — use canonical phone from API (avoids BR duplicates)
       const canonicalPhone = res.data.phone || normalizedPhone;
+
+      // Multicanal: deixar o operador escolher por qual caixa de entrada CONECTADA
+      // iniciar a conversa. O backend já filtra desconectadas/desabilitadas.
+      const chRes = await listConnectedChannels();
+      const channels = (chRes && chRes.ok && Array.isArray(chRes.data)) ? chRes.data : [];
       setCheckingPhone(false);
       setCheckPhoneError(null);
-      setSearch('');
-      selectContact(canonicalPhone);
-      fetchContacts();
+
+      if (channels.length === 0) {
+        setCheckPhoneError('Nenhuma caixa de entrada conectada para iniciar a conversa.');
+        return;
+      }
+
+      setChannelPicker({
+        phone: canonicalPhone,
+        // Exibir o número como o operador digitou (preserva o 9º dígito e o
+        // DDD com/sem zero à esquerda). O `canonicalPhone` normalizado pelo
+        // backend pode soltar o 9º dígito em celulares BR, o que quebra o
+        // slice do formatPhoneDisplay (ex.: +55 (64) 92327-255). O roteamento
+        // continua usando `canonicalPhone`; só o rótulo usa o que foi digitado.
+        phoneDisplay: formatPhoneDisplay(normalizedPhone),
+        channels,
+      });
     } catch (e) {
       setCheckPhoneError('Erro ao verificar número. Tente novamente.');
       setCheckingPhone(false);
     }
-  }, [checkingPhone, selectContact, fetchContacts]);
+  }, [checkingPhone]);
+
+  // Caixa de entrada escolhida no popup — abre a thread já vinculada ao canal, de
+  // modo que a 1ª mensagem é roteada por ele (selectContact carrega channel_id).
+  const handlePickChannel = useCallback((channel) => {
+    const picker = channelPicker;
+    if (!picker) return;
+    setChannelPicker(null);
+    setSearch('');
+    selectContact({
+      phone: picker.phone,
+      conversation_id: null,
+      channel_id: channel.id,
+      contact_id: null,
+      id: null,
+    });
+    fetchContacts();
+  }, [channelPicker, selectContact, fetchContacts]);
+
+  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
+  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
+  const handleNewConversationSent = useCallback((phone, channelId) => {
+    setShowNewConversation(false);
+    setSearch('');
+    selectContact({
+      phone,
+      conversation_id: null,
+      channel_id: channelId,
+      contact_id: null,
+      id: null,
+    });
+    fetchContacts();
+  }, [selectContact, fetchContacts]);
 
   const handleToggleArchived = useCallback(() => {
     setShowArchived(prev => !prev);
@@ -585,11 +647,25 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, []);
   useWebSocket({ onConversationChanged });
 
+  // Só entram na sidebar conversas com mensagem real trocada (last_message_ts > 0,
+  // que já exclui eventos painel-only). Um contato recém-criado sem mensagem — ex:
+  // recriado pela importação de chats do GOWA, ou aberto pelo modal sem enviar nada
+  // — não deve poluir a lista. A conversa atualmente ABERTA fica visível mesmo sem
+  // mensagem, pra não sumir enquanto o operador digita a 1ª mensagem.
+  const activeContacts = useMemo(() => {
+    const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+    return contacts.filter(c => {
+      if (c.last_message_ts && c.last_message_ts > 0) return true;
+      const key = c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
+      return key === selKey;
+    });
+  }, [contacts, selected, selectedConvId]);
+
   // Derived list: status + tag filter feed the tab counts; the active assignment
   // tab + sort produce what's actually rendered.
   const statusTagFiltered = useMemo(
-    () => contacts.filter(c => matchesStatus(c, statusFilter) && matchesTags(c, tagFilter)),
-    [contacts, statusFilter, tagFilter],
+    () => activeContacts.filter(c => matchesStatus(c, statusFilter) && matchesTags(c, tagFilter)),
+    [activeContacts, statusFilter, tagFilter],
   );
   const tabCounts = useMemo(() => ({
     all: statusTagFiltered.length,
@@ -1154,6 +1230,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
           onStartConversation=${handleStartConversation}
+          onNewConversation=${() => setShowNewConversation(true)}
           checkingPhone=${checkingPhone}
           checkPhoneError=${checkPhoneError}
           wsConnected=${wsConnected}
@@ -1192,6 +1269,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
             : html`<${ContactDetail}
                 phone=${selected}
                 conversationId=${selectedConvId}
+                channelId=${selectedChannelId}
                 onBack=${() => selectContact(null)}
                 messages=${messages}
                 setContactData=${setContactData}
@@ -1236,6 +1314,21 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           ` : null}
         </div>
       </div>
+      ${channelPicker ? html`
+        <${ChannelPickerModal}
+          phoneDisplay=${channelPicker.phoneDisplay}
+          channels=${channelPicker.channels}
+          onPick=${handlePickChannel}
+          onClose=${() => setChannelPicker(null)}
+        />
+      ` : null}
+      ${showNewConversation ? html`
+        <${NewConversationModal}
+          contacts=${contacts}
+          onClose=${() => setShowNewConversation(false)}
+          onSent=${handleNewConversationSent}
+        />
+      ` : null}
       ${ctxMenu ? html`
         <${ContextMenu}
           x=${ctxMenu.x}

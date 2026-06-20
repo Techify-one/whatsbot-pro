@@ -40,10 +40,12 @@ def register_routes(app, deps):
     statics_senditems_dir = deps.statics_senditems_dir
     outbound = deps.outbound_router
 
-    def _channel_for(phone: str, conversation_id=None) -> str:
+    def _channel_for(phone: str, conversation_id=None, channel_id=None) -> str:
         """Channel a conversation belongs to (plano 11 D1). The conversa-cêntrica UI
-        passes ``conversation_id``; legacy callers fall back to 'default' (GOWA),
-        preserving the previous behavior exactly. Routing is by CHANNEL, never name."""
+        passes ``conversation_id``; an explicit ``channel_id`` is used when starting a
+        BRAND-NEW conversation (no conversation row yet — the inbox picker chooses it).
+        Legacy callers (neither) fall back to 'default' (GOWA), preserving the previous
+        behavior exactly. Routing is by CHANNEL, never name."""
         if conversation_id:
             from db.repositories import conversation_repo as _cr
             try:
@@ -52,6 +54,8 @@ def register_routes(app, deps):
                 conv = None
             if conv and conv.get("channel_id"):
                 return conv["channel_id"]
+        if channel_id:
+            return str(channel_id)
         return "default"
 
     def _route_send_text(channel_id, phone, text, mentions=None, reply_to=None) -> str:
@@ -118,8 +122,14 @@ def register_routes(app, deps):
         # Use canonical phone from WhatsApp (avoids BR 12/13 digit duplicates)
         canonical = result.get("canonical_phone", digits) if registered else digits
 
+        # `create=false` (ex: verificação ao vivo no modal "Nova conversa") apenas
+        # valida o número, sem materializar o contato — assim ele só aparece na
+        # sidebar quando uma mensagem é de fato enviada. Default True preserva o
+        # fluxo legado (botão "Iniciar conversa" da busca).
+        should_create = body.get("create", True) is not False
+
         # If registered, pre-create contact with WhatsApp name and AI setting
-        if registered:
+        if registered and should_create:
             ai_default = settings.get("default_ai_enabled", True)
             def _save():
                 contact_repo.get_or_create(canonical, default_ai_enabled=ai_default)
@@ -312,7 +322,7 @@ def register_routes(app, deps):
             logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
             return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
-        channel_id = _channel_for(phone, body.get("conversation_id"))
+        channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         # Resolve @Name / @todos -> real mentions for group targets, only on channels
         # that support groups (Cloud is 1:1). `message` (friendly @Name) is saved/shown;
         # `send_text` (inline @<number>) + mentions go on the wire.
@@ -348,7 +358,7 @@ def register_routes(app, deps):
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message,
                 status="failed" if send_failed else "operator",
-                msg_id=msg_id, reply_to_msg_id=reply_to,
+                msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=channel_id,
             )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
@@ -676,7 +686,7 @@ def register_routes(app, deps):
         if not message:
             return _err("Campo 'message' é obrigatório.")
 
-        channel_id = _channel_for(phone, body.get("conversation_id"))
+        channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         # Track for echo-back filtering (key matches the webhook: channel:phone:text)
         state.recently_sent[f"{channel_id}:{phone}:{message[:120]}"] = time.time()
 
@@ -731,6 +741,7 @@ def register_routes(app, deps):
         image: UploadFile = File(...),
         caption: str = Form(""),
         conversation_id: str = Form(""),
+        channel_id: str = Form(""),
     ):
         """Send an image to a contact (operator-initiated)."""
         denied = permission_denied(request, "conversation.reply")
@@ -743,7 +754,7 @@ def register_routes(app, deps):
 
         # Sandbox/test contact — keep the image local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:
@@ -788,7 +799,7 @@ def register_routes(app, deps):
             "status": "operator",
             "msg_id": msg_id,
         }
-        contact = agent_handler._get_contact(phone)
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", caption, media_type="image", media_path=rel_path,
                             status="operator", msg_id=msg_id)
 
@@ -808,6 +819,7 @@ def register_routes(app, deps):
         request: Request,
         audio: UploadFile = File(...),
         conversation_id: str = Form(""),
+        channel_id: str = Form(""),
     ):
         """Send an audio file to a contact (operator-initiated)."""
         denied = permission_denied(request, "conversation.reply")
@@ -820,7 +832,7 @@ def register_routes(app, deps):
 
         # Sandbox/test contact — keep the audio local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:
@@ -864,7 +876,7 @@ def register_routes(app, deps):
             "status": "operator",
             "msg_id": msg_id,
         }
-        contact = agent_handler._get_contact(phone)
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path,
                             status="operator", msg_id=msg_id)
 
@@ -909,6 +921,7 @@ def register_routes(app, deps):
         document: UploadFile = File(...),
         caption: str = Form(""),
         conversation_id: str = Form(""),
+        channel_id: str = Form(""),
     ):
         """Send an arbitrary file (document) to a contact (operator-initiated)."""
         denied = permission_denied(request, "conversation.reply")
@@ -923,7 +936,7 @@ def register_routes(app, deps):
         dest.write_bytes(content)
 
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:
@@ -971,7 +984,7 @@ def register_routes(app, deps):
             "status": "operator",
             "msg_id": msg_id,
         }
-        contact = agent_handler._get_contact(phone)
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text_content, media_type="document",
                             media_path=rel_path, status="operator", msg_id=msg_id)
 
