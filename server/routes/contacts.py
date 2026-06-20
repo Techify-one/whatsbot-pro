@@ -1195,6 +1195,9 @@ def register_routes(app, deps):
                 result_attrs = ca_repo.get_values(contacts_table, contact.id)
             return contact.info
         info = await asyncio.to_thread(_update)
+        # Surface the persisted custom_attributes under `info` so the panel and the
+        # resolve guard read a single, reliable source (matches get_full_contact).
+        info = {**info, "custom_attributes": result_attrs}
         await emit_with_filter("contact.updated", {
             "phone": phone, "info": info, "custom_attributes": result_attrs, "ts": time.time(),
         })

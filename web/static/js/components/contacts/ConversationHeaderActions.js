@@ -11,10 +11,12 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  getContactConversation, getConversation, getMe, getUsers,
+  getContactConversation, getConversation, getMe, getUsers, getCustomAttributes,
   setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
+import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
@@ -25,15 +27,21 @@ function patchFromEvent(data) {
   if (data.assignee_user_id !== undefined) p.assignee_user_id = data.assignee_user_id;
   if (data.is_archived !== undefined) p.is_archived = data.is_archived;
   if (data.ai_active !== undefined) p.ai_active = data.ai_active;
+  // Saving conversation attributes (PUT /info) broadcasts them under `fields`;
+  // keep them fresh so the Resolver guard sees the latest filled values.
+  if (data.fields && data.fields.custom_attributes !== undefined) p.custom_attributes = data.fields.custom_attributes;
   return p;
 }
 
-export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false }) {
+export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false, onOpenConversationInfo = null, onOpenContactInfo = null, contactInfo = null }) {
   const [conv, setConv] = useState(null);
   const [user, setUser] = useState(null);
   const [users, setUsers] = useState([]);   // for "Transferir" — degrades on 403
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [convDefs, setConvDefs] = useState([]);   // conversation-scoped attribute defs
+  const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
+  const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
   const menuRef = useRef(null);
 
   // Identity (permission gating + assign-me).
@@ -52,6 +60,23 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
       .then(r => { if (alive && r && r.ok && r.data && Array.isArray(r.data.users)) setUsers(r.data.users); })
       .catch(() => {});
     return () => { alive = false; };
+  }, []);
+
+  // Attribute definitions (conversation + contact scope) — to gate "Resolver" on
+  // required ("Obrigatório preencher") attributes. Reload when the admin edits them.
+  useEffect(() => {
+    let alive = true;
+    function load() {
+      getCustomAttributes('conversation')
+        .then(r => { if (alive && r && r.ok) setConvDefs(r.data || []); })
+        .catch(() => {});
+      getCustomAttributes('contact')
+        .then(r => { if (alive && r && r.ok) setContactDefs(r.data || []); })
+        .catch(() => {});
+    }
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
   }, []);
 
   // Resolve the open conversation. Conversa-cêntrico (plano 11 D1): quando o chat
@@ -114,6 +139,30 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     }
   }
 
+  // Resolver guard: an open conversation can only be closed once every required
+  // ("Obrigatório preencher") attribute has a value — both conversation- and
+  // contact-scoped. Conversation attributes take priority; once they're filled,
+  // a second attempt surfaces any pending contact attributes. Missing ones open a
+  // modal targeting the right panel; reopening (closed → open) is never blocked.
+  function onStatusClick() {
+    if (busy) return;
+    if (!isOpen) { run(() => setConversationStatus(conv.id, 'open')); return; }
+    const convMissing = missingRequiredAttributes(convDefs, conv.custom_attributes);
+    if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+    const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
+    if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
+    run(() => setConversationStatus(conv.id, 'closed'));
+  }
+
+  // Modal "OK": close it and open the panel that holds the pending attributes so
+  // the operator can fill them right away.
+  function onMissingConfirm() {
+    const target = missingAttrs && missingAttrs.target;
+    setMissingAttrs(null);
+    if (target === 'contact') { if (onOpenContactInfo) onOpenContactInfo(); }
+    else if (onOpenConversationInfo) onOpenConversationInfo();
+  }
+
   const btn = 'px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 whitespace-nowrap';
   const canTransfer = isOpen && can('conversation.assign') && users.length > 0;
 
@@ -123,7 +172,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
       ${can('conversation.resolve') ? html`
         <button
           disabled=${busy}
-          onClick=${() => run(() => setConversationStatus(conv.id, isOpen ? 'closed' : 'open'))}
+          onClick=${onStatusClick}
           class=${btn}
           title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
         >
@@ -177,6 +226,10 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
             </div>
           ` : null}
         </div>
+      ` : null}
+
+      ${missingAttrs ? html`
+        <${RequiredAttributesModal} missing=${missingAttrs.list} onConfirm=${onMissingConfirm} />
       ` : null}
     </div>
   `;
