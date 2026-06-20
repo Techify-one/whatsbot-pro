@@ -10,6 +10,7 @@ import AgentsManager from './AgentsManager.js';
 import PromptsEditor from './PromptsEditor.js';
 import VariablesEditor from './VariablesEditor.js';
 import ToolsEditor from './ToolsEditor.js';
+import GeneralSettings from './GeneralSettings.js';
 import { ToolsManager } from '../ToolsManager.js';
 import { restartAi } from '../../services/api.js';
 
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'prompts', label: 'Prompts' },
   { id: 'variables', label: 'Variáveis' },
   { id: 'tools', label: 'Tools' },
+  { id: 'general', label: 'Configurações' },
 ];
 
 // Sub-views of the "Tools" tab. Consolidated here after the standalone
@@ -100,6 +102,7 @@ export default function AgentEngine() {
       ${tab === 'prompts' ? html`<${PromptsEditor} />` : null}
       ${tab === 'variables' ? html`<${VariablesEditor} />` : null}
       ${tab === 'tools' ? html`<${ToolsSection} />` : null}
+      ${tab === 'general' ? html`<${GeneralSettings} />` : null}
     </div>
   `;
 }
