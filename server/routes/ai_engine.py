@@ -62,6 +62,9 @@ def register_routes(app, deps):
         routing_targets = body.get("routing_targets")
         if routing_targets is not None and not isinstance(routing_targets, list):
             return _err("routing_targets deve ser uma lista ou null.")
+        hooks_config = body.get("hooks_config", {})
+        if hooks_config is not None and not isinstance(hooks_config, dict):
+            return _err("hooks_config deve ser um objeto.")
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
             display_name=body.get("display_name", ""),
@@ -72,6 +75,7 @@ def register_routes(app, deps):
             description=body.get("description", ""),
             is_router=bool(body.get("is_router", False)),
             routing_targets=routing_targets,
+            hooks_config=hooks_config or {},
         )
         _emit_changed("agent", agent_key)
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
