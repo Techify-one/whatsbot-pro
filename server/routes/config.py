@@ -57,6 +57,7 @@ def register_routes(app, deps):
             "max_executions": settings.get("max_executions", 200),
             "default_ai_enabled": settings.get("default_ai_enabled", True),
             "ai_engine_enabled": settings.get("ai_engine_enabled", False),
+            "ai_tools_code_enabled": settings.get("ai_tools_code_enabled", False),
             "has_password": bool(settings.get("web_password_hash", "")),
             "setup_completed": settings.get("setup_completed", False),
             "account_url": settings.get("account_url", ""),
@@ -79,7 +80,7 @@ def register_routes(app, deps):
             "group_reply_mode", "bot_phone",
             "max_executions", "default_ai_enabled", "setup_completed",
             "low_balance_enabled", "low_balance_threshold",
-            "ai_engine_enabled",
+            "ai_engine_enabled", "ai_tools_code_enabled",
         }
         keys_changed = []
         for key, value in body.items():

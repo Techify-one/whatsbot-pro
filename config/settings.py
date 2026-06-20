@@ -48,6 +48,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "WHATSBOT_MAX_CONTEXT": ("max_context_messages", int),
     "WHATSBOT_BATCH_DELAY": ("message_batch_delay", float),
     "WHATSBOT_AI_ENGINE": ("ai_engine_enabled", lambda v: v.lower() in ("1", "true", "yes")),
+    "WHATSBOT_AI_TOOLS_CODE": ("ai_tools_code_enabled", lambda v: v.lower() in ("1", "true", "yes")),
 }
 
 # Reverse lookup: config_key -> (env_key, cast). Used by get() to apply env overrides on-demand.
@@ -91,6 +92,14 @@ DEFAULT_CONFIG = {
     # Off (default) → caminho legado intacto (paridade total). Override por env
     # ``WHATSBOT_AI_ENGINE``.
     "ai_engine_enabled": False,
+    # ⚠️ KILL-SWITCH DE SEGURANÇA — code-in-DB. Tools ``ai_tools`` guardam código
+    # Python no banco que o instalador EXECUTA IN-PROCESS no boot (acesso total a
+    # DB/FS/rede/chave do LLM). Enquanto não houver RBAC (plano 03) + runner
+    # isolado (P62), o code-in-DB fica DESLIGADO por padrão: o instalador só
+    # materializa/importa/registra tools quando ``ai_tools_code_enabled`` é True.
+    # Ligar só conscientemente, num servidor confiável. Override env
+    # ``WHATSBOT_AI_TOOLS_CODE``. Ver DECISOES.md P62.
+    "ai_tools_code_enabled": False,
     "bot_phone": "",
     "bot_name": "",
     "default_ai_enabled": True,

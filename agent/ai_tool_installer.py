@@ -14,6 +14,12 @@ is NOT registered — the app still boots and the webhook keeps working.
 Precedence: the installer runs AFTER core + plugin tools are registered, so the
 registry's collision no-op gives code precedence over the DB (a DB tool can never
 hijack a core/plugin tool name).
+
+⚠️ SECURITY DEBT (P62): ``exec_module`` runs the DB-stored Python IN-PROCESS with
+full process privileges (DB, filesystem, network, LLM key). There is no subprocess
+isolation / RLIMIT / timeout yet. Until RBAC (plano 03) and an isolated runner land,
+this installer is gated behind the ``ai_tools_code_enabled`` kill-switch (OFF by
+default) at the call site in ``server/app.py`` — do not remove that gate.
 """
 
 from __future__ import annotations
