@@ -13,6 +13,7 @@ const STEP_COLORS = {
   llm_response: { bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-300' },
   tool_executed: { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-300' },
   gowa_send: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
+  channel_send: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
   response_sent: { bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-300' },
   error: { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-300' },
 };

@@ -20,6 +20,30 @@ const PinIcon = () => html`
   </svg>
 `;
 
+// Conversa-cêntrico (plano 11 D1): cada linha é uma CONVERSA. A identidade é a
+// conversation_id (linhas sem conversa caem no phone) — usada como key do Preact e
+// para casar a seleção. Mantém os dois canais do mesmo número como linhas distintas.
+function rowKeyFor(c) {
+  return c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
+}
+
+// Per-provider channel chip (only shown when ≥2 channels exist). Colour tints stay
+// in the dark-mode-safe set (wa-*/blue) per CLAUDE.md theming rule.
+const CHANNEL_META = {
+  gowa:           { label: 'WhatsApp',  cls: 'bg-wa-teal/15 text-wa-teal' },
+  whatsapp_cloud: { label: 'Cloud API', cls: 'bg-blue-100 text-blue-700' },
+  telegram:       { label: 'Telegram',  cls: 'bg-blue-100 text-blue-700' },
+  test:           { label: 'Teste',     cls: 'bg-wa-hover text-wa-secondary' },
+};
+function ChannelChip({ provider, name }) {
+  if (!provider) return null;
+  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
+  return html`<span
+    class="ml-[6px] inline-flex items-center gap-[3px] text-[10px] font-semibold rounded px-[5px] py-[1px] align-middle ${meta.cls}"
+    title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}
+  ><span class="w-[5px] h-[5px] rounded-full bg-current opacity-70"></span>${name || meta.label}</span>`;
+}
+
 function normalizePhone(input) {
   const digits = input.replace(/\D/g, '');
   if (digits.length < 10) return null;
@@ -66,7 +90,7 @@ function highlightParts(text, query) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedPhones, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   const selCount = (selectedPhones || []).length;
@@ -322,12 +346,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               </div>`
             : contacts.map(c => html`
                 <div
-                  key=${c.phone}
-                  onClick=${() => selectionMode ? onToggleSelect(c.phone) : onSelect(c.phone, c.match_msg_id)}
+                  key=${rowKeyFor(c)}
+                  onClick=${() => selectionMode ? onToggleSelect(c.phone) : onSelect(c, c.match_msg_id)}
                   onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     (selectionMode && selectedSet.has(c.phone)) ? 'bg-wa-selected'
-                      : (!selectionMode && selected === c.phone) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
+                      : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
                 >
                   ${selectionMode ? html`
@@ -364,6 +388,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle">IA OFF</span>`
                           : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
+                        ${showChannel ? html`<${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} />` : null}
                       </span>
                       <span class="flex items-center gap-[4px] ml-[6px] shrink-0">
                         ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}

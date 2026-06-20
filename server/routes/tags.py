@@ -6,8 +6,10 @@ import time
 
 from fastapi import Request
 
-from db.repositories import contact_repo
+from db.repositories import contact_repo, conversation_repo
 from plugins.events import emit as emit_event, emit_with_filter, apply_filter
+from server import system_notices
+from server.authz import current_user
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -129,4 +131,31 @@ def register_routes(app, deps):
             await emit_with_filter("contact.untagged", {
                 "phone": phone, "tag": removed, "ts": time.time(),
             })
+
+        # Chat notice (plano 12, grupo `tags`): one card per added/removed tag,
+        # attached to the contact's active conversation thread. Tags são por
+        # contato (plano 01), então resolvemos a conversa aberta (fallback: a mais
+        # recente) só para ancorar o aviso no fio.
+        added = set(result) - set(previous)
+        removed_tags = set(previous) - set(result)
+        if added or removed_tags:
+            actor = (current_user(request) or {}).get("name") or None
+            conv = await asyncio.to_thread(
+                conversation_repo.get_open_for_contact, existing_contact["id"])
+            if conv is None:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_latest_for_contact, existing_contact["id"])
+            if conv is not None:
+                for tag in added:
+                    await asyncio.to_thread(
+                        system_notices.emit_conversation_notice,
+                        event_type="tag_added", conversation_id=conv["id"],
+                        contact_id=existing_contact["id"], phone=phone,
+                        actor=actor, tag=tag)
+                for tag in removed_tags:
+                    await asyncio.to_thread(
+                        system_notices.emit_conversation_notice,
+                        event_type="tag_removed", conversation_id=conv["id"],
+                        contact_id=existing_contact["id"], phone=phone,
+                        actor=actor, tag=tag)
         return _ok({"phone": phone, "tags": result})

@@ -87,6 +87,9 @@ function pluginTabId(screen) { return `plugin:${screen.pluginId}:${screen.path}`
 function tabFromPath(pluginScreens) {
   const path = window.location.pathname;
   if (path.match(/^\/contacts\/\d+$/)) return 'contacts';
+  // Conversa-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
+  // conversa no hub de contatos. (/conversations sem id segue na lista full-page.)
+  if (path.match(/^\/conversations\/\d+$/)) return 'contacts';
   if (path.match(/^\/executions\/\d+$/)) return 'executions';
   const screen = (pluginScreens || []).find(s => s.path === path);
   if (screen) return pluginTabId(screen);
@@ -104,6 +107,12 @@ function pathForTab(tab, pluginScreens) {
 
 function contactIdFromPath() {
   const m = window.location.pathname.match(/^\/contacts\/(\d+)$/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Conversa-cêntrico (plano 11 D1): id da conversa aberta na URL /conversations/<id>.
+function conversationIdFromPath() {
+  const m = window.location.pathname.match(/^\/conversations\/(\d+)$/);
   return m ? parseInt(m[1], 10) : null;
 }
 
@@ -315,8 +324,10 @@ function App({ onLogout, hasPassword, currentUser }) {
   const [messageReaction, setMessageReaction] = useState(null);
   const [avatarUpdated, setAvatarUpdated] = useState(null);
   const [groupParticipantsChanged, setGroupParticipantsChanged] = useState(null);
+  const [conversationCreated, setConversationCreated] = useState(null);  // nudge sidebar to materialise a new per-channel thread
   const [lowBalance, setLowBalance] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
+  const [initialConversationId, setInitialConversationId] = useState(conversationIdFromPath);
   const [wizardManual, setWizardManual] = useState(() => window.location.pathname === '/wizard');
   const wizardLatchRef = useRef(false);
 
@@ -369,6 +380,7 @@ function App({ onLogout, hasPassword, currentUser }) {
     function onPopState() {
       setTabState(tabFromPath(pluginScreens));
       setInitialContactId(contactIdFromPath());
+      setInitialConversationId(conversationIdFromPath());
       setWizardManual(window.location.pathname === '/wizard');
     }
     window.addEventListener('popstate', onPopState);
@@ -415,6 +427,9 @@ function App({ onLogout, hasPassword, currentUser }) {
     onMessageReaction: useCallback((data) => setMessageReaction(data), []),
     onAvatarUpdated: useCallback((data) => setAvatarUpdated(data), []),
     onGroupParticipantsChanged: useCallback((data) => setGroupParticipantsChanged({ ...data, _t: Date.now() }), []),
+    onConversationChanged: useCallback((name, data) => {
+      if (name === 'conversation_created') setConversationCreated({ ...data, _t: Date.now() });
+    }, []),
     onLowBalance: useCallback((data) => {
       if (lowBalanceIsSnoozed()) return;
       setLowBalance(data);
@@ -621,7 +636,7 @@ function App({ onLogout, hasPassword, currentUser }) {
                   />
                 </div>`
               : tab === 'contacts'
-                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
+                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} initialConversationId=${initialConversationId} conversationCreated=${conversationCreated} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
                 : tab === 'costs'
                   ? html`<div class="max-w-5xl mx-auto p-4">
                       <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />

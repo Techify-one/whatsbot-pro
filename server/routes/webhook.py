@@ -1,4 +1,11 @@
-"""Webhook endpoint — receives real-time messages from GOWA."""
+"""Webhook endpoint — receives real-time messages from GOWA.
+
+Inbound also enters here from OTHER channels (WhatsApp Cloud, Telegram, …) via the
+provider-agnostic ``ingest_event(InboundEvent)`` funnel (plano 11): a parsed event
+is broadcast/saved and fed into the SAME typing-aware batch orchestrator the GOWA
+webhook uses, then the reply is routed back out through the channel's own adapter
+(``OutboundRouter``). No ``if provider ==`` anywhere in the pipeline.
+"""
 
 import asyncio
 import json
@@ -7,11 +14,12 @@ import random
 import re
 import time
 import uuid
+from pathlib import Path
 
-from gowa.client import GOWASendError, extract_msg_id
-
+from channels.events import InboundEvent
 from db.repositories import contact_repo, conversation_repo, message_repo
 from agent import group_mentions
+from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
@@ -437,6 +445,13 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
     state = deps.state
     settings = deps.settings
+    # Channel routing (plano 11): every outbound leg goes through the router so a
+    # reply lands on the conversation's channel; ``registry`` resolves the live
+    # provider instance for inbound media download.
+    outbound = deps.outbound_router
+    channel_registry = deps.channel_registry
+    # Cache dir for inbound media downloaded from push-based providers (Cloud P16).
+    media_dir = settings.data_dir / "statics" / "media"
 
     # ── Group Mention Helpers ──────────────────────────────────────
 
@@ -473,8 +488,16 @@ def register_routes(app, deps):
 
     # ── Reply Splitting & Sending ─────────────────────────────────
 
-    async def _send_reply(phone: str, reply: str):
-        """Send reply (possibly split into multiple parts) and broadcast."""
+    async def _send_reply(channel_id: str, phone: str, reply: str):
+        """Send reply (possibly split into multiple parts) and broadcast.
+
+        Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
+        reply lands on the conversation's own channel. Presence / @mentions are
+        gated by ``ChannelCapabilities`` — a Cloud channel skips them silently.
+        """
+        caps = outbound.capabilities(channel_id)
+        is_group_target = caps.groups and "@g.us" in phone
+
         # Plugin filter: full raw reply before split
         reply = await apply_filter("filter.reply.raw", reply, {"phone": phone})
         if reply is None:
@@ -515,54 +538,56 @@ def register_routes(app, deps):
                 base_delay = settings.get("split_message_delay", 2.0)
                 if base_delay > 0:
                     await asyncio.sleep(base_delay + random.uniform(-0.5, 0.5))
-                # Re-send typing indicator between parts
-                try:
-                    await asyncio.to_thread(gowa_client.send_chat_presence, phone)
-                except Exception:
-                    pass
+                # Re-send typing indicator between parts (capability-gated)
+                await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
 
             # Resolve @Name / @todos -> real mentions for group targets. We keep
             # `part` (friendly @Name) for save/broadcast and send `send_text`
-            # (inline @<number>) + mentions on the wire.
+            # (inline @<number>) + mentions on the wire. Only for channels that
+            # support groups (Cloud/Telegram-1:1 skip this).
             send_text, mentions = part, None
-            if "@g.us" in phone:
+            if is_group_target:
                 send_text, mentions = await asyncio.to_thread(
                     group_mentions.resolve_outgoing, phone, part)
 
             # Track for echo-back filtering (key on the wire text we actually send)
-            sent_key = f"{phone}:{send_text[:120]}"
+            sent_key = f"{channel_id}:{phone}:{send_text[:120]}"
             state.recently_sent[sent_key] = time.time()
 
-            send_result = None
-            try:
-                send_result = await asyncio.to_thread(
-                    gowa_client.send_message, phone, send_text, mentions)
-                await atrack_step("gowa_send", {"phone": phone, "part": i + 1, "total_parts": len(parts)})
-            except GOWASendError as e:
-                logger.error("[Batch] Send failed for %s (part %d/%d): %s", phone, i + 1, len(parts), e)
-                await atrack_step("gowa_send", {
-                    "phone": phone, "part": i + 1, "error": str(e),
+            send_result = await asyncio.to_thread(
+                outbound.send_text, channel_id, phone, send_text,
+                reply_to=None, mentions=mentions)
+            if not send_result.ok:
+                err = send_result.error or "envio falhou"
+                logger.error("[Batch] Send failed for %s/%s (part %d/%d): %s",
+                             channel_id, phone, i + 1, len(parts), err)
+                await atrack_step("channel_send", {
+                    "channel_id": channel_id, "phone": phone, "part": i + 1, "error": err,
                 }, status="error")
-                await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
+                await asyncio.to_thread(outbound.send_presence, channel_id, phone, "paused")
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
-                    "message": {"role": "error", "content": f"Falha ao enviar: {e}", "ts": time.time()},
+                    "message": {"role": "error", "content": f"Falha ao enviar: {err}", "ts": time.time()},
                 })
                 return
+            await atrack_step("channel_send", {
+                "channel_id": channel_id, "phone": phone,
+                "part": i + 1, "total_parts": len(parts)})
 
-            part_msg_id = extract_msg_id(send_result)
+            part_msg_id = send_result.external_msg_id or ""
             sent_parts.append((part, part_msg_id))
 
             # Broadcast each part to frontend individually
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
+                "channel_id": channel_id,
                 "message": {"role": "assistant", "content": part, "ts": time.time(),
                             "status": "sent", "msg_id": part_msg_id},
             })
 
             # Plugin event: AI reply leg
             await emit_with_filter("message.sent", {
-                "phone": phone, "text": part, "msg_id": part_msg_id,
+                "phone": phone, "channel_id": channel_id, "text": part, "msg_id": part_msg_id,
                 "media_type": None, "media_path": None,
                 "source": "ai", "status": "sent",
                 "ts": time.time(),
@@ -572,23 +597,26 @@ def register_routes(app, deps):
         for part, part_msg_id in sent_parts:
             try:
                 await asyncio.to_thread(agent_handler.save_assistant_message, phone, part,
-                                        msg_id=part_msg_id, status="sent")
+                                        msg_id=part_msg_id, status="sent",
+                                        channel_id=channel_id)
                 # Increment unread AI count (operator hasn't seen this reply yet)
-                contact = agent_handler._contacts.get(phone)
+                contact = agent_handler._get_contact(phone, channel_id=channel_id)
                 if contact:
                     await asyncio.to_thread(contact.increment_unread_ai)
             except Exception as e:
                 logger.error("[Batch] Failed to save reply for %s: %s", phone, e)
 
-        await asyncio.to_thread(gowa_client.stop_chat_presence, phone)
+        await asyncio.to_thread(outbound.send_presence, channel_id, phone, "paused")
         state.msg_count += 1
         full_reply = "\n".join(parts)
         await atrack_step("response_sent", {
             "phone": phone,
+            "channel_id": channel_id,
             "parts": len(parts),
             "reply_preview": full_reply[:200],
         })
-        logger.info("[Batch] Replied to %s (%d parts): %s", phone, len(parts), full_reply[:80])
+        logger.info("[Batch] Replied to %s/%s (%d parts): %s",
+                    channel_id, phone, len(parts), full_reply[:80])
 
         await ws_manager.broadcast("status", {
             "connected": state.connected,
@@ -599,9 +627,10 @@ def register_routes(app, deps):
         })
 
     async def _broadcast_tool_calls(phone: str, tool_calls: list[dict],
-                                    contact_info: dict | None = None):
+                                    contact_info: dict | None = None,
+                                    *, channel_id: str = "default"):
         """Broadcast private messages for each tool call executed by the LLM."""
-        contact = agent_handler._get_contact(phone)
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
         for tc in tool_calls:
             tool_name = tc.get("tool", "unknown")
             args = tc.get("args", {})
@@ -647,7 +676,8 @@ def register_routes(app, deps):
 
     # ── Audio Transcription Delivery ──────────────────────────────
 
-    async def _deliver_audio_transcription(phone: str, contact, transcription: str):
+    async def _deliver_audio_transcription(phone: str, contact, transcription: str,
+                                           *, channel_id: str = "default"):
         """Deliver an audio transcription based on the configured target.
 
         target=private → save as 'transcription' role (operator-only card in the panel)
@@ -658,18 +688,19 @@ def register_routes(app, deps):
         if target == "chat":
             chat_prefix = settings.get("audio_transcription_chat_prefix", "") or ""
             chat_message = f"{chat_prefix}{transcription}" if chat_prefix else transcription
-            # Suppress GOWA echo-back for the message we're about to send
-            sent_key = f"{phone}:{chat_message[:120]}"
+            # Suppress echo-back for the message we're about to send
+            sent_key = f"{channel_id}:{phone}:{chat_message[:120]}"
             state.recently_sent[sent_key] = time.time()
-            try:
-                send_result = await asyncio.to_thread(
-                    gowa_client.send_message, phone, chat_message)
-                sent_msg_id = extract_msg_id(send_result)
+            send_result = await asyncio.to_thread(
+                outbound.send_text, channel_id, phone, chat_message)
+            if send_result.ok:
+                sent_msg_id = send_result.external_msg_id or ""
                 await asyncio.to_thread(
                     contact.add_message, "assistant", chat_message,
                     msg_id=sent_msg_id, status="operator")
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
+                    "channel_id": channel_id,
                     "message": {
                         "role": "assistant",
                         "content": chat_message,
@@ -679,10 +710,10 @@ def register_routes(app, deps):
                     },
                 })
                 return
-            except GOWASendError as e:
-                logger.error("[Webhook] Failed to send transcription to chat for %s: %s", phone, e)
-                state.recently_sent.pop(sent_key, None)
-                # Fall through to private so the transcription is not lost.
+            logger.error("[Webhook] Failed to send transcription to chat for %s: %s",
+                         phone, send_result.error)
+            state.recently_sent.pop(sent_key, None)
+            # Fall through to private so the transcription is not lost.
 
         # private target (or fallback after a failed chat send)
         await asyncio.to_thread(contact.add_message, "transcription", transcription)
@@ -772,55 +803,80 @@ def register_routes(app, deps):
 
     # ── Typing-Aware Orchestrator ─────────────────────────────────
 
-    async def _wait_typing_paused(phone: str, max_wait: float = 30.0):
+    async def _wait_typing_paused(channel_id: str, phone: str, max_wait: float = 30.0):
         """Block while the contact is typing/recording. Defensive timeout to avoid hangs.
 
         WhatsApp emits a single `composing` event when the user starts typing and a
         `paused` event when they stop — there is no heartbeat in between. The stale
         check below is a fallback for cases where `paused` never arrives (dropped
         connection, app killed, etc.) — set generously so genuine long typing isn't cut.
+        Keyed by (channel_id, phone); channels without presence simply never set it.
         """
+        key = (channel_id, phone)
         start = time.time()
         while True:
-            ts = state.typing_state.get(phone)
+            ts = state.typing_state.get(key)
             if not ts or not ts.get("active"):
                 return
             # No event for 25s → assume paused (defensive)
             if time.time() - ts.get("last_ts", 0) > 25:
                 logger.info("[Orchestrator] %s typing event stale, assuming paused", phone)
-                state.typing_state[phone] = {**ts, "active": False}
+                state.typing_state[key] = {**ts, "active": False}
                 return
             if time.time() - start > max_wait:
                 logger.warning("[Orchestrator] %s typing wait timeout %.1fs", phone, max_wait)
-                state.typing_state[phone] = {**ts, "active": False}
+                state.typing_state[key] = {**ts, "active": False}
                 return
             await asyncio.sleep(0.3)
 
-    async def _send_with_typing_guard(phone: str, reply: str):
+    async def _send_with_typing_guard(channel_id: str, phone: str, reply: str):
         """Wait for contact to stop typing, mark sending=True, then send (uncancellable phase)."""
-        await _wait_typing_paused(phone)
-        state.sending[phone] = True
+        key = (channel_id, phone)
+        await _wait_typing_paused(channel_id, phone)
+        state.sending[key] = True
         try:
-            await _send_reply(phone, reply)
+            await _send_reply(channel_id, phone, reply)
         finally:
-            state.sending[phone] = False
+            state.sending[key] = False
 
-    def _schedule_orchestrator(phone: str):
+    async def _maybe_emit_ai_takeover(phone: str, channel_id: str):
+        """Emit 'A IA assumiu o atendimento' once per conversation (plano 12 §3.3).
+
+        Deduped por conversa: ``has_event`` checa se o card já existe no fio. Gateado
+        pela config (grupo ``ai``). Best-effort — nunca quebra o envio da resposta.
+        """
+        def _emit():
+            contact = agent_handler._get_contact(phone, channel_id=channel_id)
+            if contact is None:
+                return
+            conv = conversation_repo.get_open_for_contact(contact.id)
+            if conv is None or system_notices.has_event(conv["id"], "ai_takeover"):
+                return
+            system_notices.emit_conversation_notice(
+                event_type="ai_takeover", conversation_id=conv["id"],
+                contact_id=contact.id, phone=phone)
+        try:
+            await asyncio.to_thread(_emit)
+        except Exception:
+            logger.debug("[Webhook] ai_takeover notice failed for %s", phone)
+
+    def _schedule_orchestrator(channel_id: str, phone: str):
         """Cancel existing orchestrator (unless mid-send) and spawn a new one."""
-        existing = state.processing_tasks.get(phone)
+        key = (channel_id, phone)
+        existing = state.processing_tasks.get(key)
         if existing and not existing.done():
-            if state.sending.get(phone):
+            if state.sending.get(key):
                 # Mid-send — don't cancel. The current orchestrator will spawn the next
                 # cycle automatically when it finishes sending (sees pending_messages).
                 return
             existing.cancel()
-        state.processing_tasks[phone] = asyncio.create_task(_orchestrate(phone))
+        state.processing_tasks[key] = asyncio.create_task(_orchestrate(channel_id, phone))
 
-    async def _run_one_cycle(phone: str, items: list[dict]):
+    async def _run_one_cycle(channel_id: str, phone: str, items: list[dict]):
         """One processing cycle: text batch (single LLM call) + each media item separately.
 
         Cancellable via task.cancel() up until the SEND phase, which is guarded by
-        state.sending[phone]=True so the webhook does not interrupt mid-send.
+        state.sending[(channel_id, phone)]=True so the webhook does not interrupt mid-send.
         """
         exec_id = await astart_execution(phone, "webhook")
         try:
@@ -832,7 +888,7 @@ def register_routes(app, deps):
                 ],
             })
 
-            contact = agent_handler._get_contact(phone)
+            contact = agent_handler._get_contact(phone, channel_id=channel_id)
 
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
@@ -860,10 +916,7 @@ def register_routes(app, deps):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
-                        try:
-                            await asyncio.to_thread(gowa_client.mark_as_read, mid, phone)
-                        except Exception:
-                            pass
+                        await asyncio.to_thread(outbound.mark_read, channel_id, phone, mid)
                     await ws_manager.broadcast("messages_read", {"phone": phone, "only_user": True})
 
             # ── Text batch ──────────────────────────────────
@@ -893,13 +946,14 @@ def register_routes(app, deps):
                             })
                         else:
                             try:
-                                await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                                await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
                                 # Cancellable LLM call
                                 result = await agent_handler.aprocess_message(
                                     phone, combined,
-                                    save_user_message=False, save_response=False)
+                                    save_user_message=False, save_response=False,
+                                    channel_id=channel_id)
                                 if result.tool_calls:
-                                    await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                                    await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
                                 if result.reply:
                                     if result.reply.startswith("[WhatsBot]"):
                                         contact.add_message("system_notice", result.reply)
@@ -908,7 +962,8 @@ def register_routes(app, deps):
                                             "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                                         })
                                     else:
-                                        await _send_with_typing_guard(phone, result.reply)
+                                        await _send_with_typing_guard(channel_id, phone, result.reply)
+                                        await _maybe_emit_ai_takeover(phone, channel_id)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
@@ -991,7 +1046,8 @@ def register_routes(app, deps):
                             agent_handler.update_last_user_message_content, phone, new_content
                         )
                     if audio_path:
-                        await _deliver_audio_transcription(phone, contact, transcription)
+                        await _deliver_audio_transcription(phone, contact, transcription,
+                                                           channel_id=channel_id)
                     else:
                         # Image/document content — delivered as a private panel card.
                         contact.add_message("transcription", transcription)
@@ -1031,15 +1087,16 @@ def register_routes(app, deps):
                     llm_text = f"{text}\n{doc_prefix}" if text else doc_prefix
 
                 try:
-                    await asyncio.to_thread(gowa_client.send_chat_presence, phone)
+                    await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
                     result = await agent_handler.aprocess_message(
                         phone,
                         llm_text,
                         save_user_message=False, save_response=False,
                         image_path=image_path if not transcription else None,
+                        channel_id=channel_id,
                     )
                     if result.tool_calls:
-                        await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                        await _broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
                     if result.reply:
                         if result.reply.startswith("[WhatsBot]"):
                             contact.add_message("system_notice", result.reply)
@@ -1048,7 +1105,8 @@ def register_routes(app, deps):
                                 "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                             })
                         else:
-                            await _send_with_typing_guard(phone, result.reply)
+                            await _send_with_typing_guard(channel_id, phone, result.reply)
+                            await _maybe_emit_ai_takeover(phone, channel_id)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -1068,7 +1126,7 @@ def register_routes(app, deps):
         except Exception:
             pass
 
-    async def _orchestrate(phone: str):
+    async def _orchestrate(channel_id: str, phone: str):
         """Typing-aware batch orchestrator: wait → batch_delay → wait → cycle.
 
         Phases (each cancellable except the final SEND inside _run_one_cycle):
@@ -1079,31 +1137,162 @@ def register_routes(app, deps):
 
         Cancellation by the webhook (new message arrived) drops the current run; the
         webhook then schedules a fresh orchestrator that picks up the new pending list.
+        Keyed by (channel_id, phone) so concurrent channels never collide.
         """
+        key = (channel_id, phone)
         try:
             batch_delay = settings.get("message_batch_delay", 3.0)
-            await _wait_typing_paused(phone)
+            await _wait_typing_paused(channel_id, phone)
             await asyncio.sleep(batch_delay)
-            await _wait_typing_paused(phone)
+            await _wait_typing_paused(channel_id, phone)
 
-            items = list(state.pending_messages.get(phone, []))
+            items = list(state.pending_messages.get(key, []))
             if not items:
                 return
             # Consume now: a NEW message arriving during _run_one_cycle goes into a fresh batch
-            state.pending_messages.pop(phone, None)
+            state.pending_messages.pop(key, None)
 
-            await _run_one_cycle(phone, items)
+            await _run_one_cycle(channel_id, phone, items)
 
             # If new messages arrived during the SEND phase (when cancellation is blocked),
             # spawn another orchestrator so they get processed.
-            if state.pending_messages.get(phone):
-                state.processing_tasks[phone] = asyncio.create_task(_orchestrate(phone))
+            if state.pending_messages.get(key):
+                state.processing_tasks[key] = asyncio.create_task(_orchestrate(channel_id, phone))
         except asyncio.CancelledError:
             return
         finally:
             cur = asyncio.current_task()
-            if state.processing_tasks.get(phone) is cur:
-                state.processing_tasks.pop(phone, None)
+            if state.processing_tasks.get(key) is cur:
+                state.processing_tasks.pop(key, None)
+
+    # ── Provider-agnostic ingress (plano 11 Fase 0/2) ─────────────
+
+    async def _resolve_inbound_media(event: InboundEvent):
+        """For push providers that only ship a media id (Cloud P16), download +
+        cache the file so the existing transcription/render pipeline works.
+
+        Returns ``(media_path, image_path, audio_path)`` — image/audio locals feed
+        the per-kind branches in ``_run_one_cycle``. No-op when the event already
+        carries a local ``media_path`` (GOWA auto-download)."""
+        media_path = event.media_path
+        if event.media_type and not media_path:
+            extras = event.media_extras or {}
+            media_id = extras.get("media_id")
+            inst = channel_registry.get(event.channel_id) if channel_registry else None
+            if media_id and inst is not None and hasattr(inst, "download_media"):
+                try:
+                    fname = await asyncio.to_thread(
+                        inst.download_media, media_id, media_dir,
+                        mime_type=extras.get("mime_type"))
+                    if fname:
+                        media_path = f"statics/media/{fname}"
+                except Exception:
+                    logger.warning("[Ingest] media download failed for %s", media_id,
+                                   exc_info=True)
+        image_path = media_path if event.media_type == "image" else None
+        audio_path = media_path if event.media_type == "audio" else None
+        return media_path, image_path, audio_path
+
+    async def ingest_event(event: InboundEvent):
+        """Single ingress for ANY channel's inbound message (plano 11).
+
+        Mirrors the GOWA webhook's pre-batch steps for a canonical ``InboundEvent``
+        (dedup, contact resolution, broadcast, plugin filter/event) and feeds the
+        SAME typing-aware orchestrator, keyed by ``(channel_id, chat_id)``. The
+        reply is later routed back out through the channel's own adapter.
+        """
+        if getattr(event, "kind", "message") != "message":
+            return
+        channel_id = event.channel_id or "default"
+        phone = event.chat_id or event.sender_id
+        if not phone:
+            return
+
+        # Idempotency by (channel_id, external_msg_id) — providers re-deliver (P18).
+        msg_id = event.external_msg_id or str(uuid.uuid4())
+        dedup_key = f"{channel_id}:{event.external_msg_id}" if event.external_msg_id else None
+        if dedup_key:
+            if dedup_key in state.processed_messages:
+                return
+            state.processed_messages.add(dedup_key)
+
+        text = (event.text or "").strip()
+        media_type = event.media_type
+        media_path, image_path, audio_path = await _resolve_inbound_media(event)
+        media_extras = event.media_extras or None
+
+        if not text and not media_type:
+            return
+
+        # Echo suppression (mirror of GOWA): drop a message we just sent out.
+        if text:
+            sent_key = f"{channel_id}:{phone}:{text[:120]}"
+            sent_at = state.recently_sent.pop(sent_key, None)
+            if sent_at and (time.time() - sent_at) < 30:
+                logger.info("[Ingest] Ignoring echo-back for %s/%s", channel_id, phone)
+                return
+
+        contact = agent_handler._get_contact(phone, channel_id=channel_id)
+        if event.sender_name and not contact.is_group:
+            await asyncio.to_thread(contact.set_wa_name, event.sender_name)
+        await asyncio.to_thread(contact.increment_unread, msg_id)
+
+        logger.info("[Ingest] %s/%s: %s", channel_id, phone,
+                    text[:80] if text else f"[{media_type}]")
+
+        parsed_msg = {
+            "phone": phone,
+            "channel_id": channel_id,
+            "name": event.sender_name,
+            "text": text,
+            "raw_text": text,
+            "msg_id": msg_id,
+            "reply_to_msg_id": None,
+            "media_type": media_type,
+            "media_path": media_path,
+            "media_extras": media_extras,
+            "is_group": event.is_group,
+            "group_jid": event.chat_id if event.is_group else None,
+            "individual_phone": event.sender_id if event.is_group else None,
+            "is_from_me": False,
+            "raw": event.raw or {},
+            "ts": event.ts or time.time(),
+        }
+        parsed_msg = await apply_filter(
+            "filter.message.before_save", parsed_msg, {"phone": phone})
+        if parsed_msg is None:
+            logger.info("[Ingest] inbound from %s filtered out before save", phone)
+            return
+        text = parsed_msg.get("text", text)
+        msg_id = parsed_msg.get("msg_id", msg_id)
+        media_type = parsed_msg.get("media_type", media_type)
+        media_path = parsed_msg.get("media_path", media_path)
+        media_extras = parsed_msg.get("media_extras", media_extras)
+
+        broadcast_msg: dict = {"role": "user", "content": text, "ts": time.time(), "msg_id": msg_id}
+        if media_type:
+            broadcast_msg["media_type"] = media_type
+            broadcast_msg["media_path"] = media_path
+        await ws_manager.broadcast("new_message", {
+            "phone": phone, "channel_id": channel_id, "message": broadcast_msg})
+
+        await emit_with_filter("message.received", parsed_msg)
+
+        key = (channel_id, phone)
+        state.pending_messages.setdefault(key, []).append({
+            "text": text,
+            "image_path": image_path if event.media_type == "image" else None,
+            "audio_path": audio_path if event.media_type == "audio" else None,
+            "media_type": media_type,
+            "media_path": media_path,
+            "media_extras": media_extras,
+            "msg_id": msg_id,
+            "reply_to_msg_id": None,
+        })
+        _schedule_orchestrator(channel_id, phone)
+
+    # Expose the ingress for the per-channel webhook route (Cloud/Telegram/…).
+    deps.ingest_event = ingest_event
 
     # ── Webhook Endpoint ──────────────────────────────────────────
 
@@ -1305,8 +1494,8 @@ def register_routes(app, deps):
             if phone and presence_state:
                 logger.info("[Webhook] chat_presence %s from %s (media=%s)",
                             presence_state, phone, media)
-                # Update orchestrator-visible typing state
-                state.typing_state[phone] = {
+                # Update orchestrator-visible typing state (GOWA = "default" channel)
+                state.typing_state[("default", phone)] = {
                     "active": presence_state == "composing",
                     "media": media,
                     "last_ts": time.time(),
@@ -1343,7 +1532,8 @@ def register_routes(app, deps):
             if not ack_phone and msg_ids:
                 cid = await asyncio.to_thread(message_repo.get_contact_id_by_msg_id, msg_ids[0])
                 if cid:
-                    for phone_key, contact in agent_handler._contacts.items():
+                    # _contacts is keyed by (channel_id, phone) — plano 11.
+                    for (_ch, phone_key), contact in agent_handler._contacts.items():
                         if contact.id == cid:
                             ack_phone = phone_key
                             break
@@ -1394,7 +1584,7 @@ def register_routes(app, deps):
                     })
 
                 # Existing unread tracking logic (for incoming messages read by us)
-                for phone_key, contact in agent_handler._contacts.items():
+                for (_ch, phone_key), contact in agent_handler._contacts.items():
                     unread_ids = contact.get_unread_msg_ids()
                     matched = [mid for mid in msg_ids if mid in unread_ids]
                     if matched:
@@ -1546,9 +1736,9 @@ def register_routes(app, deps):
 
         state.processed_messages.add(msg_id)
 
-        # Filter GOWA echo-backs: ignore messages we recently sent
+        # Filter GOWA echo-backs: ignore messages we recently sent (GOWA = "default")
         if text:
-            sent_key = f"{phone}:{text[:120]}"
+            sent_key = f"default:{phone}:{text[:120]}"
             sent_at = state.recently_sent.pop(sent_key, None)
             if sent_at and (time.time() - sent_at) < 30:
                 logger.info("[Webhook] Ignoring echo-back for %s", phone)
@@ -1883,10 +2073,12 @@ def register_routes(app, deps):
                     })
             return _ok({"status": "group_no_mention"})
 
-        # Batch messages — accumulate and wait before responding
-        if phone not in state.pending_messages:
-            state.pending_messages[phone] = []
-        state.pending_messages[phone].append({
+        # Batch messages — accumulate and wait before responding. GOWA is the
+        # "default" channel; the batch key is (channel_id, phone) — plano 11.
+        batch_key = ("default", phone)
+        if batch_key not in state.pending_messages:
+            state.pending_messages[batch_key] = []
+        state.pending_messages[batch_key].append({
             "text": display_text,
             "image_path": image_path,
             "audio_path": audio_path,
@@ -1902,14 +2094,14 @@ def register_routes(app, deps):
         # so without this the orchestrator would block on a stale `composing` flag
         # until the 25s stale timeout. Clear here; a *new* `composing` event for
         # the next message will re-set `active=True` with a fresh last_ts.
-        ts = state.typing_state.get(phone)
+        ts = state.typing_state.get(batch_key)
         if ts and ts.get("active"):
-            state.typing_state[phone] = {**ts, "active": False}
+            state.typing_state[batch_key] = {**ts, "active": False}
 
         # Schedule (or restart) the typing-aware orchestrator. This cancels the current
         # cycle if it's not in the SEND phase yet, so a newly arrived message can be
         # bundled into the same batch (and any in-flight LLM call is aborted).
-        _schedule_orchestrator(phone)
+        _schedule_orchestrator("default", phone)
 
         # Prune processed set to avoid unbounded growth
         if len(state.processed_messages) > 5000:

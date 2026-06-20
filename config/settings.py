@@ -116,6 +116,12 @@ DEFAULT_CONFIG = {
     # opens a modal pointing to ``account_url`` for the user to recharge.
     "low_balance_enabled": True,
     "low_balance_threshold": 0.50,
+    # Avisos de sistema no chat (plano 12) — gate GLOBAL por grupo de evento.
+    # Grupo desligado ⇒ o aviso não é gerado (nada grava/emite) para ninguém.
+    "system_notice_assignment": True,
+    "system_notice_tags": True,
+    "system_notice_status": True,
+    "system_notice_ai": True,
 }
 
 

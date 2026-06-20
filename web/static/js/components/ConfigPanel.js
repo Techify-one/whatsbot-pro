@@ -38,6 +38,11 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [transferAlertDuration, setTransferAlertDuration] = useState(5);
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
+  // Avisos de sistema no chat (plano 12) — toggles globais por grupo de evento.
+  const [systemNoticeAssignment, setSystemNoticeAssignment] = useState(true);
+  const [systemNoticeTags, setSystemNoticeTags] = useState(true);
+  const [systemNoticeStatus, setSystemNoticeStatus] = useState(true);
+  const [systemNoticeAi, setSystemNoticeAi] = useState(true);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
   const [confirmUnreadAll, setConfirmUnreadAll] = useState(false);
@@ -97,6 +102,10 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setTransferAlertDuration(config.transfer_alert_duration ?? 5);
       setLowBalanceEnabled(config.low_balance_enabled ?? true);
       setLowBalanceThreshold(config.low_balance_threshold ?? 0.5);
+      setSystemNoticeAssignment(config.system_notice_assignment ?? true);
+      setSystemNoticeTags(config.system_notice_tags ?? true);
+      setSystemNoticeStatus(config.system_notice_status ?? true);
+      setSystemNoticeAi(config.system_notice_ai ?? true);
       setMaxExecutions(config.max_executions ?? 200);
       setAuditRetentionDays(config.audit_retention_days ?? 365);
       setDefaultAiEnabled(config.default_ai_enabled ?? true);
@@ -204,6 +213,10 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       transfer_alert_duration: parseInt(transferAlertDuration, 10) || 5,
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
+      system_notice_assignment: systemNoticeAssignment,
+      system_notice_tags: systemNoticeTags,
+      system_notice_status: systemNoticeStatus,
+      system_notice_ai: systemNoticeAi,
       max_executions: parseInt(maxExecutions, 10) || 200,
       audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
       default_ai_enabled: defaultAiEnabled,
@@ -638,6 +651,61 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
               >Marcar todas como lidas</button>
             </div>
           `}
+        </div>
+      <//>
+
+      <!-- Section: Avisos de sistema no chat (plano 12) -->
+      <${Section} title="Avisos de sistema no chat">
+        <span class="text-xs text-wa-secondary -mt-1">
+          Registra no fio da conversa, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
+        </span>
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${systemNoticeAssignment}
+              onChange=${(e) => setSystemNoticeAssignment(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Atribuição
+          </label>
+          <span class="text-xs text-wa-secondary">Atribuir, transferir e "assumir para mim".</span>
+        </div>
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${systemNoticeTags}
+              onChange=${(e) => setSystemNoticeTags(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Tags
+          </label>
+          <span class="text-xs text-wa-secondary">Adicionar ou remover tags de um contato.</span>
+        </div>
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${systemNoticeStatus}
+              onChange=${(e) => setSystemNoticeStatus(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Status e arquivo
+          </label>
+          <span class="text-xs text-wa-secondary">Resolver, reabrir (inclusive automática ao receber mensagem), arquivar e iniciar conversa.</span>
+        </div>
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${systemNoticeAi}
+              onChange=${(e) => setSystemNoticeAi(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            IA e atributos
+          </label>
+          <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu o atendimento", trocar o agente ativo e definir atributos.</span>
         </div>
       <//>
 

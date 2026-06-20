@@ -1,7 +1,7 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag } from '../../services/api.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -9,13 +9,76 @@ import { ContextMenu } from './ContextMenu.js';
 
 const html = htm.bind(h);
 
+// ── Conversa-cêntrico (plano 11 D1) ──────────────────────────────
+// Cada linha da sidebar é uma CONVERSA (uma por canal), não um contato. Um número
+// presente em 2 canais vira 2 linhas distintas — em vez de fundir tudo numa só.
+// Construímos as linhas cruzando os contatos (riqueza: tags/avatar/IA/nome) com as
+// conversas (canal + preview e não-lidas POR CONVERSA). A identidade da linha é a
+// `conversation_id`; contatos sem conversa ainda aparecem como linha única (phone).
+
+function buildRows(contacts, conversations) {
+  const byContact = new Map();
+  for (const cv of conversations) {
+    if (cv.contact_id == null) continue;
+    if (!byContact.has(cv.contact_id)) byContact.set(cv.contact_id, []);
+    byContact.get(cv.contact_id).push(cv);
+  }
+  const rows = [];
+  for (const c of contacts) {
+    const convs = byContact.get(c.id) || [];
+    if (convs.length === 0) {
+      // Contato sem conversa (ex: recém-iniciado pelo "Nova conversa") — linha única
+      // que cai no caminho legado por telefone (channel 'default').
+      rows.push({
+        ...c, contact_id: c.id, conversation_id: null,
+        channel_id: 'default', channel_provider: null, channel_name: null,
+      });
+    } else {
+      for (const cv of convs) {
+        rows.push({
+          ...c,
+          contact_id: c.id,
+          conversation_id: cv.id,
+          channel_id: cv.channel_id || 'default',
+          channel_provider: cv.channel_provider || null,
+          channel_name: cv.channel_name || null,
+          conv_status: cv.status,
+          // Preview + não-lidas vêm da CONVERSA (sobrescrevem os agregados do contato).
+          last_message: (cv.last_message != null && cv.last_message !== '') ? cv.last_message : c.last_message,
+          last_message_role: cv.last_message_role || c.last_message_role,
+          last_message_ts: cv.last_message_ts || c.last_message_ts,
+          last_message_status: cv.last_message_status || c.last_message_status,
+          last_message_msg_id: cv.last_message_msg_id || c.last_message_msg_id,
+          unread_count: cv.unread_count != null ? cv.unread_count : c.unread_count,
+          has_unread_mention: cv.has_unread_mention != null ? cv.has_unread_mention : c.has_unread_mention,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+// Shape a /api/conversations/{id}/messages payload into the same object the chat
+// already consumes from getContact (full contact + messages), plus channel_id.
+function shapeConvData(d) {
+  return {
+    ...(d.contact || {}),
+    messages: d.messages || [],
+    avatar_v: d.avatar_v,
+    channel_id: d.channel_id || 'default',
+    conversation: d.conversation || null,
+  };
+}
+
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, initialContactId, wsConnected, config, onConfigSave, onUnreadChange }) {
-  const [contacts, setContacts] = useState([]);
+export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, wsConnected, config, onConfigSave, onUnreadChange }) {
+  const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(null);          // open thread's phone (contact-level ops)
+  const [selectedConvId, setSelectedConvId] = useState(null);   // open thread's conversation id
+  const [selectedChannelId, setSelectedChannelId] = useState('default');  // open thread's channel
   const [scrollToMsg, setScrollToMsg] = useState(null);  // DB id of a message to focus on open (search hit)
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -33,14 +96,34 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const [selectedPhones, setSelectedPhones] = useState([]);
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
+  const selectedConvIdRef = useRef(null);
+  const selectedChannelIdRef = useRef('default');
   const typingTimers = useRef({});
   const contactsRef = useRef([]);
   const lastResolvedId = useRef(null);
+  const lastResolvedConvId = useRef(null);
   const pageVisibleRef = useRef(!document.hidden);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { selectedConvIdRef.current = selectedConvId; }, [selectedConvId]);
+  useEffect(() => { selectedChannelIdRef.current = selectedChannelId; }, [selectedChannelId]);
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+
+  // Show the per-row channel badge only when ≥2 distinct channels exist (with a
+  // single channel it would be noise) — mirrors the Conversations screen (FQ1).
+  const showChannel = useMemo(() => {
+    const seen = new Set();
+    for (const c of contacts) if (c.channel_provider) seen.add(c.channel_provider);
+    return seen.size > 1;
+  }, [contacts]);
+
+  // True when `row` is the currently-open thread (by conversation when available,
+  // else by phone for legacy contact-only rows). Reads refs → safe in WS closures.
+  const isOpenRow = useCallback((row) => {
+    if (selectedConvIdRef.current != null) return row.conversation_id === selectedConvIdRef.current;
+    return row.conversation_id == null && row.phone === selectedRef.current;
+  }, []);
 
   // Notify the app shell whenever the conversation list changes so it can refresh
   // the browser-tab unread badge — covers reads that fire no WS event (e.g. the
@@ -55,7 +138,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       if (visible && selectedRef.current) {
         markAsRead(selectedRef.current);
         setContacts(prev => prev.map(c =>
-          c.phone === selectedRef.current ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
+          isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
         ));
       }
     };
@@ -101,6 +184,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       setContacts(prev => prev.filter(c => c.phone !== phone));
       if (selectedRef.current === phone) {
         setSelected(null);
+        setSelectedConvId(null);
         setContactData(null);
         history.pushState(null, '', '/');
       }
@@ -113,6 +197,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       setContacts(prev => prev.filter(c => c.phone !== phone));
       if (selectedRef.current === phone) {
         setSelected(null);
+        setSelectedConvId(null);
         setContactData(null);
         history.pushState(null, '', '/');
       }
@@ -147,7 +232,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       : [...prev, phone]);
   }, []);
   const selectAllContacts = useCallback(() => {
-    setSelectedPhones(contactsRef.current.map(c => c.phone));
+    setSelectedPhones([...new Set(contactsRef.current.map(c => c.phone))]);
   }, []);
   const clearSelection = useCallback(() => { setSelectedPhones([]); setSelectionMode(false); }, []);
 
@@ -171,6 +256,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     setContacts(prev => prev.filter(c => !phones.includes(c.phone)));
     if (phones.includes(selectedRef.current)) {
       setSelected(null);
+      setSelectedConvId(null);
       setContactData(null);
       history.pushState(null, '', '/');
     }
@@ -199,6 +285,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
 
   const _selectedTargets = useCallback(() => {
     const current = contactsRef.current;
+    // One target per selected phone (rows may repeat a phone across channels).
     return [...selectedPhones].map(p => current.find(c => c.phone === p)).filter(Boolean);
   }, [selectedPhones]);
 
@@ -262,15 +349,30 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     ));
   }, [selectedPhones]);
 
-  // Push URL when selecting/deselecting a contact
-  const selectContact = useCallback((phone, msgId = null) => {
+  // Push URL when selecting/deselecting a conversation row. Accepts a sidebar row
+  // (conversation-centric) OR a bare phone string (legacy callers — start
+  // conversation / context-menu edit), resolving the latter to its newest row.
+  const selectContact = useCallback((rowOrPhone, msgId = null) => {
     setScrollToMsg(msgId != null ? msgId : null);
-    setSelected(phone);
-    if (phone) {
-      const c = contactsRef.current.find(c => c.phone === phone);
-      if (c && c.id != null) {
-        history.pushState(null, '', `/contacts/${c.id}`);
-      }
+    if (rowOrPhone == null) {
+      setSelected(null);
+      setSelectedConvId(null);
+      setSelectedChannelId('default');
+      history.pushState(null, '', '/');
+      return;
+    }
+    let row = rowOrPhone;
+    if (typeof rowOrPhone === 'string') {
+      row = contactsRef.current.find(c => c.phone === rowOrPhone)
+        || { phone: rowOrPhone, conversation_id: null, channel_id: 'default', contact_id: null, id: null };
+    }
+    setSelected(row.phone);
+    setSelectedConvId(row.conversation_id ?? null);
+    setSelectedChannelId(row.channel_id || 'default');
+    if (row.conversation_id != null) {
+      history.pushState(null, '', `/conversations/${row.conversation_id}`);
+    } else if (row.contact_id != null || row.id != null) {
+      history.pushState(null, '', `/contacts/${row.contact_id ?? row.id}`);
     } else {
       history.pushState(null, '', '/');
     }
@@ -286,14 +388,19 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
 
   const fetchContacts = useCallback((q = '') => {
     setLoading(true);
-    getContacts(q, showArchivedRef.current).then(res => {
-      if (res.ok) {
-        setContacts(res.data);
-        contactsRef.current = res.data;
+    Promise.all([
+      getContacts(q, showArchivedRef.current),
+      listConversations({ archived: showArchivedRef.current, limit: 200 }),
+    ]).then(([cRes, vRes]) => {
+      if (cRes.ok) {
+        const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
+        const rows = sortContacts(buildRows(cRes.data, convs));
+        setContacts(rows);
+        contactsRef.current = rows;
       }
       setLoading(false);
     });
-  }, []);
+  }, [sortContacts]);
 
   const handleStartConversation = useCallback(async (normalizedPhone) => {
     if (!normalizedPhone || checkingPhone) return;
@@ -331,6 +438,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const handleToggleArchived = useCallback(() => {
     setShowArchived(prev => !prev);
     setSelected(null);
+    setSelectedConvId(null);
   }, []);
 
   // Initial load
@@ -344,25 +452,51 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   // Reload when archive filter changes (and drop any active selection)
   useEffect(() => { fetchContacts(search); setSelectionMode(false); setSelectedPhones([]); }, [showArchived]);
 
-  // Resolve initialContactId → phone when contacts are loaded
+  // Resolve initialConversationId (/conversations/:id) or initialContactId
+  // (/contacts/:id, legacy) → a sidebar row, once the list is loaded. Mirrors the
+  // contact-centric resolution but adds the conversation dimension.
   useEffect(() => {
+    if (initialConversationId != null) {
+      if (initialConversationId === lastResolvedConvId.current) return;
+      if (contacts.length === 0 || loading) return;
+      const row = contacts.find(c => c.conversation_id === initialConversationId);
+      if (row) {
+        setSelected(row.phone);
+        setSelectedConvId(row.conversation_id);
+        setSelectedChannelId(row.channel_id || 'default');
+      } else {
+        // Conversa fora da sidebar (ex: além do limite ou arquivada) — abre direto
+        // por id; o load deriva o telefone/canal da resposta do endpoint.
+        setSelected(null);
+        setSelectedConvId(initialConversationId);
+      }
+      lastResolvedConvId.current = initialConversationId;
+      lastResolvedId.current = null;
+      return;
+    }
     if (initialContactId == null) {
       // popstate back to "/" — deselect without pushing URL again
-      if (lastResolvedId.current != null) {
+      if (lastResolvedId.current != null || lastResolvedConvId.current != null) {
         setSelected(null);
+        setSelectedConvId(null);
         lastResolvedId.current = null;
+        lastResolvedConvId.current = null;
       }
       return;
     }
-    // Already resolved this exact ID — skip (prevents re-selecting on contacts list refresh)
     if (initialContactId === lastResolvedId.current) return;
     if (contacts.length === 0 || loading) return;
-    const c = contacts.find(c => c.id === initialContactId);
-    if (c) {
-      setSelected(c.phone);
+    // /contacts/:id opens that contact's newest conversation row (rows are sorted).
+    const row = contacts.find(c => c.contact_id === initialContactId)
+      || contacts.find(c => c.id === initialContactId);
+    if (row) {
+      setSelected(row.phone);
+      setSelectedConvId(row.conversation_id ?? null);
+      setSelectedChannelId(row.channel_id || 'default');
       lastResolvedId.current = initialContactId;
+      lastResolvedConvId.current = null;
     }
-  }, [initialContactId, contacts, loading]);
+  }, [initialContactId, initialConversationId, contacts, loading]);
 
   // Debounced search
   useEffect(() => {
@@ -370,9 +504,11 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     return () => clearTimeout(timer);
   }, [search]);
 
-  // Load contact detail when selected changes
+  // Load chat detail when the open thread changes. Conversa-cêntrico: prefer the
+  // per-conversation endpoint (scoped to one channel); fall back to the legacy
+  // per-contact endpoint for rows without a conversation.
   useEffect(() => {
-    if (!selected) { setContactData(null); return; }
+    if (!selected && selectedConvId == null) { setContactData(null); return; }
     if (openInfoAfterSelect.current) {
       openInfoAfterSelect.current = false;
       setShowInfoPanel(true);
@@ -380,22 +516,32 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       setShowInfoPanel(false);
     }
     if (!hasLoadedDetail.current) setLoadingDetail(true);
-    // Preserve any messages already buffered for this contact (arrived before selection)
+    // Preserve any messages already buffered for this thread (arrived before selection)
     // but reset the accumulator for new messages arriving during fetch
-    const preFetchBuffer = pendingWsMessages.current[selected] || [];
-    pendingWsMessages.current[selected] = [];
-    // Clear unread badges immediately in local state (only if page is visible)
+    const bufKey = selected || (selectedConvId != null ? `conv:${selectedConvId}` : '');
+    const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
+    pendingWsMessages.current[bufKey] = [];
+    // Clear unread badges immediately on the OPEN row (only if page is visible)
     const isPageVisible = pageVisibleRef.current;
     if (isPageVisible) {
       setContacts(prev => prev.map(c =>
-        c.phone === selected ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
+        isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
       ));
     }
-    getContact(selected, isPageVisible).then(res => {
+    const convId = selectedConvId;
+    const loader = convId != null
+      ? getConversationMessages(convId, isPageVisible).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(selected, isPageVisible);
+    loader.then(res => {
       if (res.ok) {
         const data = res.data;
+        if (data.channel_id) setSelectedChannelId(data.channel_id);
+        // Opened by conversation id alone (row not in the sidebar) — adopt the
+        // phone from the response so contact-level handlers key correctly.
+        if (!selectedRef.current && data.phone) setSelected(data.phone);
         // Merge buffered messages: pre-fetch (arrived before click) + during-fetch (arrived during loading)
-        const duringFetch = pendingWsMessages.current[selected] || [];
+        const duringFetch = pendingWsMessages.current[bufKey] || [];
         const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
           const existing = data.messages || [];
@@ -416,13 +562,13 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           }
           return m;
         });
-        pendingWsMessages.current[selected] = [];
+        pendingWsMessages.current[bufKey] = [];
         setContactData(data);
       }
       hasLoadedDetail.current = true;
       setLoadingDetail(false);
     });
-  }, [selected]);
+  }, [selected, selectedConvId]);
 
   // Handle chat presence events (typing/recording indicators)
   useEffect(() => {
@@ -452,7 +598,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     console.log('[WS] contact_info_updated', phone, updatedInfo);
     if (!phone || !updatedInfo) return;
 
-    // Update sidebar name
+    // Update sidebar name (all rows of this phone share the contact name)
     setContacts(prev => prev.map(c =>
       c.phone === phone ? { ...c, name: updatedInfo.name || c.name } : c
     ));
@@ -601,7 +747,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       const m = msgs[i];
       if (m.role === 'assistant' && m.status) {
         setContacts(prev => prev.map(c => {
-          if (c.phone === selected && c.last_message_role === 'assistant' && m.status !== c.last_message_status) {
+          if (isOpenRow(c) && c.last_message_role === 'assistant' && m.status !== c.last_message_status) {
             return { ...c, last_message_status: m.status };
           }
           return c;
@@ -611,18 +757,38 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     }
   }, [contactData, selected]);
 
-  // Handle real-time messages from WebSocket
+  // A brand-new per-channel conversation just materialised on the backend
+  // (conversation_created) — refetch so its row appears in the sidebar even before
+  // any reply arrives (plano 11 D1). Events are rare, so no debounce is needed.
+  useEffect(() => {
+    if (!conversationCreated) return;
+    fetchContacts(search);
+  }, [conversationCreated]);
+
+  // Handle real-time messages from WebSocket. Conversa-cêntrico routing: a message
+  // belongs to the OPEN thread by conversation_id when present (operator/save
+  // payloads), else by (phone, channel_id) — (phone, channel) uniquely identifies
+  // a conversation, so the two channels of one number never cross-contaminate.
   useEffect(() => {
     if (!newMessage) return;
     const { phone, message } = newMessage;
+    const msgConvId = message.conversation_id;
+    const msgChannel = newMessage.channel_id || message.channel_id || 'default';
 
-    // Update detail view if this contact is selected
-    // Use selectedRef to avoid stale closure
-    if (phone === selectedRef.current) {
-      // Use functional updater — prev is always the latest contactData
+    let belongsToOpen;
+    if (selectedConvIdRef.current != null) {
+      belongsToOpen = (msgConvId != null)
+        ? (msgConvId === selectedConvIdRef.current)
+        : (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current);
+    } else {
+      // Legacy contact-only open thread (no conversation) — route by phone.
+      belongsToOpen = (phone === selectedRef.current);
+    }
+
+    if (belongsToOpen) {
       setContactData(prev => {
         if (!prev) {
-          // Contact data still loading — buffer in per-phone map
+          // Detail still loading — buffer under the open thread's phone key
           const buf = pendingWsMessages.current[phone] || [];
           if (!buf.some(m =>
             (m.ts === message.ts && m.role === message.role) ||
@@ -674,26 +840,21 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
         };
       });
       if (message.role === 'user' && pageVisibleRef.current) markAsRead(phone);
-    } else {
-      // Contact NOT selected — buffer for when it's opened
-      const buf = pendingWsMessages.current[phone] || [];
-      if (!buf.some(m =>
-        (m.ts === message.ts && m.role === message.role) ||
-        (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
-      )) {
-        pendingWsMessages.current[phone] = [...buf, message];
-      }
     }
 
-    // Skip contact list preview update for transcription, system_notice, tool_call, and error messages
-    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'error') return;
+    // Skip contact list preview update for transcription, system_notice, tool_call, conversation_event, and error messages
+    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'error') return;
 
     setContacts(prev => {
-      const idx = prev.findIndex(c => c.phone === phone);
+      // Target the row for this exact conversation/channel (not all rows of the phone).
+      const idx = prev.findIndex(c =>
+        (msgConvId != null && c.conversation_id === msgConvId) ||
+        (msgConvId == null && c.phone === phone && (c.channel_id || 'default') === msgChannel)
+      );
       if (idx >= 0) {
         const updated = [...prev];
         const isUserMsg = message.role === 'user';
-        const isViewing = phone === selectedRef.current && pageVisibleRef.current;
+        const isViewing = isOpenRow(updated[idx]) && pageVisibleRef.current;
         let lastPreview = (message.content || '').substring(0, 80);
         if (message.media_type === 'image') lastPreview = message.content || '📷 Imagem';
         else if (message.media_type === 'audio') lastPreview = '🎤 Áudio';
@@ -714,7 +875,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           last_message_ts: message.ts,
           last_message_status: message.status || '',
           last_message_msg_id: message.msg_id || '',
-          msg_count: updated[idx].msg_count + 1,
+          msg_count: (updated[idx].msg_count || 0) + 1,
           unread_count: isUserMsg && !isViewing
             ? (updated[idx].unread_count || 0) + 1
             : updated[idx].unread_count || 0,
@@ -728,6 +889,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
         };
         return sortContacts(updated);
       }
+      // No matching row — likely a brand-new conversation/channel; refetch to
+      // materialise it (a `conversation_created` event also nudges this).
       fetchContacts(search);
       return prev;
     });
@@ -735,6 +898,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
 
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
+  const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
 
   const autoReply = config ? config.auto_reply : false;
   const handleToggleAutoReply = useCallback(async (newValue) => {
@@ -752,7 +916,8 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           loading=${loading}
           search=${search}
           onSearchChange=${handleSearchChange}
-          selected=${selected}
+          selected=${selectedKey}
+          showChannel=${showChannel}
           onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
@@ -797,6 +962,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
             : html`<${ContactDetail}
                 phone=${selected}
+                conversationId=${selectedConvId}
                 onBack=${() => selectContact(null)}
                 messages=${messages}
                 setContactData=${setContactData}
@@ -813,6 +979,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           ${showInfoPanel && selected ? html`
             <${ContactInfoPanel}
               phone=${selected}
+              conversationId=${selectedConvId}
               info=${info}
               contactTags=${contactData && contactData.tags || []}
               globalTags=${globalTags}
