@@ -16,12 +16,14 @@ import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import {
   listConversations,
+  filterConversations,
   setConversationStatus,
   assignConversation,
   archiveConversation,
   getMe,
   getUsers,
 } from '../services/api.js';
+import { FilterBar } from './FilterBar.js';
 
 const html = htm.bind(h);
 
@@ -191,10 +193,9 @@ export function Conversations() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Filters
-  const [statusFilter, setStatusFilter] = useState('open'); // '' | 'open' | 'closed'
-  const [showArchived, setShowArchived] = useState(false);
-  const [assigneeFilter, setAssigneeFilter] = useState(''); // user id as string, or ''
+  // Rich filters from the FilterBar (flat { key: value } map ready for
+  // filterConversations). Empty object → fall back to the plain list endpoint.
+  const [richFilters, setRichFilters] = useState({});
 
   // Identity / users (best-effort — degrade if forbidden)
   const [currentUserId, setCurrentUserId] = useState(null);
@@ -238,16 +239,23 @@ export function Conversations() {
     return () => { alive = false; };
   }, []);
 
+  const hasRichFilters = useMemo(
+    () => Object.keys(richFilters).length > 0,
+    [richFilters],
+  );
+
   const fetchConversations = useCallback(async () => {
     setLoading(true);
     setError('');
-    const params = { limit: 200 };
-    if (statusFilter) params.status = statusFilter;
-    if (showArchived) params.archived = 'true';
-    else params.archived = 'false';
-    if (assigneeFilter) params.assignee_user_id = assigneeFilter;
     try {
-      const res = await listConversations(params);
+      let res;
+      if (Object.keys(richFilters).length > 0) {
+        // Rich filter active → use the filter engine endpoint.
+        res = await filterConversations({ limit: 200, ...richFilters });
+      } else {
+        // No filters → keep the original simple list behaviour (open, not archived).
+        res = await listConversations({ limit: 200, status: 'open', archived: 'false' });
+      }
       if (res && res.ok) {
         setConversations((res.data && res.data.conversations) || []);
       } else {
@@ -260,7 +268,7 @@ export function Conversations() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, showArchived, assigneeFilter]);
+  }, [richFilters]);
 
   useEffect(() => { fetchConversations(); }, [fetchConversations]);
 
@@ -293,50 +301,13 @@ export function Conversations() {
 
   return html`
     <div>
-      <!-- Filters -->
-      <div class="flex items-center gap-3 mb-4 flex-wrap">
-        <div class="flex flex-col">
-          <label class="text-[11px] text-wa-secondary mb-1">Status</label>
-          <select
-            class="wa-field px-3 py-2 rounded-md text-[14px]"
-            value=${statusFilter}
-            onChange=${(e) => setStatusFilter(e.target.value)}
-          >
-            <option value="">Todas</option>
-            <option value="open">Abertas</option>
-            <option value="closed">Fechadas</option>
-          </select>
-        </div>
+      <!-- Rich filter bar (schema-driven). Lifts its state up via onChange. -->
+      <${FilterBar} onChange=${setRichFilters} />
 
-        ${canListUsers ? html`
-          <div class="flex flex-col">
-            <label class="text-[11px] text-wa-secondary mb-1">Responsável</label>
-            <select
-              class="wa-field px-3 py-2 rounded-md text-[14px]"
-              value=${assigneeFilter}
-              onChange=${(e) => setAssigneeFilter(e.target.value)}
-            >
-              <option value="">Todos</option>
-              ${users.map(u => html`
-                <option key=${u.id} value=${String(u.id)}>${u.name || u.email}</option>
-              `)}
-            </select>
-          </div>
-        ` : null}
-
-        <label class="flex items-center gap-2 cursor-pointer select-none mt-auto py-2">
-          <input
-            type="checkbox"
-            class="w-4 h-4 accent-wa-teal"
-            checked=${showArchived}
-            onChange=${(e) => setShowArchived(e.target.checked)}
-          />
-          <span class="text-[13px] text-wa-text">Arquivadas</span>
-        </label>
-
+      <div class="flex items-center justify-end mb-3">
         <button
           onClick=${fetchConversations}
-          class="ml-auto mt-auto px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors"
+          class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors"
         >
           Atualizar
         </button>
@@ -354,7 +325,11 @@ export function Conversations() {
           ? html`
             <div class="text-center text-wa-secondary py-12">
               <div class="text-[15px] mb-1">Nenhuma conversa encontrada</div>
-              <div class="text-[13px]">Ajuste os filtros acima para ver outras conversas.</div>
+              <div class="text-[13px]">
+                ${hasRichFilters
+                  ? 'Ajuste os filtros acima para ver outras conversas.'
+                  : 'Nenhuma conversa aberta no momento.'}
+              </div>
             </div>`
           : html`
             <div class="flex flex-col gap-2">
