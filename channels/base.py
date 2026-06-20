@@ -24,6 +24,12 @@ class ChannelCapabilities:
     reactions: bool = False
     media: bool = False
     inbound_route: str = "path"           # "path" | "poll" | "none"
+    # Customer-care session window in hours (plano 11 Fase 6). 0 = always-open
+    # (GOWA/linked-device): free text any time. >0 = providers like the WhatsApp
+    # Cloud API where free text is only allowed within N hours of the last inbound;
+    # outside it requires an approved template (HSM). Drives the pipeline by
+    # CAPABILITY, never by provider name.
+    session_window_hours: int = 0
 
 
 @dataclasses.dataclass

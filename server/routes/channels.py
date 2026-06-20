@@ -17,7 +17,7 @@ import re
 
 from fastapi import Request
 
-from db.repositories import channel_repo, channel_credential_repo
+from db.repositories import channel_repo, channel_credential_repo, inbox_repo
 from server.authz import permission_denied
 from server.helpers import _ok, _err
 
@@ -93,6 +93,15 @@ def register_routes(app, deps):
         for key, value in creds.items():
             if value:  # never store an empty/placeholder secret
                 await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
+        # One inbox per channel (plano 11): conversations on this channel get their
+        # own thread. Best-effort — a failure here never blocks channel creation
+        # (resolve_inbox_id self-heals on first inbound).
+        try:
+            await asyncio.to_thread(
+                inbox_repo.get_or_create_for_channel, cid,
+                name=row.get("display_name") or cid)
+        except Exception:
+            pass
         stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
         return _ok(_serialize(row, stored))
 

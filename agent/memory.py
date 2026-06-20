@@ -4,9 +4,33 @@ import mimetypes
 import time
 from pathlib import Path
 
-from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo
+from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHANNEL_ID = "default"
+
+# channel_id -> inbox_id cache. Inboxes are created at migration/boot and only
+# change on a restart (same model as channels), so a process-lifetime cache is
+# safe and keeps ContactMemory construction off the DB on the hot path.
+_INBOX_BY_CHANNEL: dict[str, int] = {}
+
+
+def resolve_inbox_id(channel_id: str) -> int:
+    """Inbox id that owns ``channel_id`` (plano 11). Cached; falls back to the
+    default inbox (id=1) if resolution fails so a save never blows up."""
+    cid = channel_id or DEFAULT_CHANNEL_ID
+    cached = _INBOX_BY_CHANNEL.get(cid)
+    if cached is not None:
+        return cached
+    try:
+        inbox = inbox_repo.get_or_create_for_channel(cid)
+        inbox_id = int(inbox["id"])
+    except Exception:
+        logger.exception("Falha ao resolver inbox do canal %s; usando default", cid)
+        inbox_id = conversation_repo.DEFAULT_INBOX_ID
+    _INBOX_BY_CHANNEL[cid] = inbox_id
+    return inbox_id
 
 
 class TagRegistry:
@@ -63,9 +87,14 @@ class ContactMemory:
     Messages and usage are stored directly in SQLite (not cached in memory).
     """
 
-    def __init__(self, phone: str, default_ai_enabled: bool = True):
+    def __init__(self, phone: str, default_ai_enabled: bool = True, *,
+                 channel_id: str = DEFAULT_CHANNEL_ID, inbox_id: int | None = None):
         self.phone = phone
         self._default_ai_enabled = default_ai_enabled
+        # Channel/inbox this memory belongs to (plano 11). The contact row stays
+        # unified by phone (D2); the CONVERSATION is per-channel via inbox_id.
+        self.channel_id = channel_id or DEFAULT_CHANNEL_ID
+        self.inbox_id = inbox_id if inbox_id is not None else resolve_inbox_id(self.channel_id)
         self.id: int | None = None
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
         self.tags: list[str] = []
@@ -146,9 +175,12 @@ class ContactMemory:
         # save site (inbound batch/media/group + outbound) links conversation_id sem
         # tocar webhook.py. Inbound user message reabre uma conversa closed.
         conversation_id = None
+        conv = None
+        transition = None  # "created" | "reopened" | None (plano 12 §3)
         try:
-            conv = conversation_repo.resolve_for_contact(
-                self.id, self._jid(), reopen_if_closed=(role == "user"))
+            conv, transition = conversation_repo.resolve_for_contact_ex(
+                self.id, self._jid(), reopen_if_closed=(role == "user"),
+                inbox_id=self.inbox_id)
             conversation_id = conv["id"]
             # New thread → tell the panel so the inbox row shows its assignee
             # (e.g. "IA padrão") live, without waiting for a full refetch.
@@ -178,8 +210,57 @@ class ContactMemory:
                 conversation_repo.touch_activity(conversation_id)
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
+            # plano 12 §3: aviso automático no fio quando o atendimento (re)abre por
+            # uma mensagem do cliente. Painel-only; gateado por config (grupo status).
+            # Emitido APÓS o save para casar com a ordem ao vivo (a msg inbound já
+            # foi transmitida no recebimento, antes deste batch).
+            if transition in ("created", "reopened") and conv is not None:
+                self._emit_lifecycle_notice(conversation_id, transition, conv)
+            # plano 11 D1: a nova conversa precisa materializar AO VIVO na sidebar
+            # conversa-cêntrica / lista de conversas — sinal independente do gate de
+            # aviso (este é uma atualização de lista, não um card no fio).
+            if transition == "created" and conv is not None:
+                self._broadcast_conversation_created(conversation_id, conv)
         # Touch updated_at
         contact_repo.update(self.id)
+
+    def _broadcast_conversation_created(self, conversation_id: int, conv: dict):
+        """Fire a ``conversation_created`` WS event so the conversa-cêntrica sidebar
+        and the conversation list add the new per-channel thread without a reload
+        (plano 11 D1). Fire-and-forget; lazy import avoids an agent→server cycle."""
+        try:
+            from plugins.context import broadcast
+            broadcast("conversation_created", {
+                "conversation_id": conversation_id,
+                "display_id": conv.get("display_id"),
+                "contact_id": self.id,
+                "phone": self.phone,
+                "inbox_id": conv.get("inbox_id"),
+                "status": conv.get("status"),
+            })
+        except Exception:
+            logger.exception("Falha ao emitir conversation_created para %s", self.phone)
+
+    def _emit_lifecycle_notice(self, conversation_id: int, transition: str, conv: dict):
+        """Surface an automatic conversation-lifecycle card (plano 12 §3).
+
+        ``reopened`` ⇒ cliente reabriu uma conversa fechada; ``created`` ⇒ nova
+        conversa. O gate de config (grupo ``status``) decide se algo é gravado.
+        Lazy import evita ciclo agent→server no carregamento do módulo.
+        """
+        try:
+            from server import system_notices
+            if transition == "reopened":
+                system_notices.emit_conversation_notice(
+                    event_type="status_reopened_auto", conversation_id=conversation_id,
+                    contact_id=self.id, phone=self.phone)
+            elif transition == "created":
+                system_notices.emit_conversation_notice(
+                    event_type="created", conversation_id=conversation_id,
+                    contact_id=self.id, phone=self.phone,
+                    display_id=conv.get("display_id"))
+        except Exception:
+            logger.exception("Falha ao emitir aviso de ciclo de vida para %s", self.phone)
 
     def get_unread_msg_ids(self) -> list[str]:
         """Return unread message IDs from the database."""

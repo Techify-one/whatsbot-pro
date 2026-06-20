@@ -113,7 +113,7 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
 | `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo) e `has_unread_mention` (@menção não lida em grupo) |
 | `observations` | Notas/observações por contato (texto livre) |
-| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
 | `usage` | Registros de uso da API (tokens, custo, modelo) |
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
@@ -191,6 +191,15 @@ Cada contato é armazenado na tabela `contacts` com campos normalizados:
 `ContactMemory` em `agent/memory.py` é o wrapper que encapsula o acesso via repos. Mensagens são lazy-loaded do DB (não mantidas em memória). Apenas as últimas N (configurável) são enviadas ao LLM.
 
 Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
+
+## Avisos de sistema no chat (plano 12)
+
+Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** como um card centralizado painel-only — role **`conversation_event`** — igual aos `tool_call`/`system_notice`. Cobre: atribuir/assumir/remover atribuição, adicionar/remover tag, resolver/reabrir/arquivar, ligar/desligar IA (conversa **e** contato), trocar agente ativo, definir atributo — e as transições **automáticas** (cliente reabre conversa fechada ao mandar mensagem → `status_reopened_auto`; conversa nova → `created`; 1ª resposta da IA numa conversa → `ai_takeover`, 1×/conversa via dedupe).
+
+- **Módulo central**: [server/system_notices.py](server/system_notices.py) — `EVENT_GROUPS` (registry dos 4 grupos + chave de config), `EVENT_GROUP_OF` (event_type → grupo), `FORMATTERS` (texto PT-BR com autor), `emit_conversation_notice(*, event_type, conversation_id, contact_id=None, phone=None, **ctx)` (gate → formata → `message_repo.add(role="conversation_event", conversation_id=…)` → `broadcast("new_message")`). Defensivo: um aviso que falha nunca quebra a ação. Extensível: novo tipo = entrada em `FORMATTERS` + `EVENT_GROUP_OF`; grupo novo = + chave em `DEFAULT_CONFIG`/`allowed_keys`/`GET config` + toggle no `ConfigPanel`.
+- **Gate GLOBAL por grupo** (config, default ON): `system_notice_assignment`, `system_notice_tags`, `system_notice_status`, `system_notice_ai`. Grupo desligado ⇒ o aviso **não é gerado** (nada grava, nada emite). Toggles na seção "Avisos de sistema no chat" em Configurações.
+- **Call sites**: rotas de conversa via `_emit_notice` em [server/routes/conversations.py](server/routes/conversations.py) (resolve o autor do `current_user`); tags em [server/routes/tags.py](server/routes/tags.py); toggle-ai por contato em [server/routes/contacts.py](server/routes/contacts.py); automáticos no `add_message` ([agent/memory.py](agent/memory.py), via `conversation_repo.resolve_for_contact_ex` que sinaliza `created`/`reopened`) e no envio da resposta da IA ([server/routes/webhook.py](server/routes/webhook.py), `_maybe_emit_ai_takeover`).
+- **Painel-only**: `conversation_event` é excluído do contexto do LLM ([message_repo.py](db/repositories/message_repo.py)), do preview/última-mensagem da sidebar ([contact_repo.py](db/repositories/contact_repo.py) e [conversation_repo.py](db/repositories/conversation_repo.py) `_PREVIEW_EXCLUDED`) e não conta como não-lida (não entra em `unread_msg_ids`). Render como chip centralizado em [ContactDetail.js](web/static/js/components/contacts/ContactDetail.js); skip de preview em [Contacts.js](web/static/js/components/contacts/Contacts.js).
 
 ## Provider de LLM e onboarding (Techify)
 

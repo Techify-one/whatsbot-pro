@@ -27,7 +27,7 @@ function myReaction(message) {
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -297,17 +297,17 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
       if (!presenceTimerRef.current) {
-        sendPresence(phone, 'start').catch(() => {});
+        sendPresence(phone, 'start', conversationId).catch(() => {});
       }
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = setTimeout(() => {
-        sendPresence(phone, 'stop').catch(() => {});
+        sendPresence(phone, 'stop', conversationId).catch(() => {});
         presenceTimerRef.current = null;
       }, 3000);
     } else {
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = null;
-      sendPresence(phone, 'stop').catch(() => {});
+      sendPresence(phone, 'stop', conversationId).catch(() => {});
     }
   }
 
@@ -317,7 +317,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       if (presenceTimerRef.current) {
         clearTimeout(presenceTimerRef.current);
         presenceTimerRef.current = null;
-        if (phone) sendPresence(phone, 'stop').catch(() => {});
+        if (phone) sendPresence(phone, 'stop', conversationId).catch(() => {});
       }
     };
   }, [phone]);
@@ -408,7 +408,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       return { ...prev, messages: updated };
     });
     try {
-      if (msgId || dbId) await deleteMessage(phone, { msgId, dbId, scope });
+      if (msgId || dbId) await deleteMessage(phone, { msgId, dbId, scope, conversationId });
     } catch (_) { /* best-effort; WS will reconcile if it succeeded */ }
   }
 
@@ -434,7 +434,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
       return { ...prev, messages: updated };
     });
     try {
-      await reactToMessage(phone, msgId, next);
+      await reactToMessage(phone, msgId, next, conversationId);
     } catch (_) { /* best-effort; WS reconciles */ }
   }
 
@@ -535,7 +535,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
-    if (!sandbox) sendPresence(phone, 'stop').catch(() => {});
+    if (!sandbox) sendPresence(phone, 'stop', conversationId).catch(() => {});
 
     setInput('');
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -553,6 +553,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         const res = await sendPrivateMessage(phone, text, {
           aiRead: aiReadPrivate,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
+          conversationId,
         });
         updateMsgByLocalId(localId, () => ({
           _status: res.ok ? null : 'failed',
@@ -582,7 +583,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     } : prev);
 
     try {
-      const res = await _api.sendText(phone, text, replyTo);
+      const res = await _api.sendText(phone, text, replyTo, conversationId);
       if (res.ok) {
         const msgId = res.data?.msg_id || null;
         if (sandbox) {
@@ -617,7 +618,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
   async function handleRetry(localId, text) {
     updateMsgByLocalId(localId, () => ({ _status: 'sending', status: 'operator' }));
     try {
-      const res = await retrySend(phone, text);
+      const res = await retrySend(phone, text, conversationId);
       if (res.ok) {
         updateMsgByLocalId(localId, () => ({ _status: null, status: 'operator' }));
       } else {
@@ -705,15 +706,15 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
     let optimistic, sendPromise;
     if (media.type === 'image') {
       optimistic = { ...base, content: '', media_type: 'image', media_path: localUrl };
-      sendPromise = _api.sendImage(phone, media.file);
+      sendPromise = _api.sendImage(phone, media.file, '', conversationId);
     } else if (media.type === 'document') {
       const verb = sandbox ? 'recebido' : 'enviado';
       optimistic = { ...base, content: `[Documento ${verb}: ${media.filename}]`,
                      media_type: 'document', media_path: localUrl };
-      sendPromise = _api.sendDocument(phone, media.file);
+      sendPromise = _api.sendDocument(phone, media.file, '', conversationId);
     } else {
       optimistic = { ...base, content: '[Áudio]', media_type: 'audio', media_path: localUrl };
-      sendPromise = _api.sendAudio(phone, media.blob, media.filename);
+      sendPromise = _api.sendAudio(phone, media.blob, media.filename, conversationId);
     }
     optimistic = { ...optimistic, ts: Date.now() / 1000, _localId: localId,
                    _status: 'sending', _isLocalBlob: true };
@@ -864,7 +865,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
         </div>
 
         <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
-        <${ConversationHeaderActions} phone=${phone} sandbox=${sandbox} />
+        <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} />
       </div>
 
       <!-- Chat area with doodle pattern -->
@@ -879,6 +880,7 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
               const isPrivateNote = m.role === 'private_note';
               const isSystemNotice = m.role === 'system_notice';
               const isToolCall = m.role === 'tool_call';
+              const isConversationEvent = m.role === 'conversation_event';
               const isError = m.role === 'error';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
 
@@ -972,6 +974,20 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
                       <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
                         ${formatBubbleTime(m.ts)}
                       </span>
+                    </div>
+                  </div>
+                `];
+              }
+
+              if (isConversationEvent) {
+                // Lifecycle event (plano 12): centered subtle chip, like WhatsApp's
+                // system lines. Content already carries the emoji + PT-BR text.
+                // wa-* classes keep it legible in both light and dark themes.
+                return [dateSeparator, html`
+                  <div key=${i} data-mid=${m._id} class="flex justify-center my-[5px]">
+                    <div class="max-w-[80%] rounded-[10px] px-[12px] py-[5px] bg-wa-bg/80 border border-wa-border text-wa-secondary text-[12px] leading-[16px] text-center whitespace-pre-wrap shadow-sm">
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
+                      <span class="ml-[6px] text-[10px] opacity-70 whitespace-nowrap">${formatBubbleTime(m.ts)}</span>
                     </div>
                   </div>
                 `];

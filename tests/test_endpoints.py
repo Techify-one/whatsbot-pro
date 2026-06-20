@@ -1136,9 +1136,12 @@ from db.tables import messages as _msgs_t
 _cm = _CM("5500011122233")  # fresh phone -> cria contato + conversa
 _cm.add_message("user", "olá mundo")
 with _get_engine().connect() as _conn:
+    # filtra role=='user' — add_message agora também grava avisos de sistema
+    # (plano 12: 'created') no mesmo fio, que seriam a linha mais recente.
     _last = _conn.execute(
         _sa_select(_msgs_t.c.conversation_id, _msgs_t.c.content)
         .where(_msgs_t.c.contact_id == _cm.id)
+        .where(_msgs_t.c.role == "user")
         .order_by(_msgs_t.c.id.desc()).limit(1)).mappings().first()
 check("add_message -> mensagem ganha conversation_id", _last["conversation_id"] is not None)
 _live_conv = _conv_repo.get(_last["conversation_id"])
@@ -1168,6 +1171,152 @@ check("gate ai_active False quando pausada", _ai_gate(_cm) is False)
 r = client.post(f"/api/conversations/{_live_conv['id']}/ai", json={"active": True})
 check("POST /conversations/{id}/ai active=true -> reativa", r.json()["data"]["conversation"]["ai_active"] == 1)
 check("gate volta a True", _ai_gate(_cm) is True)
+
+# ═══════════════════════════════════════════════════════════════════
+#  15h-bis. Avisos de sistema no chat (plano 12)
+# ═══════════════════════════════════════════════════════════════════
+section("System notices (plano 12)")
+
+from server import system_notices as _sn
+from db.repositories import config_repo as _sn_cfg
+from db.repositories import message_repo as _sn_msg_repo
+
+def _notices(conv_id):
+    """conversation_event message contents for a conversation, ordered by id."""
+    with _get_engine().connect() as _conn:
+        rows = _conn.execute(
+            _sa_select(_msgs_t.c.content)
+            .where(_msgs_t.c.conversation_id == conv_id)
+            .where(_msgs_t.c.role == "conversation_event")
+            .order_by(_msgs_t.c.id)).all()
+    return [r[0] for r in rows]
+
+# Registry consistency: todo event_type tem formatter + grupo conhecido.
+check("plano12 registry: formatters == group_of",
+      set(_sn.FORMATTERS) == set(_sn.EVENT_GROUP_OF))
+check("plano12 registry: grupos referenciados existem",
+      all(g in _sn.EVENT_GROUPS for g in _sn.EVENT_GROUP_OF.values()))
+
+# Garante os 4 grupos ligados (defaults), conversa dedicada (contato novo).
+for _k in ("system_notice_assignment", "system_notice_tags",
+           "system_notice_status", "system_notice_ai"):
+    _sn_cfg.set(_k, True)
+# Sessão admin (Mgr) p/ exercitar o caminho do AUTOR ("Mgr fez X").
+_snhdr = {"Authorization": f"Bearer {_mgrtok}"}
+_sncm = _CM("5500099988877")
+_sncm.add_message("user", "início")  # cria conversa (+ aviso 'created', autor=None)
+_snconv = _conv_repo.get_open_for_contact(_sncm.id)
+_sn_phone = _sncm.phone
+check("create -> aviso 'created' no fio",
+      any("iniciada" in c for c in _notices(_snconv["id"])))
+
+# (a) status close/open -> grupo status, com autor nomeado
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "closed"}, headers=_snhdr)
+client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "open"}, headers=_snhdr)
+_after = _notices(_snconv["id"])
+check("status close/open -> 2 avisos", len(_after) - _n == 2)
+check("status_closed -> 'Mgr resolveu'", any("Mgr resolveu a conversa" in c for c in _after[_n:]))
+check("status_open -> 'Mgr reabriu'", any("Mgr reabriu a conversa" in c for c in _after[_n:]))
+
+# (b) GATE: grupo status OFF => nada grava
+_sn_cfg.set("system_notice_status", False)
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "closed"}, headers=_snhdr)
+check("grupo status OFF -> nenhum aviso (gate na geração)",
+      len(_notices(_snconv["id"])) == _n)
+_sn_cfg.set("system_notice_status", True)
+client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "open"}, headers=_snhdr)
+
+# (c) assign + unassign -> grupo assignment, nomeia o alvo
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/conversations/{_snconv['id']}/assign", json={"assignee_user_id": _mgr["id"]}, headers=_snhdr)
+client.post(f"/api/conversations/{_snconv['id']}/assign", json={"assignee_user_id": None}, headers=_snhdr)
+_after = _notices(_snconv["id"])
+check("assign + unassign -> 2 avisos", len(_after) - _n == 2)
+check("assigned -> nomeia alvo (Mgr)", any("para Mgr" in c for c in _after[_n:]))
+check("unassigned -> 'removeu a atribuição'",
+      any("removeu a atribuição" in c for c in _after[_n:]))
+
+# (d) ai off/on (conversa) -> grupo ai
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": False}, headers=_snhdr)
+client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": True}, headers=_snhdr)
+check("ai off/on -> 2 avisos (grupo ai)", len(_notices(_snconv["id"])) - _n == 2)
+
+# (e) agent_changed -> grupo ai
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/conversations/{_snconv['id']}/agent", json={"agent_key": "default"}, headers=_snhdr)
+check("agent_changed -> 1 aviso", len(_notices(_snconv["id"])) - _n == 1)
+
+# (f) attribute_set -> grupo ai (def 'prioridade' criada antes); no-op não gera
+_n = len(_notices(_snconv["id"]))
+client.put(f"/api/conversations/{_snconv['id']}/info",
+           json={"custom_attributes": {"prioridade": "alta"}}, headers=_snhdr)
+_after = _notices(_snconv["id"])
+check("attribute_set -> 1 aviso", len(_after) - _n == 1)
+check("attribute_set -> 'definiu'", any("definiu" in c for c in _after[_n:]))
+_n = len(_notices(_snconv["id"]))
+client.put(f"/api/conversations/{_snconv['id']}/info",
+           json={"custom_attributes": {"prioridade": "alta"}}, headers=_snhdr)
+check("attribute_set no-op (mesmo valor) -> nenhum aviso",
+      len(_notices(_snconv["id"])) == _n)
+
+# (g) tags por contato -> grupo tags (resolve conversa aberta do contato)
+client.post("/api/tags", json={"name": "vip", "color": "#ff0000"}, headers=_snhdr)
+_n = len(_notices(_snconv["id"]))
+client.put(f"/api/contacts/{_sn_phone}/tags", json={"tags": ["vip"]}, headers=_snhdr)
+client.put(f"/api/contacts/{_sn_phone}/tags", json={"tags": []}, headers=_snhdr)
+_after = _notices(_snconv["id"])
+check("tag add/remove -> 2 avisos", len(_after) - _n == 2)
+check("tag_added -> 'adicionou a tag'", any("adicionou a tag" in c for c in _after[_n:]))
+check("tag_removed -> 'removeu a tag'", any("removeu a tag" in c for c in _after[_n:]))
+
+# (h) GATE: grupo tags OFF
+_sn_cfg.set("system_notice_tags", False)
+_n = len(_notices(_snconv["id"]))
+client.put(f"/api/contacts/{_sn_phone}/tags", json={"tags": ["vip"]}, headers=_snhdr)
+check("grupo tags OFF -> nenhum aviso", len(_notices(_snconv["id"])) == _n)
+_sn_cfg.set("system_notice_tags", True)
+
+# (i) toggle-ai por contato -> grupo ai
+_n = len(_notices(_snconv["id"]))
+client.post(f"/api/contacts/{_sn_phone}/toggle-ai", json={"enabled": False}, headers=_snhdr)
+check("toggle-ai contato -> 1 aviso (grupo ai)", len(_notices(_snconv["id"])) - _n == 1)
+
+# (j) auto-reabertura: cliente manda msg numa conversa closed
+_conv_repo.set_status(_snconv["id"], "closed")
+_n = len(_notices(_snconv["id"]))
+_sncm.add_message("user", "oi de novo")
+check("auto-reopen -> aviso 'reaberta automaticamente'",
+      any("reaberta automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
+
+# (k) ai_takeover: 1×/conversa via has_event (dedupe)
+check("ai_takeover ainda não existe", _sn.has_event(_snconv["id"], "ai_takeover") is False)
+_sn.emit_conversation_notice(event_type="ai_takeover", conversation_id=_snconv["id"],
+                             contact_id=_sncm.id, phone=_sn_phone)
+check("ai_takeover emitido -> has_event True", _sn.has_event(_snconv["id"], "ai_takeover") is True)
+check("ai_takeover -> card 'IA assumiu'",
+      any("IA assumiu o atendimento" in c for c in _notices(_snconv["id"])))
+
+# (l) exclusões: conversation_event fora do contexto do LLM
+_snctx = _sn_msg_repo.get_context(_sncm.id, 200)
+check("conversation_event excluído do contexto do LLM",
+      all(m["role"] != "conversation_event" for m in _snctx))
+
+# (m) exclusões: preview da sidebar nunca é um conversation_event
+client.post(f"/api/conversations/{_snconv['id']}/archive", json={"archived": False})
+_snlist = client.get("/api/conversations").json()["data"]["conversations"]
+_snrow = next((c for c in _snlist if c["id"] == _snconv["id"]), None)
+check("sidebar -> conversa listada", _snrow is not None)
+check("sidebar preview role != conversation_event",
+      _snrow is None or _snrow.get("last_message_role") != "conversation_event")
+
+# (n) evento desconhecido -> no-op silencioso (não grava)
+_n = len(_notices(_snconv["id"]))
+_sn.emit_conversation_notice(event_type="inexistente_xyz", conversation_id=_snconv["id"],
+                             contact_id=_sncm.id, phone=_sn_phone)
+check("evento desconhecido -> no-op", len(_notices(_snconv["id"])) == _n)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15i. Filtros de conversas (plano 08)
@@ -1431,6 +1580,259 @@ check("reply extract: quoted text is NOT a reply id",
       _ext_reply({"quoted_message": "texto", "body": "oi"}) is None)
 
 # ═══════════════════════════════════════════════════════════════════
+#  19b. Runtime multi-canal (plano 11): ingest, inbox-por-canal, saída
+# ═══════════════════════════════════════════════════════════════════
+section("Multi-canal runtime (plano 11)")
+
+import asyncio as _aio
+from channels.base import Channel as _Channel, ChannelCapabilities as _Caps, SendResult as _SendResult
+from channels.events import InboundEvent as _InboundEvent
+from agent.handler import ProcessResult as _PR
+from db.repositories import (conversation_repo as _conv11, inbox_repo as _inbox11,
+                             contact_repo as _contact11, channel_repo as _chan11)
+
+_deps = app.state.deps
+_registry = _deps.channel_registry
+_router = _deps.outbound_router
+
+
+class _FakeChannel(_Channel):
+    """In-test provider — records sends, parses a trivial inbound payload."""
+    provider = "test"
+
+    def __init__(self, channel_id, registry=None, credentials=None):
+        super().__init__(channel_id, _Caps(
+            qr=False, templates=False, groups=False, presence=False,
+            reactions=True, media=True, inbound_route="path"))
+        self.sent = []
+
+    def status(self):
+        return {"connected": True, "logged_in": True, "needs_qr": False, "error": None}
+
+    def send_text(self, chat_id, text, *, reply_to=None, mentions=None):
+        self.sent.append((chat_id, text))
+        return _SendResult(ok=True, external_msg_id=f"out_{len(self.sent)}")
+
+    def send_media(self, chat_id, kind, path_or_url, *, caption="", filename=None):
+        return _SendResult(ok=True, external_msg_id="out_media")
+
+    def parse_inbound(self, raw):
+        return [_InboundEvent(
+            channel_id=self.channel_id, provider="test", kind="message",
+            external_msg_id=raw.get("id", ""), chat_id=raw.get("from", ""),
+            sender_id=raw.get("from", ""), text=raw.get("text", ""))]
+
+
+# Register provider + live instance + DB row + inbox (post-boot, as a real op would)
+_registry.register_provider(_FakeChannel)
+_fake = _FakeChannel("fake_ch")
+_registry.add_channel("fake_ch", _fake)
+_chan11.create(id="fake_ch", provider="test", display_name="Fake")
+_fake_inbox = _inbox11.get_or_create_for_channel("fake_ch", name="Fake")
+
+check("inbox-por-canal: fake_ch ganha inbox própria",
+      _fake_inbox["channel_id"] == "fake_ch" and _fake_inbox["id"] != 1)
+check("inbox_repo.get_by_channel(default) -> inbox 1",
+      (_inbox11.get_by_channel("default") or {}).get("id") == 1)
+
+# OutboundRouter: capability gating + routing + missing channel
+check("router caps fake (media on, presence off)",
+      _router.capabilities("fake_ch").media and not _router.capabilities("fake_ch").presence)
+check("router caps default/gowa (presence+groups on)",
+      _router.capabilities("default").presence and _router.capabilities("default").groups)
+_rt = _router.send_text("fake_ch", "5511777770001", "via router")
+check("router.send_text -> ok + external_msg_id", _rt.ok and bool(_rt.external_msg_id))
+check("router roteou ao canal de destino", bool(_fake.sent) and _fake.sent[-1][1] == "via router")
+check("router.send_text canal inexistente -> not ok",
+      not _router.send_text("nao_existe", "x", "y").ok)
+_router.send_presence("fake_ch", "5511777770001", "composing")  # no-op (presence=False)
+check("router.send_presence em canal sem presença -> não envia nada",
+      all(t != "__presence__" for _, t in _fake.sent))
+_fake.sent.clear()
+
+# Fase 6: janela de sessão (capability-driven, sem if provider ==)
+class _FakeWindowed(_FakeChannel):
+    def __init__(self, channel_id, registry=None, credentials=None):
+        super().__init__(channel_id)
+        self.capabilities.templates = True
+        self.capabilities.session_window_hours = 24
+_fwin = _FakeWindowed("fake_win")
+_registry.add_channel("fake_win", _fwin)
+check("session_open: gowa (janela=0) sempre aberto",
+      _router.session_open("default", None) is True)
+check("session_open: canal 0h sempre aberto mesmo com inbound antigo",
+      _router.session_open("fake_ch", time.time() - 99 * 3600) is True)
+check("session_open: dentro da janela de 24h -> aberto",
+      _router.session_open("fake_win", time.time() - 3600) is True)
+check("session_open: fora da janela de 24h -> fechado (exige template)",
+      _router.session_open("fake_win", time.time() - 25 * 3600) is False)
+check("session_open: sem inbound prévio em canal com janela -> fechado",
+      _router.session_open("fake_win", None) is False)
+
+# End-to-end ingest with the LLM mocked: inbound → conversa na inbox do canal → saída pelo canal
+async def _drive_ingest():
+    ev = _InboundEvent(channel_id="fake_ch", provider="test", kind="message",
+                       external_msg_id="in_1", chat_id="5511777770001",
+                       sender_id="5511777770001", sender_name="Fulano da Cloud",
+                       text="oi canal oficial")
+    await _deps.ingest_event(ev)
+    t = _deps.state.processing_tasks.get(("fake_ch", "5511777770001"))
+    if t:
+        await t
+
+# Force a fast, reply-enabled config for the drive (prior tests may have toggled
+# these). api_key must be truthy or the handler short-circuits before the LLM.
+_old_bd = settings.get("message_batch_delay", 3.0)
+_old_ar = settings.get("auto_reply", True)
+_old_key = agent_handler.api_key
+settings.set("message_batch_delay", 0)
+settings.set("response_delay_min", 0)
+settings.set("response_delay_max", 0)
+settings.set("split_message_delay", 0)
+settings.set("auto_reply", True)
+agent_handler.api_key = "test-key-fake"
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=_PR(reply="resposta do canal oficial"))):
+    _aio.run(_drive_ingest())
+settings.set("message_batch_delay", _old_bd)
+settings.set("auto_reply", _old_ar)
+agent_handler.api_key = _old_key
+
+_fc = _contact11.get_by_phone("5511777770001")
+check("ingest: contato resolvido por phone (D2 unificado)", _fc is not None)
+_fi = _inbox11.get_by_channel("fake_ch")
+_conv_fake = (_conv11.get_open_for_contact_inbox(_fc["id"], _fi["id"])
+              if _fc and _fi else None)
+check("ingest: conversa criada na inbox do canal (não na default)",
+      _conv_fake is not None and _conv_fake["inbox_id"] == _fi["id"] and _fi["id"] != 1)
+check("ingest: mensagem do usuário salva",
+      bool(_fc) and any(m["content"] == "oi canal oficial"
+                        for m in message_repo.get_all(_fc["id"])))
+check("ingest: resposta roteada de volta PELO canal de origem",
+      any("resposta do canal oficial" in t for _, t in _fake.sent))
+check("ingest: pushName do remetente aplicado ao contato",
+      bool(_fc) and (_fc.get("name") or "").lstrip("~") == "Fulano da Cloud")
+
+# D1: o MESMO contato tem conversas SEPARADAS por canal (default vs fake)
+_cd = _conv11.resolve_for_contact(_fc["id"], "5511777770001@s.whatsapp.net", inbox_id=1)
+_cf = _conv11.resolve_for_contact(_fc["id"], "5511777770001@s.whatsapp.net", inbox_id=_fi["id"])
+check("D1: conversas separadas por canal (mesmo contato/numero)", _cd["id"] != _cf["id"])
+check("D1: cada conversa na sua inbox",
+      _cd["inbox_id"] == 1 and _cf["inbox_id"] == _fi["id"])
+
+# Fase 4: a lista de conversas expõe canal/provider (indicador na UI)
+_r_convs = client.get("/api/conversations")
+_all_convs = (_r_convs.json().get("data") or {}).get("conversations") or []
+_fake_row = next((c for c in _all_convs if c.get("inbox_id") == _fi["id"]), None)
+check("Fase 4: conversa do canal traz channel_provider",
+      bool(_fake_row) and _fake_row.get("channel_provider") == "test")
+check("Fase 4: conversa do canal traz channel_id",
+      bool(_fake_row) and _fake_row.get("channel_id") == "fake_ch")
+check("Fase 4: conversas do gowa trazem provider gowa",
+      any(c.get("channel_provider") == "gowa" for c in _all_convs))
+
+# Idempotência inbound por (channel_id, external_msg_id) — re-entrega não duplica
+async def _drive_dup():
+    ev = _InboundEvent(channel_id="fake_ch", provider="test", kind="message",
+                       external_msg_id="in_1", chat_id="5511777770001",
+                       sender_id="5511777770001", text="DUPLICADA")
+    await _deps.ingest_event(ev)
+_aio.run(_drive_dup())
+check("idempotência: re-entrega do mesmo external_msg_id é descartada",
+      not any(m["content"] == "DUPLICADA" for m in message_repo.get_all(_fc["id"])))
+
+# HTTP: webhook por-canal → parse_inbound → ingest dispatched (wiring real)
+_contact11.get_or_create("5511777770002")
+_c2 = _contact11.get_by_phone("5511777770002")
+_contact11.update(_c2["id"], ai_enabled=0)  # no LLM call in the background cycle
+settings.set("message_batch_delay", 0)
+r = client.post("/api/webhook/test/fake_ch",
+                json={"id": "in_http", "from": "5511777770002", "text": "http oi"})
+settings.set("message_batch_delay", _old_bd)
+check("POST /api/webhook/test/fake_ch -> 200", r.status_code == 200)
+check("POST inbound -> 1 evento parseado", r.json()["data"].get("events") == 1)
+check("POST inbound -> evento ingerido (handled>=1)", r.json()["data"].get("handled", 0) >= 1)
+
+# ── Conversa-cêntrico (plano 11 D1): leitura + unread + saída POR CONVERSA ──
+section("Conversa-cêntrico (plano 11 D1)")
+
+# _cd (inbox default) e _cf (inbox do canal fake) são duas conversas do MESMO
+# contato (_fc). Mensagens distintas em cada uma provam que ler por conversation_id
+# NÃO funde os canais — ao contrário de get_all(contact_id).
+message_repo.add(_fc["id"], "user", "MSG_DEFAULT_ONLY", conversation_id=_cd["id"])
+message_repo.add(_fc["id"], "user", "MSG_FAKE_ONLY", conversation_id=_cf["id"])
+_msgs_d = message_repo.get_by_conversation(_cd["id"])
+_msgs_f = message_repo.get_by_conversation(_cf["id"])
+check("get_by_conversation: conversa default vê só a sua msg",
+      any(m["content"] == "MSG_DEFAULT_ONLY" for m in _msgs_d)
+      and not any(m["content"] == "MSG_FAKE_ONLY" for m in _msgs_d))
+check("get_by_conversation: conversa do canal vê só a sua msg",
+      any(m["content"] == "MSG_FAKE_ONLY" for m in _msgs_f)
+      and not any(m["content"] == "MSG_DEFAULT_ONLY" for m in _msgs_f))
+check("get_all (legado) ainda funde os dois canais (contraste do bug)",
+      any(m["content"] == "MSG_DEFAULT_ONLY" for m in message_repo.get_all(_fc["id"]))
+      and any(m["content"] == "MSG_FAKE_ONLY" for m in message_repo.get_all(_fc["id"])))
+
+# GET /api/conversations/{id}/messages — thread escopado a UM canal
+_rm = client.get(f"/api/conversations/{_cf['id']}/messages")
+check("GET /api/conversations/{id}/messages -> 200", _rm.status_code == 200)
+_dm = _rm.json().get("data") or {}
+check("conversation messages: só as mensagens da conversa do canal",
+      any(m["content"] == "MSG_FAKE_ONLY" for m in (_dm.get("messages") or []))
+      and not any(m["content"] == "MSG_DEFAULT_ONLY" for m in (_dm.get("messages") or [])))
+check("conversation messages: channel_id da conversa", _dm.get("channel_id") == "fake_ch")
+check("conversation messages: conversa traz provider",
+      (_dm.get("conversation") or {}).get("channel_provider") == "test")
+check("conversation messages: contato embutido (shape do chat)",
+      (_dm.get("contact") or {}).get("phone") == "5511777770001")
+check("GET conversation messages: 404 em conversa inexistente",
+      client.get("/api/conversations/99999/messages").status_code == 404)
+
+# Lista enriquecida (sidebar conversa-cêntrica): preview + unread_count por conversa
+_lc = ((client.get("/api/conversations").json().get("data") or {}).get("conversations") or [])
+_lcf = next((c for c in _lc if c.get("id") == _cf["id"]), None)
+check("lista conversas: row traz channel_id (sidebar por canal)",
+      bool(_lcf) and _lcf.get("channel_id") == "fake_ch")
+check("lista conversas: row traz last_message (preview)", bool(_lcf) and "last_message" in _lcf)
+check("lista conversas: row traz unread_count por conversa",
+      bool(_lcf) and isinstance(_lcf.get("unread_count"), int))
+
+# Unread DERIVADO por conversa (unread_msg_ids ⋈ messages.conversation_id):
+# abrir o thread de um canal não pode zerar o badge do outro canal.
+message_repo.add(_fc["id"], "user", "UNREAD_D", msg_id="UMD_1", conversation_id=_cd["id"])
+message_repo.add(_fc["id"], "user", "UNREAD_F", msg_id="UMF_1", conversation_id=_cf["id"])
+_contact11.increment_unread(_fc["id"], "UMD_1")
+_contact11.increment_unread(_fc["id"], "UMF_1")
+check("unread por conversa: default conta a sua não-lida",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) >= 1)
+check("unread por conversa: canal conta a sua não-lida",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+_read_ids = _conv11.mark_conversation_read(_cd["id"])
+check("mark_conversation_read: retorna msg_ids só da conversa lida",
+      "UMD_1" in _read_ids and "UMF_1" not in _read_ids)
+check("mark_conversation_read: zera só a conversa lida",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == 0)
+check("mark_conversation_read: NÃO zera a conversa do outro canal (D1)",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+
+# Envio do operador é CHANNEL-AWARE (plano 11): conversation_id do canal → sai PELO
+# canal, não pelo GOWA — exatamente o 2º bug (responder numa conversa Cloud ia pelo GOWA).
+_fake.sent.clear()
+mock_gowa_client.send_message.reset_mock()
+_rs = client.post("/api/contacts/5511777770001/send",
+                  json={"message": "OP_VIA_FAKE", "conversation_id": _cf["id"]})
+check("send com conversation_id do canal -> 200", _rs.status_code == 200)
+check("send roteado PELO canal da conversa (não GOWA)",
+      any(t == "OP_VIA_FAKE" for _, t in _fake.sent) and not mock_gowa_client.send_message.called)
+# Sem conversation_id -> fallback 'default' (GOWA): comportamento legado preservado
+mock_gowa_client.send_message.reset_mock()
+_fake.sent.clear()
+_rs2 = client.post("/api/contacts/5511777770001/send", json={"message": "OP_VIA_GOWA"})
+check("send sem conversation_id -> fallback GOWA (legado intacto)",
+      _rs2.status_code == 200 and mock_gowa_client.send_message.called
+      and not any(t == "OP_VIA_GOWA" for _, t in _fake.sent))
+
+# ═══════════════════════════════════════════════════════════════════
 #  20. QR / WhatsApp
 # ═══════════════════════════════════════════════════════════════════
 section("WhatsApp / QR")
@@ -1539,6 +1941,11 @@ for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies", "/custom-at
              "/runtime", "/users", "/conversations", "/ai"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
+
+# Conversa-cêntrico (plano 11 D1): /conversations/<id> serve o SPA (refresh direto
+# no chat de uma conversa) — espelha /contacts/<id>.
+check("GET /conversations/1 (SPA) -> 200", client.get("/conversations/1").status_code == 200)
+check("GET /contacts/1 (SPA) -> 200", client.get("/contacts/1").status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
 #  23. Auth with password
