@@ -311,6 +311,7 @@ inboxes = Table(
     Column("channel_type", Text, nullable=False, server_default="whatsapp"),
     Column("channel_id", Text),                                  # → channels.id (sem FK no MVP)
     Column("agent_bot_enabled", Integer, nullable=False, server_default="1"),  # gate IA nível 2
+    Column("default_agent_key", Text),                          # plano 06: agente default da inbox
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
@@ -346,6 +347,7 @@ conversations = Table(
     Column("team_id", Integer),                                 # NULLABLE sem FK
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
+    Column("active_agent_key", Text),                          # plano 06: agente da conversa
     Column("opened_at", Float, nullable=False),
     Column("resolved_at", Float),
     Column("waiting_since", Float),
@@ -471,6 +473,10 @@ ai_agents = Table(
     # JSON array of tool names, or null/"all" meaning every registered tool.
     Column("tool_names", Text),
     Column("enabled", Integer, nullable=False, server_default="1"),
+    # plano 06: roteamento/handoff (consumido pelo motor de routing futuro).
+    Column("description", Text, nullable=False, server_default=""),
+    Column("is_router", Integer, nullable=False, server_default="0"),
+    Column("routing_targets", Text),                          # JSON array de agent_keys
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )

@@ -53,6 +53,9 @@ def register_routes(app, deps):
         tool_names = body.get("tool_names")
         if tool_names is not None and not isinstance(tool_names, list):
             return _err("tool_names deve ser uma lista ou null.")
+        routing_targets = body.get("routing_targets")
+        if routing_targets is not None and not isinstance(routing_targets, list):
+            return _err("routing_targets deve ser uma lista ou null.")
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
             display_name=body.get("display_name", ""),
@@ -60,6 +63,9 @@ def register_routes(app, deps):
             model_config=model_config,
             tool_names=tool_names,
             enabled=bool(body.get("enabled", True)),
+            description=body.get("description", ""),
+            is_router=bool(body.get("is_router", False)),
+            routing_targets=routing_targets,
         )
         _emit_changed("agent", agent_key)
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))

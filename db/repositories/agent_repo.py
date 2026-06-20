@@ -33,7 +33,9 @@ def _row_to_dict(row) -> dict:
     d = dict(row)
     d["model_config"] = _decode_json(d.get("model_config"), {})
     d["tool_names"] = _decode_json(d.get("tool_names"), None)
+    d["routing_targets"] = _decode_json(d.get("routing_targets"), None)
     d["enabled"] = bool(d.get("enabled", 1))
+    d["is_router"] = bool(d.get("is_router", 0))
     return d
 
 
@@ -93,6 +95,9 @@ def save(
     model_config: dict,
     tool_names: list[str] | None,
     enabled: bool,
+    description: str = "",
+    is_router: bool = False,
+    routing_targets: list[str] | None = None,
 ) -> dict:
     """Upsert an agent, bump version and snapshot to history. Returns the row."""
     now = time.time()
@@ -105,6 +110,10 @@ def save(
         "model_config": json.dumps(model_config or {}, ensure_ascii=False),
         "tool_names": None if tool_names is None else json.dumps(tool_names, ensure_ascii=False),
         "enabled": 1 if enabled else 0,
+        "description": description or "",
+        "is_router": 1 if is_router else 0,
+        "routing_targets": (None if routing_targets is None
+                            else json.dumps(routing_targets, ensure_ascii=False)),
         "version": version,
         "updated_at": now,
     }
@@ -112,7 +121,8 @@ def save(
         conn.execute(upsert(
             ai_agents, values, conflict_cols=["agent_key"],
             update_cols=["display_name", "prompt_key", "model_config",
-                         "tool_names", "enabled", "version", "updated_at"],
+                         "tool_names", "enabled", "description", "is_router",
+                         "routing_targets", "version", "updated_at"],
         ))
         conn.execute(ai_agents_history.insert().values(
             agent_key=agent_key,
