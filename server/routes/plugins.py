@@ -24,6 +24,7 @@ from plugins.manifest import (
 from plugins.restart import schedule_restart
 from plugins.lifecycle import manager as _lifecycle_manager
 from plugins.events import emit as emit_event
+from server.authz import permission_denied
 from server.helpers import _err, _ok
 import time as _time
 
@@ -85,7 +86,10 @@ def register_routes(app, deps):
         return _ok({"plugins": out})
 
     @app.post("/api/plugins/{plugin_id}/enable")
-    async def enable_plugin(plugin_id: str):
+    async def enable_plugin(plugin_id: str, request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, True)
@@ -97,7 +101,10 @@ def register_routes(app, deps):
         return _ok({"id": plugin_id, "enabled": True, "restarting": True})
 
     @app.post("/api/plugins/{plugin_id}/disable")
-    async def disable_plugin(plugin_id: str):
+    async def disable_plugin(plugin_id: str, request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, False)
@@ -112,7 +119,10 @@ def register_routes(app, deps):
         return _ok({"id": plugin_id, "enabled": False, "restarting": True})
 
     @app.delete("/api/plugins/{plugin_id}")
-    async def delete_plugin(plugin_id: str):
+    async def delete_plugin(plugin_id: str, request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
 
@@ -158,6 +168,9 @@ def register_routes(app, deps):
 
     @app.put("/api/plugins/{plugin_id}/settings")
     async def update_plugin_settings(plugin_id: str, request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         loaded = registry.loaded.get(plugin_id) if registry else None
         if not loaded or not loaded.settings_cls:
             return _err("plugin sem settings declaradas", 404)
@@ -209,7 +222,10 @@ def register_routes(app, deps):
         )
 
     @app.post("/api/plugins/import")
-    async def import_plugin(file: UploadFile):
+    async def import_plugin(file: UploadFile, request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         contents = await file.read()
         try:
             zf = zipfile.ZipFile(io.BytesIO(contents))
@@ -268,6 +284,9 @@ def register_routes(app, deps):
         return _ok({"id": pid, "version": version, "enabled": False})
 
     @app.post("/api/plugins/restart")
-    async def restart_server():
+    async def restart_server(request: Request):
+        denied = permission_denied(request, "plugins.manage")
+        if denied:
+            return denied
         schedule_restart(reason="manual restart from /api/plugins/restart")
         return _ok({"restarting": True})

@@ -768,3 +768,20 @@ export async function resetUserPassword(id, password) {
 export async function deleteUser(id) {
   return request('DELETE', `/api/users/${id}`);
 }
+
+// Role editor (RBAC) — create/edit/delete custom roles + edit system roles.
+export async function createRole(data) {
+  return request('POST', '/api/roles', data);
+}
+
+export async function updateRole(id, data) {
+  return request('PUT', `/api/roles/${id}`, data);
+}
+
+export async function deleteRole(id) {
+  return request('DELETE', `/api/roles/${id}`);
+}
+
+export async function resetRole(id) {
+  return request('POST', `/api/roles/${id}/reset`);
+}

@@ -6,9 +6,11 @@ import time
 from typing import Any
 
 import httpx
+from fastapi import Request
 
 from config.settings import LLM_API_BASE_URL
 from server.auth import generate_salt, hash_password
+from server.authz import permission_denied
 from server.helpers import _ok, _err, _mask_key
 from server import balance_monitor
 from agent import group_mentions
@@ -70,7 +72,10 @@ def register_routes(app, deps):
         })
 
     @app.put("/api/config")
-    async def save_config(body: dict):
+    async def save_config(body: dict, request: Request):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         allowed_keys = {
             "openrouter_api_key", "model", "audio_model", "image_model",
             "document_model",
