@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from server.auth import auth_required, verify_token, rbac_enforced, resolve_request_token
 from server.helpers import _get_web_dir
+from server.audit_listener import register_audit_listener
+from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
 from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, conversations as conversations_routes
@@ -197,6 +199,7 @@ def create_app(
         _loop = asyncio.get_running_loop()
         _set_plugin_runtime(ws_manager, _loop)
         _set_events_runtime(_loop, agent_handler)
+        register_audit_listener()  # plano 07: core "*" listener for the audit trail
         _set_balance_runtime(ws_manager, _loop, settings)
         # Lifecycle: plugins finished loading + bus is live, now broadcast
         for loaded in registry.loaded.values():
@@ -352,7 +355,24 @@ def create_app(
                         status_code=401,
                     )
 
-        return await call_next(request)
+        # Audit actor (plano 07): real user when logged in, else system. The bus
+        # `*` listener reads this via contextvar (snapshotted into create_task).
+        import uuid as _uuid
+        _u = request.state.user
+        request.state.request_id = _uuid.uuid4().hex
+        _xff = request.headers.get("x-forwarded-for", "")
+        _ip = (_xff.split(",")[0].strip() if _xff
+               else (request.client.host if request.client else None))
+        _actor_token = set_current_actor(ActorCtx(
+            id=(_u.get("id") if _u else None),
+            type=("user" if _u else "system"),
+            label=(_u.get("name") or _u.get("email") if _u else None),
+            ip=_ip, request_id=request.state.request_id,
+        ))
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_actor(_actor_token)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
