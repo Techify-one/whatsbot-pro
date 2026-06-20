@@ -1122,6 +1122,39 @@ r = client.post("/api/conversations/filter", json={
 check("filter assignee values:[] -> 400 não 500", r.status_code == 400)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15j. AI Engine — history / rollback (plano 06)
+# ═══════════════════════════════════════════════════════════════════
+section("AI Engine history/rollback")
+
+client.put("/api/ai/agents/default", json={
+    "display_name": "Agente A", "prompt_key": "default", "model_config": {}, "enabled": True})
+client.put("/api/ai/agents/default", json={
+    "display_name": "Agente B", "prompt_key": "default", "model_config": {}, "enabled": True})
+r = client.get("/api/ai/agents/default/history")
+check("GET agent history -> 200", r.status_code == 200)
+_hist = r.json()["data"]
+check("agent history -> >=2 versões, mais nova primeiro",
+      len(_hist) >= 2 and _hist[0]["version"] > _hist[1]["version"])
+_v_a = next(h["version"] for h in _hist if True)  # latest is 'Agente B'
+# rollback para a versão de "Agente A" (a penúltima salva)
+_target = sorted(h["version"] for h in _hist)[-2]
+r = client.post(f"/api/ai/agents/default/rollback/{_target}")
+check("POST agent rollback -> 200", r.status_code == 200)
+check("rollback -> cria versão NOVA", r.json()["data"]["version"] > _hist[0]["version"])
+check("rollback -> restaura display_name", r.json()["data"]["display_name"] == "Agente A")
+r = client.post("/api/ai/agents/default/rollback/9999")
+check("rollback versão inexistente -> 404", r.status_code == 404)
+
+# Prompt history/rollback
+client.put("/api/ai/prompts/default", json={"body": "Prompt V1"})
+client.put("/api/ai/prompts/default", json={"body": "Prompt V2"})
+r = client.get("/api/ai/prompts/default/history")
+check("GET prompt history -> >=2", len(r.json()["data"]) >= 2)
+_pt = sorted(h["version"] for h in r.json()["data"])[-2]
+r = client.post(f"/api/ai/prompts/default/rollback/{_pt}")
+check("prompt rollback -> restaura body V1", r.json()["data"]["body"] == "Prompt V1")
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")

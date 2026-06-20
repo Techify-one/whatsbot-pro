@@ -121,3 +121,39 @@ def save(
             created_at=now,
         ))
     return _row_to_dict(values)
+
+
+def list_history(agent_key: str) -> list[dict]:
+    """Version trail (newest first), sem o snapshot completo."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(ai_agents_history.c.version, ai_agents_history.c.created_at)
+            .where(ai_agents_history.c.agent_key == agent_key)
+            .order_by(ai_agents_history.c.version.desc())
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_snapshot(agent_key: str, version: int) -> dict | None:
+    with get_engine().connect() as conn:
+        snap = conn.execute(
+            select(ai_agents_history.c.snapshot).where(
+                ai_agents_history.c.agent_key == agent_key,
+                ai_agents_history.c.version == version)
+        ).scalar()
+    return _decode_json(snap, None)
+
+
+def rollback(agent_key: str, version: int) -> dict | None:
+    """Re-apply a past snapshot as a NEW version (preserva o trail)."""
+    snap = get_snapshot(agent_key, version)
+    if not snap:
+        return None
+    return save(
+        agent_key,
+        display_name=snap.get("display_name", ""),
+        prompt_key=snap.get("prompt_key", ""),
+        model_config=_decode_json(snap.get("model_config"), {}),
+        tool_names=_decode_json(snap.get("tool_names"), None),
+        enabled=bool(snap.get("enabled", 1)),
+    )
