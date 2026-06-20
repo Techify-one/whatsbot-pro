@@ -56,7 +56,7 @@ function myReaction(message) {
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 
-export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, onBack, messages, info, contact, onAvatarClick, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -886,7 +886,12 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
               >${tagName}</span>`;
             }) : null}
           </div>
-          ${contactTyping
+          ${aiResponding
+            ? html`<div class="text-wa-teal text-[13px] leading-tight font-medium flex items-center gap-1.5">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse"></span>
+                <span>IA respondendo…</span>
+              </div>`
+            : contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
             : isGroup ? html`<div class="text-wa-secondary text-[13px] leading-tight">Grupo</div>`
             : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null
