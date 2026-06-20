@@ -60,6 +60,9 @@ KNOWN_EVENTS: set[str] = {
     "contact.updated", "contact.ai_toggled",
     "contact.tagged", "contact.untagged",
     "tag.created", "tag.updated", "tag.deleted",
+    # Conversations (plano 01 / plano 10 RT)
+    "conversation.created", "conversation.status_changed", "conversation.assigned",
+    "conversation.archived", "conversation.ai_toggled", "conversation.updated",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",
