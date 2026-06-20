@@ -8,6 +8,7 @@ import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, copyToClipboard } from './MessageContextMenu.js';
 import { EmojiPicker } from './EmojiPicker.js';
+import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 
 const html = htm.bind(h);
 
@@ -861,6 +862,9 @@ export function ContactDetail({ phone, onBack, messages, info, contact, onAvatar
             : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null
           }
         </div>
+
+        <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
+        <${ConversationHeaderActions} phone=${phone} sandbox=${sandbox} />
       </div>
 
       <!-- Chat area with doodle pattern -->
