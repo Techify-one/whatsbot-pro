@@ -109,6 +109,7 @@ while true; do
         --reload-dir agent \
         --reload-dir config \
         --reload-dir gowa \
+        --reload-dir channels \
         --reload-dir db \
         --reload-dir plugins \
         --reload-dir storages/plugins \

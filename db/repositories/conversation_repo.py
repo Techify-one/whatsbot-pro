@@ -430,6 +430,28 @@ def assign_agent(conv_id: int, *, assignee_user_id: int | None,
     return _update(conv_id, values)
 
 
+def ensure_ai_agent(contact_id: int, agent_key: str) -> dict | None:
+    """Attribute the contact's active conversation to the AI agent that is
+    answering, so the inbox shows its assignee chip (e.g. "IA padrão") sempre que
+    a IA responde — mesmo em conversas reabertas após resolução (que limpa o
+    ``active_agent_key``) ou criadas antes do agente-padrão existir.
+
+    No-op when a human has taken the chat over (``assignee_user_id`` set), when it
+    is already bound to this same agent, or when the conversation is not open.
+    Returns the updated conv only when it actually changed, so callers can
+    broadcast a single assignment event."""
+    conv = get_latest_for_contact(contact_id)
+    if conv is None:
+        return None
+    if conv.get("status") != "open":
+        return None
+    if conv.get("assignee_user_id") is not None:
+        return None  # a person owns this chat — don't steal it for the AI
+    if conv.get("active_agent_key") == agent_key:
+        return None  # already attributed to this agent
+    return _update(conv["id"], {"active_agent_key": agent_key})
+
+
 def touch_activity(conv_id: int, ts: float | None = None) -> None:
     with get_engine().begin() as conn:
         conn.execute(update(conversations).where(conversations.c.id == conv_id)
