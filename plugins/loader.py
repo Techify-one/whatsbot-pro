@@ -47,6 +47,8 @@ class LoadedPlugin:
     # Lifecycle hooks (plano 09 Fase 1): captured here, called+awaited by the host.
     setup_fn: callable | None = None
     teardown_fn: callable | None = None
+    # Channel provider classes (plano 02 Fase 0): registered in the ChannelRegistry.
+    channel_providers: list = dataclasses.field(default_factory=list)
 
     @property
     def id(self) -> str:
@@ -275,6 +277,20 @@ def _load_plugin_module(
     if settings_modname:
         settings_mod = _import_submodule(package_name, settings_modname, plugin_dir)
         loaded.settings_cls = getattr(settings_mod, "Settings", None)
+
+    # channels entry: module exporting CHANNEL_PROVIDERS=[ChannelClass, ...] — plano 02.
+    channels_modname = manifest.entry.get("channels")
+    if channels_modname:
+        channels_mod = _import_submodule(package_name, channels_modname, plugin_dir)
+        providers = getattr(channels_mod, "CHANNEL_PROVIDERS", None) or []
+        for cls in providers:
+            if isinstance(cls, type):
+                loaded.channel_providers.append(cls)
+            else:
+                logger.warning(
+                    "Plugin %s: CHANNEL_PROVIDERS entry %r is not a class, skipped",
+                    manifest.id, cls,
+                )
 
     # lifecycle entry: module exporting setup(ctx)/teardown(ctx) — plano 09 Fase 1.
     # Captured here but NOT called (no event loop at import time); the host

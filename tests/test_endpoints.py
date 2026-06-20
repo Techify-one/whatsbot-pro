@@ -795,6 +795,34 @@ check("GET /runtime/subprocesses -> 200", r.status_code == 200)
 check("GET /runtime/subprocesses -> is list", isinstance(r.json()["data"], list))
 
 # ═══════════════════════════════════════════════════════════════════
+#  15e. Channels (plano 02 Fase 0)
+# ═══════════════════════════════════════════════════════════════════
+section("Channels")
+
+r = client.get("/api/channels")
+check("GET /channels -> 200", r.status_code == 200)
+_chans = r.json()["data"]
+check("GET /channels -> is list", isinstance(_chans, list))
+_default = next((c for c in _chans if c["id"] == "default"), None)
+check("GET /channels -> seeds 'default' channel", _default is not None)
+check("GET /channels -> default provider is gowa", _default and _default["provider"] == "gowa")
+
+r = client.get("/api/channels/default")
+check("GET /channels/default -> 200", r.status_code == 200)
+
+r = client.get("/api/channels/inexistente")
+check("GET /channels/{unknown} -> 404", r.status_code == 404)
+
+# Credential masking (P15): set a secret via repo, ensure the API masks it.
+from db.repositories import channel_credential_repo as _ccrepo
+_ccrepo.set("default", "access_token", "supersecrettoken9876")
+r = client.get("/api/channels/default")
+_creds = r.json()["data"].get("credentials", {})
+check("GET /channels/default -> credential masked",
+      _creds.get("access_token", "").startswith("••••") and "supersecret" not in _creds.get("access_token", ""))
+check("GET /channels/default -> mask keeps last 4", _creds.get("access_token", "").endswith("9876"))
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")

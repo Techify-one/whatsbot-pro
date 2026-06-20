@@ -15,7 +15,7 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -24,6 +24,9 @@ from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_serv
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
 from runtime.subprocess_service import SubprocessService
+from channels.registry import ChannelRegistry
+from channels.providers.gowa_channel import GOWAChannel
+from db.repositories import channel_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
     register_plugin_events,
@@ -60,6 +63,7 @@ class ServerDeps:
     statics_senditems_dir: Path
     plugins_dir: Path = None
     plugins_registry: PluginRegistry = None
+    channel_registry: object = None
     # Dynamically set by webhook route for cross-module access
     broadcast_tool_calls: object = None
 
@@ -94,6 +98,13 @@ def create_app(
         settings.data_dir / "assets" / "plugin_examples",
     )
     registry = discover_and_load(plugins_dir)
+
+    # Channel registry (plano 02 Fase 0). Core registers the internal GOWA
+    # provider; plugins contribute providers via entry.channels. The live
+    # webhook/send flow is NOT yet rerouted through this (incremental — §0.5/0.7).
+    channel_registry = ChannelRegistry()
+    channel_registry.register_provider(GOWAChannel)
+
     for loaded in registry.loaded.values():
         if loaded.tools:
             agent_handler.register_plugin_tools(loaded.id, loaded.tools)
@@ -103,6 +114,18 @@ def create_app(
             register_plugin_events(loaded.id, loaded.event_handlers)
         if loaded.filters:
             register_plugin_filters(loaded.id, loaded.filters)
+        for provider_cls in getattr(loaded, "channel_providers", []):
+            channel_registry.register_provider(provider_cls)
+
+    # Instantiate the "default" gowa channel from its DB row (created by the
+    # 0011_channels migration), wrapping the existing client/manager.
+    try:
+        default_row = channel_repo.get("default")
+        if default_row is not None:
+            channel_registry.add_channel(
+                "default", GOWAChannel("default", gowa_client, gowa_manager))
+    except Exception as e:
+        logger.warning("Could not instantiate default channel: %s", e)
 
     # AI engine (config-in-DB + code-in-DB). Seed the default agent/prompt from
     # the current config (idempotent), then materialise/install/register the
@@ -149,6 +172,7 @@ def create_app(
         statics_senditems_dir=statics_senditems_dir,
         plugins_dir=plugins_dir,
         plugins_registry=registry,
+        channel_registry=channel_registry,
     )
 
     # Group @mention resolution service (members lookup + name/number mapping).
@@ -379,6 +403,7 @@ def create_app(
     quick_replies_routes.register_routes(app, deps)
     custom_attributes_routes.register_routes(app, deps)
     runtime_routes.register_routes(app, deps)
+    channels_routes.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
     plugins_routes.register_routes(app, deps)
