@@ -548,6 +548,23 @@ export async function deleteChannel(id) {
   return request('DELETE', `/api/channels/${encodeURIComponent(id)}`);
 }
 
+// Usuários do painel atribuíveis como agentes de um canal (criação + edição).
+// → {users:[{id,name,email,is_admin}]}
+export async function listChannelAssignableUsers() {
+  return request('GET', '/api/channels/assignable-users');
+}
+
+// Agentes (usuários do painel) que veem/recebem a inbox deste canal.
+// → {inbox_id, member_ids:[...], users:[{id,name,email,is_admin}]}
+export async function getChannelMembers(id) {
+  return request('GET', `/api/channels/${encodeURIComponent(id)}/members`);
+}
+
+// body: {user_ids:[...]} → substitui o conjunto de membros da inbox do canal.
+export async function setChannelMembers(id, userIds) {
+  return request('PUT', `/api/channels/${encodeURIComponent(id)}/members`, { user_ids: userIds });
+}
+
 // {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);

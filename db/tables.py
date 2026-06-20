@@ -348,6 +348,20 @@ contact_inboxes = Table(
 Index("idx_contact_inbox_contact", contact_inboxes.c.contact_id)
 Index("idx_contact_inbox_lid", contact_inboxes.c.inbox_id, contact_inboxes.c.source_lid)
 
+# Which panel users (agents) belong to an inbox. A non-admin user without
+# ``conversation.read_all`` only sees conversations of the inboxes they are a
+# member of. Managed from the channel editor (one inbox per channel). admin and
+# anyone holding ``conversation.read_all`` bypass membership and see everything.
+inbox_members = Table(
+    "inbox_members",
+    metadata,
+    Column("inbox_id", Integer, ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", Float, nullable=False),
+    PrimaryKeyConstraint("inbox_id", "user_id"),
+)
+Index("idx_inbox_members_user", inbox_members.c.user_id)
+
 conversations = Table(
     "conversations",
     metadata,

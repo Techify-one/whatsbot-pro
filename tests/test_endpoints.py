@@ -892,6 +892,35 @@ check("GET /channels/connected -> exclui desabilitado",
       not any(c["id"] == "conn_teste" for c in r.json()["data"]))
 _chrepo.delete("conn_teste")
 
+# Usuários atribuíveis (picker de agentes na criação do canal) — channel.manage.
+r = client.get("/api/channels/assignable-users")
+check("GET /channels/assignable-users -> 200", r.status_code == 200)
+check("GET assignable-users -> users é lista", isinstance(r.json()["data"].get("users"), list))
+
+# Membros da inbox de um canal (agentes que veem/recebem a caixa) — channel.manage.
+r = client.get("/api/channels/default/members")
+check("GET /channels/default/members -> 200", r.status_code == 200)
+_m = r.json()["data"]
+check("GET members -> tem inbox_id", isinstance(_m.get("inbox_id"), int))
+check("GET members -> member_ids é lista", isinstance(_m.get("member_ids"), list))
+check("GET members -> users é lista", isinstance(_m.get("users"), list))
+r = client.get("/api/channels/inexistente/members")
+check("GET members canal desconhecido -> 404", r.status_code == 404)
+# Cria um usuário e o atribui como membro da inbox do canal default.
+from db.repositories import user_repo as _urepo
+_u = _urepo.create(email="agente_inbox@x.com", name="Agente Inbox",
+                   password_hash="x", role_keys=["atendente"])
+r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]})
+check("PUT members -> 200", r.status_code == 200)
+check("PUT members -> persiste o membro", _u["id"] in r.json()["data"]["member_ids"])
+r = client.get("/api/channels/default/members")
+check("GET members -> reflete o membro salvo", _u["id"] in r.json()["data"]["member_ids"])
+r = client.put("/api/channels/default/members", json={"user_ids": []})
+check("PUT members -> esvazia o conjunto", r.json()["data"]["member_ids"] == [])
+r = client.put("/api/channels/default/members", json={"user_ids": "nope"})
+check("PUT members tipo inválido -> 400", r.status_code == 400)
+_urepo.delete(_u["id"])
+
 # Handshake do webhook por provider (Cloud API verification) — auth-exempt
 r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
                params={"hub.mode": "subscribe", "hub.verify_token": "vtok_abc",
