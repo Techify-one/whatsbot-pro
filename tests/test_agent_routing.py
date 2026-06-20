@@ -143,5 +143,31 @@ spec = agent_factory.build_for_contact(handler_on, contact)
 check("agente vinculado desativado -> cai no default",
       spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)
 
+print("\nhooks_config — enforcement no entrypoint do agno:")
+from agent import agno_engine  # noqa: E402
+
+class _DispatchSpy(FakeHandler):
+    def __init__(self):
+        super().__init__(True)
+        self.dispatched = []
+    def _dispatch_tool(self, contact, name, args):
+        self.dispatched.append(name)
+        return "ok"
+
+spy = _DispatchSpy()
+executed = []
+# call_limit=1 já satisfeito -> a 2ª chamada deve bloquear sem despachar
+executed.append({"tool": "buscar"})
+ep = agno_engine._make_sync_entrypoint(spy, contact, "5511888880001", "buscar",
+                                       executed, {"buscar": {"call_limit": 1}})
+out = ep()
+check("hooks: 2ª chamada bloqueada retorna aviso ao LLM", "limite" in out)
+check("hooks: tool bloqueada NÃO foi despachada", "buscar" not in spy.dispatched)
+check("hooks: registra skipped/blocked", executed[-1].get("blocked") is not None)
+# Sem hooks_config -> despacha normalmente
+ep2 = agno_engine._make_sync_entrypoint(spy, contact, "5511888880001", "buscar", [], None)
+ep2()
+check("sem hooks_config: despacha normal", "buscar" in spy.dispatched)
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
