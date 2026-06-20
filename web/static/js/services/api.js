@@ -361,6 +361,31 @@ export async function getConversation(id) {
   return request('GET', `/api/conversations/${id}`);
 }
 
+// Filter engine (plano 08). The schema describes which dimensions exist so the
+// UI can render only the controls that apply to this install.
+export async function getConversationFilterSchema() {
+  return request('GET', '/api/conversations/filter-schema');
+}
+
+// Filter conversations via the flat-param GET endpoint. Builds the querystring
+// from `params`, dropping empty values and URL-encoding keys (cattr:<key>) and
+// values correctly. AND between distinct params; a comma-separated value (e.g.
+// labels=vip,lead) is OR within that dimension.
+export async function filterConversations(params = {}) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (Array.isArray(v)) {
+      if (v.length === 0) continue;
+      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v.join(','))}`);
+    } else {
+      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+    }
+  }
+  const qs = parts.join('&');
+  return request('GET', `/api/conversations/filter${qs ? '?' + qs : ''}`);
+}
+
 export async function setConversationStatus(id, status) {
   return request('POST', `/api/conversations/${id}/status`, { status });
 }
