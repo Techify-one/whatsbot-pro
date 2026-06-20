@@ -20,7 +20,8 @@ from fastapi import Request
 from fastapi.responses import Response
 
 from channels.providers.gowa_channel import build_gowa_channel
-from db.repositories import channel_repo, channel_credential_repo, inbox_repo
+from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
+                             inbox_member_repo, user_repo)
 from server.authz import permission_denied
 from server.helpers import _ok, _err
 
@@ -39,6 +40,15 @@ def _serialize(row: dict, creds: dict) -> dict:
     row = dict(row)
     row["credentials"] = {k: _mask(v) for k, v in creds.items()}
     return row
+
+
+def _assignable_users() -> list[dict]:
+    """Active panel users for the channel agent picker (id/name/email/is_admin)."""
+    return [
+        {"id": u["id"], "name": u.get("name") or u.get("email"),
+         "email": u.get("email"), "is_admin": bool(u.get("is_admin"))}
+        for u in user_repo.list_all() if u.get("is_active")
+    ]
 
 
 def register_routes(app, deps):
@@ -108,6 +118,18 @@ def register_routes(app, deps):
                 "own_phone": row.get("own_phone"),
             })
         return _ok(out)
+
+    @app.get("/api/channels/assignable-users")
+    async def assignable_users(request: Request):
+        """Active panel users for the channel agent picker (create + edit).
+
+        Gated by ``channel.manage`` (same as the rest of this screen). Registered
+        before ``/{channel_id}`` so the literal path wins the match."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        users = await asyncio.to_thread(_assignable_users)
+        return _ok({"users": users})
 
     @app.get("/api/channels/{channel_id}")
     async def get_channel(channel_id: str, request: Request):
@@ -192,6 +214,49 @@ def register_routes(app, deps):
                 await asyncio.to_thread(channel_credential_repo.set, channel_id, str(key), str(value))
         stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
         return _ok(_serialize(row, stored))
+
+    @app.get("/api/channels/{channel_id}/members")
+    async def get_channel_members(channel_id: str, request: Request):
+        """Agents (panel users) who see/receive this channel's inbox.
+
+        Returns the channel's inbox id, the current member user ids, and the full
+        list of assignable (active) users for the picker — one round-trip for the
+        editor. Gated by ``channel.manage`` (same as the rest of this screen)."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        inbox = await asyncio.to_thread(
+            inbox_repo.get_or_create_for_channel, channel_id,
+            name=row.get("display_name") or channel_id)
+        members = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
+        users = await asyncio.to_thread(_assignable_users)
+        return _ok({"inbox_id": inbox["id"], "member_ids": members, "users": users})
+
+    @app.put("/api/channels/{channel_id}/members")
+    async def set_channel_members(channel_id: str, body: dict, request: Request):
+        """Replace the member set of this channel's inbox. Body: ``{user_ids: [...]}``."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        raw = body.get("user_ids")
+        if not isinstance(raw, list):
+            return _err("user_ids deve ser uma lista.", 400)
+        try:
+            user_ids = [int(u) for u in raw]
+        except (TypeError, ValueError):
+            return _err("user_ids deve conter apenas inteiros.", 400)
+        inbox = await asyncio.to_thread(
+            inbox_repo.get_or_create_for_channel, channel_id,
+            name=row.get("display_name") or channel_id)
+        members = await asyncio.to_thread(
+            inbox_member_repo.set_members, inbox["id"], user_ids)
+        return _ok({"inbox_id": inbox["id"], "member_ids": members})
 
     @app.delete("/api/channels/{channel_id}")
     async def delete_channel(channel_id: str, request: Request):

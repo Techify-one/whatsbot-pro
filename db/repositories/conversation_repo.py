@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 
-from sqlalchemy import select, update, func, delete as sa_delete, case
+from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
 
 from db.engine import get_engine
 from db.tables import (conversations, contacts, conversation_counters, inboxes,
@@ -263,10 +263,15 @@ def _finalize_conv(row) -> dict:
 
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
                        assignee_user_id: int | None = None, is_archived: int | None = None,
+                       inbox_ids: list[int] | None = None,
                        limit: int = 100, offset: int = 0) -> list[dict]:
     """List conversations with contact + channel info + last-message preview +
     per-conversation unread, pinned-first then newest. Feeds the conversa-cêntrica
-    sidebar and the full-page conversation list (plano 11 D1)."""
+    sidebar and the full-page conversation list (plano 11 D1).
+
+    ``inbox_ids`` scopes visibility to a set of inboxes (inbox membership): ``None``
+    means no scoping (sees all); an empty list means the user is a member of no
+    inbox and sees nothing."""
     stmt = select(*_enriched_columns()).select_from(_enriched_from())
     if status is not None:
         stmt = stmt.where(conversations.c.status == status)
@@ -276,6 +281,9 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
         stmt = stmt.where(conversations.c.assignee_user_id == assignee_user_id)
     if is_archived is not None:
         stmt = stmt.where(conversations.c.is_archived == is_archived)
+    if inbox_ids is not None:
+        stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
+                          else sa_false())
     stmt = (stmt.order_by(contacts.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())
             .limit(limit).offset(offset))
@@ -284,11 +292,17 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
     return [_finalize_conv(r) for r in rows]
 
 
-def list_filtered(where, *, limit: int = 50, offset: int = 0) -> list[dict]:
-    """List conversations matching a pre-built (injection-safe) WHERE from db.filters."""
+def list_filtered(where, *, inbox_ids: list[int] | None = None,
+                  limit: int = 50, offset: int = 0) -> list[dict]:
+    """List conversations matching a pre-built (injection-safe) WHERE from db.filters.
+
+    ``inbox_ids`` scopes by inbox membership (see :func:`list_conversations`)."""
     stmt = select(*_enriched_columns()).select_from(_enriched_from())
     if where is not None:
         stmt = stmt.where(where)
+    if inbox_ids is not None:
+        stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
+                          else sa_false())
     stmt = (stmt.order_by(contacts.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())
             .limit(limit).offset(offset))

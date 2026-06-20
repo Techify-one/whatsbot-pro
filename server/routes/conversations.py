@@ -14,7 +14,7 @@ from db import filters as conv_filters
 from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
 from server import system_notices
-from server.authz import permission_denied, current_user
+from server.authz import permission_denied, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,16 @@ async def _emit_notice(request: Request, conv: dict, event_type: str, **ctx):
         logger.debug("conversation notice %s failed: %s", event_type, e)
 
 
+def _inbox_hidden(request: Request, inbox_id) -> bool:
+    """True if inbox membership scoping hides ``inbox_id`` from the current user.
+
+    Mirrors the list filter so single-conversation reads stay consistent: a user
+    scoped to a set of inboxes (not admin / not ``conversation.read_all``) gets a
+    404 for conversations outside that set."""
+    vis = visible_inbox_ids(request)
+    return vis is not None and inbox_id not in vis
+
+
 def register_routes(app, deps):
     agent_handler = deps.agent_handler
     settings = deps.settings
@@ -106,7 +116,8 @@ def register_routes(app, deps):
         rows = await asyncio.to_thread(
             conversation_repo.list_conversations,
             status=status, inbox_id=inbox_id, assignee_user_id=assignee_user_id,
-            is_archived=1 if archived else 0, limit=limit, offset=offset)
+            is_archived=1 if archived else 0,
+            inbox_ids=visible_inbox_ids(request), limit=limit, offset=offset)
         return _ok({"conversations": rows})
 
     @app.get("/api/conversations/filter-schema")
@@ -145,7 +156,8 @@ def register_routes(app, deps):
             logger.warning("Filtro inválido: %s", e)
             return _err("Filtro inválido.", status=400)
         rows = await asyncio.to_thread(
-            conversation_repo.list_filtered, where, limit=spec.limit, offset=spec.offset)
+            conversation_repo.list_filtered, where,
+            inbox_ids=visible_inbox_ids(request), limit=spec.limit, offset=spec.offset)
         return _ok({"conversations": rows, "count": len(rows)})
 
     @app.get("/api/conversations/assignable-agents")
@@ -180,6 +192,8 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        if _inbox_hidden(request, conv.get("inbox_id")):
+            return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
     @app.get("/api/conversations/{conv_id}/messages")
@@ -193,10 +207,14 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
+        vis = visible_inbox_ids(request)
 
         def _load():
             conv = conversation_repo.get_with_channel(conv_id)
             if conv is None:
+                return None, None, [], []
+            # Inbox membership scoping: hide (as 404) before any mark-read side effect.
+            if vis is not None and conv.get("inbox_id") not in vis:
                 return None, None, [], []
             phone = conv.get("contact_phone") or ""
             contact = contact_repo.get_full_contact(phone) if phone else None
