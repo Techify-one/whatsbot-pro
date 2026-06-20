@@ -46,6 +46,11 @@ EVENT_GROUPS: dict[str, dict] = {
         "default": True,
         "label": "Tags",
     },
+    "conv_labels": {
+        "config_key": "system_notice_conv_labels",
+        "default": True,
+        "label": "Etiquetas da conversa",
+    },
     "status": {
         "config_key": "system_notice_status",
         "default": True,
@@ -64,9 +69,12 @@ EVENT_GROUP_OF: dict[str, str] = {
     "assigned": "assignment",
     "assigned_me": "assignment",
     "unassigned": "assignment",
-    # tags
+    # tags (contato)
     "tag_added": "tags",
     "tag_removed": "tags",
+    # etiquetas (conversa)
+    "conv_label_added": "conv_labels",
+    "conv_label_removed": "conv_labels",
     # status & arquivo
     "status_closed": "status",
     "status_open": "status",
@@ -121,6 +129,18 @@ def _f_tag_removed(actor=None, tag=None, **_) -> str:
     if actor:
         return f'🏷️ {actor} removeu a tag "{_q(tag)}".'
     return f'🏷️ Tag "{_q(tag)}" removida.'
+
+
+def _f_conv_label_added(actor=None, label=None, **_) -> str:
+    if actor:
+        return f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" à conversa.'
+    return f'🏷️ Etiqueta "{_q(label)}" adicionada à conversa.'
+
+
+def _f_conv_label_removed(actor=None, label=None, **_) -> str:
+    if actor:
+        return f'🏷️ {actor} removeu a etiqueta "{_q(label)}" da conversa.'
+    return f'🏷️ Etiqueta "{_q(label)}" removida da conversa.'
 
 
 def _f_status_closed(actor=None, **_) -> str:
@@ -197,6 +217,8 @@ FORMATTERS: dict[str, callable] = {
     "unassigned": _f_unassigned,
     "tag_added": _f_tag_added,
     "tag_removed": _f_tag_removed,
+    "conv_label_added": _f_conv_label_added,
+    "conv_label_removed": _f_conv_label_removed,
     "status_closed": _f_status_closed,
     "status_open": _f_status_open,
     "status_reopened_auto": _f_status_reopened_auto,

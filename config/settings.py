@@ -120,6 +120,7 @@ DEFAULT_CONFIG = {
     # Grupo desligado ⇒ o aviso não é gerado (nada grava/emite) para ninguém.
     "system_notice_assignment": True,
     "system_notice_tags": True,
+    "system_notice_conv_labels": True,
     "system_notice_status": True,
     "system_notice_ai": True,
 }

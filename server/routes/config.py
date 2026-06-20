@@ -67,6 +67,7 @@ def register_routes(app, deps):
             "low_balance_threshold": settings.get("low_balance_threshold", 0.50),
             "system_notice_assignment": settings.get("system_notice_assignment", True),
             "system_notice_tags": settings.get("system_notice_tags", True),
+            "system_notice_conv_labels": settings.get("system_notice_conv_labels", True),
             "system_notice_status": settings.get("system_notice_status", True),
             "system_notice_ai": settings.get("system_notice_ai", True),
         })
@@ -91,6 +92,7 @@ def register_routes(app, deps):
             "low_balance_enabled", "low_balance_threshold",
             "ai_engine_enabled", "ai_tools_code_enabled",
             "system_notice_assignment", "system_notice_tags",
+            "system_notice_conv_labels",
             "system_notice_status", "system_notice_ai",
         }
         keys_changed = []

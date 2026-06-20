@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,6 +60,9 @@ class WhatsAppCloudChannel(Channel):
         self.registry = registry
         # In-memory fallback for tests / registry-less usage.
         self._credentials = dict(credentials or {})
+        # Short cache for list_templates (avoid hitting the Graph API on every
+        # picker open): (fetched_at, [templates]).
+        self._templates_cache: Optional[tuple] = None
 
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
@@ -254,6 +258,82 @@ class WhatsAppCloudChannel(Channel):
             "template": template,
         }
         return self._post_message(payload)
+
+    # ── Templates (HSM) listing ──────────────────────────────────────
+    def list_templates(self) -> list[dict]:
+        """List APPROVED message templates for the WABA (Graph API).
+
+        ``GET /{waba_id}/message_templates`` — note this uses ``waba_id`` (NOT
+        ``phone_number_id``, which send_template uses). Returns only APPROVED
+        templates, normalized for the UI, following ``paging.next``. Cached for
+        ~5 min so reopening the picker doesn't re-hit Meta. Returns ``[]`` on any
+        failure or missing ``waba_id`` (the UI then shows a "configure o WABA ID"
+        hint).
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return []
+        if self._templates_cache is not None:
+            fetched_at, cached = self._templates_cache
+            if (time.time() - fetched_at) < 300:
+                return cached
+
+        results: list[dict] = []
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        params: Optional[dict] = {
+            "fields": "name,language,status,category,components",
+            "limit": 100,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                # Cap pagination defensively (a WABA shouldn't have thousands).
+                for _ in range(20):
+                    resp = client.get(url, headers=headers, params=params)
+                    if resp.status_code != 200:
+                        logger.warning("whatsapp_cloud list_templates %s -> %s: %s",
+                                       waba_id, resp.status_code, resp.text[:200])
+                        break
+                    data = resp.json()
+                    for tpl in data.get("data") or []:
+                        if (tpl.get("status") or "").upper() != "APPROVED":
+                            continue
+                        results.append(self._normalize_template(tpl))
+                    nxt = ((data.get("paging") or {}).get("next")) or ""
+                    if not nxt:
+                        break
+                    url, params = nxt, None  # next is a full URL; don't re-send params
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud list_templates failed", exc_info=True)
+            # Serve a stale cache if we have one rather than nothing.
+            return self._templates_cache[1] if self._templates_cache else []
+
+        self._templates_cache = (time.time(), results)
+        return results
+
+    @staticmethod
+    def _normalize_template(tpl: dict) -> dict:
+        """Normalize a Graph template into the UI shape (lower-cased type/format)."""
+        components = []
+        for c in tpl.get("components") or []:
+            nc: dict = {"type": (c.get("type") or "").lower()}
+            if c.get("format"):
+                nc["format"] = (c.get("format") or "").lower()
+            if c.get("text") is not None:
+                nc["text"] = c.get("text")
+            if c.get("example") is not None:
+                nc["example"] = c.get("example")
+            if c.get("buttons") is not None:
+                nc["buttons"] = c.get("buttons")
+            components.append(nc)
+        return {
+            "name": tpl.get("name"),
+            "language": tpl.get("language"),
+            "category": tpl.get("category"),
+            "status": tpl.get("status"),
+            "components": components,
+        }
 
     # ── Inbound media download (plano 11 Fase 5 / P16) ───────────────
     def download_media(self, media_id: str, dest_dir, *,

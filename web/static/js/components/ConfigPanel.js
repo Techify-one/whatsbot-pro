@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
-import { testApiKey, checkForUpdates, performUpdate, markAllUnread, markAllRead } from '../services/api.js';
+import { testApiKey, markAllUnread, markAllRead } from '../services/api.js';
 import { ModelSelect } from './ModelSelect.js';
 import { DatabaseSettings } from './DatabaseSettings.js';
 
@@ -41,6 +41,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   // Avisos de sistema no chat (plano 12) — toggles globais por grupo de evento.
   const [systemNoticeAssignment, setSystemNoticeAssignment] = useState(true);
   const [systemNoticeTags, setSystemNoticeTags] = useState(true);
+  const [systemNoticeConvLabels, setSystemNoticeConvLabels] = useState(true);
   const [systemNoticeStatus, setSystemNoticeStatus] = useState(true);
   const [systemNoticeAi, setSystemNoticeAi] = useState(true);
   const [maxExecutions, setMaxExecutions] = useState(200);
@@ -58,29 +59,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
 
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [promptFullscreen, setPromptFullscreen] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [currentVersion, setCurrentVersion] = useState('');
-  const [latestVersion, setLatestVersion] = useState('');
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-
-  // Check for updates on mount
-  useEffect(() => {
-    fetchVersionInfo();
-  }, []);
-
-  async function fetchVersionInfo() {
-    setCheckingUpdate(true);
-    try {
-      const res = await checkForUpdates();
-      if (res.ok) {
-        setCurrentVersion(res.data.current_version || '');
-        setLatestVersion(res.data.latest_version || '');
-        setUpdateAvailable(res.data.update_available || false);
-      }
-    } catch (e) {}
-    setCheckingUpdate(false);
-  }
 
   // Populate form when config loads
   useEffect(() => {
@@ -104,6 +82,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setLowBalanceThreshold(config.low_balance_threshold ?? 0.5);
       setSystemNoticeAssignment(config.system_notice_assignment ?? true);
       setSystemNoticeTags(config.system_notice_tags ?? true);
+      setSystemNoticeConvLabels(config.system_notice_conv_labels ?? true);
       setSystemNoticeStatus(config.system_notice_status ?? true);
       setSystemNoticeAi(config.system_notice_ai ?? true);
       setMaxExecutions(config.max_executions ?? 200);
@@ -142,24 +121,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     }
     setTesting(false);
   }
-
-  const handleUpdate = async () => {
-    if (!confirm('Deseja atualizar o WhatsBot para a versão mais recente?\nO servidor precisará ser reiniciado após a atualização.')) return;
-    setUpdating(true);
-    try {
-      const res = await performUpdate();
-      if (res.ok) {
-        onNotify(res.data?.message || 'Atualização concluída! Reinicie o servidor.');
-        await fetchVersionInfo();
-      } else {
-        onNotify(res.error || 'Erro ao atualizar.');
-      }
-    } catch (e) {
-      onNotify('Erro de conexão ao atualizar.');
-    } finally {
-      setUpdating(false);
-    }
-  };
 
   async function handleMarkAllUnread() {
     setMarkingAllUnread(true);
@@ -215,6 +176,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
       system_notice_assignment: systemNoticeAssignment,
       system_notice_tags: systemNoticeTags,
+      system_notice_conv_labels: systemNoticeConvLabels,
       system_notice_status: systemNoticeStatus,
       system_notice_ai: systemNoticeAi,
       max_executions: parseInt(maxExecutions, 10) || 200,
@@ -687,6 +649,18 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
             <input
               type="checkbox"
+              checked=${systemNoticeConvLabels}
+              onChange=${(e) => setSystemNoticeConvLabels(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Etiquetas da conversa
+          </label>
+          <span class="text-xs text-wa-secondary">Adicionar ou remover etiquetas de uma conversa.</span>
+        </div>
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
               checked=${systemNoticeStatus}
               onChange=${(e) => setSystemNoticeStatus(e.target.checked)}
               class="w-4 h-4 rounded border-wa-border accent-wa-teal"
@@ -784,50 +758,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
               Remover senha
             </label>
           ` : null}
-        </div>
-
-        <!-- Update -->
-        <div class="p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <div class="flex items-center justify-between">
-            <div>
-              <label class="text-sm font-semibold text-wa-text">Atualizar WhatsBot</label>
-              <div class="flex items-center gap-3 mt-1.5">
-                <span class="text-xs text-wa-secondary">
-                  Atual: <span class="font-mono font-semibold text-wa-text">${currentVersion || '...'}</span>
-                </span>
-                ${latestVersion ? html`
-                  <span class="text-xs text-wa-secondary">
-                    Última: <span class="font-mono font-semibold ${updateAvailable ? 'text-blue-600' : 'text-green-600'}">${latestVersion}</span>
-                  </span>
-                ` : null}
-                ${!checkingUpdate && !updateAvailable && latestVersion ? html`
-                  <span class="text-xs text-green-600 font-medium">Atualizado</span>
-                ` : null}
-                ${updateAvailable ? html`
-                  <span class="text-xs text-blue-600 font-medium">Nova versão disponível</span>
-                ` : null}
-              </div>
-            </div>
-            <div class="flex items-center gap-2 ml-4">
-              <button
-                onClick=${fetchVersionInfo}
-                disabled=${checkingUpdate || updating}
-                class="px-3 py-2 bg-wa-panel hover:bg-wa-hover disabled:opacity-50 text-wa-text text-sm rounded-lg transition-colors"
-                title="Verificar atualizações"
-              >
-                ${checkingUpdate ? '...' : 'Verificar'}
-              </button>
-              ${updateAvailable ? html`
-                <button
-                  onClick=${handleUpdate}
-                  disabled=${updating}
-                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap"
-                >
-                  ${updating ? 'Atualizando...' : 'Atualizar'}
-                </button>
-              ` : null}
-            </div>
-          </div>
         </div>
       <//>
 
