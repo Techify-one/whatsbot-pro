@@ -1,5 +1,5 @@
-agno
-openai
+agno>=2.6,<3
+openai>=2,<3
 httpx
 fastapi
 python-multipart

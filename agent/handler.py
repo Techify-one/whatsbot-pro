@@ -17,7 +17,7 @@ from agent.tools import CORE_TOOLS
 from agent import group_mentions, agno_engine, agent_factory
 from config.settings import LLM_API_BASE_URL
 from db.repositories import message_repo, contact_repo, tool_override_repo
-from agent.execution import track_step
+from agent.execution import track_step, add_execution_usage, set_execution_agent_key
 from plugins.context import ToolContext, PromptContext
 from plugins.events import (
     emit as emit_event,
@@ -283,6 +283,7 @@ class AgentHandler:
                 cost_usd = (prompt_tokens * prompt_price) + (completion_tokens * completion_price)
             contact = self._get_contact(phone)
             contact.add_usage(call_type, model, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+            add_execution_usage(total_tokens, cost_usd)
             logger.debug("Usage recorded for %s: %s %s tokens=%d cost=%.6f",
                          phone, call_type, model, total_tokens, cost_usd)
         except Exception as e:
@@ -312,6 +313,7 @@ class AgentHandler:
             contact = self._get_contact(phone)
             contact.add_usage(call_type, model, prompt_tokens, completion_tokens,
                               total_tokens, cost_usd)
+            add_execution_usage(total_tokens, cost_usd)
             logger.debug("Usage recorded for %s: %s %s tokens=%d cost=%.6f",
                          phone, call_type, model, total_tokens, cost_usd)
         except Exception as e:
@@ -860,6 +862,8 @@ class AgentHandler:
         # Config-in-DB: resolve the DB-driven agent for this contact (or None to
         # use the in-code prompt/model/tools — full parity when the flag is off).
         agent_spec = agent_factory.build_for_contact(self, contact)
+        if agent_spec:
+            set_execution_agent_key(agent_spec.agent_key)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
@@ -993,6 +997,8 @@ class AgentHandler:
         # Config-in-DB: resolve the DB-driven agent for this contact (or None to
         # use the in-code prompt/model/tools — full parity when the flag is off).
         agent_spec = agent_factory.build_for_contact(self, contact)
+        if agent_spec:
+            set_execution_agent_key(agent_spec.agent_key)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None

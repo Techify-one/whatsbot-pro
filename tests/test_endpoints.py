@@ -35,7 +35,7 @@ else:
     init_db(_db_path)
 
 # Seed some test data
-from db.repositories import contact_repo, message_repo, usage_repo, tag_repo, config_repo
+from db.repositories import contact_repo, message_repo, usage_repo, tag_repo, config_repo, execution_repo
 
 def _seed_data():
     """Insert test contacts, messages, tags, usage into the test DB."""
@@ -679,6 +679,22 @@ check("GET /usage/contact -> has records", len(detail) >= 2)
 
 r = client.get("/api/usage/contact/0000000000")
 check("GET /usage/contact/0000 -> empty", r.json()["data"] == [])
+
+# Executions writer (Onda 0): agent_key/total_tokens/total_cost_usd were created
+# in migration 0007 but never populated. Verify the new writer accumulates them.
+_exec_id = execution_repo.create("5511999990001", "test")
+_fresh = execution_repo.get_by_id(_exec_id)
+check("executions -> nascem zerados", (_fresh.get("total_tokens") or 0) == 0 and (_fresh.get("total_cost_usd") or 0) == 0)
+check("executions -> agent_key nasce vazio", not _fresh.get("agent_key"))
+execution_repo.add_usage(_exec_id, total_tokens=100, cost_usd=0.0012)
+execution_repo.add_usage(_exec_id, total_tokens=50, cost_usd=0.0003)  # 2nd call accumulates
+execution_repo.set_agent_key(_exec_id, "default")
+_after = execution_repo.get_by_id(_exec_id)
+check("executions.total_tokens -> acumula (100+50)", _after.get("total_tokens") == 150)
+check("executions.total_cost_usd -> acumula", abs((_after.get("total_cost_usd") or 0) - 0.0015) < 1e-9)
+check("executions.agent_key -> populado", _after.get("agent_key") == "default")
+execution_repo.add_usage(_exec_id, total_tokens=0, cost_usd=0.0)  # no-op
+check("executions.add_usage(0,0) -> no-op", execution_repo.get_by_id(_exec_id).get("total_tokens") == 150)
 
 # ═══════════════════════════════════════════════════════════════════
 #  17. Logs
