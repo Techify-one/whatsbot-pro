@@ -320,4 +320,9 @@ def register_routes(app, deps):
             return _err("Contato não encontrado.", status=404)
         conv = await asyncio.to_thread(
             conversation_repo.get_open_for_contact, contact["id"])
+        # Fall back to the latest (resolved) thread so the header can still show
+        # the conversation's status + the Reabrir action after it was resolved.
+        if not conv:
+            conv = await asyncio.to_thread(
+                conversation_repo.get_latest_for_contact, contact["id"])
         return _ok({"conversation": conv})

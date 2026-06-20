@@ -1084,6 +1084,20 @@ check("POST assign-me (admin) -> 200 + assignee=eu",
 r = client.post(f"/api/conversations/{_conv2['id']}/assign-me")
 check("POST assign-me sem auth -> 401", r.status_code == 401)
 
+# reopen: resolver limpa o assignee; reabrir (status=open) deixa a conversa SEM
+# responsável, então ela cai na aba "Não atribuídas".
+client.post(f"/api/conversations/{_conv2['id']}/assign-me",
+            headers={"Authorization": f"Bearer {_mgrtok}"})
+client.post(f"/api/conversations/{_conv2['id']}/status", json={"status": "closed"})
+r = client.post(f"/api/conversations/{_conv2['id']}/status",
+                json={"status": "open"}, headers={"Authorization": f"Bearer {_mgrtok}"})
+check("POST reopen (status open) -> 200 + status open",
+      r.status_code == 200 and r.json()["data"]["conversation"]["status"] == "open")
+check("POST reopen -> sem responsável (cai em 'Não atribuídas')",
+      r.json()["data"]["conversation"]["assignee_user_id"] is None)
+check("POST reopen -> resolved_at limpo",
+      r.json()["data"]["conversation"]["resolved_at"] is None)
+
 r = client.post(f"/api/conversations/{_conv2['id']}/ai", json={"active": False})
 check("POST ai -> ai_active=0", r.json()["data"]["conversation"]["ai_active"] == 0)
 

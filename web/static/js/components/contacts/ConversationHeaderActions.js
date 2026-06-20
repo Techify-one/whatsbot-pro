@@ -106,11 +106,11 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
   }
 
   const btn = 'px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 whitespace-nowrap';
-  const canTransfer = can('conversation.assign') && users.length > 0;
+  const canTransfer = isOpen && can('conversation.assign') && users.length > 0;
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
-      <!-- Status / Resolver -->
+      <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
         <button
           disabled=${busy}
@@ -126,8 +126,8 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
         </span>
       `}
 
-      <!-- Atribuir a mim / responsável -->
-      ${can('conversation.assign') ? html`
+      <!-- Atribuir a mim / responsável (somente em conversas abertas) -->
+      ${isOpen && can('conversation.assign') ? html`
         ${assignedToMe
           ? html`
             <button disabled=${busy} onClick=${() => run(() => assignConversation(conv.id, null))} class=${btn} title="Remover atribuição">
