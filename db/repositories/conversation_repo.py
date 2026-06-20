@@ -130,6 +130,25 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
     return [dict(r) for r in rows]
 
 
+def list_filtered(where, *, limit: int = 50, offset: int = 0) -> list[dict]:
+    """List conversations matching a pre-built (injection-safe) WHERE from db.filters."""
+    stmt = (
+        select(
+            conversations,
+            contacts.c.name.label("contact_name"),
+            contacts.c.phone.label("contact_phone"),
+            contacts.c.is_group.label("contact_is_group"),
+        )
+        .select_from(conversations.join(contacts, contacts.c.id == conversations.c.contact_id))
+    )
+    if where is not None:
+        stmt = stmt.where(where)
+    stmt = stmt.order_by(conversations.c.last_activity_at.desc()).limit(limit).offset(offset)
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def count(*, status: str | None = None) -> int:
     stmt = select(func.count()).select_from(conversations)
     if status is not None:
@@ -165,6 +184,11 @@ def set_assignee(conv_id: int, assignee_user_id: int | None) -> dict | None:
 def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
     """Pause/resume the AI for a specific conversation (gate nível conversa)."""
     return _update(conv_id, {"ai_active": ai_active})
+
+
+def set_custom_attributes(conv_id: int, attrs: dict) -> dict | None:
+    """Replace the conversation's custom_attributes JSON (reatribui o dict inteiro)."""
+    return _update(conv_id, {"custom_attributes": dict(attrs or {})})
 
 
 def touch_activity(conv_id: int, ts: float | None = None) -> None:
