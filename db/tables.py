@@ -112,9 +112,14 @@ messages = Table(
     Column("revoked", Integer, nullable=False, server_default="0"),
     Column("reactions", Text),  # JSON: {emoji: [reactor, ...]}
     Column("reply_to_msg_id", Text),  # GOWA msg_id of the quoted message (reply)
+    # plano 01: thread de atendimento. Aditivo e nullable (contact_id permanece).
+    # FK por nome (conversations é definida adiante).
+    Column("conversation_id", Integer,
+           ForeignKey("conversations.id", ondelete="CASCADE")),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
+Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
 
 
 usage = Table(
@@ -287,6 +292,81 @@ user_sessions = Table(
 )
 Index("idx_sessions_user", user_sessions.c.user_id)
 Index("idx_sessions_expires", user_sessions.c.expires_at)
+
+
+# ── Inbox e Conversas (plano 01 Fase 1) ────────────────────────────────────
+# Modelo 3 níveis: Contact → ContactInbox (identidade da pessoa num canal) →
+# Conversation (thread de atendimento). assignee_user_id/team_id são NULLABLE
+# SEM FK por robustez de ordem de migration (P1). channel_id liga p/ channels.id
+# "default" (plano 02 faz ALTER aditivo depois). conversation_id em messages é
+# aditivo. custom_attributes de conversa é JSON/JSONB nativo (NUNCA TEXT — coord
+# plano 05). status só open|closed (P3); is_archived ortogonal (P10).
+inboxes = Table(
+    "inboxes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False, server_default="WhatsApp"),
+    Column("channel_type", Text, nullable=False, server_default="whatsapp"),
+    Column("channel_id", Text),                                  # → channels.id (sem FK no MVP)
+    Column("agent_bot_enabled", Integer, nullable=False, server_default="1"),  # gate IA nível 2
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+
+contact_inboxes = Table(
+    "contact_inboxes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("contact_id", Integer, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False),
+    Column("inbox_id", Integer, ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("source_id", Text, nullable=False),                  # chave de resolução = JID
+    Column("source_jid", Text),
+    Column("source_lid", Text),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    UniqueConstraint("inbox_id", "source_id", name="uq_contact_inbox_inbox_source"),
+)
+Index("idx_contact_inbox_contact", contact_inboxes.c.contact_id)
+Index("idx_contact_inbox_lid", contact_inboxes.c.inbox_id, contact_inboxes.c.source_lid)
+
+conversations = Table(
+    "conversations",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("display_id", Integer, nullable=False),              # sequencial humano (P6)
+    Column("inbox_id", Integer, ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("contact_id", Integer, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False),
+    Column("contact_inbox_id", Integer,
+           ForeignKey("contact_inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("status", Text, nullable=False, server_default="open"),  # open|closed (P3)
+    Column("is_archived", Integer, nullable=False, server_default="0"),  # ortogonal (P10)
+    Column("assignee_user_id", Integer),                        # NULLABLE sem FK (P1)
+    Column("team_id", Integer),                                 # NULLABLE sem FK
+    Column("priority", Text),
+    Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
+    Column("opened_at", Float, nullable=False),
+    Column("resolved_at", Float),
+    Column("waiting_since", Float),
+    Column("last_activity_at", Float, nullable=False),
+    Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    UniqueConstraint("display_id", name="uq_conv_display_id"),
+)
+Index("idx_conv_inbox_status", conversations.c.inbox_id, conversations.c.status)
+Index("idx_conv_assignee_status", conversations.c.assignee_user_id, conversations.c.status)
+Index("idx_conv_contact", conversations.c.contact_id)
+Index("idx_conv_contact_inbox", conversations.c.contact_inbox_id)
+Index("idx_conv_last_activity", conversations.c.last_activity_at)
+Index("idx_conv_archived", conversations.c.is_archived)
+
+# Contador atômico de display_id (P6) — INSERT/UPDATE na mesma transação do create.
+conversation_counters = Table(
+    "conversation_counters",
+    metadata,
+    Column("name", Text, primary_key=True),
+    Column("next_value", Integer, nullable=False, server_default="1"),
+)
 
 
 unread_msg_ids = Table(
