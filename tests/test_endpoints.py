@@ -1070,6 +1070,51 @@ check("atendente assign -> 403 (lacks conversation.assign)", r.status_code == 40
 r = client.get("/api/conversations", headers={"Authorization": f"Bearer {_attok}"})
 check("atendente list -> 200 (has conversation.read)", r.status_code == 200)
 
+# ── plano 10 Onda 0: assign-me, ai, agent, info, contact→conversation ──
+# Usuário admin vivo (o _admin original foi deletado num teste anterior)
+_mgr = _urepo2.create(email="mgr@test.com", name="Mgr",
+                      password_hash=_hpa2("supersecret"), role_keys=["admin"])
+_mgrtok = client.post("/api/auth/login",
+                      json={"email": "mgr@test.com", "password": "supersecret"}).json()["data"]["token"]
+r = client.post(f"/api/conversations/{_conv2['id']}/assign-me",
+                headers={"Authorization": f"Bearer {_mgrtok}"})
+check("POST assign-me (admin) -> 200 + assignee=eu",
+      r.status_code == 200 and r.json()["data"]["conversation"]["assignee_user_id"] == _mgr["id"])
+r = client.post(f"/api/conversations/{_conv2['id']}/assign-me")
+check("POST assign-me sem auth -> 401", r.status_code == 401)
+
+r = client.post(f"/api/conversations/{_conv2['id']}/ai", json={"active": False})
+check("POST ai -> ai_active=0", r.json()["data"]["conversation"]["ai_active"] == 0)
+
+r = client.post(f"/api/conversations/{_conv2['id']}/agent", json={"agent_key": "default"})
+check("POST agent -> 200", r.status_code == 200)
+
+# PUT info com custom_attributes de conversa (cria def primeiro)
+client.post("/api/custom-attributes", json={
+    "attribute_key": "prioridade", "display_name": "Prioridade",
+    "type": "text", "applies_to": "conversation"})
+r = client.put(f"/api/conversations/{_conv2['id']}/info",
+               json={"custom_attributes": {"prioridade": "alta"}})
+check("PUT info custom_attributes -> 200 + salvo",
+      r.status_code == 200 and
+      r.json()["data"]["conversation"]["custom_attributes"].get("prioridade") == "alta")
+r = client.put(f"/api/conversations/{_conv2['id']}/info",
+               json={"custom_attributes": {"inexistente": "x"}})
+check("PUT info atributo desconhecido -> 400", r.status_code == 400)
+r = client.put(f"/api/conversations/999999/info", json={"custom_attributes": {}})
+check("PUT info conversa inexistente -> 404", r.status_code == 404)
+
+# GET /contacts/{phone}/conversation resolve a conversa aberta
+with _get_engine().connect() as _conn:
+    _cphone = _conn.execute(
+        _sa_select(_contacts_t.c.phone).where(_contacts_t.c.id == _cid)).scalar()
+r = client.get(f"/api/contacts/{_cphone}/conversation")
+check("GET contacts/{phone}/conversation -> 200", r.status_code == 200)
+check("contact conversation -> tem conversation_id",
+      (r.json()["data"]["conversation"] or {}).get("id") is not None)
+r = client.get("/api/contacts/naoexiste/conversation")
+check("GET contacts/{missing}/conversation -> 404", r.status_code == 404)
+
 # ── Fluxo vivo (Fase 2): ContactMemory.add_message resolve+stampa conversation_id ──
 from agent.memory import ContactMemory as _CM
 from db.tables import messages as _msgs_t
