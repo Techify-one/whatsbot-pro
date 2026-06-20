@@ -16,6 +16,9 @@ import {
   deleteChannel,
   getChannelStatus,
   getChannelQR,
+  getChannelMembers,
+  setChannelMembers,
+  listChannelAssignableUsers,
 } from '../services/api.js';
 
 const html = htm.bind(h);
@@ -34,6 +37,52 @@ const PROVIDERS = {
 
 function providerMeta(provider) {
   return PROVIDERS[provider] || { label: provider || '—', tint: 'bg-gray-100 text-wa-secondary' };
+}
+
+// Which WhatsApp chat types (by JID suffix) a GOWA channel surfaces as
+// conversations. The keys are stable identifiers persisted in the channel's
+// config (config.allowed_jid_types) and mirror channels/jid.py on the backend.
+// The user never sees the JID — only the friendly label.
+const JID_TYPES = [
+  { key: 'person', label: 'Pessoa (contato)', hint: 'Conversas individuais com contatos.' },
+  { key: 'person_lid', label: 'Pessoa (modo privacidade)', hint: 'Contatos que ocultam o número (modo privacidade).' },
+  { key: 'group', label: 'Grupo / Comunidade', hint: 'Mensagens de grupos e comunidades.' },
+  { key: 'newsletter', label: 'Canal', hint: 'Publicações de Canais do WhatsApp.' },
+  { key: 'broadcast', label: 'Status / Transmissão', hint: 'Status e listas de transmissão.' },
+  { key: 'bot', label: 'Bot (Meta AI etc.)', hint: 'Conversas com bots como o Meta AI.' },
+];
+const DEFAULT_JID_TYPES = ['person', 'person_lid', 'group'];
+
+// Parse a channel's `config` (the API returns it as a JSON string) into an
+// object, tolerating already-parsed objects and malformed values.
+function parseChannelConfig(config) {
+  if (!config) return {};
+  if (typeof config === 'object') return config;
+  try { return JSON.parse(config) || {}; } catch (e) { return {}; }
+}
+
+// Checkbox group letting the user pick which chat types fall into a GOWA channel.
+function JidTypePicker({ selected, onChange, disabled }) {
+  function toggle(key) {
+    const set = new Set(selected);
+    if (set.has(key)) set.delete(key); else set.add(key);
+    // Preserve canonical order.
+    onChange(JID_TYPES.map(t => t.key).filter(k => set.has(k)));
+  }
+  return html`
+    <div class="flex flex-col gap-2">
+      ${JID_TYPES.map(t => html`
+        <label key=${t.key} class="flex items-start gap-2 cursor-pointer ${disabled ? 'opacity-60 cursor-not-allowed' : ''}">
+          <input type="checkbox" class="mt-0.5" checked=${selected.includes(t.key)}
+            disabled=${disabled} onChange=${() => toggle(t.key)} />
+          <span class="flex flex-col">
+            <span class="text-[13px] text-wa-text">${t.label}</span>
+            <span class="text-[11px] text-wa-secondary">${t.hint}</span>
+          </span>
+        </label>
+      `)}
+    </div>
+  `;
 }
 
 // Random URL-safe token, used for the "sugerir" verify-token button.
@@ -63,11 +112,25 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
   // The GOWA device id is auto-generated and read-only: each channel maps to its
   // own GOWA device (one WhatsApp number) on the shared GOWA process.
   const [gowaDeviceId, setGowaDeviceId] = useState(() => `gowa_${randomToken(10)}`);
+  // Which chat types this GOWA channel surfaces (config.allowed_jid_types).
+  const [jidTypes, setJidTypes] = useState(DEFAULT_JID_TYPES);
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [botToken, setBotToken] = useState('');
+  // Agents to assign to the new channel's inbox (all providers). Loaded once.
+  const [users, setUsers] = useState([]);
+  const [agentIds, setAgentIds] = useState([]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await listChannelAssignableUsers();
+      if (alive && res && res.ok) setUsers(res.data.users || []);
+    })();
+    return () => { alive = false; };
+  }, []);
 
   const idErr = id && !ID_RE.test(id)
     ? 'Use apenas letras minúsculas, números e _ (começando por letra).'
@@ -82,7 +145,8 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
       display_name: displayName.trim(),
     };
     if (provider === 'gowa') {
-      if (gowaDeviceId.trim()) payload.config = { gowa_device_id: gowaDeviceId.trim() };
+      payload.config = { allowed_jid_types: jidTypes };
+      if (gowaDeviceId.trim()) payload.config.gowa_device_id = gowaDeviceId.trim();
     } else if (provider === 'whatsapp_cloud') {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
@@ -98,7 +162,7 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
 
   function submit() {
     if (!canSave) return;
-    onCreated(buildPayload());
+    onCreated(buildPayload(), agentIds);
   }
 
   return html`
@@ -138,6 +202,14 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
             <div class="text-[12px] text-wa-secondary mt-1">
               Identifica este número dentro do GOWA. Após criar, leia o QR Code para conectar o WhatsApp.
             </div>
+          </div>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
+            <p class="text-[12px] text-wa-secondary mb-2">
+              Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+              desmarcados são ignorados (não aparecem no painel).
+            </p>
+            <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
           </div>
         ` : null}
 
@@ -186,6 +258,15 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
           </div>
         ` : null}
 
+        <div class="border-t border-wa-border pt-3">
+          <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
+          <p class="text-[12px] text-wa-secondary mb-2">
+            Os agentes selecionados veem as conversas deste canal e recebem as mensagens que caírem aqui.
+            Administradores veem todos os canais.
+          </p>
+          <${AgentPicker} users=${users} selected=${agentIds} onChange=${setAgentIds} />
+        </div>
+
         ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
 
         <div class="flex gap-2 justify-end">
@@ -203,13 +284,33 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
 function WebhookNotice({ channelId, onDismiss }) {
   const url = `${window.location.origin}/api/webhook/whatsapp_cloud/${channelId}`;
   const [copied, setCopied] = useState(false);
-  function copy() {
+  function flagCopied() {
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+  function fallbackCopy() {
+    // navigator.clipboard is unavailable over plain HTTP (non-secure context),
+    // which is the common case here (panel served on a LAN IP). Fall back to
+    // the legacy execCommand approach via a temporary textarea.
     try {
-      navigator.clipboard.writeText(url).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      });
-    } catch (e) { /* clipboard may be unavailable */ }
+      const ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) flagCopied();
+    } catch (e) { /* clipboard truly unavailable */ }
+  }
+  function copy() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(flagCopied).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
   }
   return html`
     <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
@@ -342,7 +443,7 @@ function QRConnect({ channelId, displayName, onClose }) {
 }
 
 // ── Single channel card ─────────────────────────────────────────────
-function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, busyId }) {
+function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, onEdit, busyId }) {
   const meta = providerMeta(channel.provider);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
@@ -394,6 +495,8 @@ function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, busyId
             onClick=${() => onConnect(channel)} disabled=${busy}>Conectar</button>
         ` : null}
         <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
+          onClick=${() => onEdit(channel)} disabled=${busy}>Editar</button>
+        <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onRefresh(channel)} disabled=${busy}>
           ${busy ? '…' : 'Atualizar'}</button>
         <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
@@ -401,6 +504,206 @@ function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, busyId
           ${channel.enabled ? 'Desativar' : 'Ativar'}</button>
         <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onDelete(channel)} disabled=${busy}>Excluir</button>
+      </div>
+    </div>
+  `;
+}
+
+// ── Agent multi-select (chips) ──────────────────────────────────────
+// Selectable list of panel users (agents) that will see/receive this channel's
+// inbox. Selected agents render as removable chips; an "add" dropdown lists the
+// remaining users. Mirrors the look of the inbox "Agentes" picker.
+function AgentPicker({ users, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const byId = {};
+  for (const u of users) byId[u.id] = u;
+  const selectedUsers = selected.map(id => byId[id]).filter(Boolean);
+  const available = users.filter(u => !selected.includes(u.id));
+
+  function add(id) {
+    onChange([...selected, id]);
+    if (available.length <= 1) setOpen(false);
+  }
+  function remove(id) {
+    onChange(selected.filter(x => x !== id));
+  }
+
+  return html`
+    <div class="relative">
+      <div class="wa-field w-full min-h-[42px] px-2 py-1.5 rounded-md flex flex-wrap gap-1.5 items-center cursor-pointer"
+        onClick=${() => { if (available.length > 0) setOpen(o => !o); }}
+        title="Clique para escolher agentes">
+        ${selectedUsers.length === 0
+          ? html`<span class="text-[13px] text-wa-secondary px-1">Nenhum agente selecionado</span>`
+          : selectedUsers.map(u => html`
+            <span key=${u.id}
+              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[13px] bg-wa-hover text-wa-text border border-wa-border">
+              ${u.name}${u.is_admin ? html`<span class="text-[11px] text-wa-secondary">admin</span>` : null}
+              <button type="button" class="text-wa-secondary hover:text-red-500"
+                onClick=${(e) => { e.stopPropagation(); remove(u.id); }} title="Remover">×</button>
+            </span>
+          `)}
+        <span class="ml-auto text-[13px] text-wa-secondary px-1 shrink-0">${open ? '▲' : '▼'}</span>
+      </div>
+      ${open && available.length > 0 ? html`
+        <div class="absolute z-10 mt-1 w-full max-h-56 overflow-auto bg-wa-panel border border-wa-border rounded-md shadow-lg">
+          ${available.map(u => html`
+            <button key=${u.id} type="button"
+              class="w-full text-left px-3 py-2 text-[13px] text-wa-text hover:bg-wa-hover flex items-center gap-2"
+              onClick=${() => add(u.id)}>
+              <span class="truncate">${u.name}</span>
+              <span class="text-[12px] text-wa-secondary truncate">${u.email}</span>
+              ${u.is_admin ? html`<span class="ml-auto text-[11px] text-wa-secondary">admin</span>` : null}
+            </button>
+          `)}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+// ── Edit-channel modal ──────────────────────────────────────────────
+// Edits the channel's display info + the agents that see its inbox. Does NOT
+// reconnect or change the QR — login/session are untouched here.
+function ChannelEditForm({ channel, onSaved, onCancel }) {
+  const isCloud = channel.provider === 'whatsapp_cloud';
+  const isGowa = channel.provider === 'gowa';
+  const [displayName, setDisplayName] = useState(channel.display_name || channel.id);
+  // GOWA: which chat types this channel surfaces. Seed from the stored config
+  // (falling back to the default set when unset).
+  const [jidTypes, setJidTypes] = useState(() => {
+    const cfg = parseChannelConfig(channel.config);
+    return Array.isArray(cfg.allowed_jid_types) && cfg.allowed_jid_types.length
+      ? cfg.allowed_jid_types
+      : DEFAULT_JID_TYPES;
+  });
+  // whatsapp_cloud secrets: blank means "keep current"; only non-empty is sent.
+  const [accessToken, setAccessToken] = useState('');
+  const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [verifyToken, setVerifyToken] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+
+  const [users, setUsers] = useState([]);
+  const [selected, setSelected] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await getChannelMembers(channel.id);
+      if (!alive) return;
+      if (res && res.ok) {
+        setUsers(res.data.users || []);
+        setSelected(res.data.member_ids || []);
+      } else {
+        setError((res && res.error) || 'Falha ao carregar agentes.');
+      }
+      setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, [channel.id]);
+
+  async function save() {
+    if (busy || !displayName.trim()) return;
+    setBusy(true); setError('');
+    const payload = { display_name: displayName.trim() };
+    if (isGowa) {
+      // PUT replaces config wholesale — preserve gowa_device_id (and any other
+      // existing keys) while updating the allowed chat types.
+      const cfg = parseChannelConfig(channel.config);
+      payload.config = { ...cfg, allowed_jid_types: jidTypes };
+    }
+    if (isCloud) {
+      const credentials = {};
+      if (accessToken.trim()) credentials.access_token = accessToken.trim();
+      if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
+      if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
+      if (appSecret.trim()) credentials.app_secret = appSecret.trim();
+      if (Object.keys(credentials).length) payload.credentials = credentials;
+    }
+    const r1 = await updateChannel(channel.id, payload);
+    if (!r1 || !r1.ok) {
+      setBusy(false);
+      setError((r1 && r1.error) || 'Falha ao salvar o canal.');
+      return;
+    }
+    const r2 = await setChannelMembers(channel.id, selected);
+    setBusy(false);
+    if (!r2 || !r2.ok) {
+      setError((r2 && r2.error) || 'Canal salvo, mas falha ao salvar os agentes.');
+      return;
+    }
+    onSaved();
+  }
+
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onCancel}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-md max-h-[90vh] overflow-auto"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="text-[15px] font-medium text-wa-text mb-1">Editar canal</div>
+        <div class="text-[12px] text-wa-secondary mb-4 font-mono break-words">${channel.id}</div>
+
+        <div class="flex flex-col gap-3">
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
+          </div>
+
+          ${isGowa ? html`
+            <div class="border-t border-wa-border pt-3">
+              <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
+              <p class="text-[12px] text-wa-secondary mb-2">
+                Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+                desmarcados são ignorados (não aparecem no painel).
+              </p>
+              <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
+            </div>
+          ` : null}
+
+          ${isCloud ? html`
+            <div class="border-t border-wa-border pt-3">
+              <div class="text-[12px] text-wa-secondary mb-2">Credenciais — deixe em branco para manter a atual.</div>
+              <div class="flex flex-col gap-2">
+                <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="password"
+                  placeholder="Access Token (manter)" value=${accessToken}
+                  onInput=${(e) => setAccessToken(e.target.value)} />
+                <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="text"
+                  placeholder="Phone Number ID (manter)" value=${phoneNumberId}
+                  onInput=${(e) => setPhoneNumberId(e.target.value)} />
+                <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="text"
+                  placeholder="Verify Token (manter)" value=${verifyToken}
+                  onInput=${(e) => setVerifyToken(e.target.value)} />
+                <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="password"
+                  placeholder="App Secret (manter)" value=${appSecret}
+                  onInput=${(e) => setAppSecret(e.target.value)} />
+              </div>
+            </div>
+          ` : null}
+
+          <div class="border-t border-wa-border pt-3">
+            <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
+            <p class="text-[12px] text-wa-secondary mb-2">
+              Os agentes selecionados veem as conversas deste canal e recebem as mensagens que caírem aqui.
+              Administradores veem todos os canais.
+            </p>
+            ${loading
+              ? html`<div class="text-[13px] text-wa-secondary">Carregando agentes…</div>`
+              : html`<${AgentPicker} users=${users} selected=${selected} onChange=${setSelected} />`}
+          </div>
+
+          ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
+
+          <div class="flex gap-2 justify-end mt-1">
+            <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+              onClick=${onCancel} disabled=${busy}>Cancelar</button>
+            <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick=${save} disabled=${busy || loading || !displayName.trim()}>
+              ${busy ? 'Salvando…' : 'Salvar'}</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -418,6 +721,8 @@ export default function ChannelsManager() {
   const [webhookFor, setWebhookFor] = useState(null);
   // {id, display_name} of the GOWA channel whose QR-connect panel is open.
   const [connectFor, setConnectFor] = useState(null);
+  // The channel object being edited (display info + inbox agents), or null.
+  const [editingChannel, setEditingChannel] = useState(null);
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
@@ -457,11 +762,16 @@ export default function ChannelsManager() {
     return () => clearInterval(t);
   }, []);
 
-  async function handleCreate(payload) {
+  async function handleCreate(payload, agentIds) {
     setCreateBusy(true); setCreateError('');
     const res = await createChannel(payload);
-    setCreateBusy(false);
     if (res && res.ok) {
+      // Assign the picked agents to the new channel's inbox (best-effort: a
+      // failure here never blocks creation, which already succeeded).
+      if (agentIds && agentIds.length) {
+        await setChannelMembers(payload.id, agentIds);
+      }
+      setCreateBusy(false);
       setCreating(false);
       if (payload.provider === 'whatsapp_cloud') setWebhookFor(payload.id);
       // GOWA: open the QR-connect panel immediately so the user can scan it.
@@ -470,12 +780,17 @@ export default function ChannelsManager() {
       }
       load();
     } else {
+      setCreateBusy(false);
       setCreateError((res && res.error) || 'Falha ao criar o canal.');
     }
   }
 
   function handleConnect(channel) {
     setConnectFor({ id: channel.id, display_name: channel.display_name || channel.id });
+  }
+
+  function handleEdit(channel) {
+    setEditingChannel(channel);
   }
 
   async function handleToggle(channel) {
@@ -555,9 +870,15 @@ export default function ChannelsManager() {
             onDelete=${handleDelete}
             onRefresh=${handleRefresh}
             onConnect=${handleConnect}
+            onEdit=${handleEdit}
             busyId=${busyId} />
         `)}
       </div>
+
+      ${editingChannel ? html`<${ChannelEditForm}
+        channel=${editingChannel}
+        onCancel=${() => setEditingChannel(null)}
+        onSaved=${() => { setEditingChannel(null); load(); }} />` : null}
     </div>
   `;
 }

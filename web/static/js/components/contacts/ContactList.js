@@ -117,7 +117,7 @@ function highlightParts(text, query) {
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedPhones, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
-  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, resolveAssignee, hasIdentity }) {
+  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   const selCount = (selectedPhones || []).length;
   const selectedSet = new Set(selectedPhones || []);
@@ -360,6 +360,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           onSortChange=${onSortChange}
           tagFilter=${tagFilter}
           onTagFilterChange=${onTagFilterChange}
+          advFilters=${advFilters}
+          onAdvFiltersChange=${onAdvFiltersChange}
+          channels=${channels}
+          agentsUsers=${agentsUsers}
+          agentsAi=${agentsAi}
           globalTags=${globalTags}
           hasIdentity=${hasIdentity}
         />

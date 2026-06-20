@@ -616,9 +616,6 @@ function App({ onLogout, hasPassword, currentUser }) {
               ? html`<div class="max-w-5xl mx-auto p-4">
                   <${PageHeader} title="Painel" onBack=${() => setTab('contacts')} />
                   <${Dashboard}
-                    status=${status}
-                    qrAvailable=${qrAvailable}
-                    qrVersion=${qrVersion}
                     config=${config}
                     saving=${saving}
                     onSave=${handleSave}
