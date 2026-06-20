@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from server.auth import auth_required, verify_token
+from server.auth import auth_required, verify_token, rbac_enforced, resolve_request_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
@@ -315,17 +315,25 @@ def create_app(
             if path.startswith(prefix):
                 return await call_next(request)
 
-        # Only protect /api/* paths
-        if path.startswith("/api/") and auth_required(settings):
-            auth_header = request.headers.get("authorization", "")
-            token = ""
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]
-            if not token or not verify_token(token, settings):
-                return JSONResponse(
-                    {"ok": False, "error": "Não autenticado."},
-                    status_code=401,
-                )
+        # Only protect /api/* paths. RBAC is additive (plano 03): a valid USER
+        # session OR the legacy single-password token both authenticate. When
+        # rbac_enforce is on, ONLY a user session is accepted. Default off so a
+        # live single-password / open install keeps working.
+        request.state.user = None
+        if path.startswith("/api/"):
+            enforce = rbac_enforced(settings)
+            if enforce or auth_required(settings):
+                auth_header = request.headers.get("authorization", "")
+                token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+                kind, user = await asyncio.to_thread(
+                    resolve_request_token, token, settings)
+                request.state.user = user
+                denied = (kind != "user") if enforce else (kind is None)
+                if denied:
+                    return JSONResponse(
+                        {"ok": False, "error": "Não autenticado."},
+                        status_code=401,
+                    )
 
         return await call_next(request)
 

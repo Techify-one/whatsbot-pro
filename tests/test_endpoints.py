@@ -840,6 +840,61 @@ check("RBAC seed -> 16 permissions", _perm_count == 16)
 check("RBAC seed -> role_permissions populated (gestor 13 + atendente 5)", _rp_count == 18)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15g. RBAC users + login (plano 03 Fases 2-3, aditivo)
+# ═══════════════════════════════════════════════════════════════════
+section("RBAC users + login")
+
+# Bootstrap the first admin (one-time, only while no users exist)
+r = client.post("/api/auth/bootstrap",
+                json={"email": "admin@test.com", "name": "Admin", "password": "supersecret"})
+check("POST /auth/bootstrap -> 200", r.status_code == 200)
+_admin = r.json()["data"]["user"]
+check("bootstrap -> admin role + is_admin",
+      _admin.get("roles") == ["admin"] and _admin.get("is_admin") is True)
+check("bootstrap -> password_hash not leaked", "password_hash" not in _admin)
+
+# Second bootstrap blocked
+r = client.post("/api/auth/bootstrap",
+                json={"email": "x@y.com", "name": "X", "password": "supersecret"})
+check("POST /auth/bootstrap (2nd) -> 409", r.status_code == 409)
+
+# User login (Argon2id verify + opaque session token)
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "supersecret"})
+check("POST /auth/login (user) -> 200", r.status_code == 200)
+_utok = r.json()["data"]["token"]
+check("user login -> opaque token", len(_utok) > 20)
+check("user login -> returns user", r.json()["data"]["user"]["email"] == "admin@test.com")
+
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "nope"})
+check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
+
+# /me resolves the session and computes permissions
+r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
+check("GET /auth/me (user) -> 200", r.status_code == 200)
+_perms = r.json()["data"]["user"]["permissions"]
+check("admin me -> all 16 permissions", len([p for p in _perms if p != "*"]) == 16)
+
+r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
+check("GET /auth/check (user session) -> authenticated",
+      r.json()["data"]["authenticated"] is True)
+
+# Logout invalidates the session
+r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_utok}"})
+check("POST /auth/logout -> 200", r.status_code == 200)
+r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
+check("GET /auth/me (after logout) -> 401", r.status_code == 401)
+
+# Resolver + short-circuit (gestor via repo, since user-management UI is Fase 5)
+from db.repositories import user_repo as _urepo, rbac_repo as _rrepo
+from server.auth import hash_password_argon2 as _hpa
+_g = _urepo.create(email="gestor@test.com", name="G",
+                   password_hash=_hpa("supersecret"), role_keys=["gestor"])
+_gperms = _rrepo.user_permissions(_g["id"])
+check("gestor resolver -> 13 perms, no '*'", "*" not in _gperms and len(_gperms) == 13)
+check("gestor lacks users.manage", "users.manage" not in _gperms)
+check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_admin["id"]))
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
