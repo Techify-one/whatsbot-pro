@@ -136,9 +136,9 @@ def create_app(
         agent_factory.seed_default_agent(settings)
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
-    # ⚠️ Security gate: code-in-DB executes arbitrary Python from the DB in-process
-    # at boot. Until there is RBAC (plano 03) + an isolated runner (P62), it stays
-    # OFF by default and only runs when the operator explicitly opts in.
+    # ⚠️ Security gate: code-in-DB tools. RBAC (plano 03) e o runner isolado (P62/P67)
+    # já existem — o código do banco roda num SUBPROCESSO one-shot isolado, NÃO mais
+    # in-process. Mesmo assim a feature fica OFF por default; só roda com opt-in explícito.
     if settings.get("ai_tools_code_enabled", False):
         try:
             ai_tool_installer.install_and_register(agent_handler, settings.data_dir)
