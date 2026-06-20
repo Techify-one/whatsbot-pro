@@ -298,6 +298,32 @@ class ContactMemory:
             parts.append(f"Endereço: {self.info['address']}")
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
+        # Custom attributes (plano 05): tell the AI which attributes it may fill
+        # (via set_custom_attribute) and the values already set.
+        try:
+            from db.repositories import custom_attribute_repo as _ca_repo
+            from db.tables import contacts as _contacts_tbl
+            defs = _ca_repo.list_definitions("contact")
+            if defs and self.id:
+                values = _ca_repo.get_values(_contacts_tbl, self.id)
+                lines = []
+                for d in defs:
+                    key = d["attribute_key"]
+                    hint = ""
+                    if d.get("type") == "list" and d.get("options"):
+                        hint = f" (opções: {', '.join(map(str, d['options']))})"
+                    elif d.get("type") == "checkbox":
+                        hint = " (true/false)"
+                    cur = values.get(key)
+                    cur_str = f" = {cur}" if cur not in (None, "") else ""
+                    lines.append(f"- {key}{hint}{cur_str}")
+                if lines:
+                    parts.append(
+                        "Atributos personalizados que você pode preencher (use set_custom_attribute):"
+                    )
+                    parts.extend(lines)
+        except Exception:
+            pass
         return "\n".join(parts)
 
     def get_tags_summary(self) -> str:

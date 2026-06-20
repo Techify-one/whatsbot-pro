@@ -10,6 +10,9 @@ from fastapi.responses import FileResponse
 from gowa.client import GOWASendError, extract_msg_id
 
 from db.repositories import contact_repo, message_repo, config_repo
+from db.repositories import custom_attribute_repo as ca_repo
+from db.repositories.custom_attribute_validate import validate_value
+from db.tables import contacts as contacts_table
 from agent import group_mentions
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
@@ -970,8 +973,29 @@ def register_routes(app, deps):
 
     @app.put("/api/contacts/{phone}/info")
     async def update_contact_info(phone: str, body: dict):
-        """Update contact info fields (name, email, profession, company, observations)."""
+        """Update contact info fields (name, email, profession, company, observations,
+        plus custom_attributes — plano 05)."""
+        # Validate custom attributes up front so we can return a clean 400 (P50:
+        # unknown key → error; invalid value → error) before touching the row.
+        custom_attrs = body.get("custom_attributes")
+        valid_partial: dict = {}
+        if custom_attrs is not None:
+            if not isinstance(custom_attrs, dict):
+                return _err("custom_attributes deve ser um objeto.")
+            defs = await asyncio.to_thread(ca_repo.get_definitions_map, "contact")
+            for key, value in custom_attrs.items():
+                definition = defs.get(key)
+                if definition is None:
+                    return _err(f"Atributo '{key}' não existe.", 400)  # P50
+                norm, err = validate_value(definition, value)
+                if err:
+                    return _err(err)
+                valid_partial[key] = norm
+
+        result_attrs: dict = {}
+
         def _update():
+            nonlocal result_attrs
             contact = agent_handler._get_contact(phone)
             # Update scalar fields via update_info
             contact.update_info(
@@ -987,9 +1011,13 @@ def register_routes(app, deps):
                 ]
                 contact.info["observations"] = new_obs
                 contact_repo.set_observations(contact.id, new_obs)
+            if custom_attrs is not None:
+                result_attrs = ca_repo.set_values(contacts_table, contact.id, valid_partial)
+            else:
+                result_attrs = ca_repo.get_values(contacts_table, contact.id)
             return contact.info
         info = await asyncio.to_thread(_update)
         await emit_with_filter("contact.updated", {
-            "phone": phone, "info": info, "ts": time.time(),
+            "phone": phone, "info": info, "custom_attributes": result_attrs, "ts": time.time(),
         })
         return _ok(info)

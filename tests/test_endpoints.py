@@ -698,6 +698,90 @@ r = client.delete(f"/api/quick-replies/{_qr['id']}")
 check("DELETE /quick-replies (de novo) -> 404", r.status_code == 404)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15c. Custom Attributes (plano 05)
+# ═══════════════════════════════════════════════════════════════════
+section("Custom Attributes")
+
+# Create a list-type definition
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "plano", "display_name": "Plano", "type": "list",
+    "applies_to": "contact", "options": ["free", "premium"],
+})
+check("POST /custom-attributes (list) -> 200", r.status_code == 200)
+_def_plano = r.json()["data"]
+check("POST /custom-attributes -> retorna id", isinstance(_def_plano.get("id"), int))
+
+# Create a checkbox definition
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "vip", "display_name": "VIP", "type": "checkbox", "applies_to": "contact",
+})
+check("POST /custom-attributes (checkbox) -> 200", r.status_code == 200)
+
+# Invalid key (not snake_case) rejected
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "Plano Pago", "display_name": "x", "type": "text", "applies_to": "contact",
+})
+check("POST /custom-attributes (key inválida) -> erro", r.json().get("ok") is False)
+
+# list type without options rejected
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "sem_opcoes", "display_name": "x", "type": "list", "applies_to": "contact",
+})
+check("POST /custom-attributes (list sem options) -> erro", r.json().get("ok") is False)
+
+# Duplicate (key, applies_to) rejected
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "plano", "display_name": "Outro", "type": "text", "applies_to": "contact",
+})
+check("POST /custom-attributes (dup) -> erro", r.json().get("ok") is False)
+
+# List active definitions for contact
+r = client.get("/api/custom-attributes?applies_to=contact")
+check("GET /custom-attributes -> 200", r.status_code == 200)
+_keys = {d["attribute_key"] for d in r.json()["data"]}
+check("GET /custom-attributes -> contém plano+vip", {"plano", "vip"} <= _keys)
+
+# Create a contact (PUT info auto-creates) then set valid custom attributes
+_caphone = "5511999990050"
+r = client.put(f"/api/contacts/{_caphone}/info", json={
+    "name": "Cliente CA", "custom_attributes": {"plano": "premium", "vip": True},
+})
+check("PUT /info (custom_attributes válidos) -> 200", r.status_code == 200)
+
+# Read back via full contact
+r = client.get(f"/api/contacts/{_caphone}")
+_ca = r.json()["data"].get("custom_attributes", {})
+check("GET /contacts -> custom_attributes.plano == premium", _ca.get("plano") == "premium")
+check("GET /contacts -> custom_attributes.vip == True (bool)", _ca.get("vip") is True)
+
+# Invalid value for list rejected
+r = client.put(f"/api/contacts/{_caphone}/info", json={"custom_attributes": {"plano": "enterprise"}})
+check("PUT /info (valor inválido) -> erro", r.json().get("ok") is False)
+
+# Unknown key rejected (P50)
+r = client.put(f"/api/contacts/{_caphone}/info", json={"custom_attributes": {"desconhecido": "x"}})
+check("PUT /info (key desconhecida) -> 400", r.status_code == 400)
+
+# Update definition (display_name) — key stays
+r = client.put(f"/api/custom-attributes/{_def_plano['id']}", json={"display_name": "Plano Comercial"})
+check("PUT /custom-attributes -> 200", r.status_code == 200)
+check("PUT /custom-attributes -> display atualizado", r.json()["data"]["display_name"] == "Plano Comercial")
+
+# Soft-delete definition
+r = client.delete(f"/api/custom-attributes/{_def_plano['id']}")
+check("DELETE /custom-attributes -> 200", r.status_code == 200)
+r = client.get("/api/custom-attributes?applies_to=contact")
+check("GET /custom-attributes -> plano some após soft-delete",
+      "plano" not in {d["attribute_key"] for d in r.json()["data"]})
+
+# Purge orphans (the deleted 'plano' value should be removed from the contact JSON)
+r = client.post("/api/custom-attributes/purge-orphans?applies_to=contact")
+check("POST /custom-attributes/purge-orphans -> 200", r.status_code == 200)
+r = client.get(f"/api/contacts/{_caphone}")
+check("purge-orphans -> remove valor órfão 'plano'",
+      "plano" not in r.json()["data"].get("custom_attributes", {}))
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
@@ -913,7 +997,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies"]:
+for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies", "/custom-attributes"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
 

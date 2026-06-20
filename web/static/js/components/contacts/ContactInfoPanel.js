@@ -1,9 +1,10 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { updateContactInfo, updateContactTags, createTag } from '../../services/api.js';
+import { updateContactInfo, updateContactTags, createTag, getCustomAttributes } from '../../services/api.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
+import { CustomAttributeField } from './CustomAttributeField.js';
 
 const html = htm.bind(h);
 
@@ -19,6 +20,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
   const [newObs, setNewObs] = useState('');
+
+  // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
+  const [customDefs, setCustomDefs] = useState([]);
+  const [customValues, setCustomValues] = useState({});
 
   // Tag editor state
   const [tagSearch, setTagSearch] = useState('');
@@ -39,9 +44,25 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
         address: info.address || '',
         observations: [...(info.observations || [])],
       });
+      setCustomValues({ ...(info.custom_attributes || {}) });
     }
     setTags([...(contactTags || [])]);
   }, [phone, info, contactTags]);
+
+  // Load custom attribute definitions once; reload when the admin screen edits them.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const res = await getCustomAttributes('contact');
+      if (!cancelled && res.ok) setCustomDefs(res.data || []);
+    }
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('whatsbot:custom-attributes-changed', load);
+    };
+  }, []);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -109,7 +130,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     setSaving(true);
     try {
       const [infoRes, tagsRes] = await Promise.all([
-        updateContactInfo(phone, form),
+        updateContactInfo(phone, { ...form, custom_attributes: customValues }),
         updateContactTags(phone, tags),
       ]);
       if (infoRes.ok) {
@@ -300,6 +321,29 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                 ` : null}
               </div>
             </div>
+
+            <!-- Custom attributes (plano 05) — "Dados do contato" group.
+                 FQ5: a "Dados desta conversa" group joins here once plano 01 ships. -->
+            ${customDefs.length > 0 ? html`
+              <div class="pt-1">
+                <div class="text-wa-iconActive text-[13px] font-medium mb-2">Atributos personalizados</div>
+                <div class="space-y-4">
+                  ${customDefs.map(def => html`
+                    <${CustomAttributeField}
+                      key=${def.id}
+                      def=${def}
+                      value=${customValues[def.attribute_key]}
+                      onChange=${(v) => setCustomValues(prev => {
+                        const next = { ...prev };
+                        if (v === null || v === undefined || v === '') delete next[def.attribute_key];
+                        else next[def.attribute_key] = v;
+                        return next;
+                      })}
+                    />
+                  `)}
+                </div>
+              </div>
+            ` : null}
 
             <!-- Observations -->
             <div>

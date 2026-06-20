@@ -16,6 +16,7 @@ existing data (column type ``Float``). A future migration could move them to
 from __future__ import annotations
 
 from sqlalchemy import (
+    JSON,
     Column,
     Float,
     ForeignKey,
@@ -25,9 +26,25 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 metadata = MetaData()
+
+
+def _json_type():
+    """Dialect-agnostic JSON column type (plano 05).
+
+    JSONB on PostgreSQL (enables GIN, ``@>``, ``has_key`` for filtering),
+    generic JSON (TEXT + json1) on SQLite. This is the first NATIVE JSON column
+    in the project — earlier JSON (``messages.reactions``) is hand-serialized Text.
+
+    Mutation-tracking rule (Core, no Session): JSON/JSONB do NOT track in-place
+    dict mutation. ALWAYS reassign the whole dict in an UPDATE
+    (``values(custom_attributes=new_dict)``), never ``obj["k"] = v``.
+    """
+    return JSON().with_variant(JSONB(), "postgresql")
 
 
 config = Table(
@@ -58,6 +75,9 @@ contacts = Table(
     Column("unread_count", Integer, nullable=False, server_default="0"),
     Column("unread_ai_count", Integer, nullable=False, server_default="0"),
     Column("has_unread_mention", Integer, nullable=False, server_default="0"),
+    # Custom attributes (plano 05) — native JSON/JSONB, owned by this plan for
+    # the contact scope. conversations.custom_attributes is owned by plano 01.
+    Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
@@ -142,6 +162,31 @@ quick_replies = Table(
     Column("created_at", Float, nullable=False),              # epoch (P56)
     Column("updated_at", Float, nullable=False),
 )
+
+
+# Custom attribute definitions (plano 05). applies_to separates contact|conversation
+# scopes (P54); the same key may exist in both (P51, UNIQUE per (key, applies_to)).
+# Soft-delete via deleted_at (P49). Values live in <entity>.custom_attributes JSON.
+custom_attribute_definitions = Table(
+    "custom_attribute_definitions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("attribute_key", Text, nullable=False),            # snake_case, IDENTIDADE — nunca renomear
+    Column("display_name", Text, nullable=False),
+    Column("type", Text, nullable=False, server_default="text"),   # text|number|date|list|checkbox|link
+    Column("applies_to", Text, nullable=False),               # contact|conversation
+    Column("options", _json_type(), nullable=True),           # JSON array de strings (só p/ type=list)
+    Column("required", Integer, nullable=False, server_default="0"),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("regex_pattern", Text, nullable=True),
+    Column("regex_cue", Text, nullable=True),
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_by", Integer, nullable=True),             # FK -> users (plano 03), nullable por ora
+    Column("created_at", Float, nullable=False),              # epoch float (P56)
+    Column("deleted_at", Float, nullable=True),               # soft-delete (P49): NULL = ativa
+    UniqueConstraint("attribute_key", "applies_to", name="uq_attr_key_scope"),
+)
+Index("idx_cad_applies_to", custom_attribute_definitions.c.applies_to)
 
 
 unread_msg_ids = Table(
