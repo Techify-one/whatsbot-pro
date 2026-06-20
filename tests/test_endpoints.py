@@ -1051,6 +1051,17 @@ _cm.add_message("user", "voltei")
 check("inbound reabre conversa closed",
       _conv_repo.get(_live_conv["id"])["status"] == "open")
 
+# Fatia 2: gate ai_active por conversa
+from server.routes.webhook import _conversation_ai_active as _ai_gate
+check("gate ai_active default True (ai_active=1)", _ai_gate(_cm) is True)
+r = client.post(f"/api/conversations/{_live_conv['id']}/ai", json={"active": False})
+check("POST /conversations/{id}/ai active=false -> 200", r.status_code == 200)
+check("set_ai_active -> ai_active=0", r.json()["data"]["conversation"]["ai_active"] == 0)
+check("gate ai_active False quando pausada", _ai_gate(_cm) is False)
+r = client.post(f"/api/conversations/{_live_conv['id']}/ai", json={"active": True})
+check("POST /conversations/{id}/ai active=true -> reativa", r.json()["data"]["conversation"]["ai_active"] == 1)
+check("gate volta a True", _ai_gate(_cm) is True)
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════

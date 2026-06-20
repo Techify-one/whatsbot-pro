@@ -10,13 +10,28 @@ import uuid
 
 from gowa.client import GOWASendError, extract_msg_id
 
-from db.repositories import contact_repo, message_repo
+from db.repositories import contact_repo, conversation_repo, message_repo
 from agent import group_mentions
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 
 logger = logging.getLogger(__name__)
+
+
+def _conversation_ai_active(contact) -> bool:
+    """Per-conversation AI gate (plano 01 Fase 2, fatia 2).
+
+    Returns the active conversation's ``ai_active`` flag, defaulting to True
+    (fail-open) — um erro de resolução ou ausência de conversa NUNCA silencia o
+    bot. Permite pausar a IA numa conversa específica sem mexer no contato.
+    """
+    try:
+        conv = conversation_repo.get_open_for_contact(contact.id)
+        return bool(conv["ai_active"]) if conv else True
+    except Exception:
+        logger.exception("Falha no gate ai_active para %s", getattr(contact, "phone", "?"))
+        return True
 
 
 # Media types whose payload contains a downloadable ``path`` and can be
@@ -867,7 +882,8 @@ def register_routes(app, deps):
                         "source": "batch_text",
                         "ts": time.time(),
                     })
-                    if contact.ai_enabled and settings.get("auto_reply", True):
+                    if contact.ai_enabled and settings.get("auto_reply", True) \
+                            and _conversation_ai_active(contact):
                         if not agent_handler.api_key:
                             notice = "[WhatsBot] API key não configurada."
                             contact.add_message("system_notice", notice)
@@ -988,7 +1004,8 @@ def register_routes(app, deps):
                             },
                         })
 
-                if not contact.ai_enabled or not settings.get("auto_reply", True):
+                if not contact.ai_enabled or not settings.get("auto_reply", True) \
+                        or not _conversation_ai_active(contact):
                     continue
 
                 if not agent_handler.api_key:
