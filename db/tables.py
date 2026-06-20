@@ -187,6 +187,8 @@ custom_attribute_definitions = Table(
     Column("regex_pattern", Text, nullable=True),
     Column("regex_cue", Text, nullable=True),
     Column("position", Integer, nullable=False, server_default="0"),
+    # plano 05 Fase 6: marca defs que entram no filter-schema e ganham índice (plano 08).
+    Column("filterable", Integer, nullable=False, server_default="0"),
     Column("created_by", Integer, nullable=True),             # FK -> users (plano 03), nullable por ora
     Column("created_at", Float, nullable=False),              # epoch float (P56)
     Column("deleted_at", Float, nullable=True),               # soft-delete (P49): NULL = ativa

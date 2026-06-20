@@ -22,7 +22,7 @@ from db.tables import custom_attribute_definitions as cad
 # Fields the client may set on create; attribute_key/type/applies_to are identity
 # (settable on create, immutable on update).
 _EDITABLE = ("display_name", "options", "required", "description",
-             "regex_pattern", "regex_cue", "position")
+             "regex_pattern", "regex_cue", "position", "filterable")
 
 
 # ── Definitions ──────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ def definition_exists(attribute_key: str, applies_to: str, exclude_id: int | Non
 def create_definition(*, attribute_key: str, display_name: str, type: str = "text",
                        applies_to: str = "contact", options=None, required: int = 0,
                        description: str = "", regex_pattern=None, regex_cue=None,
-                       position: int = 0, created_by=None) -> dict | None:
+                       position: int = 0, filterable: int = 0, created_by=None) -> dict | None:
     """Create a definition. Returns the row, or None on (key, applies_to) collision."""
     if definition_exists(attribute_key, applies_to):
         return None
@@ -76,10 +76,16 @@ def create_definition(*, attribute_key: str, display_name: str, type: str = "tex
             attribute_key=attribute_key, display_name=display_name, type=type,
             applies_to=applies_to, options=options, required=required,
             description=description, regex_pattern=regex_pattern, regex_cue=regex_cue,
-            position=position, created_by=created_by, created_at=now, deleted_at=None,
+            position=position, filterable=filterable, created_by=created_by,
+            created_at=now, deleted_at=None,
         ))
         new_id = result.inserted_primary_key[0]
     return get_definition(new_id)
+
+
+def list_filterable(applies_to: str) -> list[dict]:
+    """Active definitions marked filterable (plano 08 filter-schema consumes this)."""
+    return [d for d in list_definitions(applies_to) if d.get("filterable")]
 
 
 def update_definition(def_id: int, **fields) -> dict | None:
