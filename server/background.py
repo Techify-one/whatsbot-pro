@@ -13,6 +13,10 @@ from server.avatars import refresh_and_broadcast
 # How often the background sweep re-checks every contact's avatar for changes.
 AVATAR_REFRESH_INTERVAL = 1800  # seconds (30 min)
 
+# How often the audit retention purge runs (plano 07 Fase 2).
+AUDIT_PURGE_INTERVAL = 86400  # seconds (1 day)
+AUDIT_RETENTION_DAYS_DEFAULT = 365
+
 logger = logging.getLogger(__name__)
 
 
@@ -229,3 +233,33 @@ async def avatar_fetch_task(deps):
         while slept < AVATAR_REFRESH_INTERVAL and not state.stop_event.is_set():
             await asyncio.sleep(3)
             slept += 3
+
+
+async def audit_purge_loop(deps):
+    """Enforce audit retention (plano 07 Fase 2): once a day, delete audit rows
+    older than ``audit_retention_days`` (config, default 365). The purge is the
+    ONLY deletion allowed on the append-only trail.
+    """
+    state = deps.state
+    from db.repositories import config_repo, audit_repo
+
+    while not state.stop_event.is_set():
+        try:
+            days = await asyncio.to_thread(config_repo.get, "audit_retention_days")
+            try:
+                days = int(days) if days is not None else AUDIT_RETENTION_DAYS_DEFAULT
+            except (TypeError, ValueError):
+                days = AUDIT_RETENTION_DAYS_DEFAULT
+            if days > 0:
+                cutoff = time.time() - days * 86400
+                removed = await asyncio.to_thread(audit_repo.purge, cutoff)
+                if removed:
+                    logger.info("[Audit] Retention purge removed %d rows (older than %d days)",
+                                removed, days)
+        except Exception as e:
+            logger.warning("[Audit] purge loop error: %s", e)
+
+        slept = 0
+        while slept < AUDIT_PURGE_INTERVAL and not state.stop_event.is_set():
+            await asyncio.sleep(5)
+            slept += 5
