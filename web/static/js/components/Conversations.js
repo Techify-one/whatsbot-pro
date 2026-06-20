@@ -15,7 +15,6 @@ import { h } from 'preact';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  listConversations,
   filterConversations,
   setConversationStatus,
   assignConversation,
@@ -27,6 +26,17 @@ import { FilterBar } from './FilterBar.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
+
+// Status tabs (FF2). Each tab is a BASE filter; the advanced FilterBar refines on
+// top (its params spread last, so an explicit filter wins over the tab default).
+// All tabs map to the /filter endpoint's flat params — including "me" (resolved
+// server-side from the authenticated user) and "unassigned" (assignee IS NULL).
+const STATUS_TABS = [
+  { key: 'abertas',        label: 'Abertas',        base: { status: 'open', archived: 'false' } },
+  { key: 'minhas',         label: 'Minhas',         needsUser: true, base: { status: 'open', assignee: 'me', archived: 'false' } },
+  { key: 'nao_atribuidas', label: 'Não atribuídas', base: { status: 'open', assignee: 'unassigned', archived: 'false' } },
+  { key: 'resolvidas',     label: 'Resolvidas',     base: { status: 'closed', archived: 'false' } },
+];
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -194,9 +204,12 @@ export function Conversations() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Rich filters from the FilterBar (flat { key: value } map ready for
-  // filterConversations). Empty object → fall back to the plain list endpoint.
+  // Rich filters from the FilterBar (flat { key: value } map). Refine the active
+  // status tab on top of its base params.
   const [richFilters, setRichFilters] = useState({});
+
+  // Active status tab (FF2). Drives the base filter; "minhas" needs an identity.
+  const [statusTab, setStatusTab] = useState('abertas');
 
   // Identity / users (best-effort — degrade if forbidden)
   const [currentUserId, setCurrentUserId] = useState(null);
@@ -249,14 +262,11 @@ export function Conversations() {
     setLoading(true);
     setError('');
     try {
-      let res;
-      if (Object.keys(richFilters).length > 0) {
-        // Rich filter active → use the filter engine endpoint.
-        res = await filterConversations({ limit: 200, ...richFilters });
-      } else {
-        // No filters → keep the original simple list behaviour (open, not archived).
-        res = await listConversations({ limit: 200, status: 'open', archived: 'false' });
-      }
+      const tab = STATUS_TABS.find(t => t.key === statusTab) || STATUS_TABS[0];
+      // Tab base first, FilterBar params last → an explicit filter overrides the
+      // tab default for the same dimension (e.g. picking a status in the bar).
+      const params = { limit: 200, ...tab.base, ...richFilters };
+      const res = await filterConversations(params);
       if (res && res.ok) {
         setConversations((res.data && res.data.conversations) || []);
       } else {
@@ -269,7 +279,7 @@ export function Conversations() {
     } finally {
       setLoading(false);
     }
-  }, [richFilters]);
+  }, [richFilters, statusTab]);
 
   useEffect(() => { fetchConversations(); }, [fetchConversations]);
 
@@ -327,8 +337,29 @@ export function Conversations() {
     await fetchConversations();
   }, [fetchConversations]);
 
+  // "Minhas" requires an authenticated identity (assignee=me); hide it in
+  // legacy single-password mode where currentUserId is null.
+  const visibleTabs = STATUS_TABS.filter(t => !t.needsUser || currentUserId != null);
+
   return html`
     <div>
+      <!-- Status tabs (FF2): base filter; the FilterBar refines on top. -->
+      <div class="flex items-center gap-1 border-b border-wa-border mb-3 overflow-x-auto">
+        ${visibleTabs.map(t => {
+          const active = statusTab === t.key;
+          return html`
+            <button
+              key=${t.key}
+              onClick=${() => setStatusTab(t.key)}
+              class="px-3 py-2 text-[13px] whitespace-nowrap border-b-2 -mb-px transition-colors ${active
+                ? 'border-wa-teal text-wa-teal font-medium'
+                : 'border-transparent text-wa-secondary hover:text-wa-text'}"
+            >
+              ${t.label}
+            </button>`;
+        })}
+      </div>
+
       <!-- Rich filter bar (schema-driven). Lifts its state up via onChange. -->
       <${FilterBar} onChange=${setRichFilters} />
 
@@ -356,7 +387,7 @@ export function Conversations() {
               <div class="text-[13px]">
                 ${hasRichFilters
                   ? 'Ajuste os filtros acima para ver outras conversas.'
-                  : 'Nenhuma conversa aberta no momento.'}
+                  : `Nenhuma conversa nesta aba (${(STATUS_TABS.find(t => t.key === statusTab) || STATUS_TABS[0]).label}).`}
               </div>
             </div>`
           : html`
