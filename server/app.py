@@ -15,7 +15,7 @@ from server.auth import auth_required, verify_token, rbac_enforced, resolve_requ
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, users as users_routes, conversations as conversations_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, conversations as conversations_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -436,6 +436,7 @@ def create_app(
     runtime_routes.register_routes(app, deps)
     channels_routes.register_routes(app, deps)
     channel_webhook_routes.register_routes(app, deps)
+    inboxes_routes.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
     plugins_routes.register_routes(app, deps)
