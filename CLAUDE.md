@@ -32,7 +32,7 @@ server/avatars.py    → cache de fotos de perfil em disco (statics/avatars/<pho
 server/balance_monitor.py → consulta saldo de crédito do proxy (/credits) e emite low_balance via WS
 db/                  → módulo de banco de dados (SQLAlchemy 2.0 Core)
   engine.py          → factory do Engine, URL resolution (env > arquivo > sqlite default), PRAGMAs SQLite
-  tables.py          → MetaData + 11 Table objects (Core, sem mapper/Session)
+  tables.py          → MetaData + 20 Table objects (Core, sem mapper/Session): 13 core + 7 ai_* (motor AGNO)
   upsert.py          → helper dialect-agnóstico (INSERT ... ON CONFLICT)
   connection.py      → init_db(): cria engine + roda Alembic upgrade
   migration_postgres.py → migra dados SQLite → Postgres (usado pelo endpoint admin)
@@ -118,8 +118,10 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
 | `unread_msg_ids` | IDs de mensagens não lidas por contato |
-| `executions` | Tracking de execuções (webhook → resposta) |
+| `executions` | Tracking de execuções (webhook → resposta). Inclui `agent_key`, `total_tokens`, `total_cost_usd` (populados pelo writer a cada chamada de LLM) |
 | `execution_steps` | Passos de cada execução (tool calls, llm_request, etc.) |
+| `ai_agents` / `ai_prompts` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB (flag `ai_engine_enabled`, default OFF): agente, prompt-template, variáveis e tools com código Python no banco. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
+| `ai_agents_history` / `ai_prompts_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/prompt/tool |
 | `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
 | `plugin_migrations` | Versões de SQL migrations já aplicadas, por plugin |
 | `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |

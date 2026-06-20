@@ -62,6 +62,32 @@ def track_step(step_type: str, data: dict | None = None, status: str = "ok") -> 
         logger.warning("Failed to track step %s: %s", step_type, e)
 
 
+def add_execution_usage(total_tokens: int = 0, cost_usd: float = 0.0) -> None:
+    """Accumulate token/cost totals onto the current execution.
+
+    Reads execution_id from the contextvar (inherited inside asyncio.to_thread).
+    Safe to call when no execution is active (silently returns).
+    """
+    exec_id = _current_execution.get()
+    if exec_id is None:
+        return
+    try:
+        execution_repo.add_usage(exec_id, total_tokens, cost_usd)
+    except Exception as e:
+        logger.warning("Failed to record execution usage: %s", e)
+
+
+def set_execution_agent_key(agent_key: str) -> None:
+    """Record the AI agent_key on the current execution (config-in-DB path)."""
+    exec_id = _current_execution.get()
+    if exec_id is None or not agent_key:
+        return
+    try:
+        execution_repo.set_agent_key(exec_id, agent_key)
+    except Exception as e:
+        logger.warning("Failed to record execution agent_key: %s", e)
+
+
 def get_current_execution_id() -> int | None:
     """Get the current execution ID (or None if not tracking)."""
     return _current_execution.get()

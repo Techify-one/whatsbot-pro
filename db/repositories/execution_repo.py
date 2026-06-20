@@ -46,6 +46,33 @@ def complete(execution_id: int, status: str = "completed",
         ))
 
 
+def add_usage(execution_id: int, total_tokens: int = 0, cost_usd: float = 0.0) -> None:
+    """Accumulate token/cost totals onto an execution.
+
+    Called once per billable LLM call (main reply, audio, image, document), so
+    an execution that does several calls sums them. No-op when both deltas are
+    zero. Populates the ``executions.total_tokens``/``total_cost_usd`` columns
+    that were created in 0007 but previously never written.
+    """
+    if not total_tokens and not cost_usd:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(executions).where(executions.c.id == execution_id).values(
+            total_tokens=func.coalesce(executions.c.total_tokens, 0) + total_tokens,
+            total_cost_usd=func.coalesce(executions.c.total_cost_usd, 0.0) + cost_usd,
+        ))
+
+
+def set_agent_key(execution_id: int, agent_key: str) -> None:
+    """Record which AI agent (config-in-DB) handled this execution."""
+    if not agent_key:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(executions).where(executions.c.id == execution_id).values(
+            agent_key=agent_key,
+        ))
+
+
 def get_by_id(execution_id: int) -> dict | None:
     """Return an execution with all its steps."""
     with get_engine().connect() as conn:
