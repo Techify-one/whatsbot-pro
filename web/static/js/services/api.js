@@ -488,9 +488,27 @@ export async function deleteChannel(id) {
   return request('DELETE', `/api/channels/${encodeURIComponent(id)}`);
 }
 
-// {connected, logged_in, needs_qr, error}
+// {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
+// GOWA login QR for a channel's device. Returns an object-URL string for the
+// PNG, or null when there's no QR (already logged in / not ready → 204). The
+// caller must URL.revokeObjectURL() the returned url when done.
+export async function getChannelQR(id) {
+  try {
+    const res = await fetch(`${BASE}/api/channels/${encodeURIComponent(id)}/qr`, {
+      headers: _authHeaders(),
+    });
+    if (res.status === 401) { handleUnauthorized(); return null; }
+    if (!res.ok || res.status === 204) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size < 100) return null;
+    return URL.createObjectURL(blob);
+  } catch (e) {
+    return null;
+  }
 }
 
 // ── Models ──────────────────────────────────────────────────────────

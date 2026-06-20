@@ -29,6 +29,7 @@ from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
 from channels.outbound import OutboundRouter
 from channels.providers.gowa_channel import GOWAChannel
+from channels.providers.gowa_channel import build_gowa_channel
 from db.repositories import channel_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
@@ -123,13 +124,12 @@ def create_app(
         for provider_cls in getattr(loaded, "channel_providers", []):
             channel_registry.register_provider(provider_cls)
 
-    # Materialize a LIVE Channel instance for every configured channel (plano 11).
-    # Without this only "default" was instantiated, so inbound from a whatsapp_cloud
-    # channel had no provider to parse it. The "default" gowa channel wraps the
-    # existing client/manager; every other channel is built from its provider class
-    # (registered above) with the registry for credential access. A channel whose
-    # provider isn't loaded (e.g. whatsapp_cloud when its plugin isn't installed) is
-    # skipped — logged, never fatal.
+    # Materialize a LIVE Channel instance for every configured channel.
+    # GOWA channels get their OWN per-device client (build_gowa_channel) so several
+    # WhatsApp numbers connect on the same shared GOWA process (per-channel QR);
+    # non-GOWA channels (e.g. whatsapp_cloud) are built from their provider class
+    # registered above (plano 11 multicanal). A channel whose provider isn't loaded
+    # is skipped — logged, never fatal.
     try:
         for row in channel_repo.list_all():
             cid = row["id"]
@@ -137,7 +137,9 @@ def create_app(
             try:
                 if provider == "gowa":
                     channel_registry.add_channel(
-                        cid, GOWAChannel(cid, gowa_client, gowa_manager))
+                        cid,
+                        build_gowa_channel(cid, row,
+                                           gowa_client=gowa_client, gowa_manager=gowa_manager))
                     continue
                 if not row.get("enabled", 1):
                     continue
@@ -161,6 +163,7 @@ def create_app(
     # Outbound router (plano 11): the single send surface the runtime uses instead
     # of gowa_client, routing each reply to the conversation's own channel.
     outbound_router = OutboundRouter(channel_registry)
+
 
     # AI engine (config-in-DB + code-in-DB). Seed the default agent/prompt from
     # the current config (idempotent), then materialise/install/register the
