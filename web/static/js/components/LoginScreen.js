@@ -14,7 +14,7 @@ const html = htm.bind(h);
 export function LoginScreen({ onLogin, needsBootstrap = false }) {
   const [bootstrap, setBootstrap] = useState(!!needsBootstrap);
   const [email, setEmail] = useState('');
-  const [name, setName] = useState('');
+  const [name, setName] = useState('Admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,7 +31,7 @@ export function LoginScreen({ onLogin, needsBootstrap = false }) {
 
   async function handleLogin(e) {
     e.preventDefault();
-    if (!password.trim()) return;
+    if (!email.trim() || !password.trim()) return;
     setLoading(true);
     setError('');
     try {
@@ -39,7 +39,7 @@ export function LoginScreen({ onLogin, needsBootstrap = false }) {
       if (res.ok) {
         persistAndEnter(res);
       } else {
-        setError(res.error || (email ? 'Email ou senha incorretos.' : 'Senha incorreta.'));
+        setError(res.error || 'Email ou senha incorretos.');
       }
     } catch {
       setError('Erro de conexão.');
@@ -136,7 +136,8 @@ export function LoginScreen({ onLogin, needsBootstrap = false }) {
               type="email"
               value=${email}
               onInput=${(e) => setEmail(e.target.value)}
-              placeholder="Email (opcional)"
+              placeholder="Email"
+              autofocus
               class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
             />
             <input
@@ -144,7 +145,6 @@ export function LoginScreen({ onLogin, needsBootstrap = false }) {
               value=${password}
               onInput=${(e) => setPassword(e.target.value)}
               placeholder="Senha"
-              autofocus
               class="wa-field w-full px-4 py-3 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none mb-3"
             />
 
@@ -152,15 +152,11 @@ export function LoginScreen({ onLogin, needsBootstrap = false }) {
 
             <button
               type="submit"
-              disabled=${loading || !password.trim()}
+              disabled=${loading || !email.trim() || !password.trim()}
               class="w-full py-3 bg-wa-teal hover:bg-wa-tealDark disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
             >
               ${loading ? 'Entrando...' : 'Entrar'}
             </button>
-
-            <p class="text-[11px] text-wa-secondary mt-3 text-center">
-              Deixe o email em branco para usar a senha única do painel.
-            </p>
           </form>
         `}
       </div>

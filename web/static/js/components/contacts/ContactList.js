@@ -4,8 +4,24 @@ import htm from 'htm';
 import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime, avatarUrl } from './utils.js';
 import { TagPicker } from './TagPicker.js';
+import { ConversationFilterBar } from './ConversationFilterBar.js';
 
 const html = htm.bind(h);
+
+// Tiny assignee chip shown on each row (plano 10): person for a human agent, bot
+// for an AI agent. Highlighted in teal when the conversation is assigned to me.
+function AssigneeChip({ assignee }) {
+  if (!assignee) return null;
+  const cls = assignee.isMe ? 'text-wa-teal' : 'text-wa-secondary';
+  const icon = assignee.isAi
+    ? html`<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 2a2 2 0 012 2v1h3a2 2 0 012 2v2h1a2 2 0 010 4h-1v2a2 2 0 01-2 2h-3v1a2 2 0 01-4 0v-1H7a2 2 0 01-2-2v-2H4a2 2 0 010-4h1V7a2 2 0 012-2h3V4a2 2 0 012-2zm-3 7a1 1 0 00-1 1v4a1 1 0 002 0v-4a1 1 0 00-1-1zm6 0a1 1 0 00-1 1v4a1 1 0 002 0v-4a1 1 0 00-1-1z"/></svg>`
+    : html`<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>`;
+  return html`
+    <span class="flex items-center gap-[3px] text-[10px] ${cls} max-w-[110px]" title=${'Atribuída a ' + assignee.label}>
+      ${icon}<span class="truncate">${assignee.label}</span>
+    </span>
+  `;
+}
 
 // Kebab (3-dots) menu icon, shared by the header menus. Defined as components
 // (functions returning a vnode) so they can be used as <${KebabIcon} />.
@@ -67,7 +83,8 @@ function highlightParts(text, query) {
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedPhones, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag }) {
+  selectionMode, selectedPhones, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
+  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, resolveAssignee, hasIdentity }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   const selCount = (selectedPhones || []).length;
   const selectedSet = new Set(selectedPhones || []);
@@ -291,6 +308,23 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
         </div>
       </div>
 
+      <!-- Status/assignment tabs + filters (plano 10 FF2) -->
+      ${!selectionMode && onStatusChange ? html`
+        <${ConversationFilterBar}
+          statusFilter=${statusFilter}
+          onStatusChange=${onStatusChange}
+          assignmentTab=${assignmentTab}
+          onAssignmentChange=${onAssignmentChange}
+          counts=${tabCounts || { all: 0, mine: 0, unassigned: 0 }}
+          sortBy=${sortBy}
+          onSortChange=${onSortChange}
+          tagFilter=${tagFilter}
+          onTagFilterChange=${onTagFilterChange}
+          globalTags=${globalTags}
+          hasIdentity=${hasIdentity}
+        />
+      ` : null}
+
       <!-- Contact rows -->
       <div class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg">
         ${loading && contacts.length === 0
@@ -365,9 +399,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
                       </span>
-                      <span class="flex items-center gap-[4px] ml-[6px] shrink-0">
-                        ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
-                        <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
+                      <span class="flex flex-col items-end gap-[3px] ml-[6px] shrink-0">
+                        <span class="flex items-center gap-[4px]">
+                          ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
+                          <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
+                        </span>
+                        ${resolveAssignee ? html`<${AssigneeChip} assignee=${resolveAssignee(c)} />` : null}
                       </span>
                     </div>
                     ${(c.tags && c.tags.length > 0) ? html`

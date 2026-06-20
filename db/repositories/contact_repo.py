@@ -119,6 +119,15 @@ def get_by_phone(phone: str) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def get(contact_id: int) -> dict | None:
+    """Get a contact by its primary key."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(contacts).where(contacts.c.id == contact_id)
+        ).mappings().first()
+    return _row_to_dict(row) if row else None
+
+
 def update(contact_id: int, **fields) -> None:
     """Update specific fields on a contact."""
     if not fields:
@@ -364,6 +373,11 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
     # Single SQL statement — easier to read than building it via Core.
     # Only standard SQL (MAX, GROUP BY, INNER JOIN, LEFT JOIN, COALESCE),
     # works in both SQLite and Postgres unchanged.
+    # ``conv`` joins the ACTIVE conversation of each contact (the highest id —
+    # reopening reuses the same row, new threads get a new id, so MAX(id) is the
+    # current one). Used to surface conversation status/assignee/agente on each
+    # inbox row so the status/assignment tabs (plano 10 FF2) can filter and count
+    # client-side. Aditivo: contacts without a conversation just get NULLs.
     sql = sql_text("""
         SELECT c.*,
                lm.content   AS last_msg_content,
@@ -372,6 +386,11 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                lm.media_type AS last_msg_media_type,
                lm.status    AS last_msg_status,
                lm.msg_id    AS last_msg_id,
+               conv.conv_id              AS conv_id,
+               conv.conv_status          AS conv_status,
+               conv.conv_assignee_user_id AS conv_assignee_user_id,
+               conv.conv_active_agent_key AS conv_active_agent_key,
+               conv.conv_ai_active       AS conv_ai_active,
                (SELECT COUNT(*) FROM messages WHERE contact_id = c.id) AS msg_count
         FROM contacts c
         LEFT JOIN (
@@ -384,6 +403,20 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                 GROUP BY contact_id
             ) m2 ON m1.contact_id = m2.contact_id AND m1.ts = m2.max_ts
         ) lm ON lm.contact_id = c.id
+        LEFT JOIN (
+            SELECT cv1.contact_id,
+                   cv1.id               AS conv_id,
+                   cv1.status           AS conv_status,
+                   cv1.assignee_user_id AS conv_assignee_user_id,
+                   cv1.active_agent_key AS conv_active_agent_key,
+                   cv1.ai_active        AS conv_ai_active
+            FROM conversations cv1
+            INNER JOIN (
+                SELECT contact_id, MAX(id) AS max_id
+                FROM conversations
+                GROUP BY contact_id
+            ) cv2 ON cv1.contact_id = cv2.contact_id AND cv1.id = cv2.max_id
+        ) conv ON conv.contact_id = c.id
         WHERE c.is_archived = :archived
         ORDER BY c.is_pinned DESC, COALESCE(lm.ts, c.updated_at) DESC
     """)
@@ -437,6 +470,15 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                 "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
                 "tags": tags_list,
                 "updated_at": row["updated_at"],
+                # Active conversation (plano 10 FF2) — drives the status/assignment
+                # tabs and the assignee shown on each row. NULL for contacts that
+                # never got a conversation (treated as open/unassigned by the UI).
+                "conversation_id": row["conv_id"],
+                "conv_status": row["conv_status"] or "open",
+                "assignee_user_id": row["conv_assignee_user_id"],
+                "active_agent_key": row["conv_active_agent_key"],
+                "conv_ai_active": (
+                    bool(row["conv_ai_active"]) if row["conv_ai_active"] is not None else True),
             })
 
     if q:

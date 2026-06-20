@@ -1,11 +1,53 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag } from '../../services/api.js';
+import { getContacts, getContact, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents } from '../../services/api.js';
 import { ContactList } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ContextMenu } from './ContextMenu.js';
+import { useWebSocket } from '../../hooks/useWebSocket.js';
+
+// ── Conversation tab/filter helpers (plano 10 FF2) ──────────────────
+// All client-side over the enriched contact list (each row carries its active
+// conversation's status/assignee/agente), so switching tabs is instant.
+const isUnassigned = (c) => c.assignee_user_id == null && !c.active_agent_key;
+
+function matchesStatus(c, statusFilter) {
+  if (statusFilter === 'all') return true;
+  return (c.conv_status || 'open') === statusFilter;   // 'open' | 'closed'
+}
+function matchesAssignment(c, tab, uid) {
+  if (tab === 'mine') return uid != null && c.assignee_user_id === uid;
+  if (tab === 'unassigned') return isUnassigned(c);
+  return true;  // 'all'
+}
+function matchesTags(c, tagFilter) {
+  if (!tagFilter || tagFilter.length === 0) return true;
+  const ctags = c.tags || [];
+  return tagFilter.some(t => ctags.includes(t));   // "é uma de" (OR), estilo Chatwoot
+}
+function sortContactsBy(list, sortBy) {
+  const arr = [...list];
+  const ts = (c) => c.last_message_ts || c.updated_at || 0;
+  if (sortBy === 'oldest') {
+    arr.sort((a, b) => ts(a) - ts(b));
+  } else if (sortBy === 'unread') {
+    arr.sort((a, b) => {
+      const au = (a.unread_count || 0) + (a.unread_ai_count || 0);
+      const bu = (b.unread_count || 0) + (b.unread_ai_count || 0);
+      if (au !== bu) return bu - au;
+      return ts(b) - ts(a);
+    });
+  } else {  // 'activity' — pinned first, then most recent (matches the backend)
+    arr.sort((a, b) => {
+      const ap = a.is_pinned ? 1 : 0, bp = b.is_pinned ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return ts(b) - ts(a);
+    });
+  }
+  return arr;
+}
 
 const html = htm.bind(h);
 
@@ -27,6 +69,14 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
   const [showArchived, setShowArchived] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
+  // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
+  const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
+  const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
+  const [sortBy, setSortBy] = useState('activity');           // activity|oldest|unread
+  const [tagFilter, setTagFilter] = useState([]);             // array of tag names
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
+  const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
   const [checkingPhone, setCheckingPhone] = useState(false);
   const [checkPhoneError, setCheckPhoneError] = useState(null);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -35,6 +85,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const selectedRef = useRef(null);
   const typingTimers = useRef({});
   const contactsRef = useRef([]);
+  const displayedRef = useRef([]);   // currently-visible (filtered) rows — for "selecionar todas"
   const lastResolvedId = useRef(null);
   const pageVisibleRef = useRef(!document.hidden);
 
@@ -147,7 +198,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       : [...prev, phone]);
   }, []);
   const selectAllContacts = useCallback(() => {
-    setSelectedPhones(contactsRef.current.map(c => c.phone));
+    setSelectedPhones(displayedRef.current.map(c => c.phone));
   }, []);
   const clearSelection = useCallback(() => { setSelectedPhones([]); setSelectionMode(false); }, []);
 
@@ -340,6 +391,69 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   useEffect(() => {
     getTags().then(res => { if (res.ok) setGlobalTags(res.data); });
   }, []);
+
+  // Identity + assignable agents (plano 10) — drive "Minhas" and the assignee
+  // label on each row. Best-effort; degrade silently if forbidden.
+  useEffect(() => {
+    getMe().then(res => {
+      if (res && res.ok && res.data && res.data.user) setCurrentUserId(res.data.user.id);
+    }).catch(() => {});
+    getAssignableAgents().then(res => {
+      if (res && res.ok && res.data) {
+        setAgentsUsers(Array.isArray(res.data.users) ? res.data.users : []);
+        setAgentsAi(Array.isArray(res.data.ai_agents) ? res.data.ai_agents : []);
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Real-time: patch a contact row when its conversation changes (assign /
+  // resolve / IA). The conversation_* events carry contact_id (plano 10).
+  const onConversationChanged = useCallback((name, data) => {
+    const cid = data && data.contact_id;
+    if (cid == null) return;
+    setContacts(prev => prev.map(c => {
+      if (c.id !== cid) return c;
+      const patch = {};
+      if (data.status !== undefined) patch.conv_status = data.status;
+      if (data.assignee_user_id !== undefined) patch.assignee_user_id = data.assignee_user_id;
+      if (data.active_agent_key !== undefined) patch.active_agent_key = data.active_agent_key;
+      if (data.ai_active !== undefined) patch.conv_ai_active = data.ai_active;
+      if (data.conversation_id != null && c.conversation_id == null) patch.conversation_id = data.conversation_id;
+      return { ...c, ...patch };
+    }));
+  }, []);
+  useWebSocket({ onConversationChanged });
+
+  // Derived list: status + tag filter feed the tab counts; the active assignment
+  // tab + sort produce what's actually rendered.
+  const statusTagFiltered = useMemo(
+    () => contacts.filter(c => matchesStatus(c, statusFilter) && matchesTags(c, tagFilter)),
+    [contacts, statusFilter, tagFilter],
+  );
+  const tabCounts = useMemo(() => ({
+    all: statusTagFiltered.length,
+    mine: currentUserId == null ? 0 : statusTagFiltered.filter(c => c.assignee_user_id === currentUserId).length,
+    unassigned: statusTagFiltered.filter(isUnassigned).length,
+  }), [statusTagFiltered, currentUserId]);
+  const displayedContacts = useMemo(
+    () => sortContactsBy(statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)), sortBy),
+    [statusTagFiltered, assignmentTab, currentUserId, sortBy],
+  );
+  useEffect(() => { displayedRef.current = displayedContacts; }, [displayedContacts]);
+
+  // Resolve the assignee badge for a row (human name, or AI agent name).
+  const resolveAssignee = useCallback((c) => {
+    if (c.assignee_user_id != null) {
+      const u = agentsUsers.find(x => x.id === c.assignee_user_id);
+      return { label: u ? u.name : `#${c.assignee_user_id}`, isAi: false,
+               isMe: currentUserId != null && c.assignee_user_id === currentUserId };
+    }
+    if (c.active_agent_key) {
+      const a = agentsAi.find(x => x.agent_key === c.active_agent_key);
+      return { label: a ? a.display_name : c.active_agent_key, isAi: true, isMe: false };
+    }
+    return null;
+  }, [agentsUsers, agentsAi, currentUserId]);
 
   // Reload when archive filter changes (and drop any active selection)
   useEffect(() => { fetchContacts(search); setSelectionMode(false); setSelectedPhones([]); }, [showArchived]);
@@ -748,10 +862,21 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
       <!-- Sidebar -->
       <div class="shrink-0 border-r border-wa-border transition-all duration-300 overflow-hidden ${sidebarHidden ? 'lg:w-0 lg:border-r-0' : 'lg:w-[400px]'} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}">
         <${ContactList}
-          contacts=${contacts}
+          contacts=${displayedContacts}
           loading=${loading}
           search=${search}
           onSearchChange=${handleSearchChange}
+          statusFilter=${statusFilter}
+          onStatusChange=${setStatusFilter}
+          assignmentTab=${assignmentTab}
+          onAssignmentChange=${setAssignmentTab}
+          tabCounts=${tabCounts}
+          sortBy=${sortBy}
+          onSortChange=${setSortBy}
+          tagFilter=${tagFilter}
+          onTagFilterChange=${setTagFilter}
+          resolveAssignee=${resolveAssignee}
+          hasIdentity=${currentUserId != null}
           selected=${selected}
           onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
