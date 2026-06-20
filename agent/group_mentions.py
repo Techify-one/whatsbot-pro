@@ -386,13 +386,25 @@ def resolve_outgoing(group_jid: str, text: str) -> tuple[str, list[str]]:
     members = get_members(group_jid)
     mentions: list[str] = []
 
-    # Mention-all keywords -> GOWA "@everyone". WhatsApp's everyone-mention is a
-    # group mention whose highlighted token is "@all", so rewrite whatever keyword
-    # the operator/AI used (@todos/@todes/@geral/…) to "@all" on the wire — without
-    # it WhatsApp delivers all participants in the metadata but renders the text as
-    # plain (unhighlighted) "@todos".
+    # Mention-all keywords. A literal "@everyone" in the mentions list does NOT
+    # tag/notify anyone: GOWA/WhatsApp only notify the participants whose phone
+    # JIDs are in the mentions array (same mechanism the individual mentions below
+    # rely on), and "@everyone" is not a JID. So expand it ourselves — every
+    # participant's phone goes into the mentions list, while the visible text keeps
+    # a single clean "@all" token. The bot itself is excluded (no self-ping).
     if _ALL_RE.search(text):
-        mentions.append("@everyone")
+        everyone = [m["phone"] for m in members
+                    if m["phone"] and m["phone"] != _bot_phone]
+        if everyone:
+            for p in everyone:
+                if p not in mentions:
+                    mentions.append(p)
+        else:
+            # Members unavailable (GOWA fetch failed) — fall back to the literal so
+            # behaviour doesn't regress to silently sending no mention at all.
+            mentions.append("@everyone")
+            logger.warning("[mentions] @all for %s but no resolvable members; "
+                           "sent literal @everyone as fallback", group_jid)
         text = _ALL_RE.sub("@all", text)
 
     # Name mentions: match the full known name (longest first to avoid a short
