@@ -2,9 +2,10 @@ import logging
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
+
+from runtime.subprocess_service import ManagedProcess, SubprocessSpec
 
 logger = logging.getLogger(__name__)
 
@@ -31,51 +32,47 @@ def _debug_enabled() -> bool:
 
 
 class GOWAManager:
-    """Manages the GOWA subprocess lifecycle."""
+    """Manages the GOWA subprocess lifecycle.
+
+    Delegates the actual process control to ``runtime.subprocess_service`` (plano
+    09 Fase 4): GOWA now runs in its own process group, dies with the Python
+    parent (Linux ``PR_SET_PDEATHSIG`` — covers the plugin-toggle ``os._exit``),
+    is stale-killed on boot (replacing the launcher's external ``pkill``), and is
+    watchdogged with the same 3/60s rate-limit. The public API
+    (``start``/``stop``/``restart``/``is_running``/``_on_restart``) is preserved.
+    """
 
     def __init__(self, port: int = 3000, data_dir: Path | None = None,
-                 webhook_url: str | None = None, on_restart=None):
+                 webhook_url: str | None = None, on_restart=None,
+                 readiness=None):
         self.port = port
         self.webhook_url = webhook_url
         self.data_dir = data_dir or Path.home() / ".config" / "WhatsBot"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._process: subprocess.Popen | None = None
-        self._running = False
-        self._watchdog_thread: threading.Thread | None = None
-        self._restart_count = 0
-        self._restart_window_start = 0.0
-        self._max_restarts = 3
-        self._restart_window_sec = 60
+        self._managed: ManagedProcess | None = None
+        self._log_fh = None
+        # Set after construction by the server (server/app.py); read dynamically
+        # at restart time, so we keep it as an instance attribute, not captured.
         self._on_restart = on_restart
+        self._readiness = readiness
 
     @property
     def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        return self._managed is not None and self._managed.is_running()
 
-    def start(self):
-        """Start the GOWA process."""
-        if self.is_running:
-            logger.info("GOWA already running (pid=%s)", self._process.pid)
-            return
-
+    def _build_cmd(self) -> list[str]:
         binary = _get_gowa_binary()
         if not binary.exists():
             raise FileNotFoundError(
                 f"GOWA binary not found at {binary}. "
                 "Place gowa.exe in the bin/ directory."
             )
-
-        cmd = [
-            str(binary),
-            "rest",
-            "--port", str(self.port),
-        ]
+        cmd = [str(binary), "rest", "--port", str(self.port)]
         if self.webhook_url:
             cmd.extend(["--webhook", self.webhook_url])
         # Forward every event the webhook handler knows how to process. GOWA
         # only delivers events listed here; omitting one (e.g. group.participants)
-        # silently drops it even though webhook.py has a handler — which is why
-        # group join/leave, reactions, edits and revokes never fired before.
+        # silently drops it even though webhook.py has a handler.
         cmd.extend(["--webhook-events", ",".join([
             "message",
             "message.reaction",
@@ -91,27 +88,33 @@ class GOWAManager:
         # Must be "available" to receive typing events from contacts
         cmd.extend(["--presence-on-connect", "available"])
         cmd.extend(["--os", "Techify - WhatsBot"])
-
-        debug_on = _debug_enabled()
-        if debug_on:
+        if _debug_enabled():
             cmd.extend(["--debug=true"])
+        return cmd
 
+    def start(self):
+        """Start the GOWA process (via the managed subprocess service)."""
+        if self.is_running:
+            logger.info("GOWA already running (pid=%s)", self._managed.status().get("pid"))
+            return
+
+        cmd = self._build_cmd()
+        debug_on = _debug_enabled()
         logger.info("Starting GOWA (debug=%s): %s", debug_on, " ".join(cmd))
+
         creation_flags = 0
         if sys.platform == "win32":
-            creation_flags = subprocess.CREATE_NO_WINDOW
+            creation_flags = subprocess.CREATE_NO_WINDOW  # no-op of compat off-Windows
 
         if debug_on:
             log_path = _gowa_log_path()
-            # Rotate if too large
             try:
                 if log_path.exists() and log_path.stat().st_size > GOWA_LOG_MAX_BYTES:
                     log_path.unlink(missing_ok=True)
             except OSError as e:
                 logger.warning("Could not rotate gowa.log: %s", e)
-            log_fh = open(log_path, "ab", buffering=0)
-            self._log_fh = log_fh
-            stdout_target = log_fh
+            self._log_fh = open(log_path, "ab", buffering=0)
+            stdout_target = self._log_fh
             stderr_target = subprocess.STDOUT
             logger.info("GOWA debug logs -> %s", log_path)
         else:
@@ -119,92 +122,45 @@ class GOWAManager:
             stdout_target = subprocess.DEVNULL
             stderr_target = subprocess.DEVNULL
 
-        self._process = subprocess.Popen(
-            cmd,
+        spec = SubprocessSpec(
+            name="gowa",
+            cmd=cmd,
+            signature=str(_get_gowa_binary()),  # stale-kill guard: match GOWA binary path
+            readiness=self._readiness,
+            readiness_timeout=15.0,
             stdout=stdout_target,
             stderr=stderr_target,
             creationflags=creation_flags,
+            max_restarts=3,
+            window_sec=60.0,
+            restart_delay=5.0,
+            # Read _on_restart dynamically (server sets it after construction).
+            on_restart=lambda: self._on_restart() if self._on_restart else None,
+            owner="core",
         )
-        self._running = True
-        logger.info("GOWA started (pid=%s)", self._process.pid)
-
-        # Start watchdog
-        self._watchdog_thread = threading.Thread(
-            target=self._watchdog, daemon=True, name="gowa-watchdog"
-        )
-        self._watchdog_thread.start()
+        self._managed = ManagedProcess(spec)
+        self._managed.start()
+        logger.info("GOWA started (pid=%s)", self._managed.status().get("pid"))
 
     def stop(self):
-        """Stop the GOWA process gracefully."""
-        self._running = False
-        if self._process is None:
-            return
-
-        logger.info("Stopping GOWA (pid=%s)...", self._process.pid)
-        try:
-            self._process.terminate()
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            logger.warning("GOWA did not stop gracefully, killing...")
-            self._process.kill()
-            self._process.wait(timeout=3)
-        except Exception as e:
-            logger.error("Error stopping GOWA: %s", e)
-        finally:
-            self._process = None
-            if getattr(self, "_log_fh", None):
-                try:
-                    self._log_fh.close()
-                except Exception:
-                    pass
-                self._log_fh = None
-            logger.info("GOWA stopped.")
+        """Stop the GOWA process gracefully (kills the whole process group)."""
+        if self._managed is not None:
+            try:
+                self._managed.stop()
+            except Exception as e:  # noqa: BLE001
+                logger.error("Error stopping GOWA: %s", e)
+            finally:
+                self._managed = None
+        if self._log_fh is not None:
+            try:
+                self._log_fh.close()
+            except Exception:
+                pass
+            self._log_fh = None
+        logger.info("GOWA stopped.")
 
     def restart(self):
         """Stop and start GOWA."""
         self.stop()
         time.sleep(1)
         self.start()
-
-    def _watchdog(self):
-        """Watch the GOWA process and restart on crash."""
-        while self._running:
-            if self._process and self._process.poll() is not None:
-                exit_code = self._process.returncode
-                logger.warning("GOWA exited with code %s", exit_code)
-                self._process = None
-
-                if not self._running:
-                    break
-
-                # Rate-limit restarts
-                now = time.time()
-                if now - self._restart_window_start > self._restart_window_sec:
-                    self._restart_count = 0
-                    self._restart_window_start = now
-
-                self._restart_count += 1
-                if self._restart_count > self._max_restarts:
-                    logger.error(
-                        "GOWA crashed %d times in %ds, giving up.",
-                        self._restart_count,
-                        self._restart_window_sec,
-                    )
-                    self._running = False
-                    break
-
-                logger.info("Restarting GOWA in 5 seconds... (attempt %d/%d)",
-                            self._restart_count, self._max_restarts)
-                time.sleep(5)
-                if self._running:
-                    try:
-                        self.start()
-                        if self._on_restart:
-                            try:
-                                self._on_restart()
-                            except Exception as cb_err:
-                                logger.error("on_restart callback error: %s", cb_err)
-                    except Exception as e:
-                        logger.error("Failed to restart GOWA: %s", e)
-                break  # New watchdog thread is started by start()
-            time.sleep(2)

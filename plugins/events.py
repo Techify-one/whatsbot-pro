@@ -65,6 +65,8 @@ KNOWN_EVENTS: set[str] = {
     "execution.started", "execution.ended",
     # Runtime supervisor (plano 09 Fase 3)
     "task.crashed",
+    # Managed subprocess service (plano 09 Fase 4)
+    "subprocess.crashed", "subprocess.restarted",
 }
 
 # Subscription keys that are dispatch targets, not emission sources.
