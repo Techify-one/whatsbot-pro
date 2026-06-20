@@ -444,6 +444,96 @@ export async function getUsageContactDetail(phone, params = {}) {
   return request('GET', `/api/usage/contact/${encodeURIComponent(phone)}${qs ? '?' + qs : ''}`);
 }
 
+// ── AI Engine (plano 06) — agents / prompts / variables / tools ────
+// Config-in-DB + code-in-DB. All responses are {ok, data, error}; the data is
+// the list/object directly (no extra wrapper key). Agent/prompt/variable edits
+// apply on the next message; tool (code-in-DB) edits schedule a restart.
+
+export async function listAgents() {
+  return request('GET', '/api/ai/agents');
+}
+
+export async function getAgent(key) {
+  return request('GET', `/api/ai/agents/${encodeURIComponent(key)}`);
+}
+
+// body: {display_name, prompt_key, model_config(obj), tool_names(list|null),
+//        enabled(bool), description, is_router(bool), routing_targets(list|null)}
+export async function saveAgent(key, data) {
+  return request('PUT', `/api/ai/agents/${encodeURIComponent(key)}`, data);
+}
+
+export async function getAgentHistory(key) {
+  return request('GET', `/api/ai/agents/${encodeURIComponent(key)}/history`);
+}
+
+export async function rollbackAgent(key, version) {
+  return request('POST', `/api/ai/agents/${encodeURIComponent(key)}/rollback/${version}`);
+}
+
+export async function listPrompts() {
+  return request('GET', '/api/ai/prompts');
+}
+
+export async function getPrompt(key) {
+  return request('GET', `/api/ai/prompts/${encodeURIComponent(key)}`);
+}
+
+// body: {body}
+export async function savePrompt(key, body) {
+  return request('PUT', `/api/ai/prompts/${encodeURIComponent(key)}`, { body });
+}
+
+export async function getPromptHistory(key) {
+  return request('GET', `/api/ai/prompts/${encodeURIComponent(key)}/history`);
+}
+
+export async function rollbackPrompt(key, version) {
+  return request('POST', `/api/ai/prompts/${encodeURIComponent(key)}/rollback/${version}`);
+}
+
+export async function listVariables() {
+  return request('GET', '/api/ai/variables');
+}
+
+// body: {value} (category optional)
+export async function saveVariable(name, value, category = '') {
+  return request('PUT', `/api/ai/variables/${encodeURIComponent(name)}`, { value, category });
+}
+
+export async function deleteVariable(name) {
+  return request('DELETE', `/api/ai/variables/${encodeURIComponent(name)}`);
+}
+
+export async function listTools() {
+  return request('GET', '/api/ai/tools');
+}
+
+export async function getTool(name) {
+  return request('GET', `/api/ai/tools/${encodeURIComponent(name)}`);
+}
+
+// body: {description, code, dependencies(list), enabled(bool)}
+export async function saveTool(name, data) {
+  return request('PUT', `/api/ai/tools/${encodeURIComponent(name)}`, data);
+}
+
+export async function deleteTool(name) {
+  return request('DELETE', `/api/ai/tools/${encodeURIComponent(name)}`);
+}
+
+export async function getToolHistory(name) {
+  return request('GET', `/api/ai/tools/${encodeURIComponent(name)}/history`);
+}
+
+export async function rollbackTool(name, version) {
+  return request('POST', `/api/ai/tools/${encodeURIComponent(name)}/rollback/${version}`);
+}
+
+export async function restartAi() {
+  return request('POST', '/api/ai/restart');
+}
+
 // ── Update ────────────────────────────────────────────────────────
 
 export async function checkForUpdates() {
