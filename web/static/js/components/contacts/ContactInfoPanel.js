@@ -1,11 +1,10 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { updateContactInfo, updateContactTags, createTag, getCustomAttributes, getContactConversation, getConversation, updateConversationInfo } from '../../services/api.js';
+import { updateContactInfo, updateContactTags, createTag, getCustomAttributes } from '../../services/api.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
-import { AssigneePicker } from './AssigneePicker.js';
 
 const html = htm.bind(h);
 
@@ -15,8 +14,11 @@ const TAG_COLORS = [
 ];
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
+// Contact-scoped only (plano conversa Onda 2): identity, contact tags, contact
+// custom attributes, observations. Conversation status/assignment/labels/
+// attributes live in ConversationInfoPanel.
 
-export function ContactInfoPanel({ phone, conversationId = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
+export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -25,12 +27,6 @@ export function ContactInfoPanel({ phone, conversationId = null, info, contactTa
   // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
   const [customDefs, setCustomDefs] = useState([]);
   const [customValues, setCustomValues] = useState({});
-
-  // Conversation custom attributes (FF5): the open conversation for this contact
-  // + its conversation-scoped definitions/values ("Dados desta conversa").
-  const [convo, setConvo] = useState(null);
-  const [convDefs, setConvDefs] = useState([]);
-  const [convValues, setConvValues] = useState({});
 
   // Tag editor state
   const [tagSearch, setTagSearch] = useState('');
@@ -70,43 +66,6 @@ export function ContactInfoPanel({ phone, conversationId = null, info, contactTa
       window.removeEventListener('whatsbot:custom-attributes-changed', load);
     };
   }, []);
-
-  // Conversation-scoped attribute definitions (FF5) — same lifecycle as above.
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      const res = await getCustomAttributes('conversation');
-      if (!cancelled && res.ok) setConvDefs(res.data || []);
-    }
-    load();
-    window.addEventListener('whatsbot:custom-attributes-changed', load);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('whatsbot:custom-attributes-changed', load);
-    };
-  }, []);
-
-  // Resolve the open conversation for this thread + seed its attribute values.
-  // Conversa-cêntrico (plano 11 D1): load THIS conversation by id when known (one
-  // channel); fall back to resolving by phone for legacy contact-only opens.
-  useEffect(() => {
-    let cancelled = false;
-    const apply = (res) => {
-      if (cancelled) return;
-      const c = (res && res.ok && res.data) ? res.data.conversation : null;
-      setConvo(c || null);
-      setConvValues({ ...((c && c.custom_attributes) || {}) });
-    };
-    const fail = () => { if (!cancelled) { setConvo(null); setConvValues({}); } };
-    if (conversationId != null) {
-      getConversation(conversationId).then(apply).catch(fail);
-    } else if (phone) {
-      getContactConversation(phone).then(apply).catch(fail);
-    } else {
-      setConvo(null); setConvValues({});
-    }
-    return () => { cancelled = true; };
-  }, [phone, conversationId]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -173,20 +132,10 @@ export function ContactInfoPanel({ phone, conversationId = null, info, contactTa
   async function handleSave() {
     setSaving(true);
     try {
-      const ops = [
+      const [infoRes, tagsRes] = await Promise.all([
         updateContactInfo(phone, { ...form, custom_attributes: customValues }),
         updateContactTags(phone, tags),
-      ];
-      // Persist conversation attributes too, when there's an open conversation
-      // and conversation-scoped definitions exist (FF5). Best-effort.
-      if (convo && convDefs.length > 0) {
-        ops.push(
-          updateConversationInfo(convo.id, { custom_attributes: convValues })
-            .then((res) => { if (res && res.ok && res.data) setConvo(res.data.conversation); })
-            .catch((err) => console.error('Failed to save conversation attributes:', err))
-        );
-      }
-      const [infoRes, tagsRes] = await Promise.all(ops);
+      ]);
       if (infoRes.ok) {
         onSave(infoRes.data, tagsRes.ok ? tagsRes.data.tags : tags);
       }
@@ -232,15 +181,6 @@ export function ContactInfoPanel({ phone, conversationId = null, info, contactTa
               ? html`<div class="text-wa-secondary text-[14px] mt-0.5">Grupo</div>`
               : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
           </div>
-
-          <!-- Ações da conversa (plano 10) — atribuição de agente (humano ou IA).
-               Só aparece quando há uma conversa ativa para o contato. -->
-          ${convo ? html`
-            <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
-              <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Ações da conversa</div>
-              <${AssigneePicker} conv=${convo} onChange=${(c) => setConvo(c)} />
-            </div>
-          ` : null}
 
           <!-- Fields -->
           <div class="bg-wa-bg px-6 py-4 space-y-4">
@@ -396,31 +336,6 @@ export function ContactInfoPanel({ phone, conversationId = null, info, contactTa
                       def=${def}
                       value=${customValues[def.attribute_key]}
                       onChange=${(v) => setCustomValues(prev => {
-                        const next = { ...prev };
-                        if (v === null || v === undefined || v === '') delete next[def.attribute_key];
-                        else next[def.attribute_key] = v;
-                        return next;
-                      })}
-                    />
-                  `)}
-                </div>
-              </div>
-            ` : null}
-
-            <!-- Conversation attributes (FF5) — "Dados desta conversa". Shown only
-                 with an open conversation and conversation-scoped definitions. -->
-            ${(convo && convDefs.length > 0) ? html`
-              <div class="pt-1">
-                <div class="text-wa-iconActive text-[13px] font-medium mb-2">
-                  Dados desta conversa${convo.display_id != null ? html` <span class="text-wa-secondary font-normal">#${convo.display_id}</span>` : null}
-                </div>
-                <div class="space-y-4">
-                  ${convDefs.map(def => html`
-                    <${CustomAttributeField}
-                      key=${def.id}
-                      def=${def}
-                      value=${convValues[def.attribute_key]}
-                      onChange=${(v) => setConvValues(prev => {
                         const next = { ...prev };
                         if (v === null || v === undefined || v === '') delete next[def.attribute_key];
                         else next[def.attribute_key] = v;

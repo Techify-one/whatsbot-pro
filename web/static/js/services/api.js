@@ -461,6 +461,48 @@ export async function updateConversationInfo(id, body) {
   return request('PUT', `/api/conversations/${id}/info`, body);
 }
 
+// ── Conversation labels (Onda 3) ──────────────────────────────────
+// Etiquetas próprias da conversa (registro global + atribuição por conversa),
+// separadas das tags de contato.
+
+export async function getConversationLabels() {
+  return request('GET', '/api/conversation-labels');
+}
+
+export async function createConversationLabel(name, color) {
+  return request('POST', '/api/conversation-labels', { name, color });
+}
+
+export async function updateConversationLabel(id, data) {
+  return request('PUT', `/api/conversation-labels/${id}`, data);
+}
+
+export async function deleteConversationLabel(id) {
+  return request('DELETE', `/api/conversation-labels/${id}`);
+}
+
+// Labels currently attached to ONE conversation: {conversation_id, labels:[...]}.
+export async function getConversationLabelsFor(convId) {
+  return request('GET', `/api/conversations/${convId}/labels`);
+}
+
+// Replace a conversation's labels (snapshot of names).
+export async function updateConversationLabels(convId, labels) {
+  return request('PUT', `/api/conversations/${convId}/labels`, { labels });
+}
+
+// ── Templates (Cloud API, Frente C) ───────────────────────────────
+// Channel-aware: returns {supported, templates}. Only channels with the
+// `templates` capability (WhatsApp Cloud) return supported=true.
+export async function getConversationTemplates(convId) {
+  return request('GET', `/api/conversations/${convId}/templates`);
+}
+
+// body: {template_name, language?, components?, preview_text?}
+export async function sendConversationTemplate(convId, payload) {
+  return request('POST', `/api/conversations/${convId}/send-template`, payload);
+}
+
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
 // Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
 // Credentials are ALWAYS returned masked by the backend; sending a new
@@ -698,16 +740,6 @@ export async function downloadAuditExport(params = {}, format = 'csv') {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { ok: true };
-}
-
-// ── Update ────────────────────────────────────────────────────────
-
-export async function checkForUpdates() {
-  return request('GET', '/api/update/check');
-}
-
-export async function performUpdate() {
-  return request('POST', '/api/update');
 }
 
 // ── Auth ──────────────────────────────────────────────────────────

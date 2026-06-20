@@ -29,7 +29,7 @@ CATTR_KEY_RE = r"^[a-z][a-z0-9_]{0,63}$"
 @dataclass(frozen=True)
 class Dim:
     key: str
-    kind: str                       # enum|bool|int|text|reltime|assignee|labels|q
+    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q
     ops: frozenset
     label: str = ""
     enum: frozenset = field(default_factory=frozenset)
@@ -49,6 +49,8 @@ DIMENSIONS: dict[str, Dim] = {
                     "Prioridade"),
     "since": Dim("since", "reltime", frozenset({"greater_than"}), "Atividade desde"),
     "display_id": Dim("display_id", "int", frozenset({"equal_to"}), "Número"),
-    "labels": Dim("labels", "labels", frozenset({"in"}), "Etiquetas"),
+    "labels": Dim("labels", "labels", frozenset({"in"}), "Etiquetas do contato"),
+    "conv_labels": Dim("conv_labels", "conv_labels", frozenset({"in"}),
+                       "Etiquetas da conversa"),
     "q": Dim("q", "q", frozenset({"contains"}), "Busca"),
 }

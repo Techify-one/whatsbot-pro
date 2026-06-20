@@ -93,6 +93,10 @@ class AppState:
         # Typing-aware orchestrator state
         # typing_state[phone] = {"active": bool, "media": "text"|"audio", "last_ts": float}
         self.typing_state: dict[str, dict] = {}
+        # Cache phone -> (conversation_id|None, expires_at) for the GOWA presence
+        # broadcast, so the "digitando" indicator can target the exact conversation
+        # without a DB hit on every (frequent) chat_presence event.
+        self.presence_conv_cache: dict[str, tuple[int | None, float]] = {}
         # Active orchestrator task per contact (replaces batch_tasks for typing-aware flow)
         self.processing_tasks: dict[str, asyncio.Task] = {}
         # True while a reply is mid-flight to WhatsApp — webhook must NOT cancel during this phase

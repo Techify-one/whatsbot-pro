@@ -1,10 +1,11 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, assignConversation, assignMeConversation, setConversationStatus } from '../../services/api.js';
-import { ContactList } from './ContactList.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus } from '../../services/api.js';
+import { ContactList, typingKey } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
+import { ConversationInfoPanel } from './ConversationInfoPanel.js';
 import { ContextMenu } from './ContextMenu.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
@@ -109,6 +110,9 @@ function shapeConvData(d) {
     avatar_v: d.avatar_v,
     channel_id: d.channel_id || 'default',
     conversation: d.conversation || null,
+    // Compositor hints (Frente C): template capability + 24h session window.
+    templates_supported: !!d.templates_supported,
+    session_open: d.session_open,
   };
 }
 
@@ -125,7 +129,9 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const hasLoadedDetail = useRef(false);
-  const [showInfoPanel, setShowInfoPanel] = useState(false);
+  // Which side drawer is open: 'contact' (foto/nome) | 'conversation' (botão ℹ️) |
+  // null. Single state so opening one closes the other (no overlapping drawers).
+  const [openPanel, setOpenPanel] = useState(null);
   const openInfoAfterSelect = useRef(false);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
@@ -553,12 +559,19 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   }, []);
 
   // Real-time: patch a contact row when its conversation changes (assign /
-  // resolve / IA). The conversation_* events carry contact_id (plano 10).
+  // resolve / IA). The conversation_* events carry contact_id (plano 10) and
+  // conversation_id (plano 11). Conversa-cêntrico: um contato pode ter várias
+  // linhas (uma por canal); casar só por contact_id resolveria/atribuiria TODAS
+  // as conversas do número. Linhas COM conversa casam por conversation_id;
+  // linhas sem conversa (legado) ainda casam por contact_id e adotam a nova.
   const onConversationChanged = useCallback((name, data) => {
     const cid = data && data.contact_id;
-    if (cid == null) return;
+    const convId = data && data.conversation_id;
+    if (cid == null && convId == null) return;
     setContacts(prev => prev.map(c => {
-      if (c.id !== cid) return c;
+      const isTarget = (convId != null && c.conversation_id === convId)
+        || (c.conversation_id == null && cid != null && c.id === cid);
+      if (!isTarget) return c;
       const patch = {};
       if (data.status !== undefined) patch.conv_status = data.status;
       if (data.assignee_user_id !== undefined) patch.assignee_user_id = data.assignee_user_id;
@@ -607,9 +620,16 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
   useEffect(() => {
     if (!ctxMenu || !ctxMenu.phone) { setCtxConv({ loading: false, conv: null }); return; }
     const phone = ctxMenu.phone;
+    const convId = ctxMenu.conversationId;
     let alive = true;
     setCtxConv({ loading: true, conv: null });
-    getContactConversation(phone, { includeClosed: true }).then((res) => {
+    // Conversa-cêntrico: a linha clicada conhece sua conversa — carrega ELA por id.
+    // getContactConversation(phone) resolveria só uma das conversas do número e o
+    // menu agiria no canal errado (resolver/reabrir afetaria a conversa errada).
+    const fetch = convId != null
+      ? getConversation(convId)
+      : getContactConversation(phone, { includeClosed: true });
+    fetch.then((res) => {
       if (!alive) return;
       setCtxConv({ loading: false, conv: (res && res.ok && res.data) ? res.data.conversation : null });
     }).catch(() => { if (alive) setCtxConv({ loading: false, conv: null }); });
@@ -678,9 +698,9 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     if (!selected && selectedConvId == null) { setContactData(null); return; }
     if (openInfoAfterSelect.current) {
       openInfoAfterSelect.current = false;
-      setShowInfoPanel(true);
+      setOpenPanel('contact');
     } else {
-      setShowInfoPanel(false);
+      setOpenPanel(null);
     }
     if (!hasLoadedDetail.current) setLoadingDetail(true);
     // Preserve any messages already buffered for this thread (arrived before selection)
@@ -737,24 +757,32 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
     });
   }, [selected, selectedConvId]);
 
-  // Handle chat presence events (typing/recording indicators)
+  // Handle chat presence events (typing/recording indicators). Conversa-cêntrico:
+  // a presença pertence a UMA conversa (o canal GOWA que reportou). Casamos por
+  // conversation_id quando o evento o traz (inequívoco), senão por canal::telefone.
+  // Assim só a conversa do canal que emitiu mostra "digitando" — mesmo fechada.
   useEffect(() => {
     if (!chatPresence) return;
     const { phone, state, media } = chatPresence;
     if (!phone) return;
+    const key = typingKey({
+      conversationId: chatPresence.conversation_id,
+      channelId: chatPresence.channel_id,
+      phone,
+    });
 
     if (state === 'composing') {
-      setTypingState(prev => ({ ...prev, [phone]: media === 'audio' ? 'audio' : 'text' }));
+      setTypingState(prev => ({ ...prev, [key]: media === 'audio' ? 'audio' : 'text' }));
       // WhatsApp emits a single `composing` event (not heartbeated). Auto-clear after
       // 25s as a defensive fallback in case `paused` never arrives (e.g. dropped connection).
-      clearTimeout(typingTimers.current[phone]);
-      typingTimers.current[phone] = setTimeout(() => {
-        setTypingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      clearTimeout(typingTimers.current[key]);
+      typingTimers.current[key] = setTimeout(() => {
+        setTypingState(prev => { const n = { ...prev }; delete n[key]; return n; });
       }, 25000);
     } else {
       // paused or unknown → clear
-      clearTimeout(typingTimers.current[phone]);
-      setTypingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      clearTimeout(typingTimers.current[key]);
+      setTypingState(prev => { const n = { ...prev }; delete n[key]; return n; });
     }
   }, [chatPresence]);
 
@@ -1146,18 +1174,18 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
                 setContactData=${setContactData}
                 info=${info}
                 contact=${contactData}
-                onAvatarClick=${() => selected && setShowInfoPanel(true)}
-                contactTyping=${selected && typingState[selected] || null}
+                onAvatarClick=${() => selected && setOpenPanel('contact')}
+                onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
+                contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
                 globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
               />`
           }
-          ${showInfoPanel && selected ? html`
+          ${openPanel === 'contact' && selected ? html`
             <${ContactInfoPanel}
               phone=${selected}
-              conversationId=${selectedConvId}
               info=${info}
               contactTags=${contactData && contactData.tags || []}
               globalTags=${globalTags}
@@ -1165,14 +1193,21 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
               isGroup=${contactData && contactData.is_group}
               groupName=${contactData && contactData.group_name}
               avatarV=${contactData && contactData.avatar_v}
-              onClose=${() => setShowInfoPanel(false)}
+              onClose=${() => setOpenPanel(null)}
               onSave=${(updatedInfo, updatedTags) => {
                 setContactData(prev => prev ? { ...prev, info: updatedInfo, tags: updatedTags } : prev);
                 setContacts(prev => prev.map(c =>
                   c.phone === selected ? { ...c, name: updatedInfo.name || c.name, tags: updatedTags } : c
                 ));
-                setShowInfoPanel(false);
+                setOpenPanel(null);
               }}
+            />
+          ` : null}
+          ${openPanel === 'conversation' && selected ? html`
+            <${ConversationInfoPanel}
+              phone=${selected}
+              conversationId=${selectedConvId}
+              onClose=${() => setOpenPanel(null)}
             />
           ` : null}
         </div>
@@ -1199,7 +1234,7 @@ export function Contacts({ newMessage, chatPresence, contactInfoUpdated, tagsCha
           onEditContact=${(phone) => {
             if (selectedRef.current === phone) {
               // Already open — the [selected] effect won't refire, so open directly.
-              setShowInfoPanel(true);
+              setOpenPanel('contact');
             } else {
               openInfoAfterSelect.current = true;
               selectContact(phone);
