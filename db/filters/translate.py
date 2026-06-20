@@ -58,11 +58,11 @@ def _build_clause(clause, ctx: FilterContext):
 
     kind = dim.kind
     if kind == "enum":
+        values = [str(v) for v in values]   # coerce: dict/list values never reach `in`
         for v in values:
             if v not in dim.enum:
                 raise FilterError(f"Valor inválido para {key!r}: {v!r}.")
-        col = conversations.c.status
-        return _scalar_clause(col, op, values)
+        return _scalar_clause(conversations.c.status, op, values)
     if kind == "bool":
         truthy = str(values[0]).lower() in ("1", "true", "yes", "sim") if values else False
         return conversations.c.is_archived == (1 if truthy else 0)
@@ -84,22 +84,29 @@ def _build_clause(clause, ctx: FilterContext):
 
 
 def _scalar_clause(col, op: str, values: list):
-    if op == "equal_to":
-        return col == values[0]
-    if op == "not_equal_to":
-        return col != values[0]
-    if op == "in":
-        return col.in_(values)
     if op == "is_present":
         return col.isnot(None)
     if op == "is_not_present":
         return col.is_(None)
+    if op == "in":
+        if not values:
+            raise FilterError("Operador 'in' requer ao menos um valor.")
+        return col.in_(values)
+    if op == "between":
+        if len(values) < 2:
+            raise FilterError("Operador 'between' requer dois valores.")
+        return col.between(values[0], values[1])
+    # remaining scalar operators index values[0]
+    if not values:
+        raise FilterError(f"Operador {op!r} requer um valor.")
+    if op == "equal_to":
+        return col == values[0]
+    if op == "not_equal_to":
+        return col != values[0]
     if op == "greater_than":
         return col > values[0]
     if op == "less_than":
         return col < values[0]
-    if op == "between":
-        return col.between(values[0], values[1])
     if op == "contains":
         return col.like(f"%{values[0]}%")
     if op == "does_not_contain":
@@ -121,6 +128,8 @@ def _assignee_clause(op: str, values: list, ctx: FilterContext):
             resolved.append(ctx.user_id)
         else:
             resolved.append(_to_int(v, "assignee"))
+    if not resolved:
+        raise FilterError("Filtro de responsável requer um valor.")
     if op == "equal_to":
         return col == resolved[0]
     if op == "in":

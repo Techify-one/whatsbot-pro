@@ -72,6 +72,10 @@ def register_routes(app, deps):
             where = await asyncio.to_thread(conv_filters.build_where, spec, ctx)
         except conv_filters.FilterError as e:
             return _err(str(e), status=400)
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            # Safety net: malformed input must be a clean 400, never a 500.
+            logger.warning("Filtro inválido: %s", e)
+            return _err("Filtro inválido.", status=400)
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where, limit=spec.limit, offset=spec.offset)
         return _ok({"conversations": rows, "count": len(rows)})
