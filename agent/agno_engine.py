@@ -34,6 +34,7 @@ from agno.models.message import Message
 from agno.tools.function import Function
 
 from config.settings import LLM_API_BASE_URL
+from ai_engine.hooks import check_hooks as _hooks_check
 from agent.execution import track_step
 from plugins.events import (
     apply_filter,
@@ -131,7 +132,7 @@ def _clean_args(kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k not in _RESERVED_TOOL_KWARGS}
 
 
-def _make_async_entrypoint(handler, contact, sender, tool_name, executed):
+def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
     async def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = await apply_filter(
@@ -144,6 +145,11 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed):
             return ""
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
+
+        block = _hooks_check(hooks_config, name, executed)
+        if block is not None:
+            executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
+            return block
 
         _t0 = time.monotonic()
         await emit_with_filter("tool.before", {
@@ -170,7 +176,7 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed):
     return entrypoint
 
 
-def _make_sync_entrypoint(handler, contact, sender, tool_name, executed):
+def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
     def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = apply_filter_sync(
@@ -183,6 +189,11 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed):
             return ""
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
+
+        block = _hooks_check(hooks_config, name, executed)
+        if block is not None:
+            executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
+            return block
 
         _t0 = time.monotonic()
         emit_with_filter_sync("tool.before", {
@@ -209,12 +220,15 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed):
     return entrypoint
 
 
-def build_functions(handler, contact, sender, active_tools, executed, *, is_async):
+def build_functions(handler, contact, sender, active_tools, executed, *, is_async,
+                    hooks_config=None):
     """Wrap each active tool schema into an AGNO Function.
 
     ``active_tools`` is the post-``filter.llm.tools`` list of OpenAI tool
     schemas. ``executed`` is the per-request sink that collects what actually
     ran (used to build ProcessResult and detect ``save_contact_info``).
+    ``hooks_config`` (config-in-DB) gates calls declaratively (call_limit /
+    requires_prior_call) using ``executed`` as per-message state.
     """
     make = _make_async_entrypoint if is_async else _make_sync_entrypoint
     functions: dict[str, Function] = {}
@@ -228,7 +242,7 @@ def build_functions(handler, contact, sender, active_tools, executed, *, is_asyn
             name=name,
             description=fn.get("description", ""),
             parameters=params,
-            entrypoint=make(handler, contact, sender, name, executed),
+            entrypoint=make(handler, contact, sender, name, executed, hooks_config),
             skip_entrypoint_processing=True,
         )
     return functions
@@ -320,7 +334,9 @@ async def run_async(handler, contact, sender, messages, active_tools,
     """Run the AGNO agent for one message (cancellable async path)."""
     system_prompt, convo = split_messages(messages)
     executed: list[dict] = []
-    functions = build_functions(handler, contact, sender, active_tools, executed, is_async=True)
+    hooks_config = (model_config or {}).get("_hooks_config")
+    functions = build_functions(handler, contact, sender, active_tools, executed,
+                                is_async=True, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or handler.model
 
@@ -348,7 +364,9 @@ def run_sync(handler, contact, sender, messages, active_tools,
     """Run the AGNO agent for one message (synchronous path)."""
     system_prompt, convo = split_messages(messages)
     executed: list[dict] = []
-    functions = build_functions(handler, contact, sender, active_tools, executed, is_async=False)
+    hooks_config = (model_config or {}).get("_hooks_config")
+    functions = build_functions(handler, contact, sender, active_tools, executed,
+                                is_async=False, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or handler.model
 
