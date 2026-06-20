@@ -21,17 +21,25 @@ def create(phone: str, trigger_type: str = "webhook") -> int:
 
 
 def add_step(execution_id: int, step_type: str,
-             data: dict | None = None, status: str = "ok") -> int:
-    """Add a step to an execution and return step ID."""
+             data: dict | None = None, status: str = "ok",
+             agent_key: str | None = None) -> int:
+    """Add a step to an execution and return step ID.
+
+    ``agent_key`` (config-in-DB / within-turn routing) records which agent ran the
+    step, so a multi-agent turn shows each hop's steps attributed correctly.
+    """
     data_json = json.dumps(data, ensure_ascii=False) if data else None
+    values = dict(
+        execution_id=execution_id,
+        step_type=step_type,
+        status=status,
+        data=data_json,
+        ts=time.time(),
+    )
+    if agent_key:
+        values["agent_key"] = agent_key
     with get_engine().begin() as conn:
-        result = conn.execute(sa_insert(execution_steps).values(
-            execution_id=execution_id,
-            step_type=step_type,
-            status=status,
-            data=data_json,
-            ts=time.time(),
-        ))
+        result = conn.execute(sa_insert(execution_steps).values(**values))
         return result.inserted_primary_key[0]
 
 
@@ -70,6 +78,16 @@ def set_agent_key(execution_id: int, agent_key: str) -> None:
     with get_engine().begin() as conn:
         conn.execute(sa_update(executions).where(executions.c.id == execution_id).values(
             agent_key=agent_key,
+        ))
+
+
+def set_routing_steps(execution_id: int, routing_steps: list | None) -> None:
+    """Record the within-turn handoff chain (plano 06) as JSON on the execution."""
+    if not routing_steps:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(executions).where(executions.c.id == execution_id).values(
+            routing_steps=json.dumps(routing_steps, ensure_ascii=False),
         ))
 
 
