@@ -169,5 +169,19 @@ ep2 = agno_engine._make_sync_entrypoint(spy, contact, "5511888880001", "buscar",
 ep2()
 check("sem hooks_config: despacha normal", "buscar" in spy.dispatched)
 
+print("\nexecution_repo — routing_steps + step agent_key (migration 0016):")
+from db.repositories import execution_repo  # noqa: E402
+
+_ex = execution_repo.create("5511888880001", "test")
+execution_repo.add_step(_ex, "llm_request", {"x": 1}, agent_key="triagem")
+execution_repo.add_step(_ex, "llm_request", {"x": 2}, agent_key="vendas")
+execution_repo.set_routing_steps(_ex, [{"from": "triagem", "to": "vendas", "depth": 1}])
+_full = execution_repo.get_by_id(_ex)
+check("execution.routing_steps persistido (JSON)",
+      '"from": "triagem"' in (_full.get("routing_steps") or ""))
+_steps = _full.get("steps") or []
+check("execution_steps.agent_key gravado por passo",
+      {s.get("agent_key") for s in _steps} == {"triagem", "vendas"})
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

@@ -20,11 +20,21 @@ logger = logging.getLogger(__name__)
 _current_execution: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "current_execution", default=None
 )
+# Which agent (config-in-DB) is running right now — stamped onto each step so a
+# within-turn multi-agent turn attributes its steps to the correct hop.
+_current_step_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_step_agent", default=None
+)
 
 
 def set_current_execution(exec_id: int | None) -> None:
     """Set the current execution ID in the contextvar (call from async context)."""
     _current_execution.set(exec_id)
+
+
+def set_current_step_agent(agent_key: str | None) -> None:
+    """Set the agent attributed to subsequent steps (within-turn routing)."""
+    _current_step_agent.set(agent_key)
 
 
 def create_execution(phone: str, trigger_type: str = "webhook") -> int:
@@ -57,7 +67,8 @@ def track_step(step_type: str, data: dict | None = None, status: str = "ok") -> 
     if exec_id is None:
         return
     try:
-        execution_repo.add_step(exec_id, step_type, data, status)
+        execution_repo.add_step(exec_id, step_type, data, status,
+                                agent_key=_current_step_agent.get())
     except Exception as e:
         logger.warning("Failed to track step %s: %s", step_type, e)
 
@@ -86,6 +97,17 @@ def set_execution_agent_key(agent_key: str) -> None:
         execution_repo.set_agent_key(exec_id, agent_key)
     except Exception as e:
         logger.warning("Failed to record execution agent_key: %s", e)
+
+
+def set_execution_routing_steps(routing_steps: list | None) -> None:
+    """Record the within-turn handoff chain on the current execution (plano 06)."""
+    exec_id = _current_execution.get()
+    if exec_id is None or not routing_steps:
+        return
+    try:
+        execution_repo.set_routing_steps(exec_id, routing_steps)
+    except Exception as e:
+        logger.warning("Failed to record routing_steps: %s", e)
 
 
 def get_current_execution_id() -> int | None:

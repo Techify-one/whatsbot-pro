@@ -17,7 +17,10 @@ from agent.tools import CORE_TOOLS
 from agent import group_mentions, agno_engine, agent_factory
 from config.settings import LLM_API_BASE_URL
 from db.repositories import message_repo, contact_repo, tool_override_repo
-from agent.execution import track_step, add_execution_usage, set_execution_agent_key
+from agent.execution import (
+    track_step, add_execution_usage, set_execution_agent_key,
+    set_current_step_agent, set_execution_routing_steps,
+)
 from plugins.context import ToolContext, PromptContext
 from plugins.events import (
     emit as emit_event,
@@ -827,6 +830,77 @@ class AgentHandler:
             )
         return prompt
 
+    async def _run_routing_hop(self, contact, sender, context_messages, spec, *,
+                               disable_tools):
+        """Build prompt/messages/tools for ``spec`` and run one AGNO hop.
+
+        Mirrors the inline first-hop build, but returns ``None`` if a filter
+        aborts (so within-turn routing stops on the last good reply instead of
+        sending an empty message). Used only for handoff continuations.
+        """
+        system_prompt_str = self._build_system_prompt(contact, base_prompt=spec.base_prompt)
+        system_prompt_str = await apply_filter(
+            "filter.system_prompt", system_prompt_str, {"phone": sender})
+        if system_prompt_str is None:
+            return None
+        messages = [{"role": "system", "content": system_prompt_str}, *context_messages]
+        messages = await apply_filter("filter.llm.messages", messages, {"phone": sender})
+        if messages is None:
+            return None
+        active_tools = [] if disable_tools else self._select_active_tools(spec)
+        active_tools = await apply_filter("filter.llm.tools", active_tools, {"phone": sender})
+        if active_tools is None:
+            active_tools = []
+        return await agno_engine.run_async(
+            self, contact, sender, messages, active_tools, model_config=spec.model_config)
+
+    async def _continue_routing(self, contact, sender, context_messages, first_spec,
+                                first_result, executed_tools, usage_dict, *, disable_tools):
+        """Within-turn routing: if the agent handed off this turn, let the new
+        agent answer the same message (up to ``MAX_ROUTING_DEPTH`` total hops).
+
+        Returns ``(result, executed_tools, usage_dict, routing_steps)``. When no
+        handoff happened (the common case) it returns the inputs unchanged and
+        ``run_hop`` is never invoked, so the single-agent path is untouched.
+        """
+        from ai_engine import routing as _routing
+
+        combined = list(executed_tools)
+        acc_usage = dict(usage_dict) if usage_dict else {}
+
+        def _resolve_next():
+            # transferir_agente persisted the handoff on the conversation; re-resolve.
+            nxt_spec = agent_factory.build_for_contact(self, contact)
+            return nxt_spec.agent_key if nxt_spec else None
+
+        async def _run_hop(agent_key):
+            spec = agent_factory.build_for_contact(self, contact)
+            if not spec or spec.agent_key != agent_key:
+                return None
+            set_execution_agent_key(spec.agent_key)
+            set_current_step_agent(spec.agent_key)
+            hop = await self._run_routing_hop(
+                contact, sender, context_messages, spec, disable_tools=disable_tools)
+            if hop is None:
+                return None
+            if hop.usage:
+                self._record_usage_tokens(
+                    sender, "text", spec.model_config.get("model") or self.model,
+                    hop.usage.get("prompt_tokens", 0),
+                    hop.usage.get("completion_tokens", 0),
+                    hop.usage.get("total_tokens", 0))
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    acc_usage[k] = acc_usage.get(k, 0) + hop.usage.get(k, 0)
+            combined.extend(hop.executed_tools or [])
+            return hop
+
+        result, steps = await _routing.run_with_routing(
+            first_result=first_result, first_agent_key=first_spec.agent_key,
+            resolve_next=_resolve_next, run_hop=_run_hop)
+        if steps:
+            set_execution_routing_steps(steps)
+        return result, combined, (acc_usage or None), steps
+
     async def aprocess_message(self, sender: str, text: str, *,
                                save_user_message: bool = True,
                                save_response: bool = True,
@@ -864,6 +938,7 @@ class AgentHandler:
         agent_spec = agent_factory.build_for_contact(self, contact)
         if agent_spec:
             set_execution_agent_key(agent_spec.agent_key)
+            set_current_step_agent(agent_spec.agent_key)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
@@ -924,6 +999,15 @@ class AgentHandler:
                     usage_dict.get("completion_tokens", 0),
                     usage_dict.get("total_tokens", 0),
                 )
+
+            # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
+            # agent answer this same message. No-op when no handoff occurred, so
+            # the single-agent path is unchanged.
+            if agent_spec:
+                result, executed_tools, usage_dict, _ = await self._continue_routing(
+                    contact, sender, context_messages, agent_spec,
+                    result, executed_tools, usage_dict, disable_tools=disable_tools)
+                reply = result.reply
 
             if save_response:
                 contact.add_message("assistant", reply)
@@ -999,6 +1083,7 @@ class AgentHandler:
         agent_spec = agent_factory.build_for_contact(self, contact)
         if agent_spec:
             set_execution_agent_key(agent_spec.agent_key)
+            set_current_step_agent(agent_spec.agent_key)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
