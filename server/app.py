@@ -15,7 +15,7 @@ from server.auth import auth_required, verify_token, rbac_enforced, resolve_requ
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, users as users_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -322,13 +322,22 @@ def create_app(
         request.state.user = None
         if path.startswith("/api/"):
             enforce = rbac_enforced(settings)
-            if enforce or auth_required(settings):
-                auth_header = request.headers.get("authorization", "")
-                token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+            auth_req = auth_required(settings)
+            auth_header = request.headers.get("authorization", "")
+            token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+            # Resolve a present token even in open mode so per-permission gating
+            # applies to voluntarily-logged-in users; only hit the DB when there's
+            # a token or auth is actually required/enforced.
+            if token or enforce or auth_req:
                 kind, user = await asyncio.to_thread(
                     resolve_request_token, token, settings)
                 request.state.user = user
-                denied = (kind != "user") if enforce else (kind is None)
+                if enforce:
+                    denied = kind != "user"
+                elif auth_req:
+                    denied = kind is None
+                else:
+                    denied = False  # open mode — token (if any) attached for gating
                 if denied:
                     return JSONResponse(
                         {"ok": False, "error": "Não autenticado."},
@@ -398,6 +407,7 @@ def create_app(
     # Order matters: webhook must be registered before sandbox so
     # broadcast_tool_calls is available via deps.
     auth.register_routes(app, deps)
+    users_routes.register_routes(app, deps)
     webhook.register_routes(app, deps)
     logs.register_routes(app, deps)
     sandbox.register_routes(app, deps)

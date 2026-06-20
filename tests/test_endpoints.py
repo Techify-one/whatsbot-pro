@@ -894,6 +894,52 @@ check("gestor resolver -> 13 perms, no '*'", "*" not in _gperms and len(_gperms)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_admin["id"]))
 
+# ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
+r = client.get("/api/roles")
+check("GET /api/roles -> 200", r.status_code == 200)
+check("GET /api/roles -> 3 roles + 16 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 16)
+
+r = client.get("/api/users")
+check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
+check("GET /api/users -> lists admin + gestor", len(r.json()["data"]["users"]) >= 2)
+
+r = client.post("/api/users", json={"email": "att@test.com", "name": "Atendente",
+                                    "password": "supersecret", "roles": ["atendente"]})
+check("POST /api/users (atendente) -> 200", r.status_code == 200)
+_att_id = r.json()["data"]["user"]["id"]
+check("create -> roles applied", r.json()["data"]["user"]["roles"] == ["atendente"])
+
+r = client.post("/api/users", json={"email": "att@test.com", "name": "Dup",
+                                    "password": "supersecret", "roles": ["atendente"]})
+check("POST /api/users (dup email) -> 409", r.status_code == 409)
+
+r = client.post("/api/users", json={"email": "weak@test.com", "name": "W",
+                                    "password": "short", "roles": ["atendente"]})
+check("POST /api/users (weak pw) -> 400", r.status_code == 400)
+
+r = client.put(f"/api/users/{_att_id}", json={"roles": ["gestor"], "name": "Promovido"})
+check("PUT /api/users (promote) -> 200", r.status_code == 200)
+check("PUT -> roles updated", r.json()["data"]["user"]["roles"] == ["gestor"])
+
+r = client.post(f"/api/users/{_att_id}/password", json={"password": "anothersecret"})
+check("POST /api/users/{id}/password -> 200", r.status_code == 200)
+
+# Last-admin guard: deleting the only active admin is refused
+r = client.delete(f"/api/users/{_admin['id']}")
+check("DELETE last admin -> 409 guard", r.status_code == 409)
+
+r = client.delete(f"/api/users/{_att_id}")
+check("DELETE user -> 200", r.status_code == 200)
+
+# Fase 4 enforcement: a logged-in gestor lacks users.manage -> 403
+r = client.post("/api/auth/login", json={"email": "gestor@test.com", "password": "supersecret"})
+_gtok = r.json()["data"]["token"]
+r = client.get("/api/users", headers={"Authorization": f"Bearer {_gtok}"})
+check("GET /api/users (gestor session) -> 403 (lacks users.manage)", r.status_code == 403)
+r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_gtok}"})
+check("gestor /me -> 200 (still authenticated)", r.status_code == 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
