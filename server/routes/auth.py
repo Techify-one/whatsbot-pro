@@ -107,7 +107,11 @@ def register_routes(app, deps):
         if kind is not None:
             return _ok({"authenticated": True, "has_password": has_password,
                         "has_users": has_users, "user": user})
-        return _err("Não autenticado.", status=401)
+        # Carry has_password/has_users on the 401 too, so the panel can offer the
+        # first-admin bootstrap even when a legacy password is set but no user
+        # exists yet (migration to multi-user — plano 03/10).
+        return _err("Não autenticado.", status=401,
+                    data={"has_password": has_password, "has_users": has_users})
 
     @app.post("/api/auth/logout")
     async def logout(request: Request):

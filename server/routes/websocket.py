@@ -1,10 +1,11 @@
 """WebSocket endpoint."""
 
+import asyncio
 import json
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from server.auth import auth_required, verify_token
+from server.auth import auth_required, rbac_enforced, resolve_request_token
 
 
 def register_routes(app, deps):
@@ -14,10 +15,15 @@ def register_routes(app, deps):
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
-        # Check auth token from query param if password is set
-        if auth_required(settings):
+        # Auth via the ?token= query param (the Authorization header isn't usable
+        # for WS in the browser). Accept a USER session OR the legacy single-
+        # password token (plano 03, additive); when RBAC is enforced, only a user
+        # session is valid. Open install (no password, no enforcement) → no check.
+        if auth_required(settings) or rbac_enforced(settings):
             token = websocket.query_params.get("token", "")
-            if not token or not verify_token(token, settings):
+            kind, _user = await asyncio.to_thread(resolve_request_token, token, settings)
+            ok = (kind == "user") if rbac_enforced(settings) else (kind is not None)
+            if not ok:
                 await websocket.accept()
                 await websocket.close(code=4401, reason="Unauthorized")
                 return

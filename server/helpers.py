@@ -16,8 +16,11 @@ def _ok(data: Any = None) -> dict:
     return {"ok": True, "data": data}
 
 
-def _err(message: str, status: int = 400) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message}, status_code=status)
+def _err(message: str, status: int = 400, data: Any = None) -> JSONResponse:
+    body = {"ok": False, "error": message}
+    if data is not None:
+        body["data"] = data
+    return JSONResponse(body, status_code=status)
 
 
 def _mask_key(key: str) -> str:
