@@ -939,6 +939,9 @@ class AgentHandler:
         if agent_spec:
             set_execution_agent_key(agent_spec.agent_key)
             set_current_step_agent(agent_spec.agent_key)
+        # The AI is now handling this message: attribute the conversation to it so
+        # the inbox shows its assignee chip (covers reopened/legacy threads).
+        self._ensure_conversation_agent(contact, agent_spec)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
@@ -1084,6 +1087,9 @@ class AgentHandler:
         if agent_spec:
             set_execution_agent_key(agent_spec.agent_key)
             set_current_step_agent(agent_spec.agent_key)
+        # The AI is now handling this message: attribute the conversation to it so
+        # the inbox shows its assignee chip (covers reopened/legacy threads).
+        self._ensure_conversation_agent(contact, agent_spec)
         model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
@@ -1194,6 +1200,33 @@ class AgentHandler:
             return True, "API key válida!"
         except Exception as e:
             return False, f"Erro: {e}"
+
+    def _ensure_conversation_agent(self, contact, agent_spec) -> None:
+        """Attribute the active conversation to the AI agent that is answering so
+        the inbox shows its assignee chip (e.g. "IA padrão") sempre que a IA
+        responde. Best-effort: skips chats a human took over and broadcasts a
+        single assignment event when the binding actually changed."""
+        try:
+            from db.repositories import conversation_repo, agent_repo
+            agent_key = agent_spec.agent_key if agent_spec else agent_repo.DEFAULT_AGENT_KEY
+            conv = conversation_repo.ensure_ai_agent(contact.id, agent_key)
+            if not conv:
+                return
+            try:
+                from plugins.context import broadcast
+                broadcast("conversation_assigned", {
+                    "conversation_id": conv["id"],
+                    "contact_id": contact.id,
+                    "status": conv.get("status"),
+                    "assignee_user_id": conv.get("assignee_user_id"),
+                    "active_agent_key": conv.get("active_agent_key"),
+                    "ai_active": conv.get("ai_active"),
+                })
+            except Exception:
+                logger.debug("conversation_assigned broadcast falhou para %s", contact.phone)
+        except Exception:
+            logger.exception("Falha ao atribuir agente à conversa de %s",
+                             getattr(contact, "phone", "?"))
 
     def save_assistant_message(self, phone: str, text: str, *,
                                msg_id: str | None = None,
