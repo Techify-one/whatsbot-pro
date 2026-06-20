@@ -25,16 +25,113 @@ from typing import Callable, Optional
 
 from runtime._proc_platform import (
     IS_WINDOWS,
+    combine_preexec,
     is_pid_alive,
     kill_process_group,
     pdeathsig_preexec,
     process_cmdline,
+    rlimit_preexec,
 )
 
 logger = logging.getLogger(__name__)
 
 # Default location for PID files (gitignored).
 _RUN_DIR = Path(__file__).resolve().parent.parent / "storages" / "run"
+
+
+# --------------------------------------------------------------------------- #
+# One-shot subprocess (retrofit P62/P67 — isolated code-in-DB tool runner)
+# --------------------------------------------------------------------------- #
+#
+# Unlike ``ManagedProcess`` (a supervised long-lived daemon: GOWA), a one-shot
+# is a SHORT child: spawn → feed stdin → wait with a hard timeout → collect
+# stdout/stderr/exit-code → reap. It reuses the same POSIX primitives as the
+# managed path (new session/process group so the whole tree can be killed,
+# die-with-parent via ``PR_SET_PDEATHSIG``) and adds ``RLIMIT_CPU``/``RLIMIT_AS``
+# via a ``preexec_fn``. On timeout the WHOLE process group is killed (``killpg``)
+# so a forked grandchild cannot outlive the runner.
+
+@dataclass
+class OneShotResult:
+    """Outcome of a one-shot subprocess run."""
+
+    timed_out: bool
+    returncode: Optional[int]      # None only if killed before exit was observed
+    stdout: bytes
+    stderr: bytes
+    duration_ms: int
+
+    @property
+    def ok(self) -> bool:
+        return not self.timed_out and self.returncode == 0
+
+
+def run_oneshot(
+    cmd: list,
+    *,
+    stdin_data: bytes = b"",
+    timeout: float = 10.0,
+    env: Optional[dict] = None,
+    cwd: Optional[str] = None,
+    cpu_seconds: Optional[int] = None,
+    address_space_bytes: Optional[int] = None,
+    die_with_parent: bool = True,
+) -> OneShotResult:
+    """Run ``cmd`` to completion in an isolated child, with a hard ``timeout``.
+
+    The child is started in its OWN session/process group (POSIX) so a SIGKILL
+    on timeout takes the whole tree (``os.killpg``). On POSIX, ``RLIMIT_CPU`` and
+    ``RLIMIT_AS`` are applied via ``preexec_fn`` when provided; Windows has no
+    ``resource`` module, so those degrade to no-ops and the wall-clock timeout
+    is the only guard. ``stdin_data`` is written once and stdin closed.
+
+    Returns an :class:`OneShotResult`. This function never raises for child
+    failures — a non-zero exit or a timeout is reported in the result. It only
+    raises for a genuine spawn failure (e.g. the interpreter is missing).
+    """
+    start = time.monotonic()
+    popen_kwargs: dict = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "cwd": cwd,
+        "env": env,
+    }
+    if not IS_WINDOWS:
+        # Own session → own process group; the whole tree is killable.
+        popen_kwargs["start_new_session"] = True
+        preexec = combine_preexec(
+            pdeathsig_preexec() if die_with_parent else None,
+            rlimit_preexec(cpu_seconds=cpu_seconds, address_space_bytes=address_space_bytes),
+        )
+        if preexec is not None:
+            popen_kwargs["preexec_fn"] = preexec
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        # Kill the WHOLE group, not just the leader — a runaway tool may have
+        # forked. SIGKILL is the right hammer for a CPU spinner.
+        kill_process_group(proc.pid, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except Exception:  # noqa: BLE001
+                stdout, stderr = b"", b""
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return OneShotResult(
+        timed_out=timed_out,
+        returncode=None if timed_out else proc.returncode,
+        stdout=stdout or b"",
+        stderr=stderr or b"",
+        duration_ms=duration_ms,
+    )
 
 
 @dataclass
