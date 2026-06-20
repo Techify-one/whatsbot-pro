@@ -298,7 +298,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/wizard"}
+        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -385,6 +385,7 @@ def create_app(
     @app.get("/runtime")
     @app.get("/users")
     @app.get("/conversations")
+    @app.get("/ai")
     @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/executions/{execution_id:int}")
