@@ -12,17 +12,22 @@ from fastapi import Request
 from db.repositories import user_repo, rbac_repo
 from server.auth import hash_password_argon2
 from server.authz import permission_denied
-from server.permissions import PERMISSION_CATALOG, ROLE_LABELS
+from server.permissions import PERMISSION_CATALOG, ROLE_LABELS, ALL_PERMISSION_KEYS
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
 
-_VALID_ROLE_KEYS = {"admin", "gestor", "atendente"}
+_VALID_PERMISSION_KEYS = set(ALL_PERMISSION_KEYS)
 
 
 def _count_active_admins() -> int:
     return sum(1 for u in user_repo.list_all()
                if u.get("is_admin") and u.get("is_active"))
+
+
+def _valid_role_keys() -> set[str]:
+    """Role keys that currently exist (system + custom)."""
+    return {r["key"] for r in rbac_repo.list_roles()}
 
 
 def register_routes(app, deps):
@@ -40,7 +45,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "users.manage")
         if denied:
             return denied
-        roles = await asyncio.to_thread(rbac_repo.list_roles)
+        roles = await asyncio.to_thread(rbac_repo.list_roles_with_permissions)
         for r in roles:
             r["label"] = ROLE_LABELS.get(r["key"], r["name"])
         return _ok({
@@ -56,19 +61,32 @@ def register_routes(app, deps):
         email = (body.get("email") or "").strip().lower()
         name = (body.get("name") or "").strip() or email
         password = body.get("password") or ""
-        roles = [r for r in (body.get("roles") or []) if r in _VALID_ROLE_KEYS]
+        custom = bool(body.get("custom_permissions"))
         if not email or "@" not in email:
             return _err("Email inválido.", status=400)
         if len(password) < 8:
             return _err("A senha deve ter ao menos 8 caracteres.", status=400)
-        if not roles:
-            return _err("Selecione ao menos um papel.", status=400)
+        if custom:
+            perms = [p for p in (body.get("permissions") or []) if p in _VALID_PERMISSION_KEYS]
+            if not perms:
+                return _err("Selecione ao menos uma permissão.", status=400)
+        else:
+            valid_roles = await asyncio.to_thread(_valid_role_keys)
+            roles = [r for r in (body.get("roles") or []) if r in valid_roles]
+            if not roles:
+                return _err("Selecione ao menos um papel.", status=400)
         if await asyncio.to_thread(user_repo.get_by_email, email):
             return _err("Já existe um usuário com esse email.", status=409)
         phc = hash_password_argon2(password)
-        user = await asyncio.to_thread(
-            user_repo.create, email=email, name=name, password_hash=phc, role_keys=roles)
-        logger.info("User created: %s (roles=%s).", email, roles)
+        if custom:
+            user = await asyncio.to_thread(
+                user_repo.create, email=email, name=name, password_hash=phc,
+                permission_keys=perms, custom=True)
+            logger.info("User created: %s (custom perms=%s).", email, perms)
+        else:
+            user = await asyncio.to_thread(
+                user_repo.create, email=email, name=name, password_hash=phc, role_keys=roles)
+            logger.info("User created: %s (roles=%s).", email, roles)
         return _ok({"user": user})
 
     @app.put("/api/users/{user_id}")
@@ -83,11 +101,18 @@ def register_routes(app, deps):
         name = body.get("name")
         is_active = body.get("is_active")
         roles = body.get("roles")
+        # Target permission mode: explicit flag if sent, else keep current mode.
+        target_custom = (bool(body.get("custom_permissions"))
+                         if "custom_permissions" in body
+                         else bool(existing.get("custom_permissions")))
+        # Whether this update touches the permission assignment at all.
+        touches_perms = any(k in body for k in ("custom_permissions", "roles", "permissions"))
 
-        # Guard: never deactivate or de-admin the last active admin.
+        # Guard: never deactivate or de-admin the last active admin. Switching an
+        # admin to custom mode drops their roles too, so it counts as de-admin.
         will_deactivate = is_active is not None and not is_active and existing.get("is_active")
-        will_remove_admin = (roles is not None and "admin" not in roles
-                             and existing.get("is_admin"))
+        will_remove_admin = existing.get("is_admin") and touches_perms and (
+            target_custom or (roles is not None and "admin" not in roles))
         if (will_deactivate or will_remove_admin) and existing.get("is_admin"):
             if await asyncio.to_thread(_count_active_admins) <= 1:
                 return _err("Não é possível remover o último administrador ativo.", status=409)
@@ -97,11 +122,21 @@ def register_routes(app, deps):
                 user_repo.update_info, user_id,
                 name=name if name is not None else None,
                 is_active=(1 if is_active else 0) if is_active is not None else None)
-        if roles is not None:
-            valid = [r for r in roles if r in _VALID_ROLE_KEYS]
-            if not valid:
-                return _err("Selecione ao menos um papel.", status=400)
-            await asyncio.to_thread(user_repo.set_roles, user_id, valid)
+
+        if touches_perms:
+            if target_custom:
+                perms = [p for p in (body.get("permissions") or [])
+                         if p in _VALID_PERMISSION_KEYS]
+                if not perms:
+                    return _err("Selecione ao menos uma permissão.", status=400)
+                await asyncio.to_thread(user_repo.set_custom_permissions, user_id, perms)
+            else:
+                valid_roles = await asyncio.to_thread(_valid_role_keys)
+                valid = [r for r in (roles or []) if r in valid_roles]
+                if not valid:
+                    return _err("Selecione ao menos um papel.", status=400)
+                await asyncio.to_thread(user_repo.clear_custom_permissions, user_id, valid)
+
         user = await asyncio.to_thread(user_repo.get, user_id)
         return _ok({"user": user})
 

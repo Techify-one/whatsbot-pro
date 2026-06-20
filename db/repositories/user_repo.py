@@ -8,7 +8,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, insert, select, update
 
 from db.engine import get_engine
-from db.tables import users, user_roles, roles
+from db.tables import users, user_roles, roles, user_permissions, permissions
 
 
 def count() -> int:
@@ -50,16 +50,23 @@ def list_all() -> list[dict]:
 
 
 def create(*, email: str, name: str, password_hash: str,
-           role_keys: list[str] | None = None) -> dict:
+           role_keys: list[str] | None = None,
+           permission_keys: list[str] | None = None,
+           custom: bool = False) -> dict:
+    """Create a user. ``custom=True`` ⇒ store explicit ``permission_keys`` and
+    skip roles entirely (the per-user set replaces roles)."""
     now = time.time()
     email = email.strip().lower()
     with get_engine().begin() as conn:
         result = conn.execute(insert(users).values(
             email=email, name=name, password_hash=password_hash,
-            is_active=1, created_at=now, updated_at=now,
+            is_active=1, custom_permissions=1 if custom else 0,
+            created_at=now, updated_at=now,
         ))
         uid = result.inserted_primary_key[0]
-        if role_keys:
+        if custom:
+            _assign_permissions(conn, uid, permission_keys or [])
+        elif role_keys:
             _assign_roles(conn, uid, role_keys)
     return get(uid)
 
@@ -95,6 +102,33 @@ def set_roles(user_id: int, role_keys: list[str]) -> dict | None:
     return get(user_id)
 
 
+def set_custom_permissions(user_id: int, permission_keys: list[str]) -> dict | None:
+    """Switch a user to custom mode and replace their explicit permission set.
+
+    Clears any role assignments (custom replaces roles) and sets the flag.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(update(users).where(users.c.id == user_id)
+                     .values(custom_permissions=1, updated_at=time.time()))
+        conn.execute(sa_delete(user_roles).where(user_roles.c.user_id == user_id))
+        conn.execute(sa_delete(user_permissions)
+                     .where(user_permissions.c.user_id == user_id))
+        _assign_permissions(conn, user_id, permission_keys)
+    return get(user_id)
+
+
+def clear_custom_permissions(user_id: int, role_keys: list[str]) -> dict | None:
+    """Switch a user back to role mode: drop the flag + explicit grants, set roles."""
+    with get_engine().begin() as conn:
+        conn.execute(update(users).where(users.c.id == user_id)
+                     .values(custom_permissions=0, updated_at=time.time()))
+        conn.execute(sa_delete(user_permissions)
+                     .where(user_permissions.c.user_id == user_id))
+        conn.execute(sa_delete(user_roles).where(user_roles.c.user_id == user_id))
+        _assign_roles(conn, user_id, role_keys)
+    return get(user_id)
+
+
 def delete(user_id: int) -> bool:
     with get_engine().begin() as conn:
         result = conn.execute(sa_delete(users).where(users.c.id == user_id))
@@ -111,13 +145,31 @@ def _assign_roles(conn, user_id: int, role_keys: list[str]) -> None:
         conn.execute(insert(user_roles).values(user_id=user_id, role_id=rid))
 
 
+def _assign_permissions(conn, user_id: int, permission_keys: list[str]) -> None:
+    if not permission_keys:
+        return
+    perm_ids = [r[0] for r in conn.execute(
+        select(permissions.c.id).where(permissions.c.key.in_(permission_keys)))]
+    for pid in perm_ids:
+        conn.execute(insert(user_permissions).values(user_id=user_id, permission_id=pid))
+
+
 def _with_roles(user: dict) -> dict:
+    is_custom = bool(user.get("custom_permissions"))
     with get_engine().connect() as conn:
         role_keys = [r[0] for r in conn.execute(
             select(roles.c.key).join(user_roles, user_roles.c.role_id == roles.c.id)
             .where(user_roles.c.user_id == user["id"])
         )]
+        perm_keys = [p[0] for p in conn.execute(
+            select(permissions.c.key)
+            .join(user_permissions, user_permissions.c.permission_id == permissions.c.id)
+            .where(user_permissions.c.user_id == user["id"])
+        )]
     user["roles"] = role_keys
+    user["custom_permissions"] = is_custom
+    # Explicit per-user grants (only meaningful in custom mode); sorted for the UI.
+    user["permissions"] = sorted(perm_keys)
     user["is_admin"] = "admin" in role_keys
     user.pop("password_hash", None)  # never leak the hash to callers/API
     return user

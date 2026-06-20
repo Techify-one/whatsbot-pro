@@ -412,7 +412,8 @@ export async function setConversationAi(id, active) {
   return request('POST', `/api/conversations/${id}/ai`, { active });
 }
 
-// Resolve the open conversation for a contact by phone (feeds the chat header).
+// Resolve the conversation for a contact by phone (feeds the chat header FF3 and
+// the conversation info panel FF5).
 export async function getContactConversation(phone) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
 }
@@ -711,4 +712,21 @@ export async function resetUserPassword(id, password) {
 
 export async function deleteUser(id) {
   return request('DELETE', `/api/users/${id}`);
+}
+
+// Role editor (RBAC) — create/edit/delete custom roles + edit system roles.
+export async function createRole(data) {
+  return request('POST', '/api/roles', data);
+}
+
+export async function updateRole(id, data) {
+  return request('PUT', `/api/roles/${id}`, data);
+}
+
+export async function deleteRole(id) {
+  return request('DELETE', `/api/roles/${id}`);
+}
+
+export async function resetRole(id) {
+  return request('POST', `/api/roles/${id}/reset`);
 }

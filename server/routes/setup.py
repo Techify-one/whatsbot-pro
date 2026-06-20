@@ -40,7 +40,10 @@ from config.settings import (
     TECHIFY_REQUEST_APIKEY_URL,
     TECHIFY_SERVICE_NUMBER_URL,
 )
+from fastapi import Request
+
 from gowa.client import GOWASendError
+from server.authz import permission_denied
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -88,8 +91,16 @@ def register_routes(app, deps):
     state = deps.state
 
     @app.post("/api/setup/request-key")
-    async def request_key():
-        """Send the Techify provisioning message and arm the key polling."""
+    async def request_key(request: Request):
+        """Send the Techify provisioning message and arm the key polling.
+
+        Gated by ``billing.manage`` — provisioning credits a Techify account
+        (spends money). First-run onboarding has no logged-in user (open mode),
+        so the gate passes; once users exist, only billing.manage can re-provision.
+        """
+        denied = permission_denied(request, "billing.manage")
+        if denied:
+            return denied
         # Resolve the connected WhatsApp number (digits only).
         number = (state.bot_phone or "").split(":")[0].strip()
         if not number:
