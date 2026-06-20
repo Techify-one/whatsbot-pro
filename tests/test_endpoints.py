@@ -1063,6 +1063,54 @@ check("POST /conversations/{id}/ai active=true -> reativa", r.json()["data"]["co
 check("gate volta a True", _ai_gate(_cm) is True)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15i. Filtros de conversas (plano 08)
+# ═══════════════════════════════════════════════════════════════════
+section("Conversation Filters")
+
+r = client.get("/api/conversations/filter-schema")
+check("GET filter-schema -> 200", r.status_code == 200)
+_dim_keys = {d["key"] for d in r.json()["data"]["dimensions"]}
+check("filter-schema -> tem status/labels/q", {"status", "labels", "q"} <= _dim_keys)
+check("filter-schema -> NÃO expõe colunas cruas", "drop_table" not in _dim_keys)
+
+r = client.get("/api/conversations/filter?status=open")
+check("GET filter?status=open -> 200", r.status_code == 200)
+check("filter status=open -> só abertas",
+      all(c["status"] == "open" for c in r.json()["data"]["conversations"]))
+
+_open_get = client.get("/api/conversations/filter?status=open").json()["data"]["count"]
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "status", "filter_operator": "equal_to", "values": ["open"]}]})
+check("POST filter (Chatwoot payload) == GET", r.json()["data"]["count"] == _open_get)
+
+# Adversariais → 400
+check("filter?drop_table=1 -> 400 (dim desconhecida)",
+      client.get("/api/conversations/filter?drop_table=1").status_code == 400)
+check("filter status valor inválido -> 400",
+      client.get("/api/conversations/filter?status=hacked").status_code == 400)
+r = client.post("/api/conversations/filter", json={
+    "filters": [{"attribute_key": "status", "filter_operator": "DROP", "values": ["x"]}]})
+check("POST filter operador inválido -> 400", r.status_code == 400)
+check("filter cattr não-filtrável -> 400",
+      client.get("/api/conversations/filter?cattr:nao_existe=x").status_code == 400)
+
+# cattr end-to-end: def conversation filterable + valor
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "plano_conv", "display_name": "Plano", "type": "text",
+    "applies_to": "conversation", "filterable": True})
+check("cria cattr conversation filterable -> 200", r.status_code == 200)
+_conv_repo.set_custom_attributes(_live_conv["id"], {"plano_conv": "gold"})
+r = client.get("/api/conversations/filter-schema")
+check("filter-schema inclui cattr:plano_conv",
+      "cattr:plano_conv" in {d["key"] for d in r.json()["data"]["dimensions"]})
+r = client.get("/api/conversations/filter?cattr:plano_conv=gold")
+check("filter cattr=gold -> acha a conversa",
+      any(c["id"] == _live_conv["id"] for c in r.json()["data"]["conversations"]))
+r = client.get("/api/conversations/filter?cattr:plano_conv=silver")
+check("filter cattr=silver -> não acha",
+      all(c["id"] != _live_conv["id"] for c in r.json()["data"]["conversations"]))
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
