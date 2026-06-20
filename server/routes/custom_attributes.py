@@ -67,6 +67,7 @@ def register_routes(app, deps):
             regex_pattern=(body.get("regex_pattern") or None),
             regex_cue=(body.get("regex_cue") or None),
             position=int(body.get("position") or 0),
+            filterable=1 if body.get("filterable") else 0,
         )
         if row is None:
             return _err(f"Já existe um atributo '{key}' para {applies_to}.")
@@ -92,6 +93,8 @@ def register_routes(app, deps):
             fields["required"] = 1 if body.get("required") else 0
         if "position" in body:
             fields["position"] = int(body.get("position") or 0)
+        if "filterable" in body:
+            fields["filterable"] = 1 if body.get("filterable") else 0
         if "options" in body and existing.get("type") == "list":
             opts = body.get("options")
             if not isinstance(opts, list) or not opts:

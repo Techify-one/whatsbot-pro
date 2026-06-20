@@ -767,6 +767,20 @@ r = client.put(f"/api/custom-attributes/{_def_plano['id']}", json={"display_name
 check("PUT /custom-attributes -> 200", r.status_code == 200)
 check("PUT /custom-attributes -> display atualizado", r.json()["data"]["display_name"] == "Plano Comercial")
 
+# filterable (plano 05 Fase 6) — persiste no create/update e alimenta list_filterable
+r = client.post("/api/custom-attributes", json={
+    "attribute_key": "segmento", "display_name": "Segmento", "type": "text",
+    "applies_to": "contact", "filterable": True})
+check("POST /custom-attributes filterable=true -> persistido", r.json()["data"]["filterable"] == 1)
+_seg_id = r.json()["data"]["id"]
+r = client.put(f"/api/custom-attributes/{_seg_id}", json={"filterable": False})
+check("PUT filterable=false -> 0", r.json()["data"]["filterable"] == 0)
+r = client.put(f"/api/custom-attributes/{_seg_id}", json={"filterable": True})
+check("PUT filterable=true -> 1", r.json()["data"]["filterable"] == 1)
+from db.repositories import custom_attribute_repo as _ca_repo
+check("repo.list_filterable(contact) -> inclui segmento",
+      "segmento" in {d["attribute_key"] for d in _ca_repo.list_filterable("contact")})
+
 # Soft-delete definition
 r = client.delete(f"/api/custom-attributes/{_def_plano['id']}")
 check("DELETE /custom-attributes -> 200", r.status_code == 200)
