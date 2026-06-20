@@ -224,15 +224,22 @@ def register_routes(app, deps):
         return _ok({"conversation": conv})
 
     @app.get("/api/contacts/{phone}/conversation")
-    async def contact_conversation(phone: str, request: Request):
-        """Resolve the active (open) conversation for a contact by phone — feeds the
-        chat header (display_id, status, assignee, ai_active, custom_attributes)."""
+    async def contact_conversation(phone: str, request: Request,
+                                   include_closed: bool = False):
+        """Resolve the conversation for a contact by phone — feeds the chat header
+        (display_id, status, assignee, ai_active, custom_attributes).
+
+        By default returns the active (open) thread. With ``include_closed`` it
+        returns the latest conversation regardless of status, so the sidebar
+        right-click menu can still show assignee/reopen on a resolved thread.
+        """
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
         contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if not contact:
             return _err("Contato não encontrado.", status=404)
-        conv = await asyncio.to_thread(
-            conversation_repo.get_open_for_contact, contact["id"])
+        resolver = (conversation_repo.get_latest_for_contact if include_closed
+                    else conversation_repo.get_open_for_contact)
+        conv = await asyncio.to_thread(resolver, contact["id"])
         return _ok({"conversation": conv})
