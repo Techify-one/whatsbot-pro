@@ -125,12 +125,15 @@ def register_routes(app, deps):
         dependencies = body.get("dependencies", [])
         if dependencies is not None and not isinstance(dependencies, list):
             return _err("dependencies deve ser uma lista.")
+        # Gate P63: code-in-DB tools are born DISABLED. A human must explicitly
+        # flip ``enabled`` (and the operator must set ai_tools_code_enabled) before
+        # arbitrary Python from the DB ever executes. Default False, not True.
         row = await asyncio.to_thread(
             tool_repo.save, name,
             description=body.get("description", ""),
             code=body.get("code", ""),
             dependencies=dependencies or [],
-            enabled=bool(body.get("enabled", True)),
+            enabled=bool(body.get("enabled", False)),
         )
         _emit_changed("tool", name)
         # Code-in-DB needs a process restart so the installer re-materialises,
