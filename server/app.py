@@ -15,7 +15,7 @@ from server.auth import auth_required, verify_token
 from server.helpers import _get_web_dir
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import start_gowa_task, status_poll_loop, qr_poll_loop, avatar_fetch_task
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, update, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -237,7 +237,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/wizard"}
+        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/tools", "/quick-replies", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -302,6 +302,7 @@ def create_app(
     @app.get("/executions")
     @app.get("/plugins")
     @app.get("/tools")
+    @app.get("/quick-replies")
     @app.get("/wizard")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/executions/{execution_id:int}")
@@ -336,6 +337,7 @@ def create_app(
     usage.register_routes(app, deps)
     contacts.register_routes(app, deps)
     tags.register_routes(app, deps)
+    quick_replies_routes.register_routes(app, deps)
     executions.register_routes(app, deps)
     update.register_routes(app, deps)
     plugins_routes.register_routes(app, deps)

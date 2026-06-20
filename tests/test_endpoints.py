@@ -651,6 +651,53 @@ r = client.put("/api/contacts/9999999999/tags", json={"tags": ["vip"]})
 check("PUT /contacts/9999/tags -> 404", r.status_code == 404)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15b. Quick Replies (plano 04)
+# ═══════════════════════════════════════════════════════════════════
+section("Quick Replies")
+
+r = client.get("/api/quick-replies")
+check("GET /quick-replies -> 200", r.status_code == 200)
+check("GET /quick-replies -> is list", isinstance(r.json()["data"], list))
+
+r = client.post("/api/quick-replies", json={"short_code": "oi-anna", "content": "Olá! Sou a Atendente."})
+check("POST /quick-replies -> 200", r.status_code == 200)
+_qr = r.json()["data"]
+check("POST /quick-replies -> returns id", isinstance(_qr.get("id"), int))
+check("POST /quick-replies -> short_code stored", _qr.get("short_code") == "oi-anna")
+
+# Normalization: leading slash + uppercase get stripped/lowercased
+r = client.post("/api/quick-replies", json={"short_code": "/HORARIO", "content": "8h às 18h"})
+check("POST /quick-replies -> normaliza /HORARIO -> horario", r.json()["data"]["short_code"] == "horario")
+
+# Uniqueness (P41) — duplicate short_code rejected
+r = client.post("/api/quick-replies", json={"short_code": "oi-anna", "content": "outro"})
+check("POST /quick-replies (dup) -> erro", r.json().get("ok") is False)
+
+# Invalid short_code (space/accent) rejected
+r = client.post("/api/quick-replies", json={"short_code": "com espaco", "content": "x"})
+check("POST /quick-replies (inválido) -> erro", r.json().get("ok") is False)
+
+# List now has the two created
+r = client.get("/api/quick-replies")
+_codes = {q["short_code"] for q in r.json()["data"]}
+check("GET /quick-replies -> contém criados", {"oi-anna", "horario"} <= _codes)
+
+# Update content
+r = client.put(f"/api/quick-replies/{_qr['id']}", json={"content": "Olá! Atendente aqui."})
+check("PUT /quick-replies -> 200", r.status_code == 200)
+check("PUT /quick-replies -> content atualizado", r.json()["data"]["content"] == "Olá! Atendente aqui.")
+
+# Update to a colliding short_code rejected
+r = client.put(f"/api/quick-replies/{_qr['id']}", json={"short_code": "horario"})
+check("PUT /quick-replies (colisão) -> erro", r.json().get("ok") is False)
+
+# Delete
+r = client.delete(f"/api/quick-replies/{_qr['id']}")
+check("DELETE /quick-replies -> 200", r.status_code == 200)
+r = client.delete(f"/api/quick-replies/{_qr['id']}")
+check("DELETE /quick-replies (de novo) -> 404", r.status_code == 404)
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
@@ -866,7 +913,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/painel", "/sandbox", "/costs"]:
+for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
 
