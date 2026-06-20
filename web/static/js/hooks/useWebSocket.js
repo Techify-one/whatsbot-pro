@@ -1,8 +1,13 @@
 import { useEffect } from 'preact/hooks';
 import { createWebSocket } from '../services/websocket.js';
 
-export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onWsConnect, onWsDisconnect }) {
+export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
   useEffect(() => {
+    // The 6 conversation lifecycle events (plano 10 FF2) all route to a single
+    // onConversationChanged(eventName, data) so the consumer can patch/refetch.
+    const conv = onConversationChanged
+      ? (name) => (d) => onConversationChanged(name, d)
+      : null;
     const ws = createWebSocket({
       onConnect: onWsConnect,
       onDisconnect: onWsDisconnect,
@@ -25,6 +30,12 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       avatar_updated: onAvatarUpdated,
       group_participants_changed: onGroupParticipantsChanged,
       low_balance: onLowBalance,
+      conversation_created: conv ? conv('conversation_created') : undefined,
+      conversation_status_changed: conv ? conv('conversation_status_changed') : undefined,
+      conversation_assigned: conv ? conv('conversation_assigned') : undefined,
+      conversation_archived: conv ? conv('conversation_archived') : undefined,
+      conversation_ai_toggled: conv ? conv('conversation_ai_toggled') : undefined,
+      conversation_updated: conv ? conv('conversation_updated') : undefined,
     });
     return () => ws.close();
   }, []);
