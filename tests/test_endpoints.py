@@ -941,6 +941,75 @@ r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_gtok}"})
 check("gestor /me -> 200 (still authenticated)", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15h. Conversations (plano 01 Fase 1)
+# ═══════════════════════════════════════════════════════════════════
+section("Conversations")
+
+from db.repositories import (conversation_repo as _conv_repo,
+                             contact_inbox_repo as _ci_repo)
+from db.tables import contacts as _contacts_t, inboxes as _inboxes_t
+
+with _get_engine().connect() as _conn:
+    _cid = _conn.execute(_sa_select(_contacts_t.c.id).limit(1)).scalar()
+    _inbox_seeded = _conn.execute(
+        _sa_select(_inboxes_t.c.id).where(_inboxes_t.c.id == 1)).scalar()
+check("inbox default seeded (id=1)", _inbox_seeded == 1)
+
+_ci = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
+                             source_id=f"{_cid}@s.whatsapp.net")
+_conv1 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+check("conversation_repo.create -> display_id sequencial",
+      _conv2["display_id"] == _conv1["display_id"] + 1)
+check("create -> status open + ai_active", _conv1["status"] == "open" and _conv1["ai_active"] == 1)
+
+r = client.get("/api/conversations")
+check("GET /api/conversations -> 200", r.status_code == 200)
+_convs = r.json()["data"]["conversations"]
+check("list -> includes created convs + contact_name join",
+      len(_convs) >= 2 and "contact_name" in _convs[0])
+
+r = client.get(f"/api/conversations/{_conv1['id']}")
+check("GET /api/conversations/{id} -> 200", r.status_code == 200)
+check("detail -> right conversation", r.json()["data"]["conversation"]["id"] == _conv1["id"])
+
+r = client.get("/api/conversations/999999")
+check("GET /api/conversations/{missing} -> 404", r.status_code == 404)
+
+r = client.post(f"/api/conversations/{_conv1['id']}/status", json={"status": "closed"})
+check("POST status closed -> 200", r.status_code == 200)
+check("status closed -> resolved_at set",
+      r.json()["data"]["conversation"]["status"] == "closed"
+      and r.json()["data"]["conversation"]["resolved_at"] is not None)
+
+r = client.post(f"/api/conversations/{_conv1['id']}/status", json={"status": "bogus"})
+check("POST status invalid -> 400", r.status_code == 400)
+
+r = client.post(f"/api/conversations/{_conv1['id']}/assign", json={"assignee_user_id": _admin["id"]})
+check("POST assign -> 200 + assignee set",
+      r.status_code == 200 and r.json()["data"]["conversation"]["assignee_user_id"] == _admin["id"])
+
+r = client.post(f"/api/conversations/{_conv1['id']}/archive", json={"archived": True})
+check("POST archive -> is_archived=1", r.json()["data"]["conversation"]["is_archived"] == 1)
+
+r = client.get("/api/conversations?status=closed")
+check("GET /api/conversations?status=closed -> filtered",
+      all(c["status"] == "closed" for c in r.json()["data"]["conversations"]))
+
+# Permission gating: atendente lacks conversation.assign
+from db.repositories import user_repo as _urepo2
+from server.auth import hash_password_argon2 as _hpa2
+_at = _urepo2.create(email="att2@test.com", name="A2",
+                     password_hash=_hpa2("supersecret"), role_keys=["atendente"])
+r = client.post("/api/auth/login", json={"email": "att2@test.com", "password": "supersecret"})
+_attok = r.json()["data"]["token"]
+r = client.post(f"/api/conversations/{_conv2['id']}/assign",
+                json={"assignee_user_id": None}, headers={"Authorization": f"Bearer {_attok}"})
+check("atendente assign -> 403 (lacks conversation.assign)", r.status_code == 403)
+r = client.get("/api/conversations", headers={"Authorization": f"Bearer {_attok}"})
+check("atendente list -> 200 (has conversation.read)", r.status_code == 200)
+
+# ═══════════════════════════════════════════════════════════════════
 #  16. Usage
 # ═══════════════════════════════════════════════════════════════════
 section("Usage")
