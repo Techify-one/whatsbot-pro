@@ -22,7 +22,8 @@ import { SetupWizard } from './components/SetupWizard.js';
 import { LowBalanceModal } from './components/LowBalanceModal.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
-import { checkAuth, authHeaders, getUnreadCount, logoutSession } from './services/api.js';
+import { checkAuth, authHeaders, getUnreadCount, logoutSession, getMe } from './services/api.js';
+import { hasPermission } from './utils/permissions.js';
 import { playTransferAlert } from './utils/alertSound.js';
 import { getNotifPref, playNotificationSound, showBrowserNotification } from './utils/notifications.js';
 
@@ -106,7 +107,8 @@ function contactIdFromPath() {
   return m ? parseInt(m[1], 10) : null;
 }
 
-function MenuItem({ active, href, onClick, icon, children }) {
+function MenuItem({ active, href, onClick, icon, children, gated = true }) {
+  if (!gated) return null;  // permission gate (P48: hide, don't disable)
   function handleClick(e) {
     // Let the browser handle modified clicks (Ctrl/Cmd/Shift) and middle-click
     // so users can open the menu item in a new tab/window.
@@ -151,6 +153,10 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
     setDark(next);
   }
 
+  // Permission gate for menu items (FF1). Open/legacy installs (no currentUser)
+  // see everything; a logged-in user sees only what their role allows.
+  const can = (perm) => hasPermission(currentUser, perm);
+
   return html`
     <div ref=${menuRef} class="fixed top-3 right-3 z-50">
       <button
@@ -169,16 +175,16 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} active=${tab === 'sandbox'} href=${CORE_TAB_PATHS.sandbox} onClick=${() => { onTabChange('sandbox'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 5h10v2h2V3c0-.55-.45-1-1-1H6c-.55 0-1 .45-1 1v4h2V5zm8.41 11.59L20 12l-4.59-4.59L14 8.83 17.17 12 14 15.17l1.41 1.42zM10 15.17L6.83 12 10 8.83 8.59 7.41 4 12l4.59 4.59L10 15.17zM17 19H7v-2H5v4c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-4h-2v2z"/></svg>`}
           >Sandbox</${MenuItem}>
-          <${MenuItem} active=${tab === 'costs'} href=${CORE_TAB_PATHS.costs} onClick=${() => { onTabChange('costs'); close(); }}
+          <${MenuItem} gated=${can('billing.manage')} active=${tab === 'costs'} href=${CORE_TAB_PATHS.costs} onClick=${() => { onTabChange('costs'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>`}
           >Custos</${MenuItem}>
-          <${MenuItem} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
+          <${MenuItem} gated=${can('settings.manage')} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`}
           >Execuções</${MenuItem}>
-          <${MenuItem} active=${tab === 'conversations'} href=${CORE_TAB_PATHS.conversations} onClick=${() => { onTabChange('conversations'); close(); }}
+          <${MenuItem} gated=${can('conversation.read')} active=${tab === 'conversations'} href=${CORE_TAB_PATHS.conversations} onClick=${() => { onTabChange('conversations'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>`}
           >Conversas</${MenuItem}>
-          <${MenuItem} active=${tab === 'channels'} href=${CORE_TAB_PATHS.channels} onClick=${() => { onTabChange('channels'); close(); }}
+          <${MenuItem} gated=${can('channel.manage')} active=${tab === 'channels'} href=${CORE_TAB_PATHS.channels} onClick=${() => { onTabChange('channels'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 1a9 9 0 0 0-9 9v7a3 3 0 0 0 3 3h2v-8H5v-2a7 7 0 0 1 14 0v2h-3v8h2a3 3 0 0 0 3-3v-7a9 9 0 0 0-9-9z"/></svg>`}
           >Canais</${MenuItem}>
 
@@ -211,28 +217,28 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
               Saldo e Recargar
             </a>
           ` : null}
-          <${MenuItem} active=${tab === 'tools'} href=${CORE_TAB_PATHS.tools} onClick=${() => { onTabChange('tools'); close(); }}
+          <${MenuItem} gated=${can('plugins.manage')} active=${tab === 'tools'} href=${CORE_TAB_PATHS.tools} onClick=${() => { onTabChange('tools'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>`}
           >Gerenciar Tools</${MenuItem}>
-          <${MenuItem} active=${tab === 'quick-replies'} href=${CORE_TAB_PATHS['quick-replies']} onClick=${() => { onTabChange('quick-replies'); close(); }}
+          <${MenuItem} gated=${can('quickreply.manage')} active=${tab === 'quick-replies'} href=${CORE_TAB_PATHS['quick-replies']} onClick=${() => { onTabChange('quick-replies'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 9h-2V9h2v2zm0-4h-2V5h2v2zm4 4h-2V9h2v2zm0-4h-2V5h2v2zM9 11H7V9h2v2zm0-4H7V5h2v2z"/></svg>`}
           >Respostas Rápidas</${MenuItem}>
-          <${MenuItem} active=${tab === 'custom-attributes'} href=${CORE_TAB_PATHS['custom-attributes']} onClick=${() => { onTabChange('custom-attributes'); close(); }}
+          <${MenuItem} gated=${can('settings.manage')} active=${tab === 'custom-attributes'} href=${CORE_TAB_PATHS['custom-attributes']} onClick=${() => { onTabChange('custom-attributes'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z"/></svg>`}
           >Atributos Personalizados</${MenuItem}>
-          <${MenuItem} active=${tab === 'runtime'} href=${CORE_TAB_PATHS.runtime} onClick=${() => { onTabChange('runtime'); close(); }}
+          <${MenuItem} gated=${can('settings.manage')} active=${tab === 'runtime'} href=${CORE_TAB_PATHS.runtime} onClick=${() => { onTabChange('runtime'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3a9 9 0 0 0-9 9H1l4 4 4-4H6a7 7 0 1 1 2 4.9l-1.4 1.4A9 9 0 1 0 13 3z"/></svg>`}
           >Runtime</${MenuItem}>
-          <${MenuItem} active=${tab === 'users'} href=${CORE_TAB_PATHS.users} onClick=${() => { onTabChange('users'); close(); }}
+          <${MenuItem} gated=${can('users.manage')} active=${tab === 'users'} href=${CORE_TAB_PATHS.users} onClick=${() => { onTabChange('users'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`}
           >Usuários</${MenuItem}>
-          <${MenuItem} active=${tab === 'audit'} href=${CORE_TAB_PATHS.audit} onClick=${() => { onTabChange('audit'); close(); }}
+          <${MenuItem} gated=${can('audit.read')} active=${tab === 'audit'} href=${CORE_TAB_PATHS.audit} onClick=${() => { onTabChange('audit'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>`}
           >Auditoria</${MenuItem}>
-          <${MenuItem} active=${tab === 'ai'} href=${CORE_TAB_PATHS.ai} onClick=${() => { onTabChange('ai'); close(); }}
+          <${MenuItem} gated=${can('agent.manage')} active=${tab === 'ai'} href=${CORE_TAB_PATHS.ai} onClick=${() => { onTabChange('ai'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a2 2 0 0 1 2 2v1h3a2 2 0 0 1 2 2v2h1a2 2 0 0 1 0 4h-1v2a2 2 0 0 1-2 2h-3v1a2 2 0 0 1-4 0v-1H7a2 2 0 0 1-2-2v-2H4a2 2 0 0 1 0-4h1V7a2 2 0 0 1 2-2h3V4a2 2 0 0 1 2-2zm-3 7a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1zm6 0a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1z"/></svg>`}
           >Engine de IA</${MenuItem}>
-          <${MenuItem} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}
+          <${MenuItem} gated=${can('plugins.manage')} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>`}
           >Gerenciar Plugins</${MenuItem}>
 
@@ -671,6 +677,18 @@ function AuthGate() {
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [currentUser, setCurrentUser] = useState(loadStoredUser);
 
+  // Enrich the logged-in user with permissions[] (checkAuth/login don't carry
+  // them). Drives the GearMenu gating (FF1). Best-effort: failure leaves the
+  // user without perms → helpers default to permissive, so nothing breaks.
+  function refreshPermissions() {
+    getMe().then(res => {
+      if (res && res.ok && res.data && res.data.user) {
+        setCurrentUser(res.data.user);
+        try { localStorage.setItem('whatsbot_user', JSON.stringify(res.data.user)); } catch (e) {}
+      }
+    }).catch(() => {});
+  }
+
   useEffect(() => {
     checkAuth().then(res => {
       if (res.ok) {
@@ -680,6 +698,7 @@ function AuthGate() {
         if (res.data.user) {
           setCurrentUser(res.data.user);
           try { localStorage.setItem('whatsbot_user', JSON.stringify(res.data.user)); } catch (e) {}
+          refreshPermissions();  // fetch permissions[] for menu gating
         } else if (res.data.has_users === false) {
           // Legacy single-password session with no users yet.
           setCurrentUser(null);
@@ -713,6 +732,7 @@ function AuthGate() {
     setCurrentUser(user || null);
     setAuthState('ready');
     setHasPassword(true);
+    if (user) refreshPermissions();  // login payload may omit permissions[]
   }
 
   async function handleLogout() {
