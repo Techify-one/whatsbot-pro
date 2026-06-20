@@ -308,6 +308,7 @@ function App({ onLogout, hasPassword, currentUser }) {
   const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
   const [chatPresence, setChatPresence] = useState(null);
+  const [aiTyping, setAiTyping] = useState(null);   // {phone, channel_id, active} — IA processando
   const [contactInfoUpdated, setContactInfoUpdated] = useState(null);
   const [tagsChanged, setTagsChanged] = useState(null);
   const [contactTagsUpdated, setContactTagsUpdated] = useState(null);
@@ -405,6 +406,7 @@ function App({ onLogout, hasPassword, currentUser }) {
     onConfigSaved: useCallback(() => setNotification('Configurações salvas!'), []),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
     onChatPresence: useCallback((data) => setChatPresence(data), []),
+    onAiTyping: useCallback((data) => setAiTyping(data), []),
     onContactInfoUpdated: useCallback((data) => setContactInfoUpdated(data), []),
     onTagsChanged: useCallback((data) => setTagsChanged(data), []),
     onContactTagsUpdated: useCallback((data) => setContactTagsUpdated(data), []),
@@ -625,7 +627,7 @@ function App({ onLogout, hasPassword, currentUser }) {
                   />
                 </div>`
               : tab === 'contacts'
-                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} initialConversationId=${initialConversationId} conversationCreated=${conversationCreated} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
+                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} aiTyping=${aiTyping} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} initialConversationId=${initialConversationId} conversationCreated=${conversationCreated} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
                 : tab === 'costs'
                   ? html`<div class="max-w-5xl mx-auto p-4">
                       <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
