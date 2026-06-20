@@ -534,6 +534,9 @@ def get_full_contact(phone: str) -> dict | None:
         "company": row["company"],
         "address": row["address"],
         "observations": [r.text for r in obs_rows],
+        # Custom attributes (plano 05): also surface them under `info` so the
+        # contact panel and the resolve guard read a single, reliable source.
+        "custom_attributes": data["custom_attributes"],
     }
     data["tags"] = [t.name for t in tag_rows]
     return data

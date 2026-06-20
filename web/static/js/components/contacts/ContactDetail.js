@@ -906,7 +906,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         </div>
 
         <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
-        <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} />
+        <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} onOpenConversationInfo=${onOpenConversationInfo} onOpenContactInfo=${onAvatarClick} contactInfo=${info} />
 
         <!-- Informações da conversa (Onda 2): abre o painel lateral da conversa. -->
         ${!sandbox && onOpenConversationInfo ? html`

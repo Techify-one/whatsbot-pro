@@ -47,10 +47,55 @@ function matchesAssignment(c, tab, uid) {
   if (tab === 'unassigned') return isUnassigned(c);
   return true;  // 'all'
 }
+// ── Filtros avançados (Chatwoot-style: Canais / Agente / Etiqueta / Última atividade) ──
+// Cláusula: { dim, op, value }. Avaliadas client-side em AND sobre as linhas já
+// carregadas. Cada linha carrega channel_id, assignee_user_id, active_agent_key,
+// tags e last_message_ts — tudo o que essas dimensões precisam.
+const DAY_SECONDS = 86400;
+
+function clauseMatches(c, cl, now) {
+  const { dim, op } = cl;
+  const value = cl.value;
+  if (value === '' || value == null) return true;   // cláusula incompleta → ignorada
+  if (dim === 'channel') {
+    const ch = c.channel_id || 'default';
+    return op === 'ne' ? ch !== value : ch === value;
+  }
+  if (dim === 'tag') {
+    const has = (c.tags || []).includes(value);
+    return op === 'ne' ? !has : has;
+  }
+  if (dim === 'agent') {
+    let hit;
+    if (value === 'none') hit = (c.assignee_user_id == null && !c.active_agent_key);
+    else if (value.startsWith('user:')) hit = String(c.assignee_user_id) === value.slice(5);
+    else if (value.startsWith('ai:')) hit = (c.active_agent_key || '') === value.slice(3);
+    else hit = false;
+    return op === 'ne' ? !hit : hit;
+  }
+  if (dim === 'activity') {
+    const n = parseFloat(value);
+    if (!Number.isFinite(n)) return true;
+    const ts = c.last_message_ts || c.updated_at || 0;
+    const ageDays = ts ? (now - ts) / DAY_SECONDS : Infinity;  // sem atividade → "muito antigo"
+    if (op === 'gt') return ageDays > n;                       // há MAIS de N dias
+    if (op === 'lt') return ageDays < n;                       // há MENOS de N dias
+    if (op === 'days_before') return Math.floor(ageDays) === Math.floor(n);  // há exatamente N dias
+    return true;
+  }
+  return true;
+}
+
+function matchesAdvFilters(c, advFilters, now) {
+  if (!advFilters || advFilters.length === 0) return true;
+  return advFilters.every(cl => clauseMatches(c, cl, now));
+}
+
+// Filtro simples (funil da esquerda) — etiquetas do contato, "é uma de" (OR).
 function matchesTags(c, tagFilter) {
   if (!tagFilter || tagFilter.length === 0) return true;
   const ctags = c.tags || [];
-  return tagFilter.some(t => ctags.includes(t));   // "é uma de" (OR), estilo Chatwoot
+  return tagFilter.some(t => ctags.includes(t));
 }
 function sortContactsBy(list, sortBy) {
   const arr = [...list];
@@ -187,7 +232,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
   const [sortBy, setSortBy] = useState('activity');           // activity|oldest|unread
-  const [tagFilter, setTagFilter] = useState([]);             // array of tag names
+  const [tagFilter, setTagFilter] = useState([]);             // funil simples (esquerda) — etiquetas
+  const [advFilters, setAdvFilters] = useState([]);           // [{dim, op, value}] — filtro avançado (direita)
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
   const [checkingPhone, setCheckingPhone] = useState(false);
@@ -222,6 +268,22 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     const seen = new Set();
     for (const c of contacts) if (c.channel_provider) seen.add(c.channel_provider);
     return seen.size > 1;
+  }, [contacts]);
+
+  // Canais presentes nas conversas carregadas → opções do filtro "Canais". Derivado
+  // das próprias linhas (mostra exatamente os canais em uso, sem fetch extra).
+  const channelOptions = useMemo(() => {
+    const map = new Map();
+    for (const c of contacts) {
+      const id = c.channel_id || 'default';
+      if (!map.has(id)) {
+        const label = c.channel_name
+          || c.channel_provider
+          || (id === 'default' ? 'Padrão' : id);
+        map.set(id, label);
+      }
+    }
+    return Array.from(map, ([id, label]) => ({ id, label }));
   }, [contacts]);
 
   // True when `row` is the currently-open thread (by conversation when available,
@@ -753,10 +815,13 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
   // Derived list: status + tag filter feed the tab counts; the active assignment
   // tab + sort produce what's actually rendered.
-  const statusTagFiltered = useMemo(
-    () => activeContacts.filter(c => matchesStatus(c, statusFilter) && matchesTags(c, tagFilter)),
-    [activeContacts, statusFilter, tagFilter],
-  );
+  const statusTagFiltered = useMemo(() => {
+    const now = Date.now() / 1000;
+    return activeContacts.filter(c =>
+      matchesStatus(c, statusFilter)
+      && matchesTags(c, tagFilter)
+      && matchesAdvFilters(c, advFilters, now));
+  }, [activeContacts, statusFilter, tagFilter, advFilters]);
   const tabCounts = useMemo(() => ({
     all: statusTagFiltered.length,
     mine: currentUserId == null ? 0 : statusTagFiltered.filter(c => c.assignee_user_id === currentUserId).length,
@@ -1312,6 +1377,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onSortChange=${setSortBy}
           tagFilter=${tagFilter}
           onTagFilterChange=${setTagFilter}
+          advFilters=${advFilters}
+          onAdvFiltersChange=${setAdvFilters}
+          channels=${channelOptions}
+          agentsUsers=${agentsUsers}
+          agentsAi=${agentsAi}
           resolveAssignee=${resolveAssignee}
           hasIdentity=${currentUserId != null}
           selected=${selectedKey}
@@ -1405,6 +1475,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               phone=${selected}
               conversationId=${selectedConvId}
               onClose=${() => setOpenPanel(null)}
+              onOpenContactInfo=${() => selected && setOpenPanel('contact')}
+              contactInfo=${info}
             />
           ` : null}
         </div>
