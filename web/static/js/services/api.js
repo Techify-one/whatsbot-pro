@@ -343,6 +343,38 @@ export async function updateContactTags(phone, tags) {
   return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/tags`, { tags });
 }
 
+// ── Conversations (plano 01 Fase 2) ───────────────────────────────
+// Conversation lifecycle: list with filters, fetch one, change status
+// (open/closed), assign to a user, and archive/unarchive.
+
+export async function listConversations(params = {}) {
+  const clean = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    clean[k] = v;
+  }
+  const qs = new URLSearchParams(clean).toString();
+  return request('GET', `/api/conversations${qs ? '?' + qs : ''}`);
+}
+
+export async function getConversation(id) {
+  return request('GET', `/api/conversations/${id}`);
+}
+
+export async function setConversationStatus(id, status) {
+  return request('POST', `/api/conversations/${id}/status`, { status });
+}
+
+export async function assignConversation(id, assigneeUserId) {
+  return request('POST', `/api/conversations/${id}/assign`, {
+    assignee_user_id: assigneeUserId == null ? null : assigneeUserId,
+  });
+}
+
+export async function archiveConversation(id, archived) {
+  return request('POST', `/api/conversations/${id}/archive`, { archived });
+}
+
 // ── Models ──────────────────────────────────────────────────────────
 
 export async function getModels() {
