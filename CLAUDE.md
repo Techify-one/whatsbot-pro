@@ -178,6 +178,12 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 **NÃO usa polling** — o auto-reply por polling foi removido. Toda recepção de mensagens é via webhook.
 
+### Filtro de tipos de JID (canal GOWA)
+
+O tipo de um chat do WhatsApp é definido pelo **sufixo do JID** (depois do `@`), não pelo número — o prefixo `120363…` é compartilhado por grupo, canal e comunidade. [channels/jid.py](channels/jid.py) (`classify_jid`) mapeia o sufixo para um tipo lógico: `person` (`@s.whatsapp.net`), `person_lid` (`@lid`), `group` (`@g.us`), `newsletter` (Canal, `@newsletter`), `broadcast` (Status/transmissão, `@broadcast`), `bot` (`@bot`), `unknown`.
+
+No webhook GOWA ([server/routes/webhook.py](server/routes/webhook.py)), logo após resolver o `chat_jid`, a mensagem é classificada e **descartada antes de materializar qualquer contato** se o tipo não estiver na lista permitida — corrige o bug em que tudo que não era `@g.us` caía no ramo "pessoa" (um post de Canal virava "contato fantasma"). A lista permitida vem de `config.allowed_jid_types` do canal GOWA (lida do canal `default`, que é single-channel no inbound; cache de 30s, invalidado ao editar a config do canal). **Default**: `person`, `person_lid`, `group` (descarta canal/status/bot). Tipos `unknown` nunca são bloqueados (preserva comportamento legado). A UI fica na criação/edição do canal GOWA em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`JidTypePicker`) — o usuário escolhe pelos rótulos amigáveis, sem ver o JID. Vale **apenas para canais GOWA**.
+
 ## Memória por contato
 
 Cada contato é armazenado na tabela `contacts` com campos normalizados:

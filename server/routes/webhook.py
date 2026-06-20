@@ -17,7 +17,8 @@ import uuid
 from pathlib import Path
 
 from channels.events import InboundEvent
-from db.repositories import contact_repo, conversation_repo, message_repo
+from channels import jid as jid_classifier
+from db.repositories import channel_repo, contact_repo, conversation_repo, message_repo
 from agent import group_mentions
 from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
@@ -438,6 +439,51 @@ def _extract_reply_to(data: dict) -> str | None:
 
     # 4) Last resort: scan the whole payload for a reply/quote *id* key.
     return _deep_find_reply_id(data)
+
+
+# The GOWA webhook is single-channel today: every GOWA device POSTs to the same
+# ``/api/webhook`` and is processed as the seeded ``default`` channel (batch key,
+# orchestrator and contacts are all hardcoded to "default"). So the JID-type
+# filter reads ``default``'s ``config.allowed_jid_types``. Cached briefly — this
+# runs on every inbound message; channel config changes rarely.
+_GOWA_CHANNEL_ID = "default"
+_ALLOWED_JID_CACHE: dict = {"types": None, "ts": 0.0}
+_ALLOWED_JID_TTL = 30.0
+
+
+def _read_gowa_allowed_jid_types() -> list[str]:
+    """Read the GOWA channel's allowed JID types from its ``config`` JSON.
+
+    Falls back to :data:`channels.jid.DEFAULT_ALLOWED_JID_TYPES` when unset or
+    malformed. Synchronous (DB read) — call via ``asyncio.to_thread``.
+    """
+    try:
+        row = channel_repo.get(_GOWA_CHANNEL_ID)
+        cfg = row.get("config") if row else None
+        if isinstance(cfg, str) and cfg:
+            cfg = json.loads(cfg)
+        if isinstance(cfg, dict) and "allowed_jid_types" in cfg:
+            return jid_classifier.normalize_allowed_types(cfg.get("allowed_jid_types"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[Webhook] allowed_jid_types read failed: %s", e)
+    return list(jid_classifier.DEFAULT_ALLOWED_JID_TYPES)
+
+
+def reset_allowed_jid_cache() -> None:
+    """Invalidate the cached allowed-JID-types (call after a channel config edit)."""
+    _ALLOWED_JID_CACHE["types"] = None
+    _ALLOWED_JID_CACHE["ts"] = 0.0
+
+
+async def _gowa_allowed_jid_types() -> list[str]:
+    now = time.time()
+    cached = _ALLOWED_JID_CACHE["types"]
+    if cached is not None and (now - _ALLOWED_JID_CACHE["ts"]) < _ALLOWED_JID_TTL:
+        return cached
+    types = await asyncio.to_thread(_read_gowa_allowed_jid_types)
+    _ALLOWED_JID_CACHE["types"] = types
+    _ALLOWED_JID_CACHE["ts"] = now
+    return types
 
 
 def register_routes(app, deps):
@@ -1675,7 +1721,22 @@ def register_routes(app, deps):
         sender_jid = (data.get("sender_jid", "") or data.get("sender", "")
                       or data.get("from", ""))
 
-        is_group = "@g.us" in chat_jid
+        # Classify the chat by its JID suffix — the only reliable discriminator
+        # (the 120363… numeric prefix is shared by group/channel/community). Drop
+        # types the GOWA channel isn't configured to surface BEFORE any contact
+        # is materialized; otherwise a @newsletter/@broadcast/@bot JID falls into
+        # the "person" branch and becomes a phantom contact. Default config keeps
+        # people + groups and drops channels/status/bots. Unknown suffixes are
+        # never gated (preserves legacy behaviour). Applies to inbound AND the
+        # is_from_me echo branch below.
+        jid_type = jid_classifier.classify_jid(chat_jid)
+        is_group = jid_type == jid_classifier.GROUP
+        allowed = await _gowa_allowed_jid_types()
+        if not jid_classifier.is_allowed(jid_type, allowed):
+            logger.info(
+                "[Webhook] Skipping %s message (jid=%s, type=%s not in allowed=%s)",
+                "outgoing" if is_from_me else "incoming", chat_jid, jid_type, allowed)
+            return _ok({"status": "ignored_jid_type"})
 
         # ── Resolve document filename ─────────────────────────────────
         # GOWA's webhook omits the original filename for documents when

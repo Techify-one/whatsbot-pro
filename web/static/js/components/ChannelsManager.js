@@ -39,6 +39,52 @@ function providerMeta(provider) {
   return PROVIDERS[provider] || { label: provider || '—', tint: 'bg-gray-100 text-wa-secondary' };
 }
 
+// Which WhatsApp chat types (by JID suffix) a GOWA channel surfaces as
+// conversations. The keys are stable identifiers persisted in the channel's
+// config (config.allowed_jid_types) and mirror channels/jid.py on the backend.
+// The user never sees the JID — only the friendly label.
+const JID_TYPES = [
+  { key: 'person', label: 'Pessoa (contato)', hint: 'Conversas individuais com contatos.' },
+  { key: 'person_lid', label: 'Pessoa (modo privacidade)', hint: 'Contatos que ocultam o número (modo privacidade).' },
+  { key: 'group', label: 'Grupo / Comunidade', hint: 'Mensagens de grupos e comunidades.' },
+  { key: 'newsletter', label: 'Canal', hint: 'Publicações de Canais do WhatsApp.' },
+  { key: 'broadcast', label: 'Status / Transmissão', hint: 'Status e listas de transmissão.' },
+  { key: 'bot', label: 'Bot (Meta AI etc.)', hint: 'Conversas com bots como o Meta AI.' },
+];
+const DEFAULT_JID_TYPES = ['person', 'person_lid', 'group'];
+
+// Parse a channel's `config` (the API returns it as a JSON string) into an
+// object, tolerating already-parsed objects and malformed values.
+function parseChannelConfig(config) {
+  if (!config) return {};
+  if (typeof config === 'object') return config;
+  try { return JSON.parse(config) || {}; } catch (e) { return {}; }
+}
+
+// Checkbox group letting the user pick which chat types fall into a GOWA channel.
+function JidTypePicker({ selected, onChange, disabled }) {
+  function toggle(key) {
+    const set = new Set(selected);
+    if (set.has(key)) set.delete(key); else set.add(key);
+    // Preserve canonical order.
+    onChange(JID_TYPES.map(t => t.key).filter(k => set.has(k)));
+  }
+  return html`
+    <div class="flex flex-col gap-2">
+      ${JID_TYPES.map(t => html`
+        <label key=${t.key} class="flex items-start gap-2 cursor-pointer ${disabled ? 'opacity-60 cursor-not-allowed' : ''}">
+          <input type="checkbox" class="mt-0.5" checked=${selected.includes(t.key)}
+            disabled=${disabled} onChange=${() => toggle(t.key)} />
+          <span class="flex flex-col">
+            <span class="text-[13px] text-wa-text">${t.label}</span>
+            <span class="text-[11px] text-wa-secondary">${t.hint}</span>
+          </span>
+        </label>
+      `)}
+    </div>
+  `;
+}
+
 // Random URL-safe token, used for the "sugerir" verify-token button.
 function randomToken(len = 32) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -66,6 +112,8 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
   // The GOWA device id is auto-generated and read-only: each channel maps to its
   // own GOWA device (one WhatsApp number) on the shared GOWA process.
   const [gowaDeviceId, setGowaDeviceId] = useState(() => `gowa_${randomToken(10)}`);
+  // Which chat types this GOWA channel surfaces (config.allowed_jid_types).
+  const [jidTypes, setJidTypes] = useState(DEFAULT_JID_TYPES);
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
@@ -96,7 +144,8 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
       display_name: displayName.trim(),
     };
     if (provider === 'gowa') {
-      if (gowaDeviceId.trim()) payload.config = { gowa_device_id: gowaDeviceId.trim() };
+      payload.config = { allowed_jid_types: jidTypes };
+      if (gowaDeviceId.trim()) payload.config.gowa_device_id = gowaDeviceId.trim();
     } else if (provider === 'whatsapp_cloud') {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
@@ -150,6 +199,14 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
             <div class="text-[12px] text-wa-secondary mt-1">
               Identifica este número dentro do GOWA. Após criar, leia o QR Code para conectar o WhatsApp.
             </div>
+          </div>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
+            <p class="text-[12px] text-wa-secondary mb-2">
+              Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+              desmarcados são ignorados (não aparecem no painel).
+            </p>
+            <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
           </div>
         ` : null}
 
@@ -494,7 +551,16 @@ function AgentPicker({ users, selected, onChange }) {
 // reconnect or change the QR — login/session are untouched here.
 function ChannelEditForm({ channel, onSaved, onCancel }) {
   const isCloud = channel.provider === 'whatsapp_cloud';
+  const isGowa = channel.provider === 'gowa';
   const [displayName, setDisplayName] = useState(channel.display_name || channel.id);
+  // GOWA: which chat types this channel surfaces. Seed from the stored config
+  // (falling back to the default set when unset).
+  const [jidTypes, setJidTypes] = useState(() => {
+    const cfg = parseChannelConfig(channel.config);
+    return Array.isArray(cfg.allowed_jid_types) && cfg.allowed_jid_types.length
+      ? cfg.allowed_jid_types
+      : DEFAULT_JID_TYPES;
+  });
   // whatsapp_cloud secrets: blank means "keep current"; only non-empty is sent.
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
@@ -527,6 +593,12 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
     if (busy || !displayName.trim()) return;
     setBusy(true); setError('');
     const payload = { display_name: displayName.trim() };
+    if (isGowa) {
+      // PUT replaces config wholesale — preserve gowa_device_id (and any other
+      // existing keys) while updating the allowed chat types.
+      const cfg = parseChannelConfig(channel.config);
+      payload.config = { ...cfg, allowed_jid_types: jidTypes };
+    }
     if (isCloud) {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
@@ -563,6 +635,17 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
           </div>
+
+          ${isGowa ? html`
+            <div class="border-t border-wa-border pt-3">
+              <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
+              <p class="text-[12px] text-wa-secondary mb-2">
+                Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+                desmarcados são ignorados (não aparecem no painel).
+              </p>
+              <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
+            </div>
+          ` : null}
 
           ${isCloud ? html`
             <div class="border-t border-wa-border pt-3">

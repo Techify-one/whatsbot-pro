@@ -1767,6 +1767,71 @@ check("reply extract: own id is NOT a reply", _ext_reply({"id": "SELF", "body": 
 check("reply extract: quoted text is NOT a reply id",
       _ext_reply({"quoted_message": "texto", "body": "oi"}) is None)
 
+# ── Filtro de tipos de JID (canal GOWA) ──────────────────────────────
+section("Webhook — filtro de tipos de JID (GOWA)")
+
+from channels import jid as _jid
+from server.routes.webhook import (
+    _read_gowa_allowed_jid_types as _read_allowed,
+    reset_allowed_jid_cache as _reset_jid_cache,
+)
+
+# classify_jid: o sufixo do JID (depois do @) define o tipo, não o número.
+check("classify_jid person", _jid.classify_jid("556492070004@s.whatsapp.net") == _jid.PERSON)
+check("classify_jid person_lid", _jid.classify_jid("8312345678@lid") == _jid.PERSON_LID)
+check("classify_jid group", _jid.classify_jid("120363423773591388@g.us") == _jid.GROUP)
+check("classify_jid newsletter", _jid.classify_jid("120363167775174375@newsletter") == _jid.NEWSLETTER)
+check("classify_jid broadcast", _jid.classify_jid("status@broadcast") == _jid.BROADCAST)
+check("classify_jid bot", _jid.classify_jid("867051314767696@bot") == _jid.BOT)
+check("classify_jid unknown (sem @)", _jid.classify_jid("12345") == _jid.UNKNOWN)
+check("classify_jid unknown (sufixo novo)", _jid.classify_jid("x@futuro") == _jid.UNKNOWN)
+
+# normalize: mantém só os conhecidos, na ordem canônica; cai no default se inválido.
+check("normalize mantém conhecidos",
+      _read_allowed and _jid.normalize_allowed_types(["bot", "person", "lixo"]) == ["person", "bot"])
+check("normalize vazio -> default",
+      _jid.normalize_allowed_types([]) == _jid.DEFAULT_ALLOWED_JID_TYPES)
+check("normalize não-lista -> default",
+      _jid.normalize_allowed_types("person") == _jid.DEFAULT_ALLOWED_JID_TYPES)
+
+# is_allowed: tipos desconhecidos nunca são bloqueados (comportamento legado).
+check("is_allowed unknown sempre passa",
+      _jid.is_allowed(_jid.UNKNOWN, _jid.DEFAULT_ALLOWED_JID_TYPES) is True)
+check("is_allowed newsletter bloqueado por default",
+      _jid.is_allowed(_jid.NEWSLETTER, _jid.DEFAULT_ALLOWED_JID_TYPES) is False)
+
+# Default do canal: newsletter/broadcast/bot são descartados (corrige o bug do
+# "contato fantasma" — antes tudo que não era @g.us caía no ramo "pessoa").
+_reset_jid_cache()
+for _suffix, _label in (("newsletter", "canal"), ("broadcast", "status"), ("bot", "bot")):
+    _jidstr = f"120363000000000001@{_suffix}" if _suffix != "broadcast" else "status@broadcast"
+    r = client.post("/api/webhook", json={
+        "body": f"post de {_label}", "from": _jidstr,
+        "chat_id": _jidstr, "id": f"jidfilter_{_suffix}_001", "is_from_me": False,
+    })
+    check(f"POST /webhook ({_label}) -> ignorado por tipo",
+          r.status_code == 200 and r.json()["data"]["status"] == "ignored_jid_type")
+
+# E nenhum contato fantasma foi materializado para esses JIDs.
+_clist = client.get("/api/contacts").json()["data"]
+_cphones = {c.get("phone", "") for c in (_clist if isinstance(_clist, list) else _clist.get("contacts", []))}
+check("filtro JID não cria contato fantasma",
+      not any("newsletter" in p or "broadcast" in p or "@bot" in p for p in _cphones))
+
+# Habilitar 'newsletter' no canal default passa a permitir o tipo (persistência +
+# leitura + invalidação de cache na edição de config).
+r = client.put("/api/channels/default", json={
+    "config": {"allowed_jid_types": ["person", "person_lid", "group", "newsletter"]},
+})
+check("PUT /channels/default config allowed_jid_types -> 200", r.status_code == 200)
+check("reader reflete config após edição (cache invalidado)",
+      "newsletter" in _read_allowed() and "broadcast" not in _read_allowed())
+# Restaura o default para não afetar os demais testes.
+client.put("/api/channels/default", json={
+    "config": {"allowed_jid_types": list(_jid.DEFAULT_ALLOWED_JID_TYPES)},
+})
+_reset_jid_cache()
+
 # ═══════════════════════════════════════════════════════════════════
 #  19b. Runtime multi-canal (plano 11): ingest, inbox-por-canal, saída
 # ═══════════════════════════════════════════════════════════════════
