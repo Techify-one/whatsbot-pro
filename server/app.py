@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -326,6 +326,34 @@ def create_app(
     static_dir = web_dir / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # Avatar serving with graceful fallback. The frontend always points <img> at
+    # /statics/avatars/<phone>.jpg; when the cache file is missing (cold cache, or
+    # a redeploy/replica without the file), the bare static mount would 404 and
+    # spam the browser console. This route shadows that exact subpath (registered
+    # BEFORE the /statics mount, so it wins) and returns the cached file when
+    # present, otherwise a neutral silhouette placeholder with 200 — same visual as
+    # the frontend's DefaultAvatar, but no console error.
+    _AVATAR_PLACEHOLDER_SVG = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="212" height="212" viewBox="0 0 212 212">'
+        '<rect width="212" height="212" fill="#dfe5e7"/>'
+        '<path fill="#fff" d="M106.3 113.1c14.6 0 26.5-11.9 26.5-26.5S120.9 60 106.3 60 79.8 71.9 79.8 86.6s11.9 26.5 26.5 26.5zm0 13.2c-17.7 0-53 8.9-53 26.5V166h106v-13.2c0-17.6-35.3-26.5-53-26.5z"/>'
+        '</svg>'
+    )
+
+    @app.get("/statics/avatars/{name}")
+    async def serve_avatar(name: str):
+        # Names are "<phone>.jpg" / "<jid>@g.us.jpg" — reject any path traversal.
+        if "/" in name or "\\" in name or ".." in name:
+            return Response(status_code=404)
+        avatar_file = statics_dir / "avatars" / name
+        if avatar_file.is_file():
+            return FileResponse(str(avatar_file), media_type="image/jpeg")
+        return Response(
+            content=_AVATAR_PLACEHOLDER_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")

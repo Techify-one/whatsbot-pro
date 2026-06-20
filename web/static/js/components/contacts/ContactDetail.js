@@ -12,6 +12,35 @@ import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 
 const html = htm.bind(h);
 
+// Renders an <img>/<video> for a message's media and, if the file fails to load
+// (e.g. the server lost the file under statics/ — wiped on a deploy without a
+// persistent volume), swaps to a neutral "indisponível" placeholder instead of
+// the broken-image icon. Local blobs (optimistic, just-sent) never fall back.
+function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onClick }) {
+  const [failed, setFailed] = useState(false);
+  const url = isLocalBlob ? src : '/' + src;
+  if (failed && !isLocalBlob) {
+    const label = kind === 'video' ? 'Vídeo indisponível'
+      : kind === 'sticker' ? 'Figurinha indisponível' : 'Imagem indisponível';
+    return html`
+      <div class="flex items-center gap-2 rounded-[4px] mb-1 px-3 py-4 bg-wa-hover text-wa-secondary text-[13px]"
+           style="min-width:140px" title="O arquivo de mídia não está mais disponível no servidor.">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+        </svg>
+        <span>${label}</span>
+      </div>`;
+  }
+  if (kind === 'video') {
+    return html`<video controls preload="metadata" src=${url} class=${className}
+      style=${style} onError=${() => setFailed(true)}></video>`;
+  }
+  return html`<img src=${url} alt=${alt} class=${className} style=${style}
+    onClick=${onClick} loading="lazy" onError=${() => setFailed(true)} />`;
+}
+
 // Quick-reaction emojis shown in the message context menu bar (WhatsApp-style).
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
@@ -1076,14 +1105,11 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
                       `;
                     })() : ''}
                     ${m.revoked ? '' : m.media_type === 'image' ? html`
-                      <img
-                        src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}"
-                        alt="Imagem"
-                        class="rounded-[4px] max-w-full max-h-[300px] mb-1 cursor-pointer"
+                      <${MediaWithFallback} kind="image"
+                        src=${m.media_path} isLocalBlob=${m._isLocalBlob} alt="Imagem"
+                        className="rounded-[4px] max-w-full max-h-[300px] mb-1 cursor-pointer"
                         style="min-width:120px"
-                        onClick=${() => window.open(m._isLocalBlob ? m.media_path : '/' + m.media_path, '_blank')}
-                        loading="lazy"
-                      />
+                        onClick=${() => window.open(m._isLocalBlob ? m.media_path : '/' + m.media_path, '_blank')} />
                       ${displayContent && displayContent !== '[Imagem enviada pelo contato]' && !displayContent.startsWith('[Descrição da imagem]')
                         ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
@@ -1093,23 +1119,17 @@ export function ContactDetail({ phone, conversationId = null, onBack, messages, 
                         ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
                     ` : m.media_type === 'video' ? html`
-                      <video
-                        controls
-                        preload="metadata"
-                        src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}"
-                        class="rounded-[4px] max-w-full max-h-[320px] mb-1"
-                        style="min-width:180px"
-                      ></video>
+                      <${MediaWithFallback} kind="video"
+                        src=${m.media_path} isLocalBlob=${m._isLocalBlob}
+                        className="rounded-[4px] max-w-full max-h-[320px] mb-1"
+                        style="min-width:180px" />
                       ${displayContent && !displayContent.startsWith('[Vídeo')
                         ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(displayContent)}}></span>`
                         : null}
                     ` : m.media_type === 'sticker' ? html`
-                      <img
-                        src="${m._isLocalBlob ? m.media_path : '/' + m.media_path}"
-                        alt="Sticker"
-                        class="max-w-[160px] max-h-[160px] mb-1"
-                        loading="lazy"
-                      />
+                      <${MediaWithFallback} kind="sticker"
+                        src=${m.media_path} isLocalBlob=${m._isLocalBlob} alt="Sticker"
+                        className="max-w-[160px] max-h-[160px] mb-1" />
                     ` : (m.media_type === 'location' || m.media_type === 'live_location') ? (() => {
                         // media_path here is "geo:lat,lng" (see _extract_media)
                         const m_path = m.media_path || '';
