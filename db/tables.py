@@ -189,6 +189,38 @@ custom_attribute_definitions = Table(
 Index("idx_cad_applies_to", custom_attribute_definitions.c.applies_to)
 
 
+# Channels + credentials (plano 02 Fase 0). The core talks to providers through
+# the ChannelRegistry; credentials are TEXT in the MVP (P15 — no encryption,
+# masked at the API boundary). conversations/messages.channel_id is plano 01.
+channels = Table(
+    "channels",
+    metadata,
+    Column("id", Text, primary_key=True),                 # "default" (snake_case)
+    Column("provider", Text, nullable=False),             # gowa | whatsapp_cloud | telegram | test
+    Column("display_name", Text, nullable=False, server_default=""),
+    Column("enabled", Integer, nullable=False, server_default="1"),
+    Column("gowa_device_id", Text, nullable=True),        # X-Device-Id (gowa only)
+    Column("gowa_isolation", Text, nullable=False, server_default="shared"),  # shared|dedicated_process
+    Column("config", Text, nullable=True),                # JSON: non-secret per-channel prefs
+    Column("connected", Integer, nullable=False, server_default="0"),
+    Column("logged_in", Integer, nullable=False, server_default="0"),
+    Column("own_phone", Text, nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+
+channel_credentials = Table(
+    "channel_credentials",
+    metadata,
+    Column("channel_id", Text,
+           ForeignKey("channels.id", ondelete="CASCADE"), nullable=False),
+    Column("key", Text, nullable=False),                  # access_token | verify_token | bot_token | ...
+    Column("value", Text, nullable=False),                # TEXT in MVP (P15 — masked at API edge)
+    UniqueConstraint("channel_id", "key", name="uq_channel_credentials"),
+)
+
+
 unread_msg_ids = Table(
     "unread_msg_ids",
     metadata,
