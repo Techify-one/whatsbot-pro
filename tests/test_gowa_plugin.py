@@ -487,6 +487,57 @@ check("core lifespan still registers audit_purge (not a channel concern)",
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Inbound device → channel routing (plano 02 §0.5 / Decisão P13).
+#  GOWA delivers every device's inbound to ONE webhook URL, so the receiving
+#  channel must be recovered from the payload envelope (device_id = receiving
+#  JID, session_id = registered device string). Regression guard for the bug
+#  where a 2nd GOWA number's messages collapsed into the "default" channel.
+# ═══════════════════════════════════════════════════════════════════
+section("inbound GOWA device → channel resolution (channel_repo)")
+
+import logging as _logging
+_logging.disable(_logging.INFO)
+_routedb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+os.environ["DATABASE_URL"] = f"sqlite:///{_routedb}"
+from db.engine import dispose_engine as _dispose_engine
+_dispose_engine()  # force a fresh engine bound to the temp DB
+from db.connection import init_db as _init_db
+_init_db()
+from db.repositories import channel_repo as _cr
+
+# 'default' is seeded by migration 0011 (gowa, gowa_device_id='whatsbot').
+_cr.set_status("default", own_phone="554498510557", logged_in=1, gowa_device_id="whatsbot")
+_cr.create(id="whatsapp_teste", provider="gowa", display_name="2o numero")  # device_id None → uses id
+_cr.create(id="teste", provider="whatsapp_cloud", display_name="cloud")
+_cr.set_status("whatsapp_teste", own_phone="5519988998565", logged_in=1)
+
+check("session_id maps to its channel (default)",
+      _cr.get_gowa_channel_for_device("whatsbot", None) == "default")
+check("session_id maps 2nd number (device_id NULL → channel id)",
+      _cr.get_gowa_channel_for_device("whatsapp_teste", None) == "whatsapp_teste")
+check("receiving JID maps via own_phone (2nd number)",
+      _cr.get_gowa_channel_for_device(None, "5519988998565@s.whatsapp.net") == "whatsapp_teste")
+check("receiving JID with :device suffix maps to default",
+      _cr.get_gowa_channel_for_device(None, "554498510557:7@s.whatsapp.net") == "default")
+check("unknown device → None (caller keeps URL channel)",
+      _cr.get_gowa_channel_for_device("nope", "5500000000000@s.whatsapp.net") is None)
+check("no identity given → None",
+      _cr.get_gowa_channel_for_device(None, None) is None)
+check("whatsapp_cloud channel never matched as gowa",
+      _cr.get_gowa_channel_for_device("teste", None) is None)
+_cr.create(id="vendas", provider="gowa", display_name="Vendas", gowa_device_id="vendas_ab12cd34")
+check("session_id resolves before login (own_phone still NULL)",
+      _cr.get_gowa_channel_for_device("vendas_ab12cd34", None) == "vendas")
+_cr.set_status("whatsapp_teste", enabled=0)
+check("disabled channel → None (won't route)",
+      _cr.get_gowa_channel_for_device("whatsapp_teste", None) is None)
+try:
+    os.unlink(_routedb)
+except OSError:
+    pass
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Results
 # ═══════════════════════════════════════════════════════════════════
 print(f"\n{'='*60}")
