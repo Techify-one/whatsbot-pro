@@ -36,9 +36,17 @@ def _mask(value: str) -> str:
     return f"••••{tail}"
 
 
+# Non-secret credential keys returned in CLEAR so the edit form can show + pre-fill
+# them (they are public identifiers, not secrets). Everything else is masked (P15).
+_NON_SECRET_CRED_KEYS = {"waba_id", "phone_number_id"}
+
+
 def _serialize(row: dict, creds: dict) -> dict:
     row = dict(row)
-    row["credentials"] = {k: _mask(v) for k, v in creds.items()}
+    row["credentials"] = {
+        k: (v if k in _NON_SECRET_CRED_KEYS else _mask(v))
+        for k, v in creds.items()
+    }
     return row
 
 
