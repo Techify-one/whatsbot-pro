@@ -566,6 +566,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     const text = input.trim();
     if (!text) return;
 
+    // 24h window closed (WhatsApp Cloud): free text can't be sent — steer the
+    // operator to an approved template instead of letting Meta reject it.
+    if (sessionClosed && mode !== 'private') {
+      setShowTemplatePicker(true);
+      return;
+    }
+
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
@@ -641,6 +648,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         }
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+        // Backend gate raced ahead of the UI (window closed between load and send):
+        // steer to a template when we have a conversation to send it through.
+        if (res && res.data && res.data.reason === 'session_window_closed'
+            && conversationId != null) {
+          setShowTemplatePicker(true);
+        }
       }
     } catch (err) {
       console.error('Send error:', err);
@@ -724,6 +737,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   async function confirmPendingMedia() {
     if (!pendingMedia || sending) return;
+    // 24h window closed (WhatsApp Cloud): media also requires a template.
+    if (sessionClosed) {
+      cancelPendingMedia();
+      setShowTemplatePicker(true);
+      return;
+    }
     const media = pendingMedia;
     const caption = mediaCaption.trim();
     setPendingMedia(null);
@@ -768,6 +787,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       updateMsgByLocalId(localId, () => sandbox
         ? { _status: res.ok ? null : 'failed' }
         : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+      if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
+          && conversationId != null) {
+        setShowTemplatePicker(true);
+      }
     } catch (err) {
       console.error('Send media error:', err);
       updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
@@ -1415,7 +1438,8 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           </div>
           ${mode === 'private' ? '' : html`
             <div ref=${attachMenuRef} class="relative shrink-0">
-              <button type="button" class="p-[8px]" tabindex="-1" onClick=${handleAttachClick}>
+              <button type="button" class="p-[8px] ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+                disabled=${sessionClosed} onClick=${handleAttachClick}>
                 <${AttachIcon} />
               </button>
               ${attachMenuOpen ? html`
@@ -1509,7 +1533,8 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               <${SendIcon} />
             </button>
           ` : mode === 'private' ? '' : html`
-            <button type="button" class="p-[8px] shrink-0 text-wa-icon" tabindex="-1" onClick=${handleMicClick}>
+            <button type="button" class="p-[8px] shrink-0 text-wa-icon ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+              disabled=${sessionClosed} onClick=${handleMicClick}>
               <${MicIcon} />
             </button>
           `}

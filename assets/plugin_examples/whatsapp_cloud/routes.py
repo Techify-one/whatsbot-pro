@@ -46,13 +46,9 @@ async def info():
     }
 
 
-@router.get("/templates")
-async def list_templates(channel_id: str = ""):
-    """Lista templates (HSM) aprovados do WABA.
-
-    STUB: numa fase futura isto consulta
-    ``GET /{waba_id}/message_templates`` na Graph API usando o access_token do
-    canal e retorna os templates aprovados para o operador escolher. Por ora
-    retorna lista vazia para a UI não quebrar.
-    """
-    return {"ok": True, "data": [], "stub": True}
+# NOTE: template listing/sending/creation is NOT here. It lives in the CORE,
+# channel-aware and capability-gated, under
+# ``/api/conversations/{conv_id}/templates`` (GET list, POST send-template, POST
+# create, DELETE), backed by ``OutboundRouter`` → ``WhatsAppCloudChannel`` Graph
+# calls. The old plugin ``GET /templates`` stub was removed to avoid confusion —
+# it always returned ``[]`` and nothing consumed it.

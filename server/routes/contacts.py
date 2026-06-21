@@ -72,6 +72,33 @@ def register_routes(app, deps):
             raise GOWASendError(res.error or "Falha no envio de mídia")
         return res.external_msg_id or ""
 
+    def _session_window_block(channel_id, conversation_id):
+        """Guard for the WhatsApp Cloud 24h free-text window (plano 02 P17).
+
+        Returns a 409 ``_err`` when free text/media is NOT allowed right now —
+        i.e. a windowed channel (Cloud, ``session_window_hours>0``) whose last
+        inbound is older than the window (or has none). Returns ``None`` when the
+        send is allowed, which is ALWAYS the case for always-open channels
+        (GOWA/Telegram, ``session_window_hours==0``). Capability-driven — never by
+        provider name. Outside the window only an approved template may be sent.
+        The agentic auto-reply (webhook) does not pass through here and is
+        inherently in-window, so it is never affected.
+        """
+        caps = outbound.capabilities(channel_id)
+        if not getattr(caps, "session_window_hours", 0):
+            return None
+        last_ts = None
+        if conversation_id:
+            try:
+                last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
+            except (TypeError, ValueError):
+                last_ts = None
+        if outbound.session_open(channel_id, last_ts):
+            return None
+        return _err(
+            "Fora da janela de 24h: só é possível enviar um template aprovado.",
+            status=409, data={"reason": "session_window_closed"})
+
     async def _send_read_receipts(phone: str, msg_ids: list[str]):
         """Send read receipts to GOWA in background (best-effort)."""
         for mid in msg_ids:
@@ -323,6 +350,10 @@ def register_routes(app, deps):
             return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        block = await asyncio.to_thread(
+            _session_window_block, channel_id, body.get("conversation_id"))
+        if block:
+            return block
         # Resolve @Name / @todos -> real mentions for group targets, only on channels
         # that support groups (Cloud is 1:1). `message` (friendly @Name) is saved/shown;
         # `send_text` (inline @<number>) + mentions go on the wire.
@@ -687,6 +718,10 @@ def register_routes(app, deps):
             return _err("Campo 'message' é obrigatório.")
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        block = await asyncio.to_thread(
+            _session_window_block, channel_id, body.get("conversation_id"))
+        if block:
+            return block
         # Track for echo-back filtering (key matches the webhook: channel:phone:text)
         state.recently_sent[f"{channel_id}:{phone}:{message[:120]}"] = time.time()
 
@@ -747,14 +782,19 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        # Sandbox/test contact — keep the image local, never hit GOWA.
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
+        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
+        # sandbox stays local so it is never gated (mirrors /send text).
+        if not is_sandbox:
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            if block:
+                return block
         suffix = Path(image.filename or "img.png").suffix or ".png"
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await image.read()
         dest.write_bytes(content)
-
-        # Sandbox/test contact — keep the image local, never hit GOWA.
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:
@@ -825,14 +865,19 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        # Sandbox/test contact — keep the audio local, never hit GOWA.
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
+        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
+        # sandbox stays local so it is never gated (mirrors /send text).
+        if not is_sandbox:
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            if block:
+                return block
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
         dest.write_bytes(content)
-
-        # Sandbox/test contact — keep the audio local, never hit GOWA.
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:
@@ -927,6 +972,14 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
+        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
+        # sandbox stays local so it is never gated (mirrors /send text).
+        if not is_sandbox:
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            if block:
+                return block
         filename = document.filename or "arquivo"
         safe_name = Path(filename).name
         suffix = Path(safe_name).suffix
@@ -934,9 +987,6 @@ def register_routes(app, deps):
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
         content = await document.read()
         dest.write_bytes(content)
-
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
         msg_id = None
         try:
             if not is_sandbox:

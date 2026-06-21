@@ -1289,6 +1289,13 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         };
       });
       if (message.role === 'user' && pageVisibleRef.current) markAsRead(phone);
+      // An inbound (customer) message reopens the 24h free-text window — refresh
+      // the compositor hint live so the operator isn't stuck on "fora da janela"
+      // (WhatsApp Cloud) until a manual reload.
+      if (message.role === 'user') {
+        setContactData(prev => (prev && prev.session_open !== true)
+          ? { ...prev, session_open: true } : prev);
+      }
     }
 
     // Skip contact list preview update for transcription, system_notice, tool_call, conversation_event, and error messages

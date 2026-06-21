@@ -24,6 +24,9 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -175,35 +178,151 @@ class WhatsAppCloudChannel(Channel):
             payload["context"] = {"message_id": reply_to}
         return self._post_message(payload)
 
+    def upload_media(self, path: str, *, mime_type: Optional[str] = None) -> Optional[str]:
+        """Upload a LOCAL file to the Graph API and return its media id.
+
+        ``POST /{phone_number_id}/media`` (multipart) with ``messaging_product=whatsapp``
+        and the file's mime ``type``. The returned id is consumed immediately by
+        :meth:`send_media`; Cloud media ids are single-use-ish and expire, so we do
+        NOT cache them. The header carries ONLY ``Authorization`` — httpx sets the
+        multipart ``Content-Type`` (with boundary) itself; forcing
+        ``application/json`` (as :meth:`_headers` does) would corrupt the upload.
+        Returns ``None`` on any failure (caller maps it to a clean SendResult error).
+        """
+        phone_id = self._phone_number_id
+        if not phone_id or not self._access_token or not path:
+            return None
+        mime = mime_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
+        url = f"{self._base_url()}/{phone_id}/media"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client, open(path, "rb") as fh:
+                resp = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    data={"messaging_product": "whatsapp", "type": mime},
+                    files={"file": (Path(path).name, fh, mime)},
+                )
+            if resp.status_code in (200, 201):
+                return (resp.json() or {}).get("id")
+            logger.warning("whatsapp_cloud upload_media -> %s: %s",
+                           resp.status_code, resp.text[:300])
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud upload_media failed", exc_info=True)
+        return None
+
+    @staticmethod
+    def _is_local_file(path_or_url: str) -> bool:
+        """True when the input is a local filesystem path (needs upload), not a
+        public URL (sent as ``link``)."""
+        if not path_or_url:
+            return False
+        low = path_or_url.lower()
+        if low.startswith("http://") or low.startswith("https://"):
+            return False
+        try:
+            return os.path.isfile(path_or_url)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _gif_to_mp4(path: str) -> Optional[str]:
+        """Best-effort convert an animated GIF to a looping, silent MP4 so it plays
+        inline on WhatsApp (the Cloud API has no native GIF type — a raw GIF can't
+        be sent as ``image``/``video``). Requires ffmpeg on PATH; returns the temp
+        mp4 path, or ``None`` when ffmpeg is absent/fails (caller then falls back to
+        sending the GIF as a document)."""
+        if not shutil.which("ffmpeg"):
+            return None
+        try:
+            out = os.path.join(
+                tempfile.gettempdir(),
+                f"wac_gif_{Path(path).stem}_{int(time.time() * 1000)}.mp4")
+            # yuv420p + even dimensions + faststart = broad WhatsApp compatibility;
+            # -an drops audio (GIFs have none, and silent video autoplays like a GIF).
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", path,
+                 "-movflags", "faststart", "-pix_fmt", "yuv420p",
+                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-an", out],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            if proc.returncode == 0 and os.path.isfile(out):
+                return out
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud gif->mp4 conversion failed", exc_info=True)
+        return None
+
     def send_media(self, chat_id: str, kind: str, path_or_url: str, *,
                    caption: str = "", filename=None) -> SendResult:
-        # Cloud API accepts either an uploaded media id or a public link. We use
-        # ``link`` here; uploading local files to /media (to get a media id) is
-        # a later concern — see media-cache TODO in parse_inbound (P16).
+        """Send media via the Cloud API.
+
+        Accepts EITHER a public URL (sent as ``link``) OR a LOCAL file path — the
+        core hands the provider a local ``statics/...`` path (the same contract GOWA
+        gets), so a local file is uploaded to ``/media`` first and sent by its
+        ``id``. Sending a local path as ``link`` is what produced the
+        ``(#100) ... is not a valid URI`` error.
+
+        GIF (decision: animate as video): a local ``.gif`` is converted to MP4 and
+        sent as ``video`` when ffmpeg is available; otherwise it degrades to a
+        document (delivered, not animated).
+        """
         kind = (kind or "").lower()
+        is_local = self._is_local_file(path_or_url)
+
+        # GIF → video (animated) when we can convert; else send as a document.
+        # Only auto-animate on the IMAGE path: if the operator explicitly attached
+        # the .gif as a DOCUMENT, respect that and send the file as-is.
+        is_gif = kind in ("image", "gif") and (
+            kind == "gif"
+            or (path_or_url or "").lower().endswith(".gif")
+            or (mimetypes.guess_type(path_or_url)[0] or "") == "image/gif"
+        )
+        upload_path = path_or_url
+        cleanup_path: Optional[str] = None
+        if is_gif:
+            mp4 = self._gif_to_mp4(path_or_url) if is_local else None
+            if mp4:
+                kind, upload_path, cleanup_path = "video", mp4, mp4
+            else:
+                kind = "document"  # cannot animate without conversion → deliver as file
+
+        # Resolve a local path to a media id (upload); keep public URLs as a link.
+        if is_local:
+            media_id = self.upload_media(upload_path)
+            if cleanup_path:
+                try:
+                    os.remove(cleanup_path)
+                except OSError:
+                    pass
+            if not media_id:
+                return SendResult(ok=False, error="media_upload_failed")
+            media_ref = {"id": media_id}
+        else:
+            media_ref = {"link": path_or_url}
+
         if kind == "image":
             mtype = "image"
-            media_obj: dict = {"link": path_or_url}
+            media_obj: dict = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
         elif kind in ("audio", "voice"):
             mtype = "audio"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
         elif kind == "video":
             mtype = "video"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
         elif kind == "sticker":
             mtype = "sticker"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
         else:
             mtype = "document"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
-            if filename:
-                media_obj["filename"] = filename
+            # Documents keep a human filename; fall back to the local file's name.
+            doc_name = filename or (os.path.basename(path_or_url) if is_local else None)
+            if doc_name:
+                media_obj["filename"] = doc_name
         payload = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
@@ -484,8 +603,8 @@ class WhatsAppCloudChannel(Channel):
           * one ``kind="receipt"`` event per ``statuses[]`` item
 
         Media (image/audio/document/video/sticker) is recorded with its Cloud
-        API ``media id`` in ``media_extras`` — the actual download + cache to
-        ``statics/media/`` is P16 and intentionally NOT done here (see TODO).
+        API ``media id`` in ``media_extras``; the core's inbound resolver then
+        downloads + caches it to ``statics/media/`` via :meth:`download_media`.
         """
         events: list[InboundEvent] = []
         if not isinstance(raw, dict):
@@ -561,16 +680,16 @@ class WhatsAppCloudChannel(Channel):
         elif msg_type in ("image", "audio", "video", "document", "sticker", "voice"):
             media_type = "audio" if msg_type == "voice" else msg_type
             obj = msg.get(msg_type) or {}
-            # Record the Cloud API media id so a later phase (P16) can download
-            # it via GET /{media_id} + the returned URL and cache to
-            # statics/media/. TODO(P16): resolve media_id → bytes → media_path.
+            # Record the Cloud API media id; the core's inbound media resolver
+            # (server/routes/webhook.py _resolve_inbound_media) calls
+            # :meth:`download_media` to fetch + cache it into statics/media/ and
+            # fills media_path. We only carry the id/metadata here.
             media_extras = {
                 "media_id": obj.get("id"),
                 "mime_type": obj.get("mime_type"),
                 "sha256": obj.get("sha256"),
                 "filename": obj.get("filename"),
                 "voice": obj.get("voice"),
-                "_todo": "download media via Graph /{media_id} and cache (P16)",
             }
             caption = obj.get("caption")
             if caption:
@@ -624,7 +743,7 @@ class WhatsAppCloudChannel(Channel):
             is_group=False,            # Cloud API is 1:1 only
             text=text,
             media_type=media_type,
-            media_path=None,           # filled by the media-cache phase (P16)
+            media_path=None,           # filled by the core inbound media resolver
             media_extras=media_extras,
             ts=ts,
             raw=msg,

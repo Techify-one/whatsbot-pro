@@ -107,6 +107,34 @@ def get_last(contact_id: int) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def last_inbound_ts(*, conversation_id: int | None = None,
+                    contact_id: int | None = None) -> float | None:
+    """Timestamp of the most recent INBOUND (role='user') message.
+
+    Scoped to a conversation when ``conversation_id`` is given (conversa-cêntrico —
+    one 24h window per channel), else to the whole contact. Drives the WhatsApp
+    Cloud 24h free-text window (``channels.outbound.session_open``). Returns None
+    when there is no inbound yet (windowed channels then treat the window as closed).
+
+    NOTE: counts only role='user' rows. An inbound *reaction* doesn't create such a
+    row (it mutates the target message's ``reactions`` column), so a reaction alone
+    won't reopen the window here — the operator falls back to a template, which is
+    the safe failure. Acceptable: a reaction is normally preceded by a real message.
+    """
+    if conversation_id is not None:
+        cond = (messages.c.role == "user") & (messages.c.conversation_id == conversation_id)
+    elif contact_id is not None:
+        cond = (messages.c.role == "user") & (messages.c.contact_id == contact_id)
+    else:
+        return None
+    with get_engine().connect() as conn:
+        ts = conn.execute(
+            select(messages.c.ts).where(cond)
+            .order_by(messages.c.ts.desc()).limit(1)
+        ).scalar_one_or_none()
+    return float(ts) if ts is not None else None
+
+
 def get_last_user_message(contact_id: int) -> dict | None:
     """Return the most recent user message (for updating with transcription etc)."""
     with get_engine().connect() as conn:
