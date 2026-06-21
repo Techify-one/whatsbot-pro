@@ -3157,6 +3157,111 @@ check("delete_template -> ok", _dres.get("ok") is True)
 check("delete_template -> chamou DELETE com name",
       _fwc_del.calls[-1][0] == "delete" and _fwc_del.calls[-1][2] == {"name": "pedido_ok"})
 
+# ═══════════════════════════════════════════════════════════════════
+#  WhatsApp Cloud — media upload (P1) + janela 24h no envio (P3)
+# ═══════════════════════════════════════════════════════════════════
+section("WhatsApp Cloud — upload de mídia (P1) + gate janela 24h (P3)")
+
+# A local file written by the panel must be UPLOADED to /media and sent by id —
+# sending the local path as `link` is what produced (#100) not a valid URI.
+_media_tmp = os.path.join(_tmpdir, "outbox_img.png")
+with open(_media_tmp, "wb") as _mf:
+    _mf.write(b"\x89PNG\r\n\x1a\nFAKEDATA")
+
+
+class _FakeMediaClient:
+    def __init__(self):
+        self.upload_calls = []
+        self.msg_calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def post(self, url, headers=None, json=None, data=None, files=None):
+        if files is not None:                       # multipart upload to /media
+            self.upload_calls.append({"url": url, "data": data})
+            return _Resp(200, {"id": "MEDIA_XYZ"})
+        self.msg_calls.append({"url": url, "json": json})  # JSON message send
+        return _Resp(200, {"messages": [{"id": "wamid.OUT"}]})
+
+
+_fmc = _FakeMediaClient()
+_wac.httpx.Client = lambda *a, **k: _fmc
+try:
+    _chm = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "access_token": "TOK", "phone_number_id": "PN"})
+    _mres = _chm.send_media("5511", "image", _media_tmp, caption="oi")
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("send_media(local) -> ok + external id", _mres.ok and _mres.external_msg_id == "wamid.OUT")
+check("send_media(local) -> upload em /{phone_id}/media",
+      bool(_fmc.upload_calls) and _fmc.upload_calls[-1]["url"].endswith("/PN/media"))
+check("send_media(local) -> upload com messaging_product=whatsapp",
+      _fmc.upload_calls[-1]["data"].get("messaging_product") == "whatsapp")
+check("send_media(local) -> mensagem usa media id, não link",
+      _fmc.msg_calls[-1]["json"]["image"].get("id") == "MEDIA_XYZ"
+      and "link" not in _fmc.msg_calls[-1]["json"]["image"])
+check("send_media(local) -> caption preservado",
+      _fmc.msg_calls[-1]["json"]["image"].get("caption") == "oi")
+
+# A public URL is sent as link (no upload).
+_fmc2 = _FakeMediaClient()
+_wac.httpx.Client = lambda *a, **k: _fmc2
+try:
+    _chu = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "access_token": "TOK", "phone_number_id": "PN"})
+    _chu.send_media("5511", "image", "https://pub.example/x.jpg")
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("send_media(url pública) -> sem upload, usa link",
+      not _fmc2.upload_calls
+      and _fmc2.msg_calls[-1]["json"]["image"].get("link") == "https://pub.example/x.jpg")
+
+
+# Upload failure surfaces a clean SendResult error (never an invalid link).
+class _FailUploadClient(_FakeMediaClient):
+    def post(self, url, headers=None, json=None, data=None, files=None):
+        if files is not None:
+            return _Resp(400, {"error": {"message": "bad media"}})
+        return _Resp(200, {"messages": [{"id": "x"}]})
+
+
+_ffu = _FailUploadClient()
+_wac.httpx.Client = lambda *a, **k: _ffu
+try:
+    _chf = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+        "access_token": "TOK", "phone_number_id": "PN"})
+    _fres = _chf.send_media("5511", "image", _media_tmp)
+finally:
+    _wac.httpx.Client = _orig_httpx_client
+check("send_media(local) upload falha -> ok=False media_upload_failed",
+      _fres.ok is False and _fres.error == "media_upload_failed")
+
+# ── 24h send gate on the operator routes (P3) ──
+from db.repositories import conversation_repo as _cr_gate
+_gate_conv = _cr_gate.get_with_channel(_tpl_conv["id"])  # cloud_test, window=24h
+_gate_phone = _gate_conv["contact_phone"]
+
+r = client.post(f"/api/contacts/{_gate_phone}/send",
+                json={"message": "fora da janela", "conversation_id": _tpl_conv["id"]})
+check("send (cloud sem inbound recente) -> 409 janela 24h", r.status_code == 409)
+check("send (cloud fora da janela) -> reason session_window_closed",
+      (r.json().get("data") or {}).get("reason") == "session_window_closed")
+
+# A recent inbound reopens the 24h window -> free text allowed again.
+_sn_msg_repo.add(_gate_conv["contact_id"], "user", "oi de novo",
+                 conversation_id=_tpl_conv["id"], ts=time.time())
+r = client.post(f"/api/contacts/{_gate_phone}/send",
+                json={"message": "agora vai", "conversation_id": _tpl_conv["id"]})
+check("send (cloud com inbound recente) -> 200 dentro da janela", r.status_code == 200)
+
+# GOWA (session_window_hours=0) is never gated.
+r = client.post("/api/contacts/5511999990001/send", json={"message": "gowa livre"})
+check("send (gowa) -> não bloqueado pela janela 24h", r.status_code == 200)
+
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")
 print(f"{'='*60}")
