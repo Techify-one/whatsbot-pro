@@ -604,18 +604,49 @@ r = client.put("/api/contacts/5511999990001/info", json={
     "email": "alice_new@test.com",
     "profession": "Senior Engineer",
     "company": "NewCo",
+    "address": "Rua das Flores, 123 - Centro",
     "observations": ["VIP client", "Prefers morning calls"],
 })
 check("PUT /info -> 200", r.status_code == 200)
 info = r.json()["data"]
 check("PUT /info -> name updated", info.get("name") == "Alice Updated")
 check("PUT /info -> email updated", info.get("email") == "alice_new@test.com")
+check("PUT /info -> address updated", info.get("address") == "Rua das Flores, 123 - Centro")
 
 # Verify persistence
 r = client.get("/api/contacts/5511999990001")
 data = r.json()["data"]
 check("PUT /info -> persisted name", data["name"] == "Alice Updated")
-check("PUT /info -> persisted observations", len(data.get("info", {}).get("observations", [])) == 2)
+check("PUT /info -> persisted address (top-level)", data.get("address") == "Rua das Flores, 123 - Centro")
+check("PUT /info -> persisted address (info)",
+      data.get("info", {}).get("address") == "Rua das Flores, 123 - Centro")
+# Observations are a full replace — assert exact content, not just length
+check("PUT /info -> persisted observations (content)",
+      set(data.get("info", {}).get("observations", [])) == {"VIP client", "Prefers morning calls"})
+
+# Clearing a scalar field: an empty string is an intentional clear (replace semantics)
+r = client.put("/api/contacts/5511999990001/info", json={"company": ""})
+check("PUT /info (clear company) -> 200", r.status_code == 200)
+r = client.get("/api/contacts/5511999990001")
+data = r.json()["data"]
+check("PUT /info -> company cleared", (data.get("company") or "") == "")
+# A partial body must NOT wipe untouched fields
+check("PUT /info -> address untouched after partial PUT",
+      data.get("address") == "Rua das Flores, 123 - Centro")
+
+# Whitespace-only observation is filtered out (route + repo both strip blanks)
+r = client.put("/api/contacts/5511999990001/info", json={"observations": ["Boa", "   "]})
+check("PUT /info (obs whitespace) -> 200", r.status_code == 200)
+r = client.get("/api/contacts/5511999990001")
+check("PUT /info -> only non-blank observation kept",
+      r.json()["data"].get("info", {}).get("observations", []) == ["Boa"])
+
+# Error contract: a failure must carry a non-empty error string (bug #3, backend half)
+r = client.put("/api/contacts/5511999990001/info", json={"custom_attributes": "notadict"})
+_e = r.json()
+check("PUT /info (invalid custom_attributes) -> ok False", _e.get("ok") is False)
+check("PUT /info (invalid) -> error is non-empty str",
+      isinstance(_e.get("error"), str) and _e.get("error") != "")
 
 # ═══════════════════════════════════════════════════════════════════
 #  15. Tags
@@ -659,9 +690,27 @@ r = client.put("/api/contacts/5511999990001/tags", json={"tags": ["vip", "lead"]
 check("PUT /contacts/{phone}/tags -> 200", r.status_code == 200)
 check("PUT /contacts/{phone}/tags -> set", set(r.json()["data"]["tags"]) == {"vip", "lead"})
 
+# A new global tag links once it exists — the backend contract the panel relies
+# on (create-before-link). set_contact_tags only links names present in `tags`.
+client.post("/api/tags", json={"name": "novatag", "color": "#123456"})
+client.put("/api/contacts/5511999990001/tags", json={"tags": ["vip", "lead", "novatag"]})
+r = client.get("/api/contacts/5511999990001")
+check("PUT /tags (new global tag) -> persisted", "novatag" in r.json()["data"].get("tags", []))
+
+# A name that doesn't exist globally is silently dropped (not persisted) — this
+# is why the panel must create the tag first instead of sending a raw name.
+client.put("/api/contacts/5511999990001/tags", json={"tags": ["vip", "naoexiste"]})
+r = client.get("/api/contacts/5511999990001")
+check("PUT /tags (unknown name) -> not persisted", "naoexiste" not in r.json()["data"].get("tags", []))
+check("PUT /tags (unknown name) -> known tag still persisted", "vip" in r.json()["data"].get("tags", []))
+
 # Non-existent contact (use different number not auto-created elsewhere)
 r = client.put("/api/contacts/9999999999/tags", json={"tags": ["vip"]})
 check("PUT /contacts/9999/tags -> 404", r.status_code == 404)
+# Error contract on a real failure path (the panel surfaces res.error): a failure
+# must carry ok:False + a non-empty error string.
+check("PUT /tags (404) -> ok False + non-empty error",
+      r.json().get("ok") is False and isinstance(r.json().get("error"), str) and r.json().get("error") != "")
 
 # ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
@@ -766,6 +815,14 @@ r = client.get(f"/api/contacts/{_caphone}")
 _ca = r.json()["data"].get("custom_attributes", {})
 check("GET /contacts -> custom_attributes.plano == premium", _ca.get("plano") == "premium")
 check("GET /contacts -> custom_attributes.vip == True (bool)", _ca.get("vip") is True)
+
+# Clearing a custom attribute: an explicit null removes the key (bug #5)
+r = client.put(f"/api/contacts/{_caphone}/info", json={"custom_attributes": {"vip": None}})
+check("PUT /info (clear custom attr via null) -> 200", r.status_code == 200)
+r = client.get(f"/api/contacts/{_caphone}")
+_ca2 = r.json()["data"].get("custom_attributes", {})
+check("PUT /info -> custom attr 'vip' removed", "vip" not in _ca2)
+check("PUT /info -> other custom attr 'plano' kept", _ca2.get("plano") == "premium")
 
 # Invalid value for list rejected
 r = client.put(f"/api/contacts/{_caphone}/info", json={"custom_attributes": {"plano": "enterprise"}})

@@ -389,6 +389,26 @@ class ContactMemory:
             self.info.setdefault("observations", []).append(observation)
             contact_repo.add_observation(self.id, observation)
 
+    def set_info_fields(self, fields: dict) -> None:
+        """Replace scalar contact fields from an explicit human edit (panel).
+
+        Unlike ``update_info`` (LLM auto-fill, which only overwrites non-empty
+        values), this writes every provided key UNCONDITIONALLY — an empty
+        string is treated as an intentional clear. Only known scalar columns
+        are accepted; keys absent from ``fields`` are left untouched.
+        """
+        allowed = ("name", "email", "profession", "company", "address")
+        # These columns are NOT NULL (server_default ""), so coerce a JSON null
+        # to the empty-string clear — matching the custom_attributes None path
+        # and avoiding an IntegrityError from a non-panel caller sending null.
+        to_write = {k: ("" if fields[k] is None else fields[k])
+                    for k in allowed if k in fields}
+        if not to_write:
+            return
+        for key, val in to_write.items():
+            self.info[key] = val
+        contact_repo.update(self.id, **to_write)
+
     def add_usage(self, call_type: str, model: str,
                   prompt_tokens: int, completion_tokens: int,
                   total_tokens: int, cost_usd: float) -> None:

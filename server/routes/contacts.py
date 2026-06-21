@@ -1148,8 +1148,12 @@ def register_routes(app, deps):
 
     @app.put("/api/contacts/{phone}/info")
     async def update_contact_info(phone: str, body: dict, request: Request):
-        """Update contact info fields (name, email, profession, company, observations,
-        plus custom_attributes — plano 05)."""
+        """Update contact info fields (name, email, profession, company, address,
+        observations, plus custom_attributes — plano 05).
+
+        Scalar fields use replace semantics (an empty string clears the field);
+        a custom_attribute sent as null is removed. This is an explicit human
+        edit, distinct from the LLM auto-fill path (ContactMemory.update_info)."""
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
@@ -1165,6 +1169,9 @@ def register_routes(app, deps):
                 definition = defs.get(key)
                 if definition is None:
                     return _err(f"Atributo '{key}' não existe.", 400)  # P50
+                if value is None:
+                    valid_partial[key] = None  # explicit clear → set_values pops it
+                    continue
                 norm, err = validate_value(definition, value)
                 if err:
                     return _err(err)
@@ -1175,13 +1182,14 @@ def register_routes(app, deps):
         def _update():
             nonlocal result_attrs
             contact = agent_handler._get_contact(phone)
-            # Update scalar fields via update_info
-            contact.update_info(
-                name=body.get("name", ""),
-                email=body.get("email", ""),
-                profession=body.get("profession", ""),
-                company=body.get("company", ""),
-            )
+            # Scalar fields: explicit human edit → replace semantics (an empty
+            # string clears the field). Only keys actually present in the body
+            # are written, so an absent field is left untouched while "" is an
+            # intentional clear. Distinct from update_info (LLM merge).
+            scalar_keys = ("name", "email", "profession", "company", "address")
+            scalar_fields = {k: body[k] for k in scalar_keys if k in body}
+            if scalar_fields:
+                contact.set_info_fields(scalar_fields)
             # Observations: replace entire list (update_info only appends)
             if "observations" in body:
                 new_obs = [

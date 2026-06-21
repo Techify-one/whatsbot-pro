@@ -22,6 +22,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
   const [newObs, setNewObs] = useState('');
 
   // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
@@ -131,16 +132,62 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
 
   async function handleSave() {
     setSaving(true);
+    setError(null);
     try {
+      // Flush observation text the user typed but didn't commit (Enter / +).
+      const pendingObs = newObs.trim();
+      const observations = pendingObs && !form.observations.includes(pendingObs)
+        ? [...form.observations, pendingObs]
+        : form.observations;
+
+      // Flush pending tag text. If it matches an existing global tag, add it;
+      // if it's a new name, create the global tag first — otherwise the backend
+      // silently drops names that don't exist in the tags table.
+      let finalTags = tags;
+      const pendingTag = tagSearch.trim();
+      if (pendingTag) {
+        const existing = Object.keys(globalTags || {}).find(
+          n => n.toLowerCase() === pendingTag.toLowerCase()
+        );
+        if (existing) {
+          if (!finalTags.includes(existing)) finalTags = [...finalTags, existing];
+        } else {
+          const created = await createTag(pendingTag, TAG_COLORS[0]);
+          if (created.ok) {
+            onGlobalTagsChange(prev => ({ ...prev, [pendingTag]: { color: TAG_COLORS[0] } }));
+          }
+          // A failed create is almost always "tag already exists" (stale
+          // globalTags map) — link it anyway instead of aborting the whole
+          // save. set_contact_tags only links names that exist, so a genuinely
+          // unknown name is dropped without losing the rest of the edits.
+          if (!finalTags.includes(pendingTag)) finalTags = [...finalTags, pendingTag];
+        }
+      }
+
       const [infoRes, tagsRes] = await Promise.all([
-        updateContactInfo(phone, { ...form, custom_attributes: customValues }),
-        updateContactTags(phone, tags),
+        updateContactInfo(phone, { ...form, observations, custom_attributes: customValues }),
+        updateContactTags(phone, finalTags),
       ]);
-      if (infoRes.ok) {
-        onSave(infoRes.data, tagsRes.ok ? tagsRes.data.tags : tags);
+
+      if (infoRes.ok && tagsRes.ok) {
+        // Reflect the flushed pending input and clear the editors. Use the
+        // server-authoritative tag list so local state matches what persisted.
+        const savedTags = tagsRes.data.tags;
+        setForm(prev => ({ ...prev, observations }));
+        setTags(savedTags);
+        setNewObs('');
+        setTagSearch('');
+        onSave(infoRes.data, savedTags);
+      } else {
+        setError(
+          (!infoRes.ok && infoRes.error) ||
+          (!tagsRes.ok && tagsRes.error) ||
+          'Falha ao salvar. Tente novamente.'
+        );
       }
     } catch (err) {
       console.error('Failed to save contact info:', err);
+      setError('Falha ao salvar. Tente novamente.');
     }
     setSaving(false);
   }
@@ -337,7 +384,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                       value=${customValues[def.attribute_key]}
                       onChange=${(v) => setCustomValues(prev => {
                         const next = { ...prev };
-                        if (v === null || v === undefined || v === '') delete next[def.attribute_key];
+                        // Send an explicit null on clear so the backend removes
+                        // the key (set_values pops on None); deleting it here
+                        // would leave the stored value untouched (merge).
+                        if (v === null || v === undefined || v === '') next[def.attribute_key] = null;
                         else next[def.attribute_key] = v;
                         return next;
                       })}
@@ -390,6 +440,11 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
 
         <!-- Save button -->
         <div class="px-6 py-4 bg-wa-panel border-t border-wa-border shrink-0">
+          ${error ? html`
+            <div class="mb-2 text-[13px] text-red-600 bg-red-50 border border-red-200 rounded-[8px] px-3 py-2">
+              ${error}
+            </div>
+          ` : null}
           <button
             onClick=${handleSave}
             disabled=${saving}
