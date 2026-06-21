@@ -116,6 +116,7 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
   const [jidTypes, setJidTypes] = useState(DEFAULT_JID_TYPES);
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [wabaId, setWabaId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [botToken, setBotToken] = useState('');
@@ -151,6 +152,7 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
       if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
+      if (wabaId.trim()) credentials.waba_id = wabaId.trim();
       if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
       if (appSecret.trim()) credentials.app_secret = appSecret.trim();
       if (Object.keys(credentials).length) payload.credentials = credentials;
@@ -225,6 +227,15 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="text" placeholder="ID do número (Meta)" value=${phoneNumberId}
               onInput=${(e) => setPhoneNumberId(e.target.value)} />
+          </div>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">WABA ID <span class="text-wa-secondary">(para templates)</span></label>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              type="text" placeholder="WhatsApp Business Account ID" value=${wabaId}
+              onInput=${(e) => setWabaId(e.target.value)} />
+            <div class="text-[12px] text-wa-secondary mt-1">
+              Necessário para listar e criar templates (HSM). Em WhatsApp Manager → Configurações da conta. Diferente do Phone Number ID.
+            </div>
           </div>
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">Verify Token</label>
@@ -582,6 +593,8 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
   const [appSecret, setAppSecret] = useState('');
+  // WABA ID is NOT a secret (returned in clear), so it is pre-filled and editable.
+  const [wabaId, setWabaId] = useState((channel.credentials && channel.credentials.waba_id) || '');
 
   const [users, setUsers] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -619,6 +632,7 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
       if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
+      if (wabaId.trim()) credentials.waba_id = wabaId.trim();
       if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
       if (appSecret.trim()) credentials.app_secret = appSecret.trim();
       if (Object.keys(credentials).length) payload.credentials = credentials;
@@ -665,7 +679,14 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
 
           ${isCloud ? html`
             <div class="border-t border-wa-border pt-3">
-              <div class="text-[12px] text-wa-secondary mb-2">Credenciais — deixe em branco para manter a atual.</div>
+              <label class="block text-[12px] text-wa-secondary mb-1">WABA ID <span class="text-wa-secondary">(para templates)</span></label>
+              <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="text"
+                placeholder="WhatsApp Business Account ID" value=${wabaId}
+                onInput=${(e) => setWabaId(e.target.value)} />
+              <div class="text-[12px] text-wa-secondary mt-1 mb-3">
+                Necessário para listar e criar templates (HSM). Diferente do Phone Number ID.
+              </div>
+              <div class="text-[12px] text-wa-secondary mb-2">Demais credenciais — deixe em branco para manter a atual.</div>
               <div class="flex flex-col gap-2">
                 <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="password"
                   placeholder="Access Token (manter)" value=${accessToken}
