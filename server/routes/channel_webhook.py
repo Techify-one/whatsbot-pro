@@ -276,6 +276,25 @@ def register_routes(app, deps):
             except Exception:
                 pass
 
+        # GOWA delivers every device's inbound to the SAME webhook URL (launched as
+        # .../gowa/default), so the URL's channel_id can't tell which number received
+        # the message. Resolve the real channel from the GOWA v8 envelope (top-level
+        # ``device_id`` = receiving JID, ``session_id`` = registered device string) so
+        # a 2nd GOWA number lands in its own inbox/conversation and replies go out its
+        # own device. Best-effort: only override when it maps to a DIFFERENT live
+        # channel; otherwise keep the URL channel (legacy behaviour) — never worse.
+        if provider == "gowa":
+            sess = raw.get("session_id") or (raw.get("payload") or {}).get("session_id")
+            djid = raw.get("device_id") or (raw.get("payload") or {}).get("device_id")
+            resolved = await asyncio.to_thread(
+                channel_repo.get_gowa_channel_for_device, sess, djid)
+            if (resolved and resolved != channel_id
+                    and registry is not None and registry.get(resolved) is not None):
+                logger.info("[Webhook gowa] inbound routed by device to channel %r "
+                            "(url=%r, session_id=%r, device_id=%r)",
+                            resolved, channel_id, sess, djid)
+                channel_id = resolved
+
         row = channel_repo.get(channel_id)
         if row is None:
             # Unknown channel: ack 200 (avoid retries) but record nothing useful.
