@@ -5,6 +5,7 @@ import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
 import { Conversations } from './components/Conversations.js';
+import { Attendances } from './components/attendances/Attendances.js';
 import ChannelsManager from './components/ChannelsManager.js';
 import { CostsDashboard } from './components/CostsDashboard.js';
 import { Executions } from './components/Executions.js';
@@ -48,6 +49,7 @@ const html = htm.bind(h);
 const CORE_ROUTES = {
   '/': 'contacts',
   '/conversations': 'conversations',
+  '/atendimentos': 'attendances',
   '/channels': 'channels',
   '/painel': 'dashboard',
   '/sandbox': 'sandbox',
@@ -64,6 +66,7 @@ const CORE_ROUTES = {
 const CORE_TAB_PATHS = {
   contacts: '/',
   conversations: '/conversations',
+  attendances: '/atendimentos',
   channels: '/channels',
   dashboard: '/painel',
   sandbox: '/sandbox',
@@ -203,6 +206,9 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} gated=${can('conversation.read')} active=${tab === 'conversations'} href=${CORE_TAB_PATHS.conversations} onClick=${() => { onTabChange('conversations'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>`}
           >Conversas</${MenuItem}>
+          <${MenuItem} gated=${can('conversation.read')} active=${tab === 'attendances'} href=${CORE_TAB_PATHS.attendances} onClick=${() => { onTabChange('attendances'); close(); }}
+            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 5h6v6H4V5zm0 8h6v6H4v-6zm8-8h8v6h-8V5zm0 8h8v6h-8v-6z"/></svg>`}
+          >Atendimentos</${MenuItem}>
           <${MenuItem} gated=${can('channel.manage')} active=${tab === 'channels'} href=${CORE_TAB_PATHS.channels} onClick=${() => { onTabChange('channels'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 1a9 9 0 0 0-9 9v7a3 3 0 0 0 3 3h2v-8H5v-2a7 7 0 0 1 14 0v2h-3v8h2a3 3 0 0 0 3-3v-7a9 9 0 0 0-9-9z"/></svg>`}
           >Canais</${MenuItem}>
@@ -669,6 +675,11 @@ function App({ onLogout, hasPassword, currentUser }) {
                       ? html`<div class="max-w-5xl mx-auto p-4">
                           <${PageHeader} title="Conversas" onBack=${() => setTab('contacts')} />
                           <${Conversations} />
+                        </div>`
+                    : tab === 'attendances'
+                      ? html`<div class="mx-auto p-4 max-w-none">
+                          <${PageHeader} title="Atendimentos" onBack=${() => setTab('contacts')} />
+                          <${Attendances} />
                         </div>`
                       : tab === 'channels'
                         ? html`<div class="max-w-5xl mx-auto p-4">

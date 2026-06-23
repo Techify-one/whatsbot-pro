@@ -9,7 +9,7 @@ import logging
 
 from fastapi import Request
 
-from db.repositories import user_repo, rbac_repo
+from db.repositories import user_repo, rbac_repo, inbox_repo, inbox_member_repo
 from server.auth import hash_password_argon2
 from server.authz import permission_denied
 from server.permissions import PERMISSION_CATALOG, ROLE_LABELS, ALL_PERMISSION_KEYS
@@ -38,6 +38,11 @@ def register_routes(app, deps):
         if denied:
             return denied
         users = await asyncio.to_thread(user_repo.list_all)
+        # Enriquece com as inboxes (caixas de entrada) de cada usuário — pré-preenche
+        # a seção "Caixas de entrada" do editor e permite mostrar no card.
+        by_user = await asyncio.to_thread(inbox_member_repo.inbox_ids_by_user)
+        for u in users:
+            u["inbox_ids"] = by_user.get(u.get("id"), [])
         return _ok({"users": users})
 
     @app.get("/api/roles")
@@ -48,9 +53,13 @@ def register_routes(app, deps):
         roles = await asyncio.to_thread(rbac_repo.list_roles_with_permissions)
         for r in roles:
             r["label"] = ROLE_LABELS.get(r["key"], r["name"])
+        # Catálogo de inboxes p/ a seção "Caixas de entrada" da tela de usuários
+        # (servido aqui, gated por users.manage, evitando acoplar com inbox.manage).
+        inboxes = await asyncio.to_thread(inbox_repo.list_all)
         return _ok({
             "roles": roles,
             "permissions": [{"key": k, "description": d} for k, d in PERMISSION_CATALOG],
+            "inboxes": inboxes,
         })
 
     @app.post("/api/users")
@@ -74,7 +83,7 @@ def register_routes(app, deps):
             valid_roles = await asyncio.to_thread(_valid_role_keys)
             roles = [r for r in (body.get("roles") or []) if r in valid_roles]
             if not roles:
-                return _err("Selecione ao menos um papel.", status=400)
+                return _err("Selecione ao menos um grupo de permissão.", status=400)
         if await asyncio.to_thread(user_repo.get_by_email, email):
             return _err("Já existe um usuário com esse email.", status=409)
         phc = hash_password_argon2(password)
@@ -87,6 +96,10 @@ def register_routes(app, deps):
             user = await asyncio.to_thread(
                 user_repo.create, email=email, name=name, password_hash=phc, role_keys=roles)
             logger.info("User created: %s (roles=%s).", email, roles)
+        # Caixas de entrada (inbox_members): opcional no body — atribui após criar.
+        if isinstance(body.get("inbox_ids"), list):
+            user["inbox_ids"] = await asyncio.to_thread(
+                inbox_member_repo.set_inboxes_for_user, user["id"], body["inbox_ids"])
         return _ok({"user": user})
 
     @app.put("/api/users/{user_id}")
@@ -134,10 +147,17 @@ def register_routes(app, deps):
                 valid_roles = await asyncio.to_thread(_valid_role_keys)
                 valid = [r for r in (roles or []) if r in valid_roles]
                 if not valid:
-                    return _err("Selecione ao menos um papel.", status=400)
+                    return _err("Selecione ao menos um grupo de permissão.", status=400)
                 await asyncio.to_thread(user_repo.clear_custom_permissions, user_id, valid)
 
+        # Caixas de entrada (inbox_members): substitui o conjunto se vier no body.
+        if isinstance(body.get("inbox_ids"), list):
+            await asyncio.to_thread(
+                inbox_member_repo.set_inboxes_for_user, user_id, body["inbox_ids"])
+
         user = await asyncio.to_thread(user_repo.get, user_id)
+        user["inbox_ids"] = await asyncio.to_thread(
+            inbox_member_repo.inbox_ids_for_user, user_id)
         return _ok({"user": user})
 
     @app.post("/api/users/{user_id}/password")
