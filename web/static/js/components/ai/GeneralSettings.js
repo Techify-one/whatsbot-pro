@@ -1,9 +1,9 @@
-// AI Engine — "Configurações" tab (plano 20). Holds the GLOBAL AI settings:
-// automação (responder mensagens, IA padrão p/ novos contatos, resposta em
-// grupos), chave de API, transcrição de mídia (imagem/documento/áudio) e o
-// comportamento das respostas (contexto, agrupamento, mensagens picadas, alerta
-// de transferência, aviso de saldo). O PROMPT e o MODELO são definidos POR AGENTE
-// na aba "Agentes" (o agente padrão é o global) — não ficam mais aqui.
+// AI Engine — "Configurações" tab. Holds the GLOBAL AI settings ONLY:
+// o interruptor GLOBAL de ligar/desligar a IA (checado ANTES de tudo), a chave de
+// API e o aviso de saldo. TODO o resto (automação por contato, resposta em grupos,
+// transcrição, contexto, agrupamento, mensagens picadas, alerta de transferência)
+// é configurado POR CANAL na tela "Canais" (plano 21). O PROMPT e o MODELO são
+// definidos por agente na aba "Agentes".
 // Self-contained: loads via getConfig() and persists via saveConfig() (partial
 // PUT — only sends the keys it owns, so the Painel keeps owning the rest).
 
@@ -16,48 +16,24 @@ const html = htm.bind(h);
 
 export default function GeneralSettings() {
   const [config, setConfig] = useState(null);
-  // Automação
+  // Interruptor GLOBAL da IA (checado antes do toggle por canal e por conversa).
   const [autoReply, setAutoReply] = useState(true);
-  const [defaultAiEnabled, setDefaultAiEnabled] = useState(true);
-  const [groupReplyMode, setGroupReplyMode] = useState('mention_only');
-  // API + transcrição
+  // API
   const [apiKey, setApiKey] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
-  const [imageTranscriptionEnabled, setImageTranscriptionEnabled] = useState(true);
-  const [documentTranscriptionEnabled, setDocumentTranscriptionEnabled] = useState(true);
-  const [audioTranscriptionMode, setAudioTranscriptionMode] = useState('received');
-  const [audioTranscriptionTarget, setAudioTranscriptionTarget] = useState('private');
-  const [audioTranscriptionChatPrefix, setAudioTranscriptionChatPrefix] = useState('');
-  // Comportamento
-  const [maxContext, setMaxContext] = useState(10);
-  const [batchDelay, setBatchDelay] = useState(3);
-  const [splitMessages, setSplitMessages] = useState(true);
-  const [splitDelay, setSplitDelay] = useState(2);
-  const [transferAlertEnabled, setTransferAlertEnabled] = useState(true);
-  const [transferAlertDuration, setTransferAlertDuration] = useState(5);
+  // Saldo
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState('');
+  // Modal de confirmação ao DESLIGAR o interruptor global.
+  const [confirmOff, setConfirmOff] = useState(false);
 
   function populate(cfg) {
     setAutoReply(cfg.auto_reply ?? true);
-    setDefaultAiEnabled(cfg.default_ai_enabled ?? true);
-    setGroupReplyMode(cfg.group_reply_mode ?? 'mention_only');
-    setImageTranscriptionEnabled(cfg.image_transcription_enabled ?? true);
-    setDocumentTranscriptionEnabled(cfg.document_transcription_enabled ?? true);
-    setAudioTranscriptionMode(cfg.audio_transcription_mode ?? 'received');
-    setAudioTranscriptionTarget(cfg.audio_transcription_target ?? 'private');
-    setAudioTranscriptionChatPrefix(cfg.audio_transcription_chat_prefix ?? '');
-    setMaxContext(cfg.max_context_messages ?? 10);
-    setBatchDelay(cfg.message_batch_delay ?? 3);
-    setSplitMessages(cfg.split_messages ?? true);
-    setSplitDelay(cfg.split_message_delay ?? 2);
-    setTransferAlertEnabled(cfg.transfer_alert_enabled ?? true);
-    setTransferAlertDuration(cfg.transfer_alert_duration ?? 5);
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
   }
@@ -105,19 +81,6 @@ export default function GeneralSettings() {
     setError('');
     const data = {
       auto_reply: autoReply,
-      default_ai_enabled: defaultAiEnabled,
-      group_reply_mode: groupReplyMode,
-      image_transcription_enabled: imageTranscriptionEnabled,
-      document_transcription_enabled: documentTranscriptionEnabled,
-      audio_transcription_mode: audioTranscriptionMode,
-      audio_transcription_target: audioTranscriptionTarget,
-      audio_transcription_chat_prefix: audioTranscriptionChatPrefix,
-      max_context_messages: parseInt(maxContext, 10) || 10,
-      message_batch_delay: isNaN(parseFloat(batchDelay)) ? 0 : parseFloat(batchDelay),
-      split_messages: splitMessages,
-      split_message_delay: isNaN(parseFloat(splitDelay)) ? 0 : parseFloat(splitDelay),
-      transfer_alert_enabled: transferAlertEnabled,
-      transfer_alert_duration: parseInt(transferAlertDuration, 10) || 5,
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
     };
@@ -134,6 +97,16 @@ export default function GeneralSettings() {
     }
   }
 
+  // Toggle do interruptor global. Ao DESLIGAR, abre o modal de confirmação;
+  // ao LIGAR, aplica direto.
+  function handleToggleAI() {
+    if (autoReply) {
+      setConfirmOff(true);
+    } else {
+      setAutoReply(true);
+    }
+  }
+
   if (!config) {
     return html`
       <div class="text-[14px] text-wa-secondary">
@@ -145,54 +118,39 @@ export default function GeneralSettings() {
   return html`
     <div class="flex flex-col gap-4">
       <p class="text-[13px] text-wa-secondary">
-        Configurações gerais da IA: automação, chave de API, transcrição e comportamento das respostas.
-        O prompt e o modelo são definidos por agente na aba <span class="font-medium">Agentes</span>.
+        Configurações globais da IA: o interruptor geral, a chave de API e o aviso de saldo.
+        O comportamento de cada número (responder, grupos, transcrição, contexto, mensagens
+        picadas, alerta de transferência) é configurado <span class="font-medium">por canal</span>
+        na tela <span class="font-medium">Canais</span>. O prompt e o modelo são definidos por
+        agente na aba <span class="font-medium">Agentes</span>.
       </p>
 
       ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
 
-      <!-- Automação -->
-      <div class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <div class="text-[14px] font-semibold text-wa-text">Automação</div>
-        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
-          <input
-            type="checkbox"
-            checked=${autoReply}
-            onChange=${(e) => setAutoReply(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Ativar agente de IA para responder mensagens
-        </label>
-
-        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${defaultAiEnabled ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
-          <input
-            type="checkbox"
-            checked=${defaultAiEnabled}
-            onChange=${(e) => setDefaultAiEnabled(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          IA ativada por padrão para novos contatos
-        </label>
-
-        <div>
-          <label class="block text-sm font-semibold text-wa-text mb-1">Resposta da IA em grupos</label>
-          <select
-            value=${groupReplyMode}
-            onChange=${(e) => setGroupReplyMode(e.target.value)}
-            class="w-full bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+      <!-- Interruptor GLOBAL da IA -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="flex items-center justify-between gap-3 p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+          <span class="text-sm font-semibold text-wa-text">Ativar a IA (interruptor global)</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked=${autoReply}
+            onClick=${handleToggleAI}
+            class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-wa-teal focus:ring-offset-1 ${autoReply ? 'bg-wa-teal' : 'bg-wa-border'}"
           >
-            <option value="mention_only">Somente quando o bot for mencionado</option>
-            <option value="always">Sempre (responder a todas as mensagens do grupo)</option>
-            <option value="never">Nunca (não responder em grupos)</option>
-          </select>
-          <span class="text-xs text-wa-secondary">Vale apenas para grupos com a IA ativada. "Somente quando mencionado" exige um @menção ao bot; "Sempre" responde a qualquer mensagem do grupo.</span>
+            <span class="inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${autoReply ? 'translate-x-5' : 'translate-x-0.5'}"></span>
+          </button>
         </div>
+        <span class="text-[12px] text-wa-secondary">
+          Liga/desliga a IA em TODO o sistema. É verificado primeiro: com isto desligado,
+          nenhum canal responde, mesmo que a IA esteja ativada no canal. Ligado, cada canal
+          decide se responde pela sua própria configuração.
+        </span>
       </div>
 
-      <!-- API e transcrição -->
+      <!-- API -->
       <div class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <div class="text-[14px] font-semibold text-wa-text">API e transcrição</div>
-        <!-- API Key -->
+        <div class="text-[14px] font-semibold text-wa-text">Chave de API</div>
         <div>
           <label class="block text-sm font-semibold text-wa-text mb-1">Chave de API Techify</label>
           <div class="flex gap-2">
@@ -219,193 +177,9 @@ export default function GeneralSettings() {
             <p class="text-xs mt-1 text-wa-secondary">Chave salva: ${config.openrouter_api_key}</p>
           ` : null}
         </div>
-
-        <!-- Image description toggle -->
-        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${imageTranscriptionEnabled ? 'bg-green-50 border-green-200 hover:bg-green-100' : 'bg-wa-bg border-wa-border hover:bg-wa-hover'}">
-          <input
-            type="checkbox"
-            checked=${imageTranscriptionEnabled}
-            onChange=${(e) => setImageTranscriptionEnabled(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal mt-0.5"
-          />
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class=${imageTranscriptionEnabled ? 'text-green-600' : 'text-wa-secondary'}>
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                <circle cx="8.5" cy="8.5" r="1.5"/>
-                <polyline points="21 15 16 10 5 21"/>
-              </svg>
-              <span class="text-sm font-semibold text-wa-text">Descrever imagem</span>
-              <span class="text-xs px-2 py-0.5 rounded-full ${imageTranscriptionEnabled ? 'bg-green-600 text-white' : 'bg-wa-secondary/20 text-wa-secondary'}">
-                ${imageTranscriptionEnabled ? 'Ativado' : 'Desativado'}
-              </span>
-            </div>
-            <span class="block text-xs text-wa-secondary mt-1">
-              Usa IA para descrever automaticamente o conteúdo de imagens recebidas pelo contato
-            </span>
-          </div>
-        </label>
-
-        <!-- Document transcription toggle -->
-        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${documentTranscriptionEnabled ? 'bg-green-50 border-green-200 hover:bg-green-100' : 'bg-wa-bg border-wa-border hover:bg-wa-hover'}">
-          <input
-            type="checkbox"
-            checked=${documentTranscriptionEnabled}
-            onChange=${(e) => setDocumentTranscriptionEnabled(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal mt-0.5"
-          />
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class=${documentTranscriptionEnabled ? 'text-green-600' : 'text-wa-secondary'}>
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-                <line x1="16" y1="13" x2="8" y2="13"/>
-                <line x1="16" y1="17" x2="8" y2="17"/>
-                <polyline points="10 9 9 9 8 9"/>
-              </svg>
-              <span class="text-sm font-semibold text-wa-text">Ler documento</span>
-              <span class="text-xs px-2 py-0.5 rounded-full ${documentTranscriptionEnabled ? 'bg-green-600 text-white' : 'bg-wa-secondary/20 text-wa-secondary'}">
-                ${documentTranscriptionEnabled ? 'Ativado' : 'Desativado'}
-              </span>
-            </div>
-            <span class="block text-xs text-wa-secondary mt-1">
-              Usa IA para extrair o conteúdo de documentos recebidos (PDF, DOCX e arquivos de texto)
-            </span>
-          </div>
-        </label>
-
-        <!-- Audio transcription mode & target -->
-        <div class="flex flex-col gap-3 p-3 bg-wa-bg rounded-lg border border-wa-border">
-          <div class="text-sm font-semibold text-wa-text">Transcrição de áudio</div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-wa-text mb-1">Transcrever mensagens</label>
-              <select
-                value=${audioTranscriptionMode}
-                onChange=${(e) => setAudioTranscriptionMode(e.target.value)}
-                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-              >
-                <option value="received">Somente recebidas</option>
-                <option value="sent">Somente enviadas</option>
-                <option value="both">Nos dois sentidos</option>
-                <option value="off">Não transcrever</option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-wa-text mb-1">Onde aparece a transcrição</label>
-              <select
-                value=${audioTranscriptionTarget}
-                onChange=${(e) => setAudioTranscriptionTarget(e.target.value)}
-                disabled=${audioTranscriptionMode === 'off'}
-                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none disabled:opacity-50"
-              >
-                <option value="private">Mensagem privada (só no painel)</option>
-                <option value="chat">Direto no chat (envia ao contato)</option>
-              </select>
-            </div>
-          </div>
-          ${audioTranscriptionMode !== 'off' && audioTranscriptionTarget === 'chat' ? html`
-            <div>
-              <label class="block text-xs font-medium text-wa-text mb-1">Prefixo (opcional)</label>
-              <textarea
-                value=${audioTranscriptionChatPrefix}
-                onInput=${(e) => setAudioTranscriptionChatPrefix(e.target.value)}
-                rows="2"
-                placeholder="Ex: 🎙 Transcrição: "
-                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
-              ></textarea>
-              <span class="text-xs text-wa-secondary">Texto colado antes da transcrição enviada ao chat. Deixe em branco para enviar só o texto.</span>
-            </div>
-          ` : null}
-        </div>
       </div>
 
-      <!-- Comportamento: Context & Batch -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-          <label class="block text-[13px] font-medium text-wa-text mb-1">Mensagens de contexto</label>
-          <input
-            type="number"
-            min="2"
-            max="100"
-            value=${maxContext}
-            onInput=${(e) => setMaxContext(e.target.value)}
-            class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-          />
-          <span class="text-[12px] text-wa-secondary">Qtd de msgs enviadas ao LLM</span>
-        </div>
-        <div>
-          <label class="block text-[13px] font-medium text-wa-text mb-1">Agrupar mensagens (s)</label>
-          <input
-            type="number"
-            min="0"
-            max="30"
-            step="0.5"
-            value=${batchDelay}
-            onInput=${(e) => setBatchDelay(e.target.value)}
-            class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-          />
-          <span class="text-[12px] text-wa-secondary">Espera antes de responder</span>
-        </div>
-      </div>
-
-      <!-- Split Messages -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${splitMessages}
-            onChange=${(e) => setSplitMessages(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Mensagens picadas (dividir resposta)
-        </label>
-        <span class="text-[12px] text-wa-secondary">Divide a resposta da IA em várias mensagens curtas, como uma conversa natural</span>
-        ${splitMessages ? html`
-          <div class="mt-1">
-            <label class="block text-[12px] font-medium text-wa-text mb-1">Intervalo entre mensagens (s)</label>
-            <input
-              type="number"
-              min="0"
-              max="10"
-              step="0.5"
-              value=${splitDelay}
-              onInput=${(e) => setSplitDelay(e.target.value)}
-              class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-            />
-          </div>
-        ` : null}
-      </div>
-
-      <!-- Transfer Alert -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
-          <input
-            type="checkbox"
-            checked=${transferAlertEnabled}
-            onChange=${(e) => setTransferAlertEnabled(e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-          />
-          Alerta sonoro ao transferir para humano
-        </label>
-        <span class="text-[12px] text-wa-secondary">Emite um alerta sonoro quando a IA transfere o atendimento para um humano</span>
-        ${transferAlertEnabled ? html`
-          <div class="mt-1">
-            <label class="block text-[12px] font-medium text-wa-text mb-1">Duração do alerta (segundos)</label>
-            <input
-              type="number"
-              min="1"
-              max="30"
-              step="1"
-              value=${transferAlertDuration}
-              onInput=${(e) => setTransferAlertDuration(e.target.value)}
-              class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-            />
-          </div>
-        ` : null}
-      </div>
-
-      <!-- Low balance alert -->
+      <!-- Aviso de saldo -->
       <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
         <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
           <input
@@ -444,6 +218,39 @@ export default function GeneralSettings() {
           ${saving ? 'Salvando…' : saveSuccess ? '✓ Salvo!' : 'Salvar'}
         </button>
       </div>
+
+      <!-- Modal de confirmação ao desligar a IA -->
+      ${confirmOff ? html`
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick=${() => setConfirmOff(false)}
+        >
+          <div
+            class="w-full max-w-sm bg-wa-panel rounded-lg border border-wa-border shadow-xl p-5 flex flex-col gap-3"
+            onClick=${(e) => e.stopPropagation()}
+          >
+            <h3 class="text-[15px] font-semibold text-wa-text">Desligar a IA?</h3>
+            <p class="text-[13px] text-wa-secondary">
+              Tem certeza que quer desligar a IA? Com o interruptor global desligado,
+              nenhum canal responde, mesmo que a IA esteja ativada no canal.
+            </p>
+            <div class="flex justify-end gap-2 mt-1">
+              <button
+                onClick=${() => setConfirmOff(false)}
+                class="px-4 py-2 bg-wa-bg hover:bg-wa-hover text-wa-text text-sm rounded-lg transition-colors border border-wa-border"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick=${() => { setAutoReply(false); setConfirmOff(false); }}
+                class="px-4 py-2 bg-red-600 hover:opacity-90 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                Desligar
+              </button>
+            </div>
+          </div>
+        </div>
+      ` : null}
     </div>
   `;
 }
