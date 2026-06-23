@@ -4,6 +4,7 @@ import htm from 'htm';
 import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
+import ContactsListScreen from './components/ContactsListScreen.js';
 import { Conversations } from './components/Conversations.js';
 import { Attendances } from './components/attendances/Attendances.js';
 import ChannelsManager from './components/ChannelsManager.js';
@@ -48,6 +49,7 @@ const html = htm.bind(h);
 // Core (built-in) routes. Plugin screens are merged in dynamically below.
 const CORE_ROUTES = {
   '/': 'contacts',
+  '/contatos': 'contatos',
   '/conversations': 'conversations',
   '/atendimentos': 'attendances',
   '/channels': 'channels',
@@ -65,6 +67,7 @@ const CORE_ROUTES = {
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
+  contatos: '/contatos',
   conversations: '/conversations',
   attendances: '/atendimentos',
   channels: '/channels',
@@ -676,6 +679,11 @@ function App({ onLogout, hasPassword, currentUser }) {
                         }} />
                         <${Executions} />
                       </div>`
+                    : tab === 'contatos'
+                      ? html`<div class="max-w-5xl mx-auto p-4">
+                          <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
+                          <${ContactsListScreen} />
+                        </div>`
                     : tab === 'conversations'
                       ? html`<div class="max-w-5xl mx-auto p-4">
                           <${PageHeader} title="Conversas" onBack=${() => setTab('contacts')} />
