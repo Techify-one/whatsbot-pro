@@ -21,6 +21,7 @@ import { SetupWizard } from './components/SetupWizard.js';
 import { LowBalanceModal } from './components/LowBalanceModal.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useConfig } from './hooks/useConfig.js';
+import { entityFromPath } from './hooks/useDeepLink.js';
 import { checkAuth, authHeaders, getUnreadCount, logoutSession, getMe } from './services/api.js';
 import { hasPermission } from './utils/permissions.js';
 import { playTransferAlert } from './utils/alertSound.js';
@@ -90,6 +91,9 @@ function tabFromPath(pluginScreens) {
   if (path.match(/^\/executions\/\d+$/)) return 'executions';
   const screen = (pluginScreens || []).find(s => s.path === path);
   if (screen) return pluginTabId(screen);
+  // Deep-link de entidade (/ai/agents/<key>, /channels/<id>, …) → tab dona.
+  const ent = entityFromPath();
+  if (ent) return ent.tab;
   return CORE_ROUTES[path] || 'contacts';
 }
 
@@ -111,6 +115,15 @@ function contactIdFromPath() {
 function conversationIdFromPath() {
   const m = window.location.pathname.match(/^\/conversations\/(\d+)$/);
   return m ? parseInt(m[1], 10) : null;
+}
+
+// Permalink de mensagem (estilo Chatwoot): /conversations/<id>?message=<_id>. O id
+// alvo do scroll vem da query string, sanitizado p/ inteiro (alimenta scrollToMsg).
+function scrollMsgFromSearch() {
+  const raw = new URLSearchParams(window.location.search).get('message');
+  if (raw == null) return null;
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 function MenuItem({ active, href, onClick, icon, children, gated = true }) {
@@ -323,6 +336,10 @@ function App({ onLogout, hasPassword, currentUser }) {
   const [lowBalance, setLowBalance] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
   const [initialConversationId, setInitialConversationId] = useState(conversationIdFromPath);
+  // Mensagem-alvo do permalink (?message=<_id>): scroll + destaque ao abrir a conversa.
+  const [initialScrollMsgId, setInitialScrollMsgId] = useState(scrollMsgFromSearch);
+  // Seleção de entidade vinda da URL (deep-link genérico das demais telas).
+  const [initialEntity, setInitialEntity] = useState(entityFromPath);
   const [wizardManual, setWizardManual] = useState(() => window.location.pathname === '/wizard');
   const wizardLatchRef = useRef(false);
 
@@ -376,6 +393,8 @@ function App({ onLogout, hasPassword, currentUser }) {
       setTabState(tabFromPath(pluginScreens));
       setInitialContactId(contactIdFromPath());
       setInitialConversationId(conversationIdFromPath());
+      setInitialScrollMsgId(scrollMsgFromSearch());
+      setInitialEntity(entityFromPath());
       setWizardManual(window.location.pathname === '/wizard');
     }
     window.addEventListener('popstate', onPopState);
@@ -556,6 +575,10 @@ function App({ onLogout, hasPassword, currentUser }) {
     ? pluginScreens.find(s => pluginTabId(s) === tab)
     : null;
 
+  // Seleção de entidade relevante para a tela `t` (ou null). Cada tela só recebe
+  // o deep-link da sua própria tab.
+  const entFor = (t) => (initialEntity && initialEntity.tab === t ? initialEntity : null);
+
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
       <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} />
@@ -569,12 +592,12 @@ function App({ onLogout, hasPassword, currentUser }) {
           : tab === 'quick-replies'
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Respostas Rápidas" onBack=${() => setTab('contacts')} />
-                <${QuickReplies} />
+                <${QuickReplies} initialEntity=${entFor('quick-replies')} />
               </div>`
             : tab === 'custom-attributes'
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Atributos Personalizados" onBack=${() => setTab('contacts')} />
-                <${CustomAttributesManager} />
+                <${CustomAttributesManager} initialEntity=${entFor('custom-attributes')} />
               </div>`
             : tab === 'runtime'
             ? html`<div class="max-w-5xl mx-auto p-4">
@@ -584,7 +607,7 @@ function App({ onLogout, hasPassword, currentUser }) {
             : tab === 'users'
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
-                <${UsersManager} />
+                <${UsersManager} initialEntity=${entFor('users')} />
               </div>`
             : tab === 'audit'
             ? html`<div class="max-w-5xl mx-auto p-4">
@@ -594,12 +617,12 @@ function App({ onLogout, hasPassword, currentUser }) {
             : tab === 'ai'
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Engine de IA" onBack=${() => setTab('contacts')} />
-                <${AgentEngine} />
+                <${AgentEngine} initialEntity=${entFor('ai')} />
               </div>`
             : tab === 'plugins'
             ? html`<div class="max-w-5xl mx-auto p-4">
                 <${PageHeader} title="Plugins" onBack=${() => setTab('contacts')} />
-                <${PluginsManager} onPluginsChanged=${() => {
+                <${PluginsManager} initialEntity=${entFor('plugins')} onPluginsChanged=${() => {
                   fetch('/api/plugins/manifest', { headers: authHeaders() }).then(r => r.json()).then(res => {
                     if (res && res.ok) {
                       const sc = (res.data.plugins || []).flatMap(p =>
@@ -624,7 +647,7 @@ function App({ onLogout, hasPassword, currentUser }) {
                   />
                 </div>`
               : tab === 'contacts'
-                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} aiTyping=${aiTyping} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} initialConversationId=${initialConversationId} conversationCreated=${conversationCreated} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
+                ? html`<${Contacts} newMessage=${newMessage} chatPresence=${chatPresence} aiTyping=${aiTyping} contactInfoUpdated=${contactInfoUpdated} tagsChanged=${tagsChanged} contactTagsUpdated=${contactTagsUpdated} contactAiToggled=${contactAiToggled} messagesRead=${messagesRead} messageStatus=${messageStatus} messageAction=${messageAction} messageReaction=${messageReaction} avatarUpdated=${avatarUpdated} groupParticipantsChanged=${groupParticipantsChanged} initialContactId=${initialContactId} initialConversationId=${initialConversationId} initialScrollMsgId=${initialScrollMsgId} conversationCreated=${conversationCreated} wsConnected=${wsConnected} config=${config} onConfigSave=${save} onUnreadChange=${refreshUnreadCount} />`
                 : tab === 'costs'
                   ? html`<div class="max-w-5xl mx-auto p-4">
                       <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
@@ -650,7 +673,7 @@ function App({ onLogout, hasPassword, currentUser }) {
                       : tab === 'channels'
                         ? html`<div class="max-w-5xl mx-auto p-4">
                             <${PageHeader} title="Canais" onBack=${() => setTab('contacts')} />
-                            <${ChannelsManager} />
+                            <${ChannelsManager} initialEntity=${entFor('channels')} />
                           </div>`
                         : html`<${Sandbox} newMessage=${newMessage} />`
         }

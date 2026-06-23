@@ -365,4 +365,8 @@ def _row_to_dict(row) -> dict:
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]
     d["_id"] = row["id"]
+    # conversa-cêntrico (plano 11): expõe a thread de pertencimento ao frontend,
+    # para montar permalink de mensagem (/conversations/<id>?message=<_id>) mesmo
+    # na visão contato-cêntrica/mesclada. nullable em linhas pré-plano-11.
+    d["conversation_id"] = row["conversation_id"]
     return d

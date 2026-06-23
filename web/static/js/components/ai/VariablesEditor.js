@@ -2,13 +2,14 @@
 // (name/value) referenciadas pelos prompts via {name}. Sem histórico/versão.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listVariables,
   saveVariable,
   deleteVariable,
 } from '../../services/api.js';
+import { useDeepLink } from '../../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -60,7 +61,7 @@ function VariableForm({ editing, onSave, onCancel, busy }) {
   `;
 }
 
-export default function VariablesEditor() {
+export default function VariablesEditor({ initialEntity }) {
   const [vars, setVars] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -78,6 +79,24 @@ export default function VariablesEditor() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /ai/variables/<name>: reabre a variável da URL e reflete a aberta.
+  const pushUrl = useDeepLink({
+    tab: 'ai',
+    resolve: initialEntity && initialEntity.sub === 'variables'
+      ? { sub: 'variables', id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const v = vars.find(x => x.name === sel.id);
+      if (v) { setEditing(v); setCreating(false); }
+    },
+  });
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing ? { sub: 'variables', id: editing.name } : { sub: 'variables' });
+  }, [editing]);
 
   async function handleSave(name, value) {
     setBusy(true); setError('');

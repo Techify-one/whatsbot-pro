@@ -13,6 +13,7 @@ import ToolsEditor from './ToolsEditor.js';
 import GeneralSettings from './GeneralSettings.js';
 import { ToolsManager } from '../ToolsManager.js';
 import { restartAi, getConfig, saveConfig } from '../../services/api.js';
+import { entityPath } from '../../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -35,7 +36,7 @@ const TOOLS_SUBTABS = [
   { id: 'code', label: 'Code-in-DB' },
 ];
 
-function ToolsSection() {
+function ToolsSection({ initialEntity }) {
   const [view, setView] = useState('registered');
   return html`
     <div>
@@ -48,13 +49,14 @@ function ToolsSection() {
             onClick=${() => setView(s.id)}>${s.label}</button>
         `)}
       </div>
-      ${view === 'registered' ? html`<${ToolsManager} />` : html`<${ToolsEditor} />`}
+      ${view === 'registered' ? html`<${ToolsManager} initialEntity=${initialEntity} />` : html`<${ToolsEditor} />`}
     </div>
   `;
 }
 
-export default function AgentEngine() {
-  const [tab, setTab] = useState('agents');
+export default function AgentEngine({ initialEntity }) {
+  // Sub-aba ativa: inicia da URL (/ai/<sub>) e segue back/forward.
+  const [tab, setTab] = useState(() => initialEntity?.sub || 'agents');
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState('');
   // ai_engine_enabled flag: null = unknown/loading.
@@ -66,6 +68,11 @@ export default function AgentEngine() {
       if (res && res.ok) setEngineOn(!!res.data.ai_engine_enabled);
     });
   }, []);
+
+  // Deep-link de sub-aba: back/forward (ou reload) leva à sub-aba da URL.
+  useEffect(() => {
+    if (initialEntity?.sub) setTab(initialEntity.sub);
+  }, [initialEntity]);
 
   async function toggleEngine() {
     const next = !engineOn;
@@ -157,14 +164,23 @@ export default function AgentEngine() {
             class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap ${tab === t.id
               ? 'border-wa-teal text-wa-teal font-medium'
               : 'border-transparent text-wa-secondary hover:text-wa-text'}"
-            onClick=${() => setTab(t.id)}>${t.label}</button>
+            onClick=${() => {
+              setTab(t.id);
+              const p = entityPath('ai', { sub: t.id });
+              if (window.location.pathname !== p) {
+                // popstate (como o setTab do app.js) mantém o App.initialEntity em
+                // sync com a URL — senão voltar à sub-aba reabriria a entidade antiga.
+                history.pushState(null, '', p);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }
+            }}>${t.label}</button>
         `)}
       </div>
 
-      ${tab === 'agents' ? html`<${AgentsManager} />` : null}
-      ${tab === 'prompts' ? html`<${PromptsEditor} />` : null}
-      ${tab === 'variables' ? html`<${VariablesEditor} />` : null}
-      ${tab === 'tools' ? html`<${ToolsSection} />` : null}
+      ${tab === 'agents' ? html`<${AgentsManager} initialEntity=${initialEntity} />` : null}
+      ${tab === 'prompts' ? html`<${PromptsEditor} initialEntity=${initialEntity} />` : null}
+      ${tab === 'variables' ? html`<${VariablesEditor} initialEntity=${initialEntity} />` : null}
+      ${tab === 'tools' ? html`<${ToolsSection} initialEntity=${initialEntity} />` : null}
       ${tab === 'general' ? html`<${GeneralSettings} />` : null}
     </div>
   `;

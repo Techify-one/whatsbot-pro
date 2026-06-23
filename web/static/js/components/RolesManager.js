@@ -8,12 +8,13 @@
 // still assigned to a user (409) — we surface its message as-is.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import PermissionPicker from './PermissionPicker.js';
 import {
   getRoles, createRole, updateRole, deleteRole, resetRole,
 } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -69,19 +70,17 @@ function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
 }
 
 // ── Single role card (with inline editor) ───────────────────────────
-function RoleCard({ role, catalog, onSave, onReset, onDelete, busy }) {
+function RoleCard({ role, catalog, onSave, onReset, onDelete, busy, editing, onOpen, onClose }) {
   const isAdmin = role.key === 'admin';
   const isSystem = !!role.is_system;
-  const [editing, setEditing] = useState(false);
   const [sel, setSel] = useState([...(role.permission_keys || [])]);
   const [name, setName] = useState(role.name || '');
 
-  // Reset local state whenever we (re)open the editor or the role changes.
-  function open() {
-    setSel([...(role.permission_keys || [])]);
-    setName(role.name || '');
-    setEditing(true);
-  }
+  // `editing` é controlado pelo pai (espelha a URL /users/roles/<key>). Ao abrir,
+  // reinicializa os campos locais a partir do papel.
+  useEffect(() => {
+    if (editing) { setSel([...(role.permission_keys || [])]); setName(role.name || ''); }
+  }, [editing]);
   const toggle = (k) => setSel(p => p.includes(k) ? p.filter(x => x !== k) : [...p, k]);
 
   return html`
@@ -102,7 +101,7 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, busy }) {
         ${!isAdmin && !editing ? html`
           <div class="flex gap-1 shrink-0 flex-wrap justify-end">
             <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-              onClick=${open}>Editar permissões</button>
+              onClick=${onOpen}>Editar permissões</button>
             ${isSystem ? html`
               <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                 onClick=${() => onReset(role)}>Restaurar padrão</button>
@@ -126,14 +125,14 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, busy }) {
           <${PermissionPicker} catalog=${catalog} selected=${sel} onToggle=${toggle} />
           <div class="flex gap-2 justify-end">
             <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
-              onClick=${() => setEditing(false)} disabled=${busy}>Cancelar</button>
+              onClick=${onClose} disabled=${busy}>Cancelar</button>
             <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
               onClick=${async () => {
                 const ok = await onSave(role, {
                   permission_keys: sel,
                   ...(isSystem ? {} : { name: name.trim() || role.name }),
                 });
-                if (ok) setEditing(false);
+                if (ok) onClose();
               }}
               disabled=${busy}>${busy ? 'Salvando…' : 'Salvar'}</button>
           </div>
@@ -143,13 +142,15 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, busy }) {
   `;
 }
 
-export default function RolesManager() {
+export default function RolesManager({ initialEntity }) {
   const [roles, setRoles] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Papel aberto no editor (controla os cards) — espelha /users/roles/<key>.
+  const [editingKey, setEditingKey] = useState(null);
 
   async function load() {
     setLoading(true); setError('');
@@ -164,6 +165,25 @@ export default function RolesManager() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /users/roles/<role_key>: reabre o editor do papel da URL (exceto o
+  // papel fixo admin, que não tem editor).
+  const pushUrl = useDeepLink({
+    tab: 'users',
+    resolve: initialEntity && initialEntity.sub === 'roles'
+      ? { sub: 'roles', id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditingKey(null); return; }
+      const r = roles.find(x => x.key === sel.id);
+      if (r && r.key !== 'admin') setEditingKey(sel.id);
+    },
+  });
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editingKey ? { sub: 'roles', id: editingKey } : { sub: 'roles' });
+  }, [editingKey]);
 
   async function handleCreate(data) {
     setBusy(true); setError('');
@@ -222,7 +242,9 @@ export default function RolesManager() {
       <div class="flex flex-col gap-2">
         ${roles.map(role => html`
           <${RoleCard} key=${role.id} role=${role} catalog=${catalog}
-            onSave=${handleSave} onReset=${handleReset} onDelete=${handleDelete} busy=${busy} />
+            onSave=${handleSave} onReset=${handleReset} onDelete=${handleDelete} busy=${busy}
+            editing=${editingKey === role.key && role.key !== 'admin'}
+            onOpen=${() => setEditingKey(role.key)} onClose=${() => setEditingKey(null)} />
         `)}
       </div>
     </div>

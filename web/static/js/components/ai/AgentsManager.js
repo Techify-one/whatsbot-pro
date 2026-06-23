@@ -9,7 +9,7 @@
 // fallback do motor e não pode ser excluído.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listAgents,
@@ -22,6 +22,7 @@ import {
 } from '../../services/api.js';
 import { ModelSelect } from '../ModelSelect.js';
 import { SearchableSelect } from '../SearchableSelect.js';
+import { useDeepLink } from '../../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -309,7 +310,7 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
   `;
 }
 
-export default function AgentsManager() {
+export default function AgentsManager({ initialEntity }) {
   const [agents, setAgents] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [tools, setTools] = useState([]);
@@ -343,6 +344,27 @@ export default function AgentsManager() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /ai/agents/<agent_key>: reabre o agente da URL e reflete o aberto.
+  const pushUrl = useDeepLink({
+    tab: 'ai',
+    resolve: initialEntity && initialEntity.sub === 'agents'
+      ? { sub: 'agents', id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const a = agents.find(x => x.agent_key === sel.id);
+      if (a) { setEditing(a); setCreating(null); }
+    },
+  });
+  // Reflete na URL todo abrir/fechar do editor num só ponto (cobre cancelar,
+  // salvar, duplicar e excluir). Pula o 1º render p/ não atropelar o deep-link
+  // de entrada antes de a lista carregar.
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing ? { sub: 'agents', id: editing.agent_key } : { sub: 'agents' });
+  }, [editing]);
 
   async function handleSave(key, data) {
     setBusy(true); setError('');

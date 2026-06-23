@@ -5,10 +5,11 @@
 // (409) — we surface its message as-is.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import PermissionPicker from './PermissionPicker.js';
 import RolesManager from './RolesManager.js';
+import { useDeepLink, entityPath, basePath } from '../hooks/useDeepLink.js';
 import {
   getUsers,
   getRoles,
@@ -202,8 +203,9 @@ const SUBTABS = [
   { id: 'roles', label: 'Papéis' },
 ];
 
-export default function UsersManager() {
-  const [view, setView] = useState('users');
+export default function UsersManager({ initialEntity }) {
+  // Sub-view (Usuários | Papéis) espelha a URL: /users[/{id}] vs /users/roles[/{key}].
+  const [view, setView] = useState(() => (initialEntity && initialEntity.sub === 'roles' ? 'roles' : 'users'));
   const [users, setUsers] = useState([]);
   const [roleDefs, setRoleDefs] = useState([]);
   const [permCatalog, setPermCatalog] = useState([]);
@@ -228,6 +230,30 @@ export default function UsersManager() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Sub-view segue a URL (deep-link / back-forward).
+  useEffect(() => {
+    setView(initialEntity && initialEntity.sub === 'roles' ? 'roles' : 'users');
+  }, [initialEntity]);
+
+  // Deep-link /users/<id> (sub-view Usuários). RolesManager cuida de /users/roles/<key>.
+  const pushUrl = useDeepLink({
+    tab: 'users',
+    resolve: initialEntity && !initialEntity.sub ? { id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const u = users.find(x => String(x.id) === String(sel.id));
+      if (u) { setEditing(u); setCreating(false); }
+    },
+  });
+  // Reflete o usuário aberto na URL — só na view Usuários (a view Papéis tem URL
+  // própria, empurrada no clique da sub-aba; aqui evitamos sobrescrevê-la).
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    if (view === 'users') pushUrl(editing ? { id: editing.id } : null);
+  }, [editing]);
 
   async function handleCreate(data) {
     setBusy(true); setError('');
@@ -268,11 +294,18 @@ export default function UsersManager() {
             class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap ${view === t.id
               ? 'border-wa-teal text-wa-teal font-medium'
               : 'border-transparent text-wa-secondary hover:text-wa-text'}"
-            onClick=${() => { setView(t.id); setError(''); }}>${t.label}</button>
+            onClick=${() => {
+              setView(t.id); setEditing(null); setCreating(false); setError('');
+              const p = t.id === 'roles' ? entityPath('users', { sub: 'roles' }) : basePath('users');
+              if (window.location.pathname !== p) {
+                history.pushState(null, '', p);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }
+            }}>${t.label}</button>
         `)}
       </div>
 
-      ${view === 'roles' ? html`<${RolesManager} />` : html`
+      ${view === 'roles' ? html`<${RolesManager} initialEntity=${initialEntity} />` : html`
       <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">

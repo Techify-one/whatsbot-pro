@@ -435,8 +435,14 @@ def create_app(
     async def auth_middleware(request: Request, call_next):
         path = request.url.path
 
-        # SPA pages, static assets, webhook, and auth endpoints are always open
-        if path in _SPA_PATHS or path.startswith(("/contacts/", "/conversations/", "/executions/")):
+        # SPA pages, static assets, webhook, and auth endpoints are always open.
+        # The prefixes serve the SPA on hard reload of an entity deep-link
+        # (e.g. /channels/<id>, /ai/agents/<key>) — same as /contacts/<id>.
+        # /plugins/ is already covered by _AUTH_EXEMPT_PREFIXES (static).
+        if path in _SPA_PATHS or path.startswith((
+            "/contacts/", "/conversations/", "/executions/",
+            "/ai/", "/channels/", "/users/", "/quick-replies/", "/custom-attributes/",
+        )):
             return await call_next(request)
         if path in _AUTH_EXEMPT_EXACT:
             return await call_next(request)
@@ -536,7 +542,37 @@ def create_app(
     @app.get("/contacts/{contact_id:int}")
     @app.get("/conversations/{conversation_id:int}")
     @app.get("/executions/{execution_id:int}")
-    async def index(contact_id: int | None = None, conversation_id: int | None = None, execution_id: int | None = None):
+    # Deep-links por entidade (espelham /contacts/<id>): a URL carrega a
+    # identidade natural da entidade aberta e o reload reabre na sub-aba certa.
+    # Todas servem o mesmo index.html — o router do frontend resolve a seleção.
+    @app.get("/ai/{sub:str}")
+    @app.get("/ai/{sub:str}/{entity_id:str}")
+    @app.get("/plugins/{plugin_id:str}")
+    @app.get("/channels/{channel_id:str}")
+    # user_id é numérico → :int exclui /users/roles naturalmente (sem depender da
+    # ordem de registro entre /users/{id} e /users/roles).
+    @app.get("/users/{user_id:int}")
+    @app.get("/users/roles")
+    @app.get("/users/roles/{role_key:str}")
+    # short_code pode conter "/" (ex.: "/saud") → :path tolera o segmento extra
+    # mesmo quando um proxy decodifica %2F antes de chegar aqui.
+    @app.get("/quick-replies/{short_code:path}")
+    @app.get("/custom-attributes/{scope:str}")
+    @app.get("/custom-attributes/{scope:str}/{attr_key:str}")
+    async def index(
+        contact_id: int | None = None,
+        conversation_id: int | None = None,
+        execution_id: int | None = None,
+        sub: str | None = None,
+        entity_id: str | None = None,
+        plugin_id: str | None = None,
+        channel_id: str | None = None,
+        user_id: int | None = None,
+        role_key: str | None = None,
+        short_code: str | None = None,
+        scope: str | None = None,
+        attr_key: str | None = None,
+    ):
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
