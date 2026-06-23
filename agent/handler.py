@@ -15,6 +15,7 @@ from openai import OpenAI, AsyncOpenAI
 from agent.memory import ContactMemory, TagRegistry, _build_image_content
 from agent.tools import CORE_TOOLS
 from agent import group_mentions, agno_engine, agent_factory
+from channels import ai_settings
 from config.settings import LLM_API_BASE_URL
 from db.repositories import message_repo, contact_repo, tool_override_repo
 from agent.execution import (
@@ -644,8 +645,13 @@ class AgentHandler:
         # ContactMemory carries its own inbox so the CONVERSATION is per-channel.
         key = (channel_id, phone)
         if key not in self._contacts:
+            # Per-channel default (plano 21): a new contact's AI follows the
+            # channel's own "IA padrão p/ novos contatos", falling back to the
+            # global default when the channel hasn't overridden it.
+            default_ai = bool(ai_settings.value(
+                channel_id, "default_ai_enabled", self.default_ai_enabled))
             self._contacts[key] = ContactMemory(
-                phone, default_ai_enabled=self.default_ai_enabled, channel_id=channel_id)
+                phone, default_ai_enabled=default_ai, channel_id=channel_id)
         return self._contacts[key]
 
     def iter_cached_contacts(self, phone: str) -> list[ContactMemory]:
@@ -711,14 +717,17 @@ class AgentHandler:
         return out
 
     def _build_system_prompt(self, contact: ContactMemory,
-                             base_prompt: str | None = None) -> str:
+                             base_prompt: str | None = None,
+                             split_messages: bool | None = None) -> str:
         """Build system prompt with contact info and current date/time injected.
 
         ``base_prompt`` overrides ``self.system_prompt`` as the starting text
         (config-in-DB path); the dynamic sections (group context, contact info,
         tags, date, plugin fragments, split-messages format) layer on top
-        unchanged in both paths.
+        unchanged in both paths. ``split_messages`` overrides ``self.split_messages``
+        (per-channel resolution, plano 21).
         """
+        split_on = self.split_messages if split_messages is None else split_messages
         prompt = base_prompt if base_prompt is not None else self.system_prompt
         if contact.is_group:
             gname = f" chamado '{contact.group_name}'" if contact.group_name else ""
@@ -807,7 +816,7 @@ class AgentHandler:
             f"Hora: {now.strftime('%H:%M')}\n"
             "--- Fim ---"
         )
-        if self.split_messages:
+        if split_on:
             prompt += (
                 "\n\n--- FORMATO DE SAÍDA (OBRIGATÓRIO) ---\n"
                 "Sua resposta INTEIRA deve ser UM array JSON de strings — nada mais.\n"
@@ -857,7 +866,11 @@ class AgentHandler:
         aborts (so within-turn routing stops on the last good reply instead of
         sending an empty message). Used only for handoff continuations.
         """
-        system_prompt_str = self._build_system_prompt(contact, base_prompt=spec.base_prompt)
+        eff_split = bool(ai_settings.value(
+            getattr(contact, "channel_id", "default"),
+            "split_messages", self.split_messages))
+        system_prompt_str = self._build_system_prompt(
+            contact, base_prompt=spec.base_prompt, split_messages=eff_split)
         system_prompt_str = await apply_filter(
             "filter.system_prompt", system_prompt_str, {"phone": sender})
         if system_prompt_str is None:
@@ -952,8 +965,15 @@ class AgentHandler:
         if save_user_message:
             contact.add_message("user", text or "", media_type=media_type, media_path=media_path)
 
-        context_messages = contact.get_context_messages(self.max_context_messages)
-        if self.split_messages:
+        # Per-channel overrides (plano 21): context size + split format follow the
+        # channel's config, falling back to the global (handler) value.
+        eff_max_context = ai_settings.value(
+            channel_id, "max_context_messages", self.max_context_messages)
+        eff_split = bool(ai_settings.value(
+            channel_id, "split_messages", self.split_messages))
+
+        context_messages = contact.get_context_messages(eff_max_context)
+        if eff_split:
             context_messages = self._encode_history_for_split(context_messages)
 
         # Config-in-DB: resolve the DB-driven agent for this contact (or None to
@@ -969,7 +989,8 @@ class AgentHandler:
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
 
-        system_prompt_str = self._build_system_prompt(contact, base_prompt=base_prompt)
+        system_prompt_str = self._build_system_prompt(
+            contact, base_prompt=base_prompt, split_messages=eff_split)
         system_prompt_str = await apply_filter(
             "filter.system_prompt", system_prompt_str, {"phone": sender}
         )
@@ -1101,8 +1122,15 @@ class AgentHandler:
         if save_user_message:
             contact.add_message("user", text or "", media_type=media_type, media_path=media_path)
 
-        context_messages = contact.get_context_messages(self.max_context_messages)
-        if self.split_messages:
+        # Per-channel overrides (plano 21): context size + split format follow the
+        # channel's config, falling back to the global (handler) value.
+        eff_max_context = ai_settings.value(
+            channel_id, "max_context_messages", self.max_context_messages)
+        eff_split = bool(ai_settings.value(
+            channel_id, "split_messages", self.split_messages))
+
+        context_messages = contact.get_context_messages(eff_max_context)
+        if eff_split:
             context_messages = self._encode_history_for_split(context_messages)
 
         # Config-in-DB: resolve the DB-driven agent for this contact (or None to
@@ -1118,7 +1146,8 @@ class AgentHandler:
         model_config = agent_spec.model_config if agent_spec else None
         base_prompt = agent_spec.base_prompt if agent_spec else None
 
-        system_prompt_str = self._build_system_prompt(contact, base_prompt=base_prompt)
+        system_prompt_str = self._build_system_prompt(
+            contact, base_prompt=base_prompt, split_messages=eff_split)
         system_prompt_str = apply_filter_sync(
             "filter.system_prompt", system_prompt_str, {"phone": sender}
         )
