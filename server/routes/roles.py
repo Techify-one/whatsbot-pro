@@ -42,11 +42,11 @@ def register_routes(app, deps):
         if not _KEY_RE.match(key):
             return _err("Chave inválida (use a-z, 0-9, _; começando por letra).", status=400)
         if key in _RESERVED_KEYS:
-            return _err("Essa chave é reservada para um papel de sistema.", status=400)
+            return _err("Essa chave é reservada para um grupo de sistema.", status=400)
         if not name:
-            return _err("Informe um nome para o papel.", status=400)
+            return _err("Informe um nome para o grupo de permissão.", status=400)
         if await asyncio.to_thread(rbac_repo.get_role_by_key, key):
-            return _err("Já existe um papel com essa chave.", status=409)
+            return _err("Já existe um grupo com essa chave.", status=409)
         role = await asyncio.to_thread(
             rbac_repo.create_role, key, name, _clean_perms(body.get("permission_keys")))
         role["label"] = ROLE_LABELS.get(role["key"], role["name"])
@@ -60,9 +60,9 @@ def register_routes(app, deps):
             return denied
         role = await asyncio.to_thread(rbac_repo.get_role, role_id)
         if not role:
-            return _err("Papel não encontrado.", status=404)
+            return _err("Grupo de permissão não encontrado.", status=404)
         if role["key"] == "admin":
-            return _err("O papel Administrador tem todas as permissões e não é editável.",
+            return _err("O grupo Administrador tem todas as permissões e não é editável.",
                         status=400)
         name = body.get("name")
         perms = (_clean_perms(body.get("permission_keys"))
@@ -82,12 +82,12 @@ def register_routes(app, deps):
             return denied
         role = await asyncio.to_thread(rbac_repo.get_role, role_id)
         if not role:
-            return _err("Papel não encontrado.", status=404)
+            return _err("Grupo de permissão não encontrado.", status=404)
         if role.get("is_system"):
-            return _err("Papéis de sistema não podem ser excluídos.", status=409)
+            return _err("Grupos de sistema não podem ser excluídos.", status=409)
         count = await asyncio.to_thread(rbac_repo.role_assignment_count, role_id)
         if count > 0:
-            return _err(f"Papel atribuído a {count} usuário(s). "
+            return _err(f"Grupo atribuído a {count} usuário(s). "
                         "Remova-o desses usuários antes de excluir.", status=409)
         await asyncio.to_thread(rbac_repo.delete_role, role_id)
         logger.info("Role deleted: %s", role["key"])
@@ -101,9 +101,9 @@ def register_routes(app, deps):
             return denied
         role = await asyncio.to_thread(rbac_repo.get_role, role_id)
         if not role:
-            return _err("Papel não encontrado.", status=404)
+            return _err("Grupo de permissão não encontrado.", status=404)
         if role["key"] not in ROLE_DEFAULTS:
-            return _err("Sem padrão definido para este papel.", status=400)
+            return _err("Sem padrão definido para este grupo.", status=400)
         defaults = sorted(ROLE_DEFAULTS[role["key"]])
         await asyncio.to_thread(rbac_repo.set_role_permissions, role_id, defaults)
         updated = await asyncio.to_thread(rbac_repo.get_role, role_id)

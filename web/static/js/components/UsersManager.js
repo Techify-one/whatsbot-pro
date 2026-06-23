@@ -43,7 +43,7 @@ function RoleChips({ roleKeys, roleDefs }) {
     return def ? (def.label || def.name || k) : k;
   };
   if (!roleKeys || roleKeys.length === 0) {
-    return html`<span class="text-[12px] text-wa-secondary">sem papel</span>`;
+    return html`<span class="text-[12px] text-wa-secondary">sem grupo</span>`;
   }
   return html`
     <div class="flex flex-wrap gap-1">
@@ -57,7 +57,7 @@ function RoleChips({ roleKeys, roleDefs }) {
 }
 
 // ── Create / edit form ─────────────────────────────────────────────
-function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) {
+function UserForm({ editing, roleDefs, permCatalog, inboxes = [], onSubmit, onCancel, busy }) {
   const [email, setEmail] = useState(editing ? editing.email : '');
   const [name, setName] = useState(editing ? (editing.name || '') : '');
   const [password, setPassword] = useState('');
@@ -66,6 +66,8 @@ function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) 
   // Custom mode: the user gets an explicit permission set, replacing roles.
   const [custom, setCustom] = useState(editing ? !!editing.custom_permissions : false);
   const [perms, setPerms] = useState(editing ? [...(editing.permissions || [])] : []);
+  // Caixas de entrada (inbox_members) das quais este usuário é membro.
+  const [inboxIds, setInboxIds] = useState(editing ? [...(editing.inbox_ids || [])] : []);
 
   function toggleRole(key) {
     setRoles(prev => prev.includes(key) ? prev.filter(r => r !== key) : [...prev, key]);
@@ -73,12 +75,15 @@ function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) 
   function togglePerm(key) {
     setPerms(prev => prev.includes(key) ? prev.filter(p => p !== key) : [...prev, key]);
   }
+  function toggleInbox(id) {
+    setInboxIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+  }
 
   const emailErr = !editing && email && !EMAIL_RE.test(email.trim())
     ? 'Email inválido.' : '';
   const passwordErr = !editing && password && password.length < 8
     ? 'A senha deve ter ao menos 8 caracteres.' : '';
-  const rolesErr = (!custom && roles.length === 0) ? 'Selecione ao menos um papel.' : '';
+  const rolesErr = (!custom && roles.length === 0) ? 'Selecione ao menos um grupo de permissão.' : '';
   const permsErr = (custom && perms.length === 0) ? 'Selecione ao menos uma permissão.' : '';
 
   const canSave = !busy
@@ -92,9 +97,9 @@ function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) 
       ? { custom_permissions: true, permissions: perms }
       : { custom_permissions: false, roles };
     if (editing) {
-      onSubmit({ name: name.trim(), is_active: isActive, ...assignment });
+      onSubmit({ name: name.trim(), is_active: isActive, ...assignment, inbox_ids: inboxIds });
     } else {
-      onSubmit({ email: email.trim().toLowerCase(), name: name.trim(), password, ...assignment });
+      onSubmit({ email: email.trim().toLowerCase(), name: name.trim(), password, ...assignment, inbox_ids: inboxIds });
     }
   }
 
@@ -130,12 +135,12 @@ function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) 
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked=${custom} onChange=${(e) => setCustom(e.target.checked)} />
           <span class="text-[14px] text-wa-text">Permissões personalizadas</span>
-          <span class="text-[12px] text-wa-secondary">(ignora papéis — conjunto sob medida)</span>
+          <span class="text-[12px] text-wa-secondary">(ignora grupos de permissão — conjunto sob medida)</span>
         </label>
 
         ${!custom ? html`
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Papéis</label>
+            <label class="block text-[12px] text-wa-secondary mb-1">Grupos de permissão</label>
             <div class="flex flex-col gap-1.5">
               ${(roleDefs || []).map(r => html`
                 <label key=${r.key} class="flex items-center gap-2 cursor-pointer">
@@ -155,6 +160,23 @@ function UserForm({ editing, roleDefs, permCatalog, onSubmit, onCancel, busy }) 
             ${permsErr ? html`<div class="text-[12px] text-red-500 mt-1">${permsErr}</div>` : null}
           </div>
         `}
+        ${inboxes.length ? html`
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Caixas de entrada</label>
+            <p class="text-[12px] text-wa-secondary mb-1.5">
+              As caixas que este usuário vê e atende. Administradores veem todas, independente da seleção.
+            </p>
+            <div class="flex flex-col gap-1.5">
+              ${inboxes.map(ib => html`
+                <label key=${ib.id} class="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked=${inboxIds.includes(ib.id)}
+                    onChange=${() => toggleInbox(ib.id)} />
+                  <span class="text-[14px] text-wa-text">${ib.name || ('Caixa #' + ib.id)}</span>
+                </label>
+              `)}
+            </div>
+          </div>
+        ` : null}
         ${editing ? html`
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked=${isActive} onChange=${(e) => setIsActive(e.target.checked)} />
@@ -200,7 +222,7 @@ function PasswordModal({ user, onSubmit, onCancel, busy }) {
 
 const SUBTABS = [
   { id: 'users', label: 'Usuários' },
-  { id: 'roles', label: 'Papéis' },
+  { id: 'roles', label: 'Grupos de permissão' },
 ];
 
 export default function UsersManager({ initialEntity }) {
@@ -209,6 +231,7 @@ export default function UsersManager({ initialEntity }) {
   const [users, setUsers] = useState([]);
   const [roleDefs, setRoleDefs] = useState([]);
   const [permCatalog, setPermCatalog] = useState([]);
+  const [inboxes, setInboxes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
@@ -223,6 +246,7 @@ export default function UsersManager({ initialEntity }) {
     if (rRes && rRes.ok) {
       setRoleDefs((rRes.data && rRes.data.roles) || []);
       setPermCatalog((rRes.data && rRes.data.permissions) || []);
+      setInboxes((rRes.data && rRes.data.inboxes) || []);
     }
     if (uRes && uRes.ok) setUsers((uRes.data && uRes.data.users) || []);
     else setError((uRes && uRes.error) || 'Falha ao carregar usuários.');
@@ -309,7 +333,7 @@ export default function UsersManager({ initialEntity }) {
       <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Usuários do painel e seus papéis. Cada papel concede um conjunto de permissões.
+          Usuários do painel e seus grupos de permissão. Cada grupo concede um conjunto de permissões.
         </p>
         ${!creating && !editing ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
@@ -319,8 +343,8 @@ export default function UsersManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${UserForm} roleDefs=${roleDefs} permCatalog=${permCatalog} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${UserForm} editing=${editing} roleDefs=${roleDefs} permCatalog=${permCatalog} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      ${creating ? html`<${UserForm} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+      ${editing ? html`<${UserForm} editing=${editing} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
