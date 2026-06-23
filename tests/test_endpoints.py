@@ -923,6 +923,12 @@ r = client.post("/api/channels", json={"id": "x_prov", "provider": "telegrama"})
 check("POST /channels provider inválido -> 400", r.status_code == 400)
 r = client.post("/api/channels", json={"id": "cloud_teste", "provider": "whatsapp_cloud"})
 check("POST /channels id duplicado -> 409", r.status_code == 409)
+# Auto-geração do id quando o body não envia "id" (usuário só escolhe display_name)
+import re as _re_chan
+r = client.post("/api/channels", json={"provider": "whatsapp_cloud", "display_name": "Auto Cloud"})
+check("POST /channels sem id -> 200", r.status_code == 200)
+check("POST /channels sem id -> id auto <provider>_<hex>",
+      bool(_re_chan.match(r"^whatsapp_cloud_[0-9a-f]{8}$", (r.json()["data"] or {}).get("id", ""))))
 
 r = client.put("/api/channels/cloud_teste", json={"display_name": "Cloud Renomeado", "enabled": False})
 check("PUT /channels -> 200 atualiza", r.status_code == 200 and r.json()["data"]["display_name"] == "Cloud Renomeado")
@@ -1123,6 +1129,22 @@ check("PUT -> roles updated", r.json()["data"]["user"]["roles"] == ["gestor"])
 
 r = client.post(f"/api/users/{_att_id}/password", json={"password": "anothersecret"})
 check("POST /api/users/{id}/password -> 200", r.status_code == 200)
+
+# Caixas de entrada por usuário (inbox_members editado na tela de Usuários)
+_roles_data = client.get("/api/roles").json()["data"]
+check("GET /api/roles -> expõe inboxes (lista)", isinstance(_roles_data.get("inboxes"), list))
+_inboxes_f1 = _roles_data.get("inboxes") or []
+if _inboxes_f1:
+    _ib_id = _inboxes_f1[0]["id"]
+    r = client.put(f"/api/users/{_att_id}", json={"inbox_ids": [_ib_id]})
+    check("PUT /api/users (inbox_ids) -> 200", r.status_code == 200)
+    check("PUT /api/users -> inbox_ids na resposta",
+          r.json()["data"]["user"].get("inbox_ids") == [_ib_id])
+    _list = client.get("/api/users").json()["data"]["users"]
+    _row = next((x for x in _list if x["id"] == _att_id), None)
+    check("GET /api/users -> inbox_ids persistido", bool(_row) and _row.get("inbox_ids") == [_ib_id])
+    r = client.put(f"/api/users/{_att_id}", json={"inbox_ids": []})
+    check("PUT /api/users -> limpa inbox_ids", r.json()["data"]["user"].get("inbox_ids") == [])
 
 # Last-admin guard: deleting the only active admin is refused
 r = client.delete(f"/api/users/{_admin['id']}")

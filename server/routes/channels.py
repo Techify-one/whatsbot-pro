@@ -179,22 +179,31 @@ def register_routes(app, deps):
             return denied
         cid = (body.get("id") or "").strip()
         provider = (body.get("provider") or "").strip()
-        if not _ID_RE.match(cid):
-            return _err("id inválido (use snake_case: a-z, 0-9, _; começa com letra).", 400)
         if provider not in _ALLOWED_PROVIDERS:
             return _err(f"provider deve ser um de: {', '.join(sorted(_ALLOWED_PROVIDERS))}.", 400)
-        if await asyncio.to_thread(channel_repo.get, cid):
-            return _err("Já existe um canal com esse id.", 409)
         config = body.get("config")
         # The UI may nest gowa_device_id inside config; accept either spot.
         gowa_device_id = body.get("gowa_device_id")
         if not gowa_device_id and isinstance(config, dict):
             gowa_device_id = config.get("gowa_device_id")
-        # GOWA device id is auto-generated, never user-chosen. Each channel maps
-        # to its own GOWA device (X-Device-Id) on the shared GOWA process. A
-        # random suffix keeps it unique even if a channel id is reused later.
+        # GOWA device id is auto-generated, never user-chosen. Each channel maps to
+        # its own GOWA device (X-Device-Id) on the shared GOWA process.
         if provider == "gowa" and not gowa_device_id:
-            gowa_device_id = f"{cid}_{uuid.uuid4().hex[:8]}"
+            gowa_device_id = f"gowa_{uuid.uuid4().hex[:8]}"
+        # Channel id is auto-generated: the user only picks a display name. GOWA
+        # reuses its device id as the channel id; other providers get
+        # "<provider>_<hex>". A client may still send an explicit id (back-compat):
+        # it is validated and checked for uniqueness as before.
+        if cid:
+            if not _ID_RE.match(cid):
+                return _err("id inválido (use snake_case: a-z, 0-9, _; começa com letra).", 400)
+            if await asyncio.to_thread(channel_repo.get, cid):
+                return _err("Já existe um canal com esse id.", 409)
+        else:
+            cid = (gowa_device_id if (provider == "gowa" and gowa_device_id)
+                   else f"{provider}_{uuid.uuid4().hex[:8]}")
+            while await asyncio.to_thread(channel_repo.get, cid):
+                cid = f"{provider}_{uuid.uuid4().hex[:8]}"
         row = await asyncio.to_thread(
             channel_repo.create, id=cid, provider=provider,
             display_name=body.get("display_name", "") or cid,

@@ -1,4 +1,5 @@
-// Role editor screen (RBAC). Sub-view of the Users area ("Papéis" tab).
+// Role editor screen (RBAC). Sub-view of the Users area ("Grupos de permissão" tab).
+// (Internamente continua "role/roles" — só o rótulo visível mudou.)
 // Lists every role with its permissions and lets an admin:
 //   • edit the permissions of gestor/atendente (system) and custom roles,
 //   • restore a system role to its seeded defaults,
@@ -36,7 +37,7 @@ function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
-      <div class="text-[14px] font-medium text-wa-text mb-3">Novo papel</div>
+      <div class="text-[14px] font-medium text-wa-text mb-3">Novo grupo de permissão</div>
       <div class="flex flex-col gap-3">
         <div class="flex gap-3 flex-wrap">
           <div class="flex-1 min-w-[160px]">
@@ -62,7 +63,7 @@ function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
             onClick=${onCancel} disabled=${busy}>Cancelar</button>
           <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick=${() => canSave && onSubmit({ key, name: name.trim(), permission_keys: sel })}
-            disabled=${!canSave}>${busy ? 'Salvando…' : 'Criar papel'}</button>
+            disabled=${!canSave}>${busy ? 'Salvando…' : 'Criar grupo de permissão'}</button>
         </div>
       </div>
     </div>
@@ -95,7 +96,7 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, busy, editing, onO
               : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal">custom</span>`}
           </div>
           <div class="text-[12px] text-wa-secondary mt-0.5">
-            ${isAdmin ? 'Todas as permissões (papel fixo)' : `${(role.permission_keys || []).length} permissão(ões)`}
+            ${isAdmin ? 'Todas as permissões (grupo fixo)' : `${(role.permission_keys || []).length} permissão(ões)`}
           </div>
         </div>
         ${!isAdmin && !editing ? html`
@@ -159,7 +160,7 @@ export default function RolesManager({ initialEntity }) {
       setRoles((res.data && res.data.roles) || []);
       setCatalog((res.data && res.data.permissions) || []);
     } else {
-      setError((res && res.error) || 'Falha ao carregar papéis.');
+      setError((res && res.error) || 'Falha ao carregar grupos de permissão.');
     }
     setLoading(false);
   }
@@ -190,7 +191,7 @@ export default function RolesManager({ initialEntity }) {
     const res = await createRole(data);
     setBusy(false);
     if (res && res.ok) { setCreating(false); load(); }
-    else setError((res && res.error) || 'Falha ao criar papel.');
+    else setError((res && res.error) || 'Falha ao criar grupo de permissão.');
   }
 
   async function handleSave(role, data) {
@@ -198,12 +199,12 @@ export default function RolesManager({ initialEntity }) {
     const res = await updateRole(role.id, data);
     setBusy(false);
     if (res && res.ok) { load(); return true; }
-    setError((res && res.error) || 'Falha ao salvar papel.');
+    setError((res && res.error) || 'Falha ao salvar grupo de permissão.');
     return false;
   }
 
   async function handleReset(role) {
-    if (!confirm(`Restaurar as permissões padrão do papel "${role.label || role.key}"?`)) return;
+    if (!confirm(`Restaurar as permissões padrão do grupo "${role.label || role.key}"?`)) return;
     setBusy(true); setError('');
     const res = await resetRole(role.id);
     setBusy(false);
@@ -212,24 +213,24 @@ export default function RolesManager({ initialEntity }) {
   }
 
   async function handleDelete(role) {
-    if (!confirm(`Excluir o papel "${role.label || role.key}"? Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Excluir o grupo de permissão "${role.label || role.key}"? Esta ação não pode ser desfeita.`)) return;
     setBusy(true); setError('');
     const res = await deleteRole(role.id);
     setBusy(false);
     if (res && res.ok) load();
-    else setError((res && res.error) || 'Falha ao excluir o papel.');
+    else setError((res && res.error) || 'Falha ao excluir o grupo de permissão.');
   }
 
   return html`
     <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Papéis e as permissões que cada um concede. O papel <span class="font-mono">admin</span> tem
+          Grupos de permissão e as permissões que cada um concede. O grupo <span class="font-mono">admin</span> tem
           todas as permissões e é fixo.
         </p>
         ${!creating ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
-            onClick=${() => { setCreating(true); setError(''); }}>+ Novo papel</button>
+            onClick=${() => { setCreating(true); setError(''); }}>+ Novo grupo de permissão</button>
         ` : null}
       </div>
 

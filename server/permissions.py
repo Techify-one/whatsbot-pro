@@ -22,7 +22,7 @@ PERMISSION_CATALOG = [
     ("quickreply.manage",     "Respostas rápidas"),
     ("template.create",       "Criar templates (WhatsApp Cloud)"),
     ("template.delete",       "Apagar templates (WhatsApp Cloud)"),
-    ("users.manage",          "Criar/editar/desativar usuários e papéis"),
+    ("users.manage",          "Criar/editar/desativar usuários e grupos de permissão"),
     ("audit.read",            "Ler trilha de auditoria"),
 ]
 
