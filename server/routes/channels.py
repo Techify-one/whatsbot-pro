@@ -14,6 +14,7 @@ live instance when present, else the stored flags.
 import asyncio
 import json
 import re
+import time
 import uuid
 
 from fastapi import Request
@@ -21,8 +22,10 @@ from fastapi.responses import Response
 
 from channels.providers.gowa_channel import build_gowa_channel
 from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
-                             inbox_member_repo, user_repo)
-from server.authz import permission_denied
+                             inbox_member_repo, user_repo,
+                             contact_repo, conversation_repo, message_repo)
+from plugins.events import emit_with_filter
+from server.authz import permission_denied, has_permission
 from server.helpers import _ok, _err
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -148,6 +151,202 @@ def register_routes(app, deps):
                 "own_phone": row.get("own_phone"),
             })
         return _ok(out)
+
+    @app.get("/api/channels/{channel_id}/session-state")
+    async def channel_session_state(channel_id: str, request: Request, phone: str = ""):
+        """Session/window state for STARTING a conversation on ``channel_id`` (plano 21).
+
+        The "Nova conversa" modal needs to know, BEFORE a conversation row exists,
+        whether free text is allowed to ``phone`` on this channel or a template is
+        required. Resolves the contact's latest conversation IN this channel's inbox
+        (if any) and computes the 24h free-text window from its last inbound.
+
+        Returns ``{templates_supported, session_open, has_conversation,
+        conversation_id, last_inbound_ts}``:
+        - always-open channels (GOWA) → ``session_open=True`` (free text always ok);
+        - windowed channels (WhatsApp Cloud) → ``session_open`` is True only when an
+          existing conversation has an inbound within 24h. No conversation, or an
+          expired window, yields ``False`` (a template is then mandatory).
+        Capability-driven — never by provider name.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        phone = (phone or "").strip()
+        if not phone:
+            return _err("phone é obrigatório.", status=400)
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        outbound = deps.outbound_router
+
+        def _resolve() -> dict:
+            templates_supported = outbound.supports(channel_id, "templates")
+            contact = contact_repo.get_by_phone(phone)
+            conv = None
+            if contact:
+                inbox = inbox_repo.get_by_channel(channel_id)
+                if inbox:
+                    conv = conversation_repo.get_latest_for_contact_inbox(
+                        contact["id"], inbox["id"])
+            conv_id = conv["id"] if conv else None
+            last_ts = (message_repo.last_inbound_ts(conversation_id=conv_id)
+                       if conv_id else None)
+            return {
+                "templates_supported": templates_supported,
+                "session_open": outbound.session_open(channel_id, last_ts),
+                "has_conversation": conv is not None,
+                "conversation_id": conv_id,
+                "last_inbound_ts": last_ts,
+            }
+
+        data = await asyncio.to_thread(_resolve)
+        return _ok(data)
+
+    @app.get("/api/channels/{channel_id}/templates")
+    async def channel_templates(channel_id: str, request: Request):
+        """Templates for a channel, used by the picker when starting a BRAND-NEW
+        conversation (no conversation row yet, plano 21). Channel-scoped twin of
+        ``GET /api/conversations/{id}/templates`` — same ``{supported, templates,
+        can_create, can_delete}`` shape."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        outbound = deps.outbound_router
+        can_create = has_permission(request, "template.create")
+        can_delete = has_permission(request, "template.delete")
+        if not outbound.supports(channel_id, "templates"):
+            return _ok({"supported": False, "templates": [],
+                        "can_create": can_create, "can_delete": can_delete})
+        templates = await asyncio.to_thread(outbound.list_templates, channel_id)
+        return _ok({"supported": True, "templates": templates,
+                    "can_create": can_create, "can_delete": can_delete})
+
+    @app.post("/api/channels/{channel_id}/send-template")
+    async def channel_send_template(channel_id: str, body: dict, request: Request):
+        """Send an approved template to ``phone`` through ``channel_id`` when there is
+        no conversation yet (plano 21). Channel-scoped twin of
+        ``POST /api/conversations/{id}/send-template``: saving the operator message
+        creates the contact + conversation in this channel's inbox, so the new thread
+        appears in the sidebar exactly like a normal first send.
+
+        body: ``{phone, template_name, language?, components?, preview_text?}``.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        phone = (body.get("phone") or "").strip()
+        template_name = (body.get("template_name") or "").strip()
+        language = (body.get("language") or "pt_BR").strip() or "pt_BR"
+        components = body.get("components")
+        if not phone:
+            return _err("phone é obrigatório.", status=400)
+        if not template_name:
+            return _err("template_name é obrigatório.", status=400)
+        if components is not None and not isinstance(components, list):
+            return _err("components deve ser uma lista.", status=400)
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        outbound = deps.outbound_router
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+
+        result = await asyncio.to_thread(
+            outbound.send_template, channel_id, phone, template_name,
+            lang=language, components=components or None)
+        if not result.ok:
+            return _err(f"Falha ao enviar template: {result.error}", status=502)
+
+        msg_id = result.external_msg_id or None
+        preview = (body.get("preview_text") or "").strip() or f"📋 Template: {template_name}"
+        try:
+            msg_data = await asyncio.to_thread(
+                deps.agent_handler.save_operator_message, phone, preview,
+                status="operator", msg_id=msg_id, channel_id=channel_id)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"Template enviado, mas falha ao salvar a mensagem: {e}", status=500)
+
+        try:
+            await deps.ws_manager.broadcast("new_message", {
+                "phone": phone, "channel_id": channel_id, "message": msg_data})
+        except Exception:
+            pass
+        await emit_with_filter("message.sent", {
+            "phone": phone, "text": preview, "msg_id": msg_id,
+            "media_type": None, "media_path": None,
+            "source": "template", "status": "operator",
+            "template_name": template_name, "ts": time.time(),
+        })
+        return _ok({"message": "Template enviado.", "msg_id": msg_id, "phone": phone})
+
+    _TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+
+    @app.post("/api/channels/{channel_id}/templates")
+    async def channel_create_template(channel_id: str, body: dict, request: Request):
+        """Create a template on ``channel_id`` (gated ``template.create``). Channel-
+        scoped twin of ``POST /api/conversations/{id}/templates`` for the new-
+        conversation picker."""
+        denied = permission_denied(request, "template.create")
+        if denied:
+            return denied
+        name = (body.get("name") or "").strip().lower()
+        if not name or not name.isascii() or not all(c.isalnum() or c == "_" for c in name):
+            return _err("Nome inválido: use apenas letras minúsculas, números e _.", status=400)
+        body_text = (body.get("body_text") or "").strip()
+        if not body_text:
+            return _err("body_text é obrigatório.", status=400)
+        category = (body.get("category") or "UTILITY").strip().upper()
+        if category not in _TEMPLATE_CATEGORIES:
+            return _err(f"category deve ser uma de {sorted(_TEMPLATE_CATEGORIES)}.", status=400)
+        language = (body.get("language") or "pt_BR").strip() or "pt_BR"
+        body_examples = body.get("body_examples")
+        header_examples = body.get("header_examples")
+        if body_examples is not None and not isinstance(body_examples, list):
+            return _err("body_examples deve ser uma lista.", status=400)
+        if header_examples is not None and not isinstance(header_examples, list):
+            return _err("header_examples deve ser uma lista.", status=400)
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        outbound = deps.outbound_router
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+        result = await asyncio.to_thread(
+            outbound.create_template, channel_id, name,
+            category=category, language=language, body_text=body_text,
+            header_text=(body.get("header_text") or "").strip() or None,
+            footer_text=(body.get("footer_text") or "").strip() or None,
+            body_examples=body_examples or None,
+            header_examples=header_examples or None)
+        if not result.get("ok"):
+            return _err(f"Falha ao criar template: {result.get('error')}", status=502)
+        return _ok({
+            "message": "Template enviado para aprovação da Meta.",
+            "id": result.get("id"), "status": result.get("status"),
+            "category": result.get("category"), "name": name,
+        })
+
+    @app.delete("/api/channels/{channel_id}/templates/{name}")
+    async def channel_delete_template(channel_id: str, name: str, request: Request):
+        """Delete a template (all languages) on ``channel_id`` (gated
+        ``template.delete``)."""
+        denied = permission_denied(request, "template.delete")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        outbound = deps.outbound_router
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+        result = await asyncio.to_thread(outbound.delete_template, channel_id, name)
+        if not result.get("ok"):
+            return _err(f"Falha ao apagar template: {result.get('error')}", status=502)
+        return _ok({"message": "Template apagado.", "name": name})
 
     @app.get("/api/channels/assignable-users")
     async def assignable_users(request: Request):

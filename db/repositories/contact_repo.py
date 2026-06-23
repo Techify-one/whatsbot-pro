@@ -452,6 +452,7 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                 "id": contact_id,
                 "phone": row["phone"],
                 "name": name,
+                "email": row["email"] or "",
                 "last_message": last_content,
                 "last_message_role": row["last_msg_role"] or "",
                 "last_message_ts": row["last_msg_ts"] or 0,
