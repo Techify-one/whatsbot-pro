@@ -38,6 +38,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       conversation_ai_toggled: conv ? conv('conversation_ai_toggled') : undefined,
       conversation_updated: conv ? conv('conversation_updated') : undefined,
       conversation_deleted: conv ? conv('conversation_deleted') : undefined,
+      conversation_labels_changed: conv ? conv('conversation_labels_changed') : undefined,
     });
     return () => ws.close();
   }, []);

@@ -25,8 +25,6 @@ import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
-const ID_RE = /^[a-z][a-z0-9_]*$/;
-
 // Provider catalogue: label + accent tint (only classes covered by custom.css
 // dark overrides — green/blue/gray/purple at -50/-700). `gowa` is the local
 // WhatsApp bridge; `whatsapp_cloud` is Meta's Cloud API; `test` is a no-op.
@@ -283,7 +281,6 @@ function Dot({ on }) {
 // ── Create-channel modal ────────────────────────────────────────────
 function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
   const [provider, setProvider] = useState('gowa');
-  const [id, setId] = useState('');
   const [displayName, setDisplayName] = useState('');
   // Per-channel AI settings (config.ai), seeded from the current global config.
   const [ai, setAi] = useState(() => aiDefaults || aiDefaultsFrom({}));
@@ -312,15 +309,12 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
     return () => { alive = false; };
   }, []);
 
-  const idErr = id && !ID_RE.test(id)
-    ? 'Use apenas letras minúsculas, números e _ (começando por letra).'
-    : '';
-
-  const canSave = !busy && id.trim() && !idErr && displayName.trim();
+  // O ID do canal é gerado automaticamente pelo backend (o usuário só escolhe o
+  // nome de exibição). GOWA reusa o device id; demais providers, "<provider>_<hex>".
+  const canSave = !busy && displayName.trim();
 
   function buildPayload() {
     const payload = {
-      id: id.trim(),
       provider,
       display_name: displayName.trim(),
     };
@@ -361,14 +355,6 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
               <option key=${key} value=${key}>${meta.label}</option>
             `)}
           </select>
-        </div>
-
-        <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">ID</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" placeholder="ex: whatsapp_principal" value=${id}
-            onInput=${(e) => setId(e.target.value)} />
-          ${idErr ? html`<div class="text-[12px] text-red-500 mt-1">${idErr}</div>` : null}
         </div>
 
         <div>
@@ -1009,17 +995,20 @@ export default function ChannelsManager({ initialEntity }) {
     setCreateBusy(true); setCreateError('');
     const res = await createChannel(payload);
     if (res && res.ok) {
+      // O id é gerado pelo backend — usar o canal retornado, não o payload.
+      const created = res.data || {};
+      const newId = created.id;
       // Assign the picked agents to the new channel's inbox (best-effort: a
       // failure here never blocks creation, which already succeeded).
-      if (agentIds && agentIds.length) {
-        await setChannelMembers(payload.id, agentIds);
+      if (agentIds && agentIds.length && newId) {
+        await setChannelMembers(newId, agentIds);
       }
       setCreateBusy(false);
       setCreating(false);
-      if (payload.provider === 'whatsapp_cloud') setWebhookFor(payload.id);
+      if (payload.provider === 'whatsapp_cloud') setWebhookFor(newId);
       // GOWA: open the QR-connect panel immediately so the user can scan it.
       if (payload.provider === 'gowa') {
-        setConnectFor({ id: payload.id, display_name: payload.display_name });
+        setConnectFor({ id: newId, display_name: created.display_name || payload.display_name });
       }
       load();
     } else {
