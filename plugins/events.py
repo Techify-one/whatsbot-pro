@@ -63,6 +63,7 @@ KNOWN_EVENTS: set[str] = {
     # Conversations (plano 01 / plano 10 RT)
     "conversation.created", "conversation.status_changed", "conversation.assigned",
     "conversation.archived", "conversation.ai_toggled", "conversation.updated",
+    "conversation.deleted",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",

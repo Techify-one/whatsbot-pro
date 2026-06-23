@@ -80,6 +80,13 @@ def register_routes(app, deps):
         existing = await asyncio.to_thread(ca_repo.get_definition, def_id)
         if existing is None or existing.get("deleted_at") is not None:
             return _err("Atributo não encontrado.", 404)
+        # System attributes (plano 19 §1.3/§5): identity is immutable — reject any
+        # attempt to rename the key/scope of a system attribute with 400 (the update
+        # path never writes these fields anyway, so this is the explicit guard).
+        if existing.get("is_system"):
+            for ident in ("attribute_key", "applies_to"):
+                if ident in body and (body.get(ident) or "") != existing.get(ident):
+                    return _err("Atributos de sistema não podem ser renomeados.", 400)
         fields: dict = {}
         if "display_name" in body:
             dn = (body.get("display_name") or "").strip()
@@ -109,6 +116,12 @@ def register_routes(app, deps):
 
     @app.delete("/api/custom-attributes/{def_id}")
     async def delete_custom_attribute(def_id: int):
+        existing = await asyncio.to_thread(ca_repo.get_definition, def_id)
+        if existing is None or existing.get("deleted_at") is not None:
+            return _err("Atributo não encontrado.", 404)
+        # System attributes (plano 19) ship with the app — protect from deletion.
+        if existing.get("is_system"):
+            return _err("Atributos de sistema não podem ser apagados.", 400)
         ok = await asyncio.to_thread(ca_repo.delete_definition, def_id)
         if not ok:
             return _err("Atributo não encontrado.", 404)

@@ -8,11 +8,11 @@ const html = htm.bind(h);
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDelete, onCreateTag, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
   const ref = useRef(null);
   const [showTags, setShowTags] = useState(false);
   const [showAssign, setShowAssign] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDeleteConv, setConfirmDeleteConv] = useState(false);
 
   // Conversation-level menu state (assign attendant / resolve). The sidebar rows
   // are contact-level, so `conv` is resolved lazily by the parent on right-click.
@@ -35,6 +35,9 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
     return () => document.removeEventListener('mousedown', handleClick);
   }, [onClose]);
 
+  // Reset the inline delete confirmation when the menu targets a different row.
+  useEffect(() => { setConfirmDeleteConv(false); }, [phone, conv && conv.id]);
+
   const left = Math.min(x, window.innerWidth - 200);
   const top = Math.min(y, window.innerHeight - 50);
 
@@ -55,18 +58,20 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[200px] max-h-[85vh] overflow-y-auto wa-scrollbar"
       style="left:${left}px;top:${top}px"
     >
+      ${canAct ? html`
       <button
-        onClick=${() => { onToggleAI(phone, !aiEnabled); onClose(); }}
+        onClick=${() => { onToggleAI(conv.id, !conv.ai_active); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
       >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill=${aiEnabled ? '#ef4444' : '#00a884'}>
-          ${aiEnabled
+        <svg viewBox="0 0 24 24" width="18" height="18" fill=${conv.ai_active ? '#ef4444' : '#00a884'}>
+          ${conv.ai_active
             ? html`<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/>`
             : html`<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>`
           }
         </svg>
-        ${aiEnabled ? 'Desativar IA' : 'Ativar IA'}
+        ${conv.ai_active ? 'Desativar IA' : 'Ativar IA'}
       </button>
+      ` : null}
       <button
         onClick=${() => { onEditContact(phone); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -229,22 +234,24 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           </svg>
           ${isArchived ? 'Desarquivar' : 'Arquivar'}
         </button>
+        ${canAct ? html`
         <button
           onClick=${() => {
-            if (!confirmDelete) {
-              setConfirmDelete(true);
+            if (!confirmDeleteConv) {
+              setConfirmDeleteConv(true);
               return;
             }
-            onDelete(phone);
+            onDeleteConversation(conv.id);
             onClose();
           }}
-          class="w-full text-left px-4 py-[10px] text-[14.5px] ${confirmDelete ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors flex items-center gap-3"
+          class="w-full text-left px-4 py-[10px] text-[14.5px] ${confirmDeleteConv ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors flex items-center gap-3"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
             <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
           </svg>
-          ${confirmDelete ? 'Confirmar exclusão?' : 'Apagar Contato'}
+          ${confirmDeleteConv ? 'Confirmar exclusão da conversa?' : 'Apagar conversa'}
         </button>
+        ` : null}
       </div>
     </div>
   `;

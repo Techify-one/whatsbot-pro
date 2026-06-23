@@ -13,7 +13,7 @@ from sqlalchemy import select, update, func, delete as sa_delete, case, false as
 
 from db.engine import get_engine
 from db.tables import (conversations, contacts, conversation_counters, inboxes,
-                       channels, messages, unread_msg_ids)
+                       channels, messages, unread_msg_ids, conversation_label_links)
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +52,27 @@ def _default_agent_key_for_inbox(inbox_id: int) -> str | None:
     return agent_repo.DEFAULT_AGENT_KEY
 
 
+def _default_ai_enabled() -> bool:
+    """Whether brand-new conversations start with the AI active (config-driven).
+
+    Plano 17: the per-conversation ``ai_active`` seed comes from the global
+    ``default_ai_enabled`` toggle (no longer from ``contacts.ai_enabled``).
+    Best-effort — defaults to True so a config read failure never silences the AI.
+    """
+    from db.repositories import config_repo
+    try:
+        return bool(config_repo.get("default_ai_enabled", True))
+    except Exception:
+        return True
+
+
 def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
-           opened_at: float | None = None, ai_active: int = 1,
+           opened_at: float | None = None, ai_active: int | None = None,
            is_archived: int = 0, active_agent_key: str | None = None) -> dict:
     now = time.time()
     opened = opened_at if opened_at is not None else now
+    if ai_active is None:
+        ai_active = 1 if _default_ai_enabled() else 0
     if active_agent_key is None:
         active_agent_key = _default_agent_key_for_inbox(inbox_id)
     with get_engine().begin() as conn:
@@ -419,6 +435,26 @@ def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
     return _update(conv_id, {"ai_active": ai_active})
 
 
+def set_conversation_ai(conv_id: int, active: int) -> dict | None:
+    """Toggle the AI for a conversation AND (un)assign it (plano 17).
+
+    OFF (``active=0``) mirrors ``set_status('closed')``: pausing the AI also drops
+    the assignment (``active_agent_key`` + ``assignee_user_id`` → None) so the
+    conversation lands back in the "Não atribuídas" fila for a human to pick up.
+    ON (``active=1``) re-attributes it to the inbox's default AI agent so the row
+    leaves the fila immediately, without waiting for the next inbound message.
+    The human assignee is left untouched on the ON path (it is normally already
+    None, cleared by a prior OFF)."""
+    if active:
+        conv = get(conv_id)
+        if conv is None:
+            return None
+        agent_key = _default_agent_key_for_inbox(conv.get("inbox_id"))
+        return _update(conv_id, {"ai_active": 1, "active_agent_key": agent_key})
+    return _update(conv_id, {
+        "ai_active": 0, "active_agent_key": None, "assignee_user_id": None})
+
+
 def set_custom_attributes(conv_id: int, attrs: dict) -> dict | None:
     """Replace the conversation's custom_attributes JSON (reatribui o dict inteiro)."""
     return _update(conv_id, {"custom_attributes": dict(attrs or {})})
@@ -459,6 +495,8 @@ def ensure_ai_agent(contact_id: int, agent_key: str) -> dict | None:
         return None
     if conv.get("status") != "open":
         return None
+    if not conv.get("ai_active"):
+        return None  # AI paused on this conversation (plano 17) — never re-attribute
     if conv.get("assignee_user_id") is not None:
         return None  # a person owns this chat — don't steal it for the AI
     if conv.get("active_agent_key") == agent_key:
@@ -470,3 +508,48 @@ def touch_activity(conv_id: int, ts: float | None = None) -> None:
     with get_engine().begin() as conn:
         conn.execute(update(conversations).where(conversations.c.id == conv_id)
                      .values(last_activity_at=ts if ts is not None else time.time()))
+
+
+def delete(conv_id: int) -> int | None:
+    """Hard-delete a conversation and its messages (plano 16).
+
+    Returns the deleted conversation's ``contact_id`` (truthy) or ``None`` if it
+    did not exist. Steps, all in ONE transaction:
+
+    1. Clear unread for this conversation FIRST (espelha :func:`mark_conversation_read`):
+       ``unread_msg_ids`` has no ``conversation_id`` and ``contacts.unread_count`` is
+       denormalized, so deleting the messages before clearing would orphan unread rows
+       and inflate the badge.
+    2. Delete ``messages WHERE conversation_id`` EXPLICITLY — the column has no real FK
+       in SQLite (migration 0013 added it without one), so the declarative CASCADE does
+       not fire. (In Postgres the FK may cascade; the explicit delete is then idempotent.)
+    3. Delete ``conversation_label_links`` (defensive — FK may be missing in legacy SQLite).
+    4. Delete the ``conversations`` row.
+    """
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            select(conversations.c.contact_id).where(conversations.c.id == conv_id)
+        ).first()
+        if row is None:
+            return None
+        contact_id = row.contact_id
+        unread_rows = conn.execute(
+            select(unread_msg_ids.c.id)
+            .select_from(unread_msg_ids.join(messages, messages.c.msg_id == unread_msg_ids.c.msg_id))
+            .where(unread_msg_ids.c.contact_id == contact_id)
+            .where(messages.c.conversation_id == conv_id)
+        ).all()
+        n = len(unread_rows)
+        if n:
+            conn.execute(sa_delete(unread_msg_ids)
+                         .where(unread_msg_ids.c.id.in_([r.id for r in unread_rows])))
+            conn.execute(update(contacts).where(contacts.c.id == contact_id).values(
+                unread_count=case((contacts.c.unread_count <= n, 0),
+                                  else_=contacts.c.unread_count - n),
+                updated_at=time.time(),
+            ))
+        conn.execute(sa_delete(messages).where(messages.c.conversation_id == conv_id))
+        conn.execute(sa_delete(conversation_label_links)
+                     .where(conversation_label_links.c.conversation_id == conv_id))
+        conn.execute(sa_delete(conversations).where(conversations.c.id == conv_id))
+    return contact_id

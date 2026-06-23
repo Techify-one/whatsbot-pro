@@ -89,9 +89,12 @@ DEFAULT_CONFIG = {
     # Quando ``ai_engine_enabled`` é True, prompt/modelo/tools do agente são
     # lidos do banco (tabelas ``ai_*``) em vez das constantes do AgentHandler,
     # e tools podem ser criadas/editadas como código Python no próprio banco.
-    # Off (default) → caminho legado intacto (paridade total). Override por env
+    # Plano 20: o multi-agente é o caminho PADRÃO (single-agent legado aposentado).
+    # ON por default → prompt/modelo/tools vêm do agente default (semeado no boot,
+    # fonte canônica). O caminho legado in-code permanece como rede de segurança
+    # (``build_for_contact`` devolve None em row quebrada). Override env
     # ``WHATSBOT_AI_ENGINE``.
-    "ai_engine_enabled": False,
+    "ai_engine_enabled": True,
     # ⚠️ KILL-SWITCH DE SEGURANÇA — code-in-DB. Tools ``ai_tools`` guardam código
     # Python no banco que o instalador EXECUTA IN-PROCESS no boot (acesso total a
     # DB/FS/rede/chave do LLM). Enquanto não houver RBAC (plano 03) + runner

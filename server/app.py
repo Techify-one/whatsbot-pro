@@ -203,6 +203,12 @@ def create_app(
         agent_factory.seed_default_agent(settings)
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
+    # Built-in system custom-attributes (plano 19): seed CPF & friends (idempotent).
+    try:
+        from db.system_attributes import seed_system_attributes
+        seed_system_attributes()
+    except Exception as e:
+        logger.warning("System attributes seed failed: %s", e)
     # ⚠️ Security gate: code-in-DB tools. RBAC (plano 03) e o runner isolado (P62/P67)
     # já existem — o código do banco roda num SUBPROCESSO one-shot isolado, NÃO mais
     # in-process. Mesmo assim a feature fica OFF por default; só roda com opt-in explícito.

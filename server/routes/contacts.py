@@ -1164,6 +1164,16 @@ def register_routes(app, deps):
         if conv is None:
             conv = await asyncio.to_thread(conversation_repo.get_latest_for_contact, contact_id)
         if conv is not None:
+            # P17: the AI gate is per-conversation now — the contact flag above no
+            # longer silences the bot. Mirror the toggle onto the contact's conversation
+            # (low-level ai_active flip, no (un)assign) so the AI actually pauses/resumes
+            # and the chat notice below stays truthful. Push conversation_ai_toggled so
+            # the sidebar badge flips live.
+            await asyncio.to_thread(
+                conversation_repo.set_ai_active, conv["id"], 1 if result else 0)
+            await ws_manager.broadcast("conversation_ai_toggled", {
+                "conversation_id": conv["id"], "contact_id": contact_id,
+                "ai_active": 1 if result else 0, "ts": time.time()})
             await asyncio.to_thread(
                 system_notices.emit_conversation_notice,
                 event_type="ai_on" if result else "ai_off",

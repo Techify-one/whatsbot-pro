@@ -168,7 +168,7 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args})
+        executed.append({"tool": name, "args": args, "result": feedback})
         track_step("tool_executed", {"tool": name, "args": args})
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
@@ -212,7 +212,7 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args})
+        executed.append({"tool": name, "args": args, "result": feedback})
         track_step("tool_executed", {"tool": name, "args": args})
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."

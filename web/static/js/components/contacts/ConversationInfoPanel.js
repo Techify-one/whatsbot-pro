@@ -37,7 +37,7 @@ function fmtTs(ts) {
   }
 }
 
-export function ConversationInfoPanel({ phone, conversationId = null, onClose, onOpenContactInfo = null, contactInfo = null }) {
+export function ConversationInfoPanel({ phone, conversationId = null, onClose, onOpenContactInfo = null, contactInfo = null, convAttrPatch = null }) {
   const [conv, setConv] = useState(null);
   const [loading, setLoading] = useState(true);
   const [convDefs, setConvDefs] = useState([]);
@@ -99,6 +99,20 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
     }
     return () => { cancelled = true; };
   }, [phone, conversationId]);
+
+  // P19 (locked decision 6): live-refresh when the AI writes a conversation-scope
+  // custom attribute. Contacts.js forwards the `conversation_updated` WS event as
+  // `convAttrPatch` ({conversation_id, custom_attributes}); merge the new values
+  // into the open panel without a refetch — mirrors how the contact panel reacts to
+  // `contact_info_updated`. The effect closure captures the latest `conv` (a new
+  // patch prop triggers a re-render before the effect runs), so the id check is fresh.
+  useEffect(() => {
+    if (!convAttrPatch || !conv) return;
+    if (convAttrPatch.conversation_id !== conv.id) return;
+    const next = convAttrPatch.custom_attributes || {};
+    setConvValues(prev => ({ ...prev, ...next }));
+    setConv(prev => (prev ? { ...prev, custom_attributes: { ...(prev.custom_attributes || {}), ...next } } : prev));
+  }, [convAttrPatch]);
 
   // Merge an updated conv row from an action endpoint into the current one — the
   // raw rows (assign/status) omit the channel fields, so we keep prev's enrichment.

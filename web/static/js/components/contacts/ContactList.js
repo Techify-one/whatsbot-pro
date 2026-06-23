@@ -439,7 +439,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`
                           : null
                         }
-                        ${c.ai_enabled === false
+                        ${(c.conv_ai_active === 0 || c.conv_ai_active === false)
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle">IA OFF</span>`
                           : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }

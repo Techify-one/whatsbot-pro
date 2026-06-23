@@ -42,6 +42,7 @@ from config.settings import (
 )
 from fastapi import Request
 
+from db.repositories import conversation_repo
 from gowa.client import GOWASendError
 from server.authz import permission_denied
 from server.helpers import _ok, _err
@@ -121,7 +122,15 @@ def register_routes(app, deps):
         try:
             def _disable_provision_ai():
                 contact = agent_handler._get_contact(provision_number)
-                contact.set_ai_enabled(False)
+                contact.set_ai_enabled(False)  # legacy contact flag (back-compat)
+                # P17: the AI gate is per-conversation now, so the contact flag no
+                # longer silences the bot. Eagerly resolve the provisioning
+                # contact's conversation and pause it (ai_active=0) so the bot never
+                # auto-replies to Techify — even after Techify answers (the inbound
+                # reuses this open, paused conversation instead of a fresh one).
+                jid = f"{provision_number}@s.whatsapp.net"
+                conv = conversation_repo.resolve_for_contact(contact.id, jid)
+                conversation_repo.set_ai_active(conv["id"], 0)
             await asyncio.to_thread(_disable_provision_ai)
         except Exception as e:
             logger.warning(

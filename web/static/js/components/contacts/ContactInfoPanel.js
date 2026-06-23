@@ -18,12 +18,14 @@ const TAG_COLORS = [
 // custom attributes, observations. Conversation status/assignment/labels/
 // attributes live in ConversationInfoPanel.
 
-export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
+export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [newObs, setNewObs] = useState('');
+  // Inline 2-click confirmation for the destructive "Apagar contato" action (plano 16).
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
   const [customDefs, setCustomDefs] = useState([]);
@@ -52,6 +54,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     }
     setTags([...(contactTags || [])]);
   }, [phone, info, contactTags]);
+
+  // Reset the delete confirmation when switching contacts (don't carry a primed
+  // "Confirmar?" over to the wrong contact).
+  useEffect(() => { setConfirmDelete(false); }, [phone]);
 
   // Load custom attribute definitions once; reload when the admin screen edits them.
   useEffect(() => {
@@ -452,6 +458,18 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
           >
             ${saving ? 'Salvando...' : 'Salvar'}
           </button>
+          ${onDeleteContact ? html`
+            <button
+              type="button"
+              onClick=${() => {
+                if (!confirmDelete) { setConfirmDelete(true); return; }
+                onDeleteContact();
+              }}
+              class="w-full mt-2 text-[14px] font-medium py-2.5 rounded-[8px] ${confirmDelete ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors"
+            >
+              ${confirmDelete ? 'Confirmar exclusão? Apaga TODAS as conversas' : 'Apagar contato'}
+            </button>
+          ` : null}
         </div>
       </div>
     </div>

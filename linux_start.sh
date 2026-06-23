@@ -13,9 +13,9 @@
 set -u
 
 # Porta web (frontend + REST + WS). Pode ser sobrescrita externamente.
-export WHATSBOT_WEB_PORT="${WHATSBOT_WEB_PORT:-8090}"
+export WHATSBOT_WEB_PORT="${WHATSBOT_WEB_PORT:-8091}"
 # Porta interna do subprocess GOWA (não exposta).
-export WHATSBOT_GOWA_PORT="${WHATSBOT_GOWA_PORT:-64998}"
+export WHATSBOT_GOWA_PORT="${WHATSBOT_GOWA_PORT:-64997}"
 
 cd "$(dirname "$0")"
 
