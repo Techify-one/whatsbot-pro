@@ -1,10 +1,17 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useCallback } from 'preact/hooks';
 import { getConfig, saveConfig as apiSaveConfig } from '../services/api.js';
 
 export function useConfig() {
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      const res = await getConfig();
+      if (res.ok) setConfig(res.data);
+    } catch (e) { /* ignore */ }
+  }, []);
 
   useEffect(() => {
     getConfig().then((res) => {
@@ -31,5 +38,5 @@ export function useConfig() {
     }
   }
 
-  return { config, loading, saving, save, setConfig };
+  return { config, loading, saving, save, setConfig, reload };
 }
