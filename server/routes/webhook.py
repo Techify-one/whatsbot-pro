@@ -18,6 +18,7 @@ from pathlib import Path
 
 from channels.events import InboundEvent
 from channels import jid as jid_classifier
+from channels import ai_settings
 from db.repositories import channel_repo, contact_repo, conversation_repo, message_repo
 from agent import group_mentions
 # Media/reply parsing helpers live in gowa.inbound (plano 13 Fase 0); re-imported
@@ -109,6 +110,18 @@ def register_routes(app, deps):
     # Cache dir for inbound media downloaded from push-based providers (Cloud P16).
     media_dir = settings.data_dir / "statics" / "media"
 
+    def _channel_ai_enabled(channel_id: str) -> bool:
+        """Master AI gate (plano 21), checked BEFORE the per-conversation flag.
+
+        Two layers: the GLOBAL ``auto_reply`` switch (the panel-wide on/off button)
+        AND the channel's own ``ai_enabled`` override. Both must be on for the AI
+        to reply on this channel. The per-conversation ``ai_active`` flag is checked
+        separately by ``_conversation_ai_active``.
+        """
+        if not settings.get("auto_reply", True):
+            return False
+        return bool(ai_settings.value(channel_id, "ai_enabled", True))
+
     def _resolve_presence_conv_id(phone: str) -> int | None:
         """Resolve the GOWA conversation_id for a chat_presence event so the
         frontend can scope the "digitando" indicator to that exact conversation
@@ -186,7 +199,8 @@ def register_routes(app, deps):
             logger.info("[Batch] reply for %s aborted by filter.reply.raw", phone)
             return
 
-        split_enabled = settings.get("split_messages", True)
+        split_enabled = ai_settings.value(
+            channel_id, "split_messages", settings.get("split_messages", True))
 
         if split_enabled:
             parts = parse_split_reply(reply)
@@ -217,7 +231,9 @@ def register_routes(app, deps):
 
             if i > 0:
                 # Inter-message delay with ±0.5s variation
-                base_delay = settings.get("split_message_delay", 2.0)
+                base_delay = ai_settings.value(
+                    channel_id, "split_message_delay",
+                    settings.get("split_message_delay", 2.0))
                 if base_delay > 0:
                     await asyncio.sleep(base_delay + random.uniform(-0.5, 0.5))
                 # Re-send typing indicator between parts (capability-gated)
@@ -369,7 +385,17 @@ def register_routes(app, deps):
 
         # If transfer_to_human was called, broadcast alert + state updates
         if any(tc.get("tool") == "transfer_to_human" for tc in tool_calls):
-            await ws_manager.broadcast("human_transfer_alert", {"phone": phone})
+            # Per-channel sound alert (plano 21): resolve the channel's setting and
+            # ship it in the payload so the panel respects it even though the
+            # toggle no longer lives in the global config.
+            ta_enabled = bool(ai_settings.value(
+                channel_id, "transfer_alert_enabled",
+                settings.get("transfer_alert_enabled", True)))
+            ta_duration = ai_settings.value(
+                channel_id, "transfer_alert_duration",
+                settings.get("transfer_alert_duration", 5))
+            await ws_manager.broadcast("human_transfer_alert", {
+                "phone": phone, "enabled": ta_enabled, "duration": ta_duration})
             await ws_manager.broadcast("contact_ai_toggled", {
                 "phone": phone,
                 "ai_enabled": False,
@@ -406,10 +432,14 @@ def register_routes(app, deps):
         target=private → save as 'transcription' role (operator-only card in the panel)
         target=chat    → send a new WhatsApp message with the configured prefix
         """
-        target = settings.get("audio_transcription_target", "private")
+        target = ai_settings.value(
+            channel_id, "audio_transcription_target",
+            settings.get("audio_transcription_target", "private"))
 
         if target == "chat":
-            chat_prefix = settings.get("audio_transcription_chat_prefix", "") or ""
+            chat_prefix = ai_settings.value(
+                channel_id, "audio_transcription_chat_prefix",
+                settings.get("audio_transcription_chat_prefix", "")) or ""
             chat_message = f"{chat_prefix}{transcription}" if chat_prefix else transcription
             # Suppress echo-back for the message we're about to send
             sent_key = f"{channel_id}:{phone}:{chat_message[:120]}"
@@ -459,16 +489,20 @@ def register_routes(app, deps):
         group_jid: str | None = None,
         file_name: str = "",        # document only — original filename
         mimetype: str = "",         # document only — best-effort mime hint
+        channel_id: str = "default",
     ) -> str:
         """Inbound-path wrapper around the shared transcription helper.
 
         Delegates to ``server.transcription.maybe_transcribe`` so the gate +
         plugin hooks (``filter.transcription.should_run`` / ``.result``) live in
-        one place, shared with the operator send routes.
+        one place, shared with the operator send routes. The transcription gates
+        (describe image / read document / audio mode) are resolved PER CHANNEL
+        (plano 21) via a settings view that overlays the channel's overrides.
         """
         return await maybe_transcribe(
             media_kind, path,
-            settings=settings, agent_handler=agent_handler,
+            settings=ai_settings.view(channel_id, settings),
+            agent_handler=agent_handler,
             phone=phone, source=source, is_group=is_group, group_jid=group_jid,
             file_name=file_name, mimetype=mimetype,
         )
@@ -586,7 +620,7 @@ def register_routes(app, deps):
                 "combined_preview": "\n".join(t for t in text_parts if t)[:200],
             })
 
-            if settings.get("auto_reply", True):
+            if _channel_ai_enabled(channel_id):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
@@ -609,7 +643,7 @@ def register_routes(app, deps):
                         "source": "batch_text",
                         "ts": time.time(),
                     })
-                    if settings.get("auto_reply", True) \
+                    if _channel_ai_enabled(channel_id) \
                             and _conversation_ai_active(contact):
                         if not agent_handler.api_key:
                             notice = "[WhatsBot] API key não configurada."
@@ -688,6 +722,7 @@ def register_routes(app, deps):
                         phone=phone, source="batch",
                         is_group=contact.is_group,
                         group_jid=phone if contact.is_group else None,
+                        channel_id=channel_id,
                     )
                 elif image_path:
                     transcription = await _maybe_transcribe(
@@ -695,6 +730,7 @@ def register_routes(app, deps):
                         phone=phone, source="batch",
                         is_group=contact.is_group,
                         group_jid=phone if contact.is_group else None,
+                        channel_id=channel_id,
                     )
                 elif document_path:
                     transcription = await _maybe_transcribe(
@@ -704,6 +740,7 @@ def register_routes(app, deps):
                         group_jid=phone if contact.is_group else None,
                         file_name=doc_extras.get("file_name") or "",
                         mimetype=doc_extras.get("mimetype") or "",
+                        channel_id=channel_id,
                     )
 
                 if transcription:
@@ -736,7 +773,7 @@ def register_routes(app, deps):
                             },
                         })
 
-                if not settings.get("auto_reply", True) \
+                if not _channel_ai_enabled(channel_id) \
                         or not _conversation_ai_active(contact):
                     continue
 
@@ -822,7 +859,9 @@ def register_routes(app, deps):
         """
         key = (channel_id, phone)
         try:
-            batch_delay = settings.get("message_batch_delay", 3.0)
+            batch_delay = ai_settings.value(
+                channel_id, "message_batch_delay",
+                settings.get("message_batch_delay", 3.0))
             await _wait_typing_paused(channel_id, phone)
             await asyncio.sleep(batch_delay)
             await _wait_typing_paused(channel_id, phone)
@@ -1741,8 +1780,12 @@ def register_routes(app, deps):
             if text:
                 display_text = f"[{sender_label}]: {group_mentions.apply_incoming(lookup, text)}"
 
-            # Check if bot is mentioned (use RAW text, before name resolution)
-            group_mode = settings.get("group_reply_mode", "mention_only")
+            # Check if bot is mentioned (use RAW text, before name resolution).
+            # Per-channel (plano 21): the GOWA legacy webhook is single-channel, so
+            # the group-reply policy is read from the ``default`` channel's override.
+            group_mode = ai_settings.value(
+                _GOWA_CHANNEL_ID, "group_reply_mode",
+                settings.get("group_reply_mode", "mention_only"))
             bot_mentioned = _is_bot_mentioned(text, data)
 
             if group_mode == "never" or (group_mode == "mention_only" and not bot_mentioned):

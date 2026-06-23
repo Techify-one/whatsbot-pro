@@ -19,6 +19,7 @@ import {
   getChannelMembers,
   setChannelMembers,
   listChannelAssignableUsers,
+  getConfig,
 } from '../services/api.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 
@@ -84,6 +85,181 @@ function JidTypePicker({ selected, onChange, disabled }) {
   `;
 }
 
+// Build the per-channel AI override object (config.ai) seeded from the current
+// GLOBAL config (plano 21). A new channel "inherits" the values that used to be
+// global; ``ai_enabled`` (the per-channel master switch) defaults on.
+function aiDefaultsFrom(cfg) {
+  cfg = cfg || {};
+  return {
+    ai_enabled: true,
+    default_ai_enabled: cfg.default_ai_enabled ?? true,
+    group_reply_mode: cfg.group_reply_mode ?? 'mention_only',
+    image_transcription_enabled: cfg.image_transcription_enabled ?? true,
+    document_transcription_enabled: cfg.document_transcription_enabled ?? true,
+    audio_transcription_mode: cfg.audio_transcription_mode ?? 'received',
+    audio_transcription_target: cfg.audio_transcription_target ?? 'private',
+    audio_transcription_chat_prefix: cfg.audio_transcription_chat_prefix ?? '',
+    max_context_messages: cfg.max_context_messages ?? 10,
+    message_batch_delay: cfg.message_batch_delay ?? 3,
+    split_messages: cfg.split_messages ?? true,
+    split_message_delay: cfg.split_message_delay ?? 2,
+    transfer_alert_enabled: cfg.transfer_alert_enabled ?? true,
+    transfer_alert_duration: cfg.transfer_alert_duration ?? 5,
+  };
+}
+
+// Per-channel AI settings form (config.ai). Controlled: `value` is the ai object,
+// `onChange` receives the full updated object. Mirrors the knobs that used to be
+// global in the IA "Configurações" tab — now configured per channel.
+function AiSettingsFields({ value, onChange }) {
+  const ai = value || {};
+  const set = (key, v) => onChange({ ...ai, [key]: v });
+  const num = (key, v, fallback) => {
+    const n = parseFloat(v);
+    set(key, isNaN(n) ? fallback : n);
+  };
+  const aiOn = ai.ai_enabled !== false;
+  return html`
+    <div class="flex flex-col gap-3">
+      <!-- Master switch for this channel -->
+      <label class="flex items-center gap-3 text-[14px] font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${aiOn ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+        <input type="checkbox" checked=${aiOn}
+          onChange=${(e) => set('ai_enabled', e.target.checked)}
+          class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+        Ativar a IA neste canal
+      </label>
+
+      ${aiOn ? html`
+        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
+          <input type="checkbox" checked=${ai.default_ai_enabled !== false}
+            onChange=${(e) => set('default_ai_enabled', e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+          IA ativada por padrão para novos contatos
+        </label>
+
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Resposta da IA em grupos</label>
+          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+            value=${ai.group_reply_mode || 'mention_only'}
+            onChange=${(e) => set('group_reply_mode', e.target.value)}>
+            <option value="mention_only">Somente quando o bot for mencionado</option>
+            <option value="always">Sempre (responder a todas as mensagens do grupo)</option>
+            <option value="never">Nunca (não responder em grupos)</option>
+          </select>
+        </div>
+
+        <!-- Transcrição de mídia -->
+        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
+          <input type="checkbox" checked=${ai.image_transcription_enabled !== false}
+            onChange=${(e) => set('image_transcription_enabled', e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+          Descrever imagem
+        </label>
+        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
+          <input type="checkbox" checked=${ai.document_transcription_enabled !== false}
+            onChange=${(e) => set('document_transcription_enabled', e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+          Ler documento
+        </label>
+
+        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+          <div class="text-[13px] font-semibold text-wa-text">Transcrição de áudio</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Transcrever mensagens</label>
+              <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+                value=${ai.audio_transcription_mode || 'received'}
+                onChange=${(e) => set('audio_transcription_mode', e.target.value)}>
+                <option value="received">Somente recebidas</option>
+                <option value="sent">Somente enviadas</option>
+                <option value="both">Nos dois sentidos</option>
+                <option value="off">Não transcrever</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Onde aparece a transcrição</label>
+              <select class="wa-field w-full px-3 py-2 rounded-md text-[14px] disabled:opacity-50"
+                value=${ai.audio_transcription_target || 'private'}
+                disabled=${(ai.audio_transcription_mode || 'received') === 'off'}
+                onChange=${(e) => set('audio_transcription_target', e.target.value)}>
+                <option value="private">Mensagem privada (só no painel)</option>
+                <option value="chat">Direto no chat (envia ao contato)</option>
+              </select>
+            </div>
+          </div>
+          ${(ai.audio_transcription_mode || 'received') !== 'off' && ai.audio_transcription_target === 'chat' ? html`
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Prefixo (opcional)</label>
+              <textarea rows="2" placeholder="Ex: 🎙 Transcrição: "
+                class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-none"
+                value=${ai.audio_transcription_chat_prefix || ''}
+                onInput=${(e) => set('audio_transcription_chat_prefix', e.target.value)}></textarea>
+            </div>
+          ` : null}
+        </div>
+
+        <!-- Contexto + agrupamento -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Mensagens de contexto</label>
+            <input type="number" min="2" max="100"
+              class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              value=${ai.max_context_messages ?? 10}
+              onInput=${(e) => num('max_context_messages', e.target.value, 10)} />
+            <span class="text-[11px] text-wa-secondary">Qtd de msgs enviadas ao LLM</span>
+          </div>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Agrupar mensagens (s)</label>
+            <input type="number" min="0" max="30" step="0.5"
+              class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              value=${ai.message_batch_delay ?? 3}
+              onInput=${(e) => num('message_batch_delay', e.target.value, 0)} />
+            <span class="text-[11px] text-wa-secondary">Espera antes de responder</span>
+          </div>
+        </div>
+
+        <!-- Mensagens picadas -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+            <input type="checkbox" checked=${ai.split_messages !== false}
+              onChange=${(e) => set('split_messages', e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+            Mensagens picadas (dividir resposta)
+          </label>
+          ${ai.split_messages !== false ? html`
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Intervalo entre mensagens (s)</label>
+              <input type="number" min="0" max="10" step="0.5"
+                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+                value=${ai.split_message_delay ?? 2}
+                onInput=${(e) => num('split_message_delay', e.target.value, 0)} />
+            </div>
+          ` : null}
+        </div>
+
+        <!-- Alerta sonoro de transferência -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+            <input type="checkbox" checked=${ai.transfer_alert_enabled !== false}
+              onChange=${(e) => set('transfer_alert_enabled', e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+            Alerta sonoro ao transferir para humano
+          </label>
+          ${ai.transfer_alert_enabled !== false ? html`
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Duração do alerta (segundos)</label>
+              <input type="number" min="1" max="30" step="1"
+                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+                value=${ai.transfer_alert_duration ?? 5}
+                onInput=${(e) => num('transfer_alert_duration', e.target.value, 5)} />
+            </div>
+          ` : null}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
 // Random URL-safe token, used for the "sugerir" verify-token button.
 function randomToken(len = 32) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -103,9 +279,11 @@ function Dot({ on }) {
 }
 
 // ── Create-channel modal ────────────────────────────────────────────
-function ChannelForm({ onCreated, onCancel, busy, error }) {
+function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
   const [provider, setProvider] = useState('gowa');
   const [displayName, setDisplayName] = useState('');
+  // Per-channel AI settings (config.ai), seeded from the current global config.
+  const [ai, setAi] = useState(() => aiDefaults || aiDefaultsFrom({}));
   // Provider-specific credential/config fields.
   // The GOWA device id is auto-generated and read-only: each channel maps to its
   // own GOWA device (one WhatsApp number) on the shared GOWA process.
@@ -140,9 +318,11 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
       provider,
       display_name: displayName.trim(),
     };
+    // Per-channel AI settings live under config.ai for every provider (plano 21).
+    const config = { ai };
     if (provider === 'gowa') {
-      payload.config = { allowed_jid_types: jidTypes };
-      if (gowaDeviceId.trim()) payload.config.gowa_device_id = gowaDeviceId.trim();
+      config.allowed_jid_types = jidTypes;
+      if (gowaDeviceId.trim()) config.gowa_device_id = gowaDeviceId.trim();
     } else if (provider === 'whatsapp_cloud') {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
@@ -154,6 +334,7 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
     } else if (provider === 'telegram') {
       if (botToken.trim()) payload.credentials = { bot_token: botToken.trim() };
     }
+    payload.config = config;
     return payload;
   }
 
@@ -255,6 +436,11 @@ function ChannelForm({ onCreated, onCancel, busy, error }) {
             </div>
           </div>
         ` : null}
+
+        <div class="border-t border-wa-border pt-3">
+          <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
+          <${AiSettingsFields} value=${ai} onChange=${setAi} />
+        </div>
 
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
@@ -563,10 +749,16 @@ function AgentPicker({ users, selected, onChange }) {
 // ── Edit-channel modal ──────────────────────────────────────────────
 // Edits the channel's display info + the agents that see its inbox. Does NOT
 // reconnect or change the QR — login/session are untouched here.
-function ChannelEditForm({ channel, onSaved, onCancel }) {
+function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
   const isCloud = channel.provider === 'whatsapp_cloud';
   const isGowa = channel.provider === 'gowa';
   const [displayName, setDisplayName] = useState(channel.display_name || channel.id);
+  // Per-channel AI settings (config.ai): the stored overrides layered on top of
+  // the global-derived defaults (so unset keys show the inherited value).
+  const [ai, setAi] = useState(() => {
+    const cfg = parseChannelConfig(channel.config);
+    return { ...(aiDefaults || aiDefaultsFrom({})), ...(cfg.ai || {}) };
+  });
   // GOWA: which chat types this channel surfaces. Seed from the stored config
   // (falling back to the default set when unset).
   const [jidTypes, setJidTypes] = useState(() => {
@@ -609,12 +801,12 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
     if (busy || !displayName.trim()) return;
     setBusy(true); setError('');
     const payload = { display_name: displayName.trim() };
-    if (isGowa) {
-      // PUT replaces config wholesale — preserve gowa_device_id (and any other
-      // existing keys) while updating the allowed chat types.
-      const cfg = parseChannelConfig(channel.config);
-      payload.config = { ...cfg, allowed_jid_types: jidTypes };
-    }
+    // PUT replaces config wholesale — preserve existing keys (gowa_device_id,
+    // allowed_jid_types) while updating the per-channel AI settings (plano 21).
+    const cfg = parseChannelConfig(channel.config);
+    const newConfig = { ...cfg, ai };
+    if (isGowa) newConfig.allowed_jid_types = jidTypes;
+    payload.config = newConfig;
     if (isCloud) {
       const credentials = {};
       if (accessToken.trim()) credentials.access_token = accessToken.trim();
@@ -692,6 +884,11 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
           ` : null}
 
           <div class="border-t border-wa-border pt-3">
+            <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
+            <${AiSettingsFields} value=${ai} onChange=${setAi} />
+          </div>
+
+          <div class="border-t border-wa-border pt-3">
             <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
             <p class="text-[12px] text-wa-secondary mb-2">
               Os agentes selecionados veem as conversas deste canal e recebem as mensagens que caírem aqui.
@@ -731,6 +928,9 @@ export default function ChannelsManager({ initialEntity }) {
   const [connectFor, setConnectFor] = useState(null);
   // The channel object being edited (display info + inbox agents), or null.
   const [editingChannel, setEditingChannel] = useState(null);
+  // Per-channel AI defaults, derived from the global config (plano 21): a new
+  // channel inherits the values that used to be global.
+  const [aiDefaults, setAiDefaults] = useState(() => aiDefaultsFrom({}));
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
@@ -745,6 +945,15 @@ export default function ChannelsManager({ initialEntity }) {
       if (c) setEditingChannel(c);
     },
   });
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await getConfig();
+      if (alive && res && res.ok) setAiDefaults(aiDefaultsFrom(res.data));
+    })();
+    return () => { alive = false; };
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -875,7 +1084,8 @@ export default function ChannelsManager({ initialEntity }) {
         onCreated=${handleCreate}
         onCancel=${() => setCreating(false)}
         busy=${createBusy}
-        error=${createError} />` : null}
+        error=${createError}
+        aiDefaults=${aiDefaults} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -901,6 +1111,7 @@ export default function ChannelsManager({ initialEntity }) {
 
       ${editingChannel ? html`<${ChannelEditForm}
         channel=${editingChannel}
+        aiDefaults=${aiDefaults}
         onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
         onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
     </div>

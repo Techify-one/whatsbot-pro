@@ -407,7 +407,7 @@ function App({ onLogout, hasPassword, currentUser }) {
     return () => window.removeEventListener('popstate', onPopState);
   }, [pluginScreens]);
 
-  const { config, loading, saving, save } = useConfig();
+  const { config, loading, saving, save, reload: reloadConfig } = useConfig();
 
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
@@ -428,17 +428,22 @@ function App({ onLogout, hasPassword, currentUser }) {
       if (data.version) setQrVersion(data.version);
     }, []),
     onGowaStatus: useCallback((data) => setNotification(data.message), []),
-    onConfigSaved: useCallback(() => setNotification('Configurações salvas!'), []),
+    onConfigSaved: useCallback(() => { setNotification('Configurações salvas!'); reloadConfig(); }, [reloadConfig]),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
     onChatPresence: useCallback((data) => setChatPresence(data), []),
     onAiTyping: useCallback((data) => setAiTyping(data), []),
     onContactInfoUpdated: useCallback((data) => setContactInfoUpdated(data), []),
     onTagsChanged: useCallback((data) => setTagsChanged(data), []),
     onContactTagsUpdated: useCallback((data) => setContactTagsUpdated(data), []),
-    onHumanTransferAlert: useCallback(() => {
+    onHumanTransferAlert: useCallback((data) => {
+      // Per-channel alert (plano 21): the payload carries the channel's resolved
+      // setting; fall back to the global config for older payloads.
       const cfg = configRef.current;
-      if (cfg && cfg.transfer_alert_enabled === false) return;
-      const duration = cfg?.transfer_alert_duration || 5;
+      const enabled = (data && data.enabled !== undefined)
+        ? data.enabled
+        : !(cfg && cfg.transfer_alert_enabled === false);
+      if (!enabled) return;
+      const duration = (data && data.duration) || cfg?.transfer_alert_duration || 5;
       playTransferAlert(duration);
     }, []),
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),

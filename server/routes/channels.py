@@ -259,6 +259,13 @@ def register_routes(app, deps):
                 reset_allowed_jid_cache()
             except Exception:
                 pass
+            # Drop the per-channel AI settings cache too (plano 21) so the new
+            # overrides take effect without waiting for the TTL.
+            try:
+                from channels import ai_settings
+                ai_settings.reset_cache(channel_id)
+            except Exception:
+                pass
         # Credentials: a non-empty value replaces; the masked placeholder (••••) is ignored.
         for key, value in (body.get("credentials") or {}).items():
             if value and not str(value).startswith("••••"):
