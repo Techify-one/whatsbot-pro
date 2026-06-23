@@ -355,6 +355,9 @@ check("GET /api/contacts/{phone} -> has name", data.get("name") == "Alice Test")
 check("GET /api/contacts/{phone} -> has email", data.get("email") == "alice@test.com")
 check("GET /api/contacts/{phone} -> has messages", isinstance(data.get("messages"), list))
 check("GET /api/contacts/{phone} -> messages count", len(data["messages"]) == 4)
+# Permalink de mensagem (estilo Chatwoot): cada msg expõe conversation_id p/ ancorar o link.
+check("GET /api/contacts/{phone} -> messages expose conversation_id",
+      all("conversation_id" in m for m in data["messages"]))
 check("GET /api/contacts/{phone} -> has tags", isinstance(data.get("tags"), list))
 check("GET /api/contacts/{phone} -> has observations", isinstance(data.get("info", {}).get("observations"), list))
 
@@ -2667,6 +2670,25 @@ for path in ["/", "/painel", "/sandbox", "/costs", "/quick-replies", "/custom-at
 check("GET /conversations/1 (SPA) -> 200", client.get("/conversations/1").status_code == 200)
 check("GET /contacts/1 (SPA) -> 200", client.get("/contacts/1").status_code == 200)
 
+# Deep-links por entidade (identidade natural): cada um serve o SPA no reload,
+# mirroring /contacts/<id>. Sub-abas do /ai e do /users também são deep-linkáveis.
+for path in [
+    "/ai/agents", "/ai/agents/default", "/ai/prompts/saudacao",
+    "/ai/variables/nome_empresa", "/ai/tools", "/ai/tools/save_contact_info",
+    "/plugins/lembretes", "/channels/default",
+    "/users/1", "/users/roles", "/users/roles/gestor",
+    "/quick-replies/saudacao",
+    "/custom-attributes/contact", "/custom-attributes/contact/empresa",
+    "/custom-attributes/conversation/prioridade",
+]:
+    check(f"GET {path} (SPA) -> 200", client.get(path).status_code == 200)
+
+# short_code com "/" codificado (%2F) ainda serve o SPA (não 404).
+check("GET /quick-replies/%2Fsaud (SPA) -> 200",
+      client.get("/quick-replies/%2Fsaud").status_code == 200)
+# /users/roles é palavra reservada — não pode ser capturado como user_id numérico.
+check("GET /users/roles != user_id (SPA) -> 200", client.get("/users/roles").status_code == 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  23. Auth with password
 # ═══════════════════════════════════════════════════════════════════
@@ -2679,6 +2701,15 @@ check("SET password -> 200", r.status_code == 200)
 # Now auth should be required
 r = client.get("/api/auth/check")
 check("GET /auth/check (no token) -> 401", r.status_code == 401)
+
+# Os prefixos de deep-link (SPA) ficam abertos mesmo com senha, para o reload de
+# uma URL de entidade servir o index.html — mas a API equivalente segue protegida.
+check("GET /channels/default (SPA, no token) -> 200",
+      client.get("/channels/default").status_code == 200)
+check("GET /ai/agents/default (SPA, no token) -> 200",
+      client.get("/ai/agents/default").status_code == 200)
+check("GET /api/channels (no token) -> 401 (API ainda protegida)",
+      client.get("/api/channels").status_code == 401)
 
 # Login
 r = client.post("/api/auth/login", json={"password": "mysecret123"})

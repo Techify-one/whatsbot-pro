@@ -8,6 +8,7 @@ import htm from 'htm';
 import { PluginSettingsForm } from './PluginSettingsForm.js';
 import { PluginScreen } from './PluginScreen.js';
 import { authHeaders, handleUnauthorized } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -46,7 +47,7 @@ function RestartBanner() {
 }
 
 
-export function PluginsManager({ onPluginsChanged }) {
+export function PluginsManager({ onPluginsChanged, initialEntity }) {
   const [plugins, setPlugins] = useState([]);
   const [apiVersion, setApiVersion] = useState('');
   const [loading, setLoading] = useState(true);
@@ -56,6 +57,17 @@ export function PluginsManager({ onPluginsChanged }) {
   const [restarting, setRestarting] = useState(false);
   const [exporting, setExporting] = useState({}); // { [pluginId]: pct (0-100) }
   const fileRef = useRef(null);
+
+  // Deep-link /plugins/<id>: a URL reflete o plugin com o modal Configurar aberto.
+  const pushUrl = useDeepLink({
+    tab: 'plugins',
+    resolve: initialEntity ? { id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel) { setSettingsOpen(null); return; }
+      if (plugins.find(p => p.id === sel.id)) setSettingsOpen(sel.id);
+    },
+  });
 
   async function load() {
     setLoading(true);
@@ -269,7 +281,7 @@ export function PluginsManager({ onPluginsChanged }) {
                     class="px-3 py-1 text-[13px] rounded ${p.enabled ? 'bg-yellow-500 text-white' : 'bg-green-600 text-white'}"
                   >${p.enabled ? 'Desativar' : 'Ativar'}</button>
                   <button
-                    onClick=${() => setSettingsOpen(p.id)}
+                    onClick=${() => { setSettingsOpen(p.id); pushUrl({ id: p.id }); }}
                     disabled=${!p.loaded}
                     class="px-3 py-1 text-[13px] rounded bg-wa-panel border border-wa-border disabled:opacity-50"
                   >Configurar</button>
@@ -306,7 +318,7 @@ export function PluginsManager({ onPluginsChanged }) {
             <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between">
               <div class="font-medium">Configurações — ${(cfgPlugin && cfgPlugin.name) || settingsOpen}</div>
               <button class="text-wa-secondary hover:text-wa-text"
-                      onClick=${() => setSettingsOpen(null)}>×</button>
+                      onClick=${() => { setSettingsOpen(null); pushUrl(null); }}>×</button>
             </div>
             <div class="p-4">
               ${cfgScreen

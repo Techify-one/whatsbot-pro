@@ -5,7 +5,7 @@
 // Dispatches `whatsbot:custom-attributes-changed` so open contact/conversation panels reload.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getCustomAttributes,
@@ -13,6 +13,7 @@ import {
   updateCustomAttribute,
   deleteCustomAttribute,
 } from '../services/api.js';
+import { useDeepLink, entityPath } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -193,14 +194,15 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
   `;
 }
 
-export default function CustomAttributesManager() {
+export default function CustomAttributesManager({ initialEntity }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState('conversation');   // active scope tab (Chatwoot-style)
+  // Aba de escopo (Chatwoot-style) espelha /custom-attributes/<scope>[/<key>].
+  const [tab, setTab] = useState(() => initialEntity?.sub || 'conversation');
 
   async function load() {
     setLoading(true);
@@ -222,6 +224,33 @@ export default function CustomAttributesManager() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Aba de escopo segue a URL (deep-link / back-forward).
+  useEffect(() => {
+    if (initialEntity?.sub) setTab(initialEntity.sub);
+  }, [initialEntity]);
+
+  // Deep-link /custom-attributes/<scope>/<key>: reabre o atributo (escopo + chave).
+  const pushUrl = useDeepLink({
+    tab: 'custom-attributes',
+    resolve: initialEntity ? { sub: initialEntity.sub, id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const a = items.find(r => (r.applies_to || 'contact') === sel.sub && r.attribute_key === sel.id);
+      if (a) { setEditing(a); setCreating(false); }
+    },
+  });
+  // Reflete o atributo aberto na URL (escopo do próprio atributo + chave); ao
+  // fechar, volta ao escopo da aba atual. Pula o 1º render p/ não atropelar o
+  // deep-link de entrada.
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing
+      ? { sub: editing.applies_to || 'contact', id: editing.attribute_key }
+      : { sub: tab });
+  }, [editing]);
 
   async function handleCreate(data) {
     setBusy(true); setError('');
@@ -268,7 +297,14 @@ export default function CustomAttributesManager() {
         ${SCOPE_TABS.map(([scope, title]) => html`
           <button key=${scope}
             class="relative pb-2 text-[14px] transition-colors ${tab === scope ? 'text-wa-teal font-medium' : 'text-wa-secondary hover:text-wa-text'}"
-            onClick=${() => setTab(scope)}>
+            onClick=${() => {
+              setTab(scope); setEditing(null); setError('');
+              const p = entityPath('custom-attributes', { sub: scope });
+              if (window.location.pathname !== p) {
+                history.pushState(null, '', p);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }
+            }}>
             ${title}
             ${tab === scope ? html`<span class="absolute left-0 right-0 -bottom-px h-0.5 bg-wa-teal rounded-full"></span>` : null}
           </button>

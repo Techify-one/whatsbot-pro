@@ -6,7 +6,7 @@ import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachI
 import { formatBubbleTime, isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, copyToClipboard } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, copyToClipboard } from './MessageContextMenu.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
@@ -385,6 +385,22 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       if (match) text = match[2];
     }
     copyToClipboard(text);
+  }
+
+  // Permalink estilo Chatwoot: âncora na conversa + id interno da mensagem (a mesma
+  // chave que o scroll-to-message usa via data-mid). Prefere a conversa da própria
+  // mensagem; cai no prop da conversa aberta. null quando não há como ancorar (msg
+  // sem _id ou pré-plano-11 sem conversation_id na visão mesclada) → item desabilitado.
+  function messagePermalink(message) {
+    if (!message || message._id == null) return null;
+    const convId = message.conversation_id != null ? message.conversation_id : conversationId;
+    if (convId == null) return null;
+    return `${window.location.origin}/conversations/${convId}?message=${message._id}`;
+  }
+
+  function copyMessageLink(message) {
+    const url = messagePermalink(message);
+    if (url) copyToClipboard(url);
   }
 
   // Locate a quoted message in the current thread by its GOWA msg_id.
@@ -1564,6 +1580,9 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                                  setTimeout(() => inputRef.current?.focus(), 0); } },
             ] : []),
             { label: 'Copiar', icon: CopyIcon, onClick: () => copyMessageText(msgMenu.message) },
+            { label: 'Copiar link da mensagem', icon: LinkIcon,
+              disabled: !messagePermalink(msgMenu.message),
+              onClick: () => copyMessageLink(msgMenu.message) },
             ...(msgMenu.message.revoked ? [] : [
               { label: 'Apagar', icon: TrashIcon, danger: true,
                 onClick: () => setDeleteDialog({ message: msgMenu.message, isFromMe: msgMenu.isFromMe }) },

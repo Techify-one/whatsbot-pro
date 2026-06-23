@@ -3,7 +3,7 @@
 // `whatsbot:quick-replies-changed` ao salvar/excluir para o composer recarregar.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getQuickReplies,
@@ -11,6 +11,7 @@ import {
   updateQuickReply,
   deleteQuickReply,
 } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -81,7 +82,7 @@ function QuickReplyForm({ editing, onSubmit, onCancel, busy }) {
   `;
 }
 
-export default function QuickReplies() {
+export default function QuickReplies({ initialEntity }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -98,6 +99,23 @@ export default function QuickReplies() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /quick-replies/<short_code>: reabre a resposta rápida da URL.
+  const pushUrl = useDeepLink({
+    tab: 'quick-replies',
+    resolve: initialEntity ? { id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const r = items.find(x => x.short_code === sel.id);
+      if (r) { setEditing(r); setCreating(false); }
+    },
+  });
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing ? { id: editing.short_code } : null);
+  }, [editing]);
 
   async function handleCreate(data) {
     setBusy(true); setError('');

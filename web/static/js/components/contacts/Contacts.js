@@ -198,7 +198,7 @@ function shapeConvData(d) {
 
 // ── Main Component ───────────────────────────────────────────────
 
-export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, wsConnected, config, onConfigSave, onUnreadChange }) {
+export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange }) {
   const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -954,6 +954,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         setSelected(null);
         setSelectedConvId(initialConversationId);
       }
+      // Permalink (?message=<_id>): foca a mensagem assim que a conversa renderiza.
+      // Lido no momento da resolução e consumido uma vez (onScrolledToMsg limpa);
+      // a conversa carrega TODAS as mensagens, então o alvo está sempre no DOM.
+      if (initialScrollMsgId != null) setScrollToMsg(initialScrollMsgId);
       lastResolvedConvId.current = initialConversationId;
       lastResolvedId.current = null;
       return;

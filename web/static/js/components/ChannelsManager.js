@@ -20,6 +20,7 @@ import {
   setChannelMembers,
   listChannelAssignableUsers,
 } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -730,7 +731,7 @@ function ChannelEditForm({ channel, onSaved, onCancel }) {
   `;
 }
 
-export default function ChannelsManager() {
+export default function ChannelsManager({ initialEntity }) {
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -746,6 +747,18 @@ export default function ChannelsManager() {
   const [editingChannel, setEditingChannel] = useState(null);
   const channelsRef = useRef([]);
   channelsRef.current = channels;
+
+  // Deep-link /channels/<id>: a URL reflete o canal aberto no editor.
+  const pushUrl = useDeepLink({
+    tab: 'channels',
+    resolve: initialEntity ? { id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel) { setEditingChannel(null); return; }
+      const c = channels.find(ch => ch.id === sel.id);
+      if (c) setEditingChannel(c);
+    },
+  });
 
   async function load() {
     setLoading(true);
@@ -812,6 +825,7 @@ export default function ChannelsManager() {
 
   function handleEdit(channel) {
     setEditingChannel(channel);
+    pushUrl({ id: channel.id });
   }
 
   async function handleToggle(channel) {
@@ -898,8 +912,8 @@ export default function ChannelsManager() {
 
       ${editingChannel ? html`<${ChannelEditForm}
         channel=${editingChannel}
-        onCancel=${() => setEditingChannel(null)}
-        onSaved=${() => { setEditingChannel(null); load(); }} />` : null}
+        onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
+        onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
     </div>
   `;
 }
