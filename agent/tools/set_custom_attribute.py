@@ -82,6 +82,12 @@ def execute(ctx, args: dict) -> str | None:
         norm, err = validate_value(definition, value)
         if err:
             return f"Erro: {err}"
+        # Record the EFFECTIVE scope back into args (it may have been switched by
+        # the forgiving block above). The same dict is stored in the executed
+        # record, so the tool_call card and the webhook's live-refresh
+        # (_broadcast_tool_calls → attr_scopes) both reflect WHERE it really saved,
+        # not the scope the LLM originally requested (plano 19).
+        args["scope"] = scope
         if scope == "conversation":
             conv = conversation_repo.get_open_for_contact(ctx.contact.id)
             if not conv:
@@ -92,4 +98,9 @@ def execute(ctx, args: dict) -> str | None:
     except Exception as e:
         logger.warning("set_custom_attribute failed for %s: %s", getattr(ctx.contact, "phone", "?"), e)
         return "Erro ao salvar o atributo."
-    return None
+    # Return a structured success message (plano 19): confirms the value WAS saved
+    # and WHERE (contact vs conversation) — the painel card reflects this instead of
+    # a generic "feito", and it tells the LLM the forgiving scope-switch (if any).
+    label = definition.get("display_name") or key
+    where = "na conversa" if scope == "conversation" else "no contato"
+    return f"✅ {label} salvo {where}."

@@ -430,6 +430,12 @@ export async function archiveConversation(id, archived) {
   return request('POST', `/api/conversations/${id}/archive`, { archived });
 }
 
+// Hard-delete a single conversation/thread (plano 16). Keeps the contact and its
+// other conversations; only this thread + its messages are removed.
+export async function deleteConversation(id) {
+  return request('DELETE', `/api/conversations/${id}`);
+}
+
 // Assume the conversation for the current user (plano 10 Onda 0). No body — the
 // server resolves "me" from the authenticated session.
 export async function assignMeConversation(id) {

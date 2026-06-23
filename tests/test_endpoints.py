@@ -1437,6 +1437,97 @@ check("POST /conversations/{id}/ai active=true -> reativa", r.json()["data"]["co
 check("gate volta a True", _ai_gate(_cm) is True)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15h-ter. Planos 16-20 (apagar conversa/contato, IA por conversa, atrib. sistema)
+# ═══════════════════════════════════════════════════════════════════
+section("Planos 16-20 (apagar, IA por conversa, atributos de sistema)")
+
+# ── P17: desligar IA despausa + tira atribuição (Não atribuídas) e zera agente ──
+_p17 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_p17["id"], _mgr["id"])  # responsável humano + agente default
+r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": False})
+_d = r.json()["data"]["conversation"]
+check("P17 ai off -> ai_active=0", _d["ai_active"] == 0)
+check("P17 ai off -> active_agent_key limpo", not _d["active_agent_key"])
+check("P17 ai off -> assignee removido (cai em Não atribuídas)", _d["assignee_user_id"] is None)
+r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": True})
+_d2 = r.json()["data"]["conversation"]
+check("P17 ai on -> ai_active=1", _d2["ai_active"] == 1)
+check("P17 ai on -> religa agente default", _d2["active_agent_key"] == "default")
+check("P17 ai on -> não restaura responsável humano", _d2["assignee_user_id"] is None)
+
+# ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
+_cmdel = _CM("5500077766655")
+_cmdel.add_message("user", "primeira conversa")
+with _get_engine().connect() as _conn:
+    _convA_id = _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id)
+        .where(_msgs_t.c.contact_id == _cmdel.id)
+        .where(_msgs_t.c.role == "user")
+        .order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
+_ciB = _ci_repo.get_or_create(inbox_id=1, contact_id=_cmdel.id,
+                              source_id=f"{_cmdel.id}@s.whatsapp.net")
+_convB = _conv_repo.create(inbox_id=1, contact_id=_cmdel.id, contact_inbox_id=_ciB["id"])
+r = client.delete(f"/api/conversations/{_convA_id}")
+check("P16 DELETE conversa -> 200", r.status_code == 200)
+check("P16 DELETE -> conversa removida", _conv_repo.get(_convA_id) is None)
+check("P16 DELETE -> outra conversa do contato preservada",
+      _conv_repo.get(_convB["id"]) is not None)
+with _get_engine().connect() as _conn:
+    _msgs_left = _conn.execute(
+        _sa_select(_msgs_t.c.id).where(_msgs_t.c.conversation_id == _convA_id)).fetchall()
+    _contact_left = _conn.execute(
+        _sa_select(_contacts_t.c.id).where(_contacts_t.c.id == _cmdel.id)).scalar()
+check("P16 DELETE -> mensagens da conversa apagadas", len(_msgs_left) == 0)
+check("P16 DELETE -> contato preservado", _contact_left == _cmdel.id)
+r = client.delete("/api/conversations/999999")
+check("P16 DELETE conversa inexistente -> 404", r.status_code == 404)
+
+# ── P19: atributo de sistema (CPF) semeado, idempotente e protegido ──
+from db.system_attributes import seed_system_attributes as _seed_sys
+from db.repositories import custom_attribute_repo as _cad_repo
+_seed_sys()
+_cpf = _cad_repo.get_definitions_map("contact").get("cpf")
+check("P19 seed -> CPF criado is_system=1", _cpf is not None and _cpf.get("is_system") == 1)
+_seed_sys()  # 2ª chamada deve ser no-op
+_cpf2 = _cad_repo.get_definitions_map("contact").get("cpf")
+check("P19 seed idempotente (mesmo id)", bool(_cpf2) and _cpf2["id"] == _cpf["id"])
+r = client.delete(f"/api/custom-attributes/{_cpf['id']}")
+check("P19 DELETE atributo de sistema -> 400", r.status_code == 400)
+# rename guard (plano 19 §5): mudar key/scope de um atributo de sistema -> 400
+r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"attribute_key": "cpf_novo"})
+check("P19 PUT renomear atributo de sistema -> 400", r.status_code == 400)
+r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"display_name": "CPF do cliente"})
+check("P19 PUT editar display_name de atributo de sistema -> 200", r.status_code == 200)
+
+# ── P20: multi-agente forçado + espelhamento config <-> agente padrão ──
+from db.repositories import agent_repo as _agent_repo, prompt_repo as _prompt_repo
+from agent.agent_factory import DEFAULT_PROMPT_KEY as _DPK
+_def_agent = _agent_repo.get("default")
+check("P20 agente 'default' semeado", _def_agent is not None)
+check("P20 default tem modelo não-vazio",
+      bool(dict((_def_agent or {}).get("model_config") or {}).get("model")))
+check("P20 default usa todas as tools core (tool_names None)",
+      (_def_agent or {}).get("tool_names") is None)
+# config -> agente padrão (modelo)
+client.put("/api/config", json={"model": "openai/gpt-4o-mini"})
+check("P20 PUT config model -> espelha no agente padrão",
+      dict((_agent_repo.get("default") or {}).get("model_config") or {}).get("model") == "openai/gpt-4o-mini")
+# config -> prompt padrão (system_prompt)
+client.put("/api/config", json={"system_prompt": "Prompt global P20"})
+check("P20 PUT config system_prompt -> espelha no prompt padrão",
+      (_prompt_repo.get(_DPK) or {}).get("body") == "Prompt global P20")
+# agente padrão -> config (mirror-back do modelo)
+client.put("/api/ai/agents/default", json={
+    "display_name": "Agente padrão", "prompt_key": "default",
+    "model_config": {"model": "anthropic/claude-sonnet-4-6"}})
+check("P20 PUT agente default model -> espelha em config['model']",
+      client.get("/api/config").json()["data"].get("model") == "anthropic/claude-sonnet-4-6")
+# prompt padrão -> config (mirror-back do system_prompt)
+client.put("/api/ai/prompts/default", json={"body": "Prompt via aba Prompts"})
+check("P20 PUT prompt default body -> espelha em config['system_prompt']",
+      client.get("/api/config").json()["data"].get("system_prompt") == "Prompt via aba Prompts")
+
+# ═══════════════════════════════════════════════════════════════════
 #  15h-bis. Avisos de sistema no chat (plano 12)
 # ═══════════════════════════════════════════════════════════════════
 section("System notices (plano 12)")

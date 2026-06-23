@@ -376,6 +376,23 @@ def register_routes(app, deps):
                 except Exception as e:
                     logger.debug("contact_ai_toggled broadcast failed: %s", e)
         await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
+        # Parity with the sidebar right-click (POST /assign, /assign-me, /agent):
+        # surface a lifecycle card in the thread when the assignee changes via the
+        # "?" info panel. Defensive — a failed notice never fails the assignment.
+        if kind == "user":
+            me = current_user(request)
+            if me and uid == me.get("id"):
+                await _emit_notice(request, conv, "assigned_me")
+            else:
+                target = await asyncio.to_thread(user_repo.get, uid)
+                await _emit_notice(request, conv, "assigned",
+                                   target=(target or {}).get("name") or f"usuário #{uid}")
+        elif kind == "none":
+            await _emit_notice(request, conv, "unassigned")
+        elif kind == "ai":
+            ag = await asyncio.to_thread(agent_repo.get, agent_key)
+            await _emit_notice(request, conv, "agent_changed",
+                               agent=(ag or {}).get("display_name") or agent_key)
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/ai")
@@ -384,12 +401,45 @@ def register_routes(app, deps):
         if denied:
             return denied
         active = 1 if body.get("active") else 0
-        conv = await asyncio.to_thread(conversation_repo.set_ai_active, conv_id, active)
+        conv = await asyncio.to_thread(conversation_repo.set_conversation_ai, conv_id, active)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        # Toggling the AI per-conversation also (un)assigns it (plano 17): turning
+        # the AI OFF drops the assignment so the row falls into "Não atribuídas";
+        # turning it ON re-binds the default agent. Emit the assignment event so the
+        # sidebar repositions the row, plus the ai_toggled event for the badge.
+        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
         await _broadcast(deps, "conversation_ai_toggled", "conversation.ai_toggled", conv)
         await _emit_notice(request, conv, "ai_on" if active else "ai_off")
         return _ok({"conversation": conv})
+
+    @app.delete("/api/conversations/{conv_id}")
+    async def delete_conversation(conv_id: int, request: Request):
+        """Hard-delete a single conversation/thread (plano 16, ação A).
+
+        Removes only this conversation + its messages — the contact and its other
+        conversations are kept. Gated by ``conversation.resolve`` (reused; we do
+        NOT invent ``conversation.delete``). No lifecycle card is emitted (the
+        thread it would land in is destroyed)."""
+        denied = permission_denied(request, "conversation.resolve")
+        if denied:
+            return denied
+        # Read the enriched row BEFORE deleting — afterwards the payload (phone,
+        # inbox_id, contact_id) is gone. ``get_with_channel`` exposes the phone as
+        # ``contact_phone`` (label in _enriched_columns), NOT ``phone``.
+        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        if _inbox_hidden(request, conv.get("inbox_id")):
+            return _err("Conversa não encontrada.", status=404)
+        await asyncio.to_thread(conversation_repo.delete, conv_id)
+        try:
+            deps.agent_handler.drop_cached_contact(conv.get("contact_phone"))
+        except Exception:
+            pass
+        await _broadcast(deps, "conversation_deleted", "conversation.deleted", conv)
+        return _ok({"message": "Conversa apagada.", "conversation_id": conv_id,
+                    "contact_id": conv.get("contact_id")})
 
     @app.post("/api/conversations/{conv_id}/archive")
     async def archive(conv_id: int, body: dict, request: Request):

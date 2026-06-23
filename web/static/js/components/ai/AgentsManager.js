@@ -116,6 +116,10 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
   const keyCollision = isNew && trimmedKey && (existingKeys || []).includes(trimmedKey)
     ? 'Já existe um agente com essa chave.' : '';
   const keyErr = keyFormatErr || keyCollision;
+  // The default agent is the canonical "global" (plano 20) — its model must never
+  // be empty (it is the fallback every other agent inherits). Other agents may
+  // leave it blank to fall back to the app default.
+  const isDefault = !isNew && agent.agent_key === 'default';
 
   function toggleTool(name) {
     setToolNames(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
@@ -138,7 +142,8 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
   }
 
   const canSave = !busy && displayName.trim()
-    && (isNew ? (trimmedKey && !keyErr) : true);
+    && (isNew ? (trimmedKey && !keyErr) : true)
+    && (!isDefault || !!model.trim());
 
   function submit() {
     if (!canSave) return;
@@ -201,14 +206,15 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
         </div>
 
         <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Modelo</label>
+          <label class="block text-[12px] text-wa-secondary mb-1">Modelo${isDefault ? ' (obrigatório)' : ''}</label>
           <${ModelSelect}
             value=${model}
             onChange=${setModel}
-            placeholder="— padrão do app —"
-            allowEmpty=${true}
+            placeholder=${isDefault ? 'Selecione o modelo' : '— padrão do app —'}
+            allowEmpty=${!isDefault}
             emptyLabel="— padrão do app —"
           />
+          ${isDefault ? html`<div class="text-[11px] text-wa-secondary mt-1">O agente padrão é o modelo global do app — não pode ficar vazio.</div>` : null}
         </div>
 
         <div class="grid grid-cols-3 gap-2">

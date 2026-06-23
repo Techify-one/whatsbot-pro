@@ -320,6 +320,12 @@ def register_routes(app, deps):
             lines = [f"\U0001f527 {tool_name}"]
             for key, value in args.items():
                 lines.append(f"{key}: {value}")
+            # Reflect the tool OUTCOME (success detail / error / where it saved)
+            # instead of always implying success (plano 19). None-returning tools
+            # (e.g. save_contact_info) add no line — the card stays as before.
+            result = tc.get("result")
+            if isinstance(result, str) and result.strip():
+                lines.append(f"→ {result.strip()}")
             content = "\n".join(lines)
 
             contact.add_message("tool_call", content)
@@ -331,6 +337,27 @@ def register_routes(app, deps):
                     "ts": time.time(),
                 },
             })
+
+        # Live-refresh the open info panel after a custom-attribute write (plano 19).
+        # set_custom_attribute doesn't populate contact_info, so without this the
+        # "Dados do contato" / conversation panel only updates on reopen.
+        attr_scopes = {
+            ((tc.get("args") or {}).get("scope") or "contact")
+            for tc in tool_calls
+            if tc.get("tool") == "set_custom_attribute" and not tc.get("skipped")
+        }
+        if "contact" in attr_scopes:
+            full = await asyncio.to_thread(contact_repo.get_full_contact, phone)
+            if full:
+                await ws_manager.broadcast("contact_info_updated", {
+                    "phone": phone, "info": full.get("info")})
+        if "conversation" in attr_scopes:
+            conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact.id)
+            if conv:
+                await ws_manager.broadcast("conversation_updated", {
+                    "conversation_id": conv["id"], "contact_id": contact.id,
+                    "fields": {"custom_attributes": conv.get("custom_attributes")},
+                    "ts": time.time()})
 
         # Broadcast updated contact info so the frontend refreshes name/details
         if contact_info:
@@ -559,7 +586,7 @@ def register_routes(app, deps):
                 "combined_preview": "\n".join(t for t in text_parts if t)[:200],
             })
 
-            if contact.ai_enabled and settings.get("auto_reply", True):
+            if settings.get("auto_reply", True):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
@@ -582,7 +609,7 @@ def register_routes(app, deps):
                         "source": "batch_text",
                         "ts": time.time(),
                     })
-                    if contact.ai_enabled and settings.get("auto_reply", True) \
+                    if settings.get("auto_reply", True) \
                             and _conversation_ai_active(contact):
                         if not agent_handler.api_key:
                             notice = "[WhatsBot] API key não configurada."
@@ -709,7 +736,7 @@ def register_routes(app, deps):
                             },
                         })
 
-                if not contact.ai_enabled or not settings.get("auto_reply", True) \
+                if not settings.get("auto_reply", True) \
                         or not _conversation_ai_active(contact):
                     continue
 

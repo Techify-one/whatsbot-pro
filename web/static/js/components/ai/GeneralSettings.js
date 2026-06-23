@@ -1,22 +1,35 @@
-// AI Engine — "Configurações" tab. Holds the AI settings moved out of the
-// main Painel (ConfigPanel): the chat model, the agent instructions
-// (system_prompt) and the behaviour block (context size, batching, split
-// messages, transfer alert, low-balance alert). Self-contained: loads via
-// getConfig() and persists via saveConfig() (partial PUT — only sends the keys
-// it owns, so the Painel keeps owning the rest).
+// AI Engine — "Configurações" tab (plano 20). Holds the GLOBAL AI settings:
+// automação (responder mensagens, IA padrão p/ novos contatos, resposta em
+// grupos), chave de API, transcrição de mídia (imagem/documento/áudio) e o
+// comportamento das respostas (contexto, agrupamento, mensagens picadas, alerta
+// de transferência, aviso de saldo). O PROMPT e o MODELO são definidos POR AGENTE
+// na aba "Agentes" (o agente padrão é o global) — não ficam mais aqui.
+// Self-contained: loads via getConfig() and persists via saveConfig() (partial
+// PUT — only sends the keys it owns, so the Painel keeps owning the rest).
 
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
-import { getConfig, saveConfig } from '../../services/api.js';
-import { ModelSelect } from '../ModelSelect.js';
+import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
 
 const html = htm.bind(h);
 
 export default function GeneralSettings() {
   const [config, setConfig] = useState(null);
-  const [model, setModel] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('');
+  // Automação
+  const [autoReply, setAutoReply] = useState(true);
+  const [defaultAiEnabled, setDefaultAiEnabled] = useState(true);
+  const [groupReplyMode, setGroupReplyMode] = useState('mention_only');
+  // API + transcrição
+  const [apiKey, setApiKey] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [imageTranscriptionEnabled, setImageTranscriptionEnabled] = useState(true);
+  const [documentTranscriptionEnabled, setDocumentTranscriptionEnabled] = useState(true);
+  const [audioTranscriptionMode, setAudioTranscriptionMode] = useState('received');
+  const [audioTranscriptionTarget, setAudioTranscriptionTarget] = useState('private');
+  const [audioTranscriptionChatPrefix, setAudioTranscriptionChatPrefix] = useState('');
+  // Comportamento
   const [maxContext, setMaxContext] = useState(10);
   const [batchDelay, setBatchDelay] = useState(3);
   const [splitMessages, setSplitMessages] = useState(true);
@@ -29,11 +42,16 @@ export default function GeneralSettings() {
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState('');
-  const [promptFullscreen, setPromptFullscreen] = useState(false);
 
   function populate(cfg) {
-    setModel(cfg.model || '');
-    setSystemPrompt(cfg.system_prompt || '');
+    setAutoReply(cfg.auto_reply ?? true);
+    setDefaultAiEnabled(cfg.default_ai_enabled ?? true);
+    setGroupReplyMode(cfg.group_reply_mode ?? 'mention_only');
+    setImageTranscriptionEnabled(cfg.image_transcription_enabled ?? true);
+    setDocumentTranscriptionEnabled(cfg.document_transcription_enabled ?? true);
+    setAudioTranscriptionMode(cfg.audio_transcription_mode ?? 'received');
+    setAudioTranscriptionTarget(cfg.audio_transcription_target ?? 'private');
+    setAudioTranscriptionChatPrefix(cfg.audio_transcription_chat_prefix ?? '');
     setMaxContext(cfg.max_context_messages ?? 10);
     setBatchDelay(cfg.message_batch_delay ?? 3);
     setSplitMessages(cfg.split_messages ?? true);
@@ -57,13 +75,43 @@ export default function GeneralSettings() {
 
   useEffect(() => { load(); }, []);
 
+  async function handleTestKey() {
+    const key = apiKey.trim();
+    if (!key) { setTestResult({ ok: false, message: 'Insira uma API key primeiro.' }); return; }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await testApiKey(key);
+      if (res.ok) {
+        setTestResult({ ok: res.data.valid, message: res.data.message });
+        if (res.data.valid) {
+          // Auto-save the key and refresh the masked display.
+          await saveConfig({ openrouter_api_key: key });
+          setApiKey('');
+          load();
+        }
+      } else {
+        setTestResult({ ok: false, message: res.error || 'Erro ao testar.' });
+      }
+    } catch {
+      setTestResult({ ok: false, message: 'Erro de conexão.' });
+    }
+    setTesting(false);
+  }
+
   async function handleSave() {
     setSaving(true);
     setSaveSuccess(false);
     setError('');
     const data = {
-      model: model.trim() || 'deepseek/deepseek-v4-pro',
-      system_prompt: systemPrompt,
+      auto_reply: autoReply,
+      default_ai_enabled: defaultAiEnabled,
+      group_reply_mode: groupReplyMode,
+      image_transcription_enabled: imageTranscriptionEnabled,
+      document_transcription_enabled: documentTranscriptionEnabled,
+      audio_transcription_mode: audioTranscriptionMode,
+      audio_transcription_target: audioTranscriptionTarget,
+      audio_transcription_chat_prefix: audioTranscriptionChatPrefix,
       max_context_messages: parseInt(maxContext, 10) || 10,
       message_batch_delay: isNaN(parseFloat(batchDelay)) ? 0 : parseFloat(batchDelay),
       split_messages: splitMessages,
@@ -73,10 +121,13 @@ export default function GeneralSettings() {
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
     };
+    // Only include the API key when the user typed a new one.
+    if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
     const res = await saveConfig(data);
     setSaving(false);
     if (res && res.ok) {
       setSaveSuccess(true);
+      setApiKey('');
       setTimeout(() => setSaveSuccess(false), 3000);
     } else {
       setError((res && res.error) || 'Falha ao salvar as configurações.');
@@ -94,68 +145,182 @@ export default function GeneralSettings() {
   return html`
     <div class="flex flex-col gap-4">
       <p class="text-[13px] text-wa-secondary">
-        Configurações gerais da IA: modelo, instruções e comportamento das respostas.
+        Configurações gerais da IA: automação, chave de API, transcrição e comportamento das respostas.
+        O prompt e o modelo são definidos por agente na aba <span class="font-medium">Agentes</span>.
       </p>
 
       ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
 
-      <!-- Model -->
-      <div>
-        <label class="block text-[13px] font-medium text-wa-text mb-1">Modelo de IA (chat)</label>
-        <${ModelSelect}
-          value=${model}
-          onChange=${setModel}
-          placeholder="deepseek/deepseek-v4-pro"
-        />
-      </div>
+      <!-- Automação -->
+      <div class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="text-[14px] font-semibold text-wa-text">Automação</div>
+        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${autoReply ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+          <input
+            type="checkbox"
+            checked=${autoReply}
+            onChange=${(e) => setAutoReply(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Ativar agente de IA para responder mensagens
+        </label>
 
-      <!-- Instructions (system prompt) -->
-      <div class="flex flex-col">
-        <div class="flex items-center justify-between mb-1">
-          <label class="block text-[13px] font-medium text-wa-text">Instruções</label>
-          <button
-            type="button"
-            onClick=${() => setPromptFullscreen(true)}
-            class="text-wa-secondary hover:text-wa-teal transition-colors p-1 rounded"
-            title="Abrir editor em tela cheia"
+        <label class="flex items-center gap-3 text-sm font-semibold text-wa-text cursor-pointer p-3 rounded-lg border ${defaultAiEnabled ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}">
+          <input
+            type="checkbox"
+            checked=${defaultAiEnabled}
+            onChange=${(e) => setDefaultAiEnabled(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          IA ativada por padrão para novos contatos
+        </label>
+
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Resposta da IA em grupos</label>
+          <select
+            value=${groupReplyMode}
+            onChange=${(e) => setGroupReplyMode(e.target.value)}
+            class="w-full bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-          </button>
+            <option value="mention_only">Somente quando o bot for mencionado</option>
+            <option value="always">Sempre (responder a todas as mensagens do grupo)</option>
+            <option value="never">Nunca (não responder em grupos)</option>
+          </select>
+          <span class="text-xs text-wa-secondary">Vale apenas para grupos com a IA ativada. "Somente quando mencionado" exige um @menção ao bot; "Sempre" responde a qualquer mensagem do grupo.</span>
         </div>
-        <textarea
-          value=${systemPrompt}
-          onInput=${(e) => setSystemPrompt(e.target.value)}
-          rows="6"
-          class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y"
-        ></textarea>
       </div>
 
-      <!-- Fullscreen Prompt Editor -->
-      ${promptFullscreen ? html`
-        <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick=${(e) => { if (e.target === e.currentTarget) setPromptFullscreen(false); }}>
-          <div class="bg-wa-bg w-full h-full rounded-xl flex flex-col shadow-2xl overflow-hidden">
-            <div class="flex items-center justify-between px-5 py-3 border-b border-wa-border">
-              <h2 class="text-sm font-semibold text-wa-text">Instruções</h2>
-              <button
-                type="button"
-                onClick=${() => setPromptFullscreen(false)}
-                class="text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
-                title="Fechar"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </button>
-            </div>
-            <textarea
-              value=${systemPrompt}
-              onInput=${(e) => setSystemPrompt(e.target.value)}
-              class="flex-1 w-full bg-wa-bg text-wa-text px-5 py-4 text-sm leading-relaxed focus:outline-none resize-none"
-              autofocus
-            ></textarea>
+      <!-- API e transcrição -->
+      <div class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="text-[14px] font-semibold text-wa-text">API e transcrição</div>
+        <!-- API Key -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Chave de API Techify</label>
+          <div class="flex gap-2">
+            <input
+              type="password"
+              value=${apiKey}
+              onInput=${(e) => setApiKey(e.target.value)}
+              placeholder=${config.openrouter_api_key || 'sk-or-...'}
+              class="flex-1 bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+            />
+            <button
+              onClick=${handleTestKey}
+              disabled=${testing}
+              class="px-4 py-2 bg-wa-bg hover:bg-wa-hover disabled:opacity-50 text-wa-text text-sm rounded-lg transition-colors whitespace-nowrap border border-wa-border"
+            >
+              ${testing ? '...' : 'Testar'}
+            </button>
           </div>
+          ${testResult ? html`
+            <p class="text-xs mt-1 ${testResult.ok ? 'text-green-600' : 'text-red-500'}">
+              ${testResult.ok ? '✓' : '✗'} ${testResult.message}
+            </p>
+          ` : config.openrouter_api_key ? html`
+            <p class="text-xs mt-1 text-wa-secondary">Chave salva: ${config.openrouter_api_key}</p>
+          ` : null}
         </div>
-      ` : null}
 
-      <!-- Context & Batch -->
+        <!-- Image description toggle -->
+        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${imageTranscriptionEnabled ? 'bg-green-50 border-green-200 hover:bg-green-100' : 'bg-wa-bg border-wa-border hover:bg-wa-hover'}">
+          <input
+            type="checkbox"
+            checked=${imageTranscriptionEnabled}
+            onChange=${(e) => setImageTranscriptionEnabled(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal mt-0.5"
+          />
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class=${imageTranscriptionEnabled ? 'text-green-600' : 'text-wa-secondary'}>
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <circle cx="8.5" cy="8.5" r="1.5"/>
+                <polyline points="21 15 16 10 5 21"/>
+              </svg>
+              <span class="text-sm font-semibold text-wa-text">Descrever imagem</span>
+              <span class="text-xs px-2 py-0.5 rounded-full ${imageTranscriptionEnabled ? 'bg-green-600 text-white' : 'bg-wa-secondary/20 text-wa-secondary'}">
+                ${imageTranscriptionEnabled ? 'Ativado' : 'Desativado'}
+              </span>
+            </div>
+            <span class="block text-xs text-wa-secondary mt-1">
+              Usa IA para descrever automaticamente o conteúdo de imagens recebidas pelo contato
+            </span>
+          </div>
+        </label>
+
+        <!-- Document transcription toggle -->
+        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${documentTranscriptionEnabled ? 'bg-green-50 border-green-200 hover:bg-green-100' : 'bg-wa-bg border-wa-border hover:bg-wa-hover'}">
+          <input
+            type="checkbox"
+            checked=${documentTranscriptionEnabled}
+            onChange=${(e) => setDocumentTranscriptionEnabled(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal mt-0.5"
+          />
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class=${documentTranscriptionEnabled ? 'text-green-600' : 'text-wa-secondary'}>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+              </svg>
+              <span class="text-sm font-semibold text-wa-text">Ler documento</span>
+              <span class="text-xs px-2 py-0.5 rounded-full ${documentTranscriptionEnabled ? 'bg-green-600 text-white' : 'bg-wa-secondary/20 text-wa-secondary'}">
+                ${documentTranscriptionEnabled ? 'Ativado' : 'Desativado'}
+              </span>
+            </div>
+            <span class="block text-xs text-wa-secondary mt-1">
+              Usa IA para extrair o conteúdo de documentos recebidos (PDF, DOCX e arquivos de texto)
+            </span>
+          </div>
+        </label>
+
+        <!-- Audio transcription mode & target -->
+        <div class="flex flex-col gap-3 p-3 bg-wa-bg rounded-lg border border-wa-border">
+          <div class="text-sm font-semibold text-wa-text">Transcrição de áudio</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-wa-text mb-1">Transcrever mensagens</label>
+              <select
+                value=${audioTranscriptionMode}
+                onChange=${(e) => setAudioTranscriptionMode(e.target.value)}
+                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+              >
+                <option value="received">Somente recebidas</option>
+                <option value="sent">Somente enviadas</option>
+                <option value="both">Nos dois sentidos</option>
+                <option value="off">Não transcrever</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-wa-text mb-1">Onde aparece a transcrição</label>
+              <select
+                value=${audioTranscriptionTarget}
+                onChange=${(e) => setAudioTranscriptionTarget(e.target.value)}
+                disabled=${audioTranscriptionMode === 'off'}
+                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none disabled:opacity-50"
+              >
+                <option value="private">Mensagem privada (só no painel)</option>
+                <option value="chat">Direto no chat (envia ao contato)</option>
+              </select>
+            </div>
+          </div>
+          ${audioTranscriptionMode !== 'off' && audioTranscriptionTarget === 'chat' ? html`
+            <div>
+              <label class="block text-xs font-medium text-wa-text mb-1">Prefixo (opcional)</label>
+              <textarea
+                value=${audioTranscriptionChatPrefix}
+                onInput=${(e) => setAudioTranscriptionChatPrefix(e.target.value)}
+                rows="2"
+                placeholder="Ex: 🎙 Transcrição: "
+                class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none resize-none"
+              ></textarea>
+              <span class="text-xs text-wa-secondary">Texto colado antes da transcrição enviada ao chat. Deixe em branco para enviar só o texto.</span>
+            </div>
+          ` : null}
+        </div>
+      </div>
+
+      <!-- Comportamento: Context & Batch -->
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label class="block text-[13px] font-medium text-wa-text mb-1">Mensagens de contexto</label>

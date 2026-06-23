@@ -84,6 +84,17 @@ def register_routes(app, deps):
             routing_targets=routing_targets,
             hooks_config=hooks_config or {},
         )
+        # Plano 20: the default agent is the canonical "global". Mirror its model
+        # back into config['model'] so prompt/model-less secondary agents keep a
+        # fresh fallback. Best-effort.
+        if agent_key == agent_repo.DEFAULT_AGENT_KEY:
+            new_model = (model_config or {}).get("model")
+            if new_model:
+                try:
+                    deps.settings["model"] = new_model
+                    await asyncio.to_thread(deps.settings.save)
+                except Exception as e:
+                    logger.warning("mirror default agent model -> config failed: %s", e)
         _emit_changed("agent", agent_key)
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
         return _ok(row)
@@ -185,6 +196,14 @@ def register_routes(app, deps):
         if denied:
             return denied
         row = await asyncio.to_thread(prompt_repo.save, prompt_key, body.get("body", ""))
+        # Plano 20: mirror the default agent's prompt body back into the global
+        # config['system_prompt'] fallback (canonical = default agent). Best-effort.
+        if prompt_key == agent_repo.DEFAULT_AGENT_KEY:  # DEFAULT_PROMPT_KEY == "default"
+            try:
+                deps.settings["system_prompt"] = body.get("body", "")
+                await asyncio.to_thread(deps.settings.save)
+            except Exception as e:
+                logger.warning("mirror default prompt -> config failed: %s", e)
         _emit_changed("prompt", prompt_key)
         logger.info("AI prompt saved: %s (v%s)", prompt_key, row.get("version"))
         return _ok(row)

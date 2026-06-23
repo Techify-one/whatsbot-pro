@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, toggleContactAI, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels } from '../../services/api.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels } from '../../services/api.js';
 import { ContactList, typingKey } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -161,6 +161,11 @@ function buildRows(contacts, conversations) {
           channel_provider: cv.channel_provider || null,
           channel_name: cv.channel_name || null,
           conv_status: cv.status,
+          // Per-conversation AI gate (plano 17) — drives the "IA OFF" badge and the
+          // right-click toggle. WS patches keep this in sync as `conv_ai_active`.
+          conv_ai_active: cv.ai_active,
+          assignee_user_id: cv.assignee_user_id,
+          active_agent_key: cv.active_agent_key,
           // Preview + não-lidas vêm da CONVERSA (sobrescrevem os agregados do contato).
           last_message: (cv.last_message != null && cv.last_message !== '') ? cv.last_message : c.last_message,
           last_message_role: cv.last_message_role || c.last_message_role,
@@ -314,17 +319,27 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     return () => document.removeEventListener('visibilitychange', handler);
   }, []);
 
-  const handleToggleAI = useCallback(async (phone, enabled) => {
-    const res = await toggleContactAI(phone, enabled);
+  // Toggle the AI for a single CONVERSATION (plano 17). Turning it OFF also
+  // unassigns the conversation (handled server-side) so it drops into the
+  // "Não atribuídas" fila; turning it ON re-binds the default agent. Optimistic
+  // patch by conversation_id (a phone can have N conversations).
+  const handleToggleAI = useCallback(async (convId, enabled) => {
+    if (convId == null) return;
+    const res = await setConversationAi(convId, enabled);
     if (res.ok) {
       setContacts(prev => prev.map(c =>
-        c.phone === phone ? { ...c, ai_enabled: res.data.ai_enabled } : c
+        c.conversation_id === convId
+          ? {
+              ...c,
+              conv_ai_active: enabled ? 1 : 0,
+              // On OFF the row must fall into "Não atribuídas" immediately; the
+              // WS conversation_assigned event then fills the real values on ON.
+              ...(enabled ? {} : { active_agent_key: null, assignee_user_id: null }),
+            }
+          : c
       ));
-      if (contactData && contactData.phone === phone) {
-        setContactData(prev => prev ? { ...prev, ai_enabled: res.data.ai_enabled } : prev);
-      }
     }
-  }, [contactData]);
+  }, []);
 
   const handleMarkUnread = useCallback(async (phone) => {
     const res = await markAsUnread(phone);
@@ -364,6 +379,23 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     if (res.ok) {
       setContacts(prev => prev.filter(c => c.phone !== phone));
       if (selectedRef.current === phone) {
+        setSelected(null);
+        setSelectedConvId(null);
+        setContactData(null);
+        history.pushState(null, '', '/');
+      }
+    }
+  }, []);
+
+  // Delete a single CONVERSATION/thread (plano 16, ação A). Filters the sidebar by
+  // conversation_id (NEVER phone — a phone has N rows) and clears the open thread
+  // only if it is the one being deleted.
+  const handleDeleteConversation = useCallback(async (convId) => {
+    if (convId == null) return;
+    const res = await deleteConversation(convId);
+    if (res.ok) {
+      setContacts(prev => prev.filter(c => c.conversation_id !== convId));
+      if (selectedConvIdRef.current === convId) {
         setSelected(null);
         setSelectedConvId(null);
         setContactData(null);
@@ -494,15 +526,25 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const clearSelection = useCallback(() => { setSelectedPhones([]); setSelectionMode(false); }, []);
 
   const handleBulkAI = useCallback(async (enabled) => {
-    const phones = [...selectedPhones];
-    if (!phones.length) return;
-    await Promise.all(phones.map(p => toggleContactAI(p, enabled).catch(() => null)));
+    const phones = new Set(selectedPhones);
+    if (!phones.size) return;
+    // Operate per CONVERSATION (plano 17): map the selected phones to their visible
+    // conversation rows. Legacy rows without a conversation are skipped.
+    const convIds = displayedRef.current
+      .filter(c => phones.has(c.phone) && c.conversation_id != null)
+      .map(c => c.conversation_id);
+    if (!convIds.length) return;
+    const idSet = new Set(convIds);
+    await Promise.all(convIds.map(id => setConversationAi(id, enabled).catch(() => null)));
     setContacts(prev => prev.map(c =>
-      phones.includes(c.phone) ? { ...c, ai_enabled: enabled } : c
+      idSet.has(c.conversation_id)
+        ? {
+            ...c,
+            conv_ai_active: enabled ? 1 : 0,
+            ...(enabled ? {} : { active_agent_key: null, assignee_user_id: null }),
+          }
+        : c
     ));
-    if (phones.includes(selectedRef.current)) {
-      setContactData(prev => prev ? { ...prev, ai_enabled: enabled } : prev);
-    }
   }, [selectedPhones]);
 
   const handleBulkArchive = useCallback(async () => {
@@ -780,10 +822,32 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // linhas (uma por canal); casar só por contact_id resolveria/atribuiria TODAS
   // as conversas do número. Linhas COM conversa casam por conversation_id;
   // linhas sem conversa (legado) ainda casam por contact_id e adotam a nova.
+  // P19: latest conversation-scope custom-attribute write, forwarded to the open
+  // ConversationInfoPanel for live refresh (mirrors contact_info_updated → panel).
+  const [convAttrPatch, setConvAttrPatch] = useState(null);
   const onConversationChanged = useCallback((name, data) => {
     const cid = data && data.contact_id;
     const convId = data && data.conversation_id;
     if (cid == null && convId == null) return;
+    // Conversation deleted (plano 16): drop the row by conversation_id and clear
+    // the open thread if it was the one deleted.
+    if (name === 'conversation_deleted') {
+      if (convId == null) return;
+      setContacts(prev => prev.filter(c => c.conversation_id !== convId));
+      if (selectedConvIdRef.current === convId) {
+        setSelected(null);
+        setSelectedConvId(null);
+        setContactData(null);
+        history.pushState(null, '', '/');
+      }
+      return;
+    }
+    // P19: a conversation-scope custom-attribute write arrives as conversation_updated
+    // with fields.custom_attributes — forward it to the open ConversationInfoPanel so
+    // it refreshes live (the sidebar patch below doesn't render attribute values).
+    if (convId != null && data.fields && data.fields.custom_attributes !== undefined) {
+      setConvAttrPatch({ conversation_id: convId, custom_attributes: data.fields.custom_attributes, ts: Date.now() });
+    }
     setContacts(prev => prev.map(c => {
       const isTarget = (convId != null && c.conversation_id === convId)
         || (c.conversation_id == null && cid != null && c.id === cid);
@@ -1468,6 +1532,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               groupName=${contactData && contactData.group_name}
               avatarV=${contactData && contactData.avatar_v}
               onClose=${() => setOpenPanel(null)}
+              onDeleteContact=${() => { handleDelete(selected); setOpenPanel(null); }}
               onSave=${(updatedInfo, updatedTags) => {
                 setContactData(prev => prev ? { ...prev, info: updatedInfo, tags: updatedTags } : prev);
                 setContacts(prev => prev.map(c =>
@@ -1484,6 +1549,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               onClose=${() => setOpenPanel(null)}
               onOpenContactInfo=${() => selected && setOpenPanel('contact')}
               contactInfo=${info}
+              convAttrPatch=${convAttrPatch}
             />
           ` : null}
         </div>
@@ -1542,7 +1608,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           }}
           onArchive=${handleArchive}
           onPin=${handlePin}
-          onDelete=${handleDelete}
+          onDeleteConversation=${handleDeleteConversation}
           onCreateTag=${handleCreateTag}
           onClose=${() => setCtxMenu(null)}
         />
