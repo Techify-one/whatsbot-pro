@@ -371,6 +371,26 @@ def register_routes(app, deps):
         users = await asyncio.to_thread(_assignable_users)
         return _ok({"users": users})
 
+    @app.get("/api/channels/providers")
+    async def list_providers(request: Request):
+        """Channel providers currently AVAILABLE to create a channel with.
+
+        A provider is only offered when its backing plugin is enabled — i.e. its
+        ``CHANNEL_PROVIDERS`` class is registered in the live ``ChannelRegistry``.
+        GOWA is core and always present; ``whatsapp_cloud``/``telegram``/``test``
+        come from their plugins, so they disappear from the "Novo canal" picker
+        when the plugin is disabled. Gated by ``channel.manage`` (same as the rest
+        of this screen). Registered before ``/{channel_id}`` so the literal path
+        wins the match."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        if registry is not None:
+            names = sorted(set(registry.providers()) & _ALLOWED_PROVIDERS)
+        else:
+            names = sorted(_ALLOWED_PROVIDERS)
+        return _ok({"providers": names})
+
     @app.get("/api/channels/{channel_id}")
     async def get_channel(channel_id: str, request: Request):
         denied = permission_denied(request, "channel.manage")

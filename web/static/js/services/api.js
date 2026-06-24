@@ -618,6 +618,12 @@ export async function listChannelAssignableUsers() {
   return request('GET', '/api/channels/assignable-users');
 }
 
+// Providers disponíveis para CRIAR um canal — só os cujos plugins estão ativos
+// (GOWA é core e sempre presente). → {providers:["gowa", ...]}
+export async function listChannelProviders() {
+  return request('GET', '/api/channels/providers');
+}
+
 // Agentes (usuários do painel) que veem/recebem a inbox deste canal.
 // → {inbox_id, member_ids:[...], users:[{id,name,email,is_admin}]}
 export async function getChannelMembers(id) {
