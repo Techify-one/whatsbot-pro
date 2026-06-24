@@ -443,10 +443,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
                     <div class="flex justify-between items-baseline">
                       <span class="text-wa-text text-[17px] truncate leading-[21px]">
-                        ${c.is_group ? (c.group_name || c.name || c.phone) : ((c.name || '').replace(/^~/, '') || c.phone)}
-                        ${!c.is_group && c.name && c.name.startsWith('~')
-                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] align-middle" title="Nome obtido do WhatsApp">WA</span>`
-                          : null
+                        ${c.is_group
+                          ? (c.group_name || c.name || c.phone)
+                          : html`<span class=${c.name && c.name.startsWith('~') ? 'underline decoration-1 underline-offset-2' : ''} title=${c.name && c.name.startsWith('~') ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${(c.name || '').replace(/^~/, '') || c.phone}</span>`
                         }
                         ${c.archived_by_app
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`
