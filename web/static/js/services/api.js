@@ -186,8 +186,15 @@ export async function getUnreadCount() {
   return request('GET', '/api/contacts/unread-count');
 }
 
-export async function getContact(phone, markRead = true) {
-  const qs = markRead ? '' : '?mark_read=false';
+// `channelId` escopa o thread ao canal escolhido (multicanal): ao abrir uma
+// conversa NOVA pela caixa de entrada selecionada, antes de existir uma conversa
+// nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
+// nunca cai na conversa de outro canal do mesmo número.
+export async function getContact(phone, markRead = true, channelId = null) {
+  const params = [];
+  if (!markRead) params.push('mark_read=false');
+  if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 

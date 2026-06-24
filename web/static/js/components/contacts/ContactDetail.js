@@ -911,9 +911,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const isAutoName = !isGroup && rawName && rawName.startsWith('~');
   const displayName = isGroup ? (contact.group_name || phone) : (rawName ? rawName.replace(/^~/, '') : phone);
   const hasText = input.trim().length > 0;
-  // Template support (Frente C): capability flag from the conversation payload.
-  // sessionClosed → the 24h free-text window elapsed, so only a template may go out.
-  const templatesSupported = !sandbox && conversationId != null && !!(contact && contact.templates_supported);
+  // Template support (Frente C): capability flag from the conversation payload — ou,
+  // ao iniciar uma conversa NOVA pela caixa de entrada escolhida (plano 21), do
+  // payload channel-scoped do getContact (ainda sem conversationId). O TemplatePicker
+  // opera em "channel mode" (channelId + phone) quando não há conversa.
+  // sessionClosed → a janela de texto livre de 24h expirou (ou nunca abriu, no caso de
+  // um número novo no Cloud), então só um template pode sair.
+  const templatesSupported = !sandbox && !!(contact && contact.templates_supported);
   const sessionClosed = templatesSupported && contact && contact.session_open === false;
 
   return html`
@@ -1559,6 +1563,8 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       ${showTemplatePicker ? html`
         <${TemplatePicker}
           conversationId=${conversationId}
+          channelId=${channelId}
+          phone=${phone}
           onClose=${() => setShowTemplatePicker(false)}
           onSent=${() => setShowTemplatePicker(false)}
         />
