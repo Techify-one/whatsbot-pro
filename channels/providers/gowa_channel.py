@@ -133,6 +133,14 @@ class GOWAChannel(Channel):
         except Exception:  # noqa: BLE001
             logger.debug("gowa revoke failed", exc_info=True)
 
+    def check_phone(self, phone: str) -> dict:
+        """Verify the number on WhatsApp via GOWA ``/user/check`` (resolves the BR
+        canonical phone too). Propagates ``GOWASendError`` so the caller can surface
+        a real connection problem (e.g. HTTP 401 when this device isn't logged in)."""
+        if self._client is None:
+            return {"registered": True, "canonical_phone": phone, "name": ""}
+        return self._client.check_phone(phone)
+
     # ── Inbound ──────────────────────────────────────────────────────
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a raw GOWA webhook body into InboundEvents (plano 13 Fase 0).

@@ -6,6 +6,10 @@ import {
   sendConversationTemplate,
   createConversationTemplate,
   deleteConversationTemplate,
+  getChannelTemplates,
+  sendChannelTemplate,
+  createChannelTemplate,
+  deleteChannelTemplate,
 } from '../../services/api.js';
 
 const html = htm.bind(h);
@@ -64,7 +68,11 @@ function statusBadge(status) {
   return { label: s, cls: 'bg-wa-hover text-wa-secondary' };
 }
 
-export function TemplatePicker({ conversationId, onClose, onSent }) {
+// `conversationId` → conversa existente (modo padrão). Quando ausente e `channelId`
+// + `phone` são passados, opera em modo CHANNEL (plano 21): iniciar conversa nova
+// pela "Nova conversa" usa as rotas channel-scoped (ainda não há conversa).
+export function TemplatePicker({ conversationId, channelId, phone, onClose, onSent }) {
+  const channelMode = conversationId == null && !!channelId;
   const [loading, setLoading] = useState(true);
   const [supported, setSupported] = useState(true);
   const [templates, setTemplates] = useState([]);
@@ -89,7 +97,10 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
 
   const loadTemplates = useCallback(() => {
     setLoading(true);
-    return getConversationTemplates(conversationId).then(res => {
+    const fetchTemplates = channelMode
+      ? getChannelTemplates(channelId)
+      : getConversationTemplates(conversationId);
+    return fetchTemplates.then(res => {
       if (res && res.ok && res.data) {
         setSupported(!!res.data.supported);
         setTemplates(res.data.templates || []);
@@ -101,12 +112,15 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
       }
       setLoading(false);
     }).catch(() => { setError('Falha ao carregar templates.'); setLoading(false); });
-  }, [conversationId]);
+  }, [conversationId, channelId, channelMode]);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    getConversationTemplates(conversationId).then(res => {
+    const fetchTemplates = channelMode
+      ? getChannelTemplates(channelId)
+      : getConversationTemplates(conversationId);
+    fetchTemplates.then(res => {
       if (!alive) return;
       if (res && res.ok && res.data) {
         setSupported(!!res.data.supported);
@@ -119,7 +133,7 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
       setLoading(false);
     }).catch(() => { if (alive) { setError('Falha ao carregar templates.'); setLoading(false); } });
     return () => { alive = false; };
-  }, [conversationId]);
+  }, [conversationId, channelId, channelMode]);
 
   function selectTemplate(tpl) {
     setSelected(tpl);
@@ -195,12 +209,15 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
     setSending(true);
     setSendError('');
     const components = buildComponents();
-    const res = await sendConversationTemplate(conversationId, {
+    const payload = {
       template_name: selected.name,
       language: langCode(selected),
       components,
       preview_text: preview,
-    });
+    };
+    const res = channelMode
+      ? await sendChannelTemplate(channelId, { phone, ...payload })
+      : await sendConversationTemplate(conversationId, payload);
     setSending(false);
     if (res && res.ok) {
       if (onSent) onSent(res.data);
@@ -214,7 +231,9 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
     setConfirmDelete(null);
     setDeletingName(name);
     setDeleteError('');
-    const res = await deleteConversationTemplate(conversationId, name);
+    const res = channelMode
+      ? await deleteChannelTemplate(channelId, name)
+      : await deleteConversationTemplate(conversationId, name);
     setDeletingName(null);
     if (res && res.ok) {
       await loadTemplates();
@@ -267,6 +286,8 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
           ${!loading && supported && creating ? html`
             <${CreateTemplateForm}
               conversationId=${conversationId}
+              channelId=${channelId}
+              channelMode=${channelMode}
               onCancel=${() => setCreating(false)}
               onCreated=${async () => { setCreating(false); await loadTemplates(); }}
             />
@@ -411,7 +432,7 @@ export function TemplatePicker({ conversationId, onClose, onSent }) {
 // Builds a SIMPLE definition (name/category/language + header/body/footer text +
 // example values per {{n}}) and POSTs it; the provider assembles the Graph
 // components. Media headers / buttons are intentionally out of scope here.
-function CreateTemplateForm({ conversationId, onCancel, onCreated }) {
+function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, onCreated }) {
   const [name, setName] = useState('');
   const [category, setCategory] = useState('UTILITY');
   const [language, setLanguage] = useState('pt_BR');
@@ -451,7 +472,9 @@ function CreateTemplateForm({ conversationId, onCancel, onCreated }) {
     if (bodyIdxs.length) payload.body_examples = bodyIdxs.map(n => (bodyEx[n] || '').trim());
     if (headerIdxs.length) payload.header_examples = headerIdxs.map(n => (headerEx[n] || '').trim());
 
-    const res = await createConversationTemplate(conversationId, payload);
+    const res = channelMode
+      ? await createChannelTemplate(channelId, payload)
+      : await createConversationTemplate(conversationId, payload);
     setSaving(false);
     if (res && res.ok) {
       setOkMsg('Template enviado para aprovação da Meta.');
