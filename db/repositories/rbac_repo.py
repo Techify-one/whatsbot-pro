@@ -89,6 +89,76 @@ def user_has_permission(user_id: int, permission_key: str) -> bool:
     return "*" in perms or permission_key in perms
 
 
+# ── Plugin permissions (plano "RBAC para Plugins" §3.3-3.4) ────────────────
+
+def upsert_plugin_permission(
+    key: str, description: str, plugin_id: str, group_label: str | None
+) -> None:
+    """Upsert one plugin permission row (idempotent, dialect-agnostic).
+
+    Called at plugin load for each ``plugin.<id>.<key>`` declared in the
+    ``rbac:`` block. On conflict (existing key) it refreshes the description,
+    plugin_id and group_label so manifest edits propagate. Existing
+    role/user grants survive (they FK on ``permissions.id``, untouched here)."""
+    from db.upsert import upsert
+    with get_engine().begin() as conn:
+        conn.execute(upsert(
+            permissions,
+            values={
+                "key": key, "description": description,
+                "plugin_id": plugin_id, "group_label": group_label,
+            },
+            conflict_cols=["key"],
+            update_cols=["description", "plugin_id", "group_label"],
+        ))
+
+
+def delete_plugin_permissions(plugin_id: str) -> int:
+    """Delete every permission row of a plugin. Returns the rows removed.
+
+    ``role_permissions`` / ``user_permissions`` grants cascade via their FK to
+    ``permissions.id``. Used when a plugin is deleted."""
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_delete(permissions).where(permissions.c.plugin_id == plugin_id))
+    return result.rowcount or 0
+
+
+def list_plugin_permissions() -> list[dict]:
+    """All permission rows that belong to a plugin (``plugin_id IS NOT NULL``)."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(permissions)
+            .where(permissions.c.plugin_id.isnot(None))
+            .order_by(permissions.c.group_label, permissions.c.key)
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def plugin_permission_keys() -> set[str]:
+    """The set of keys of every plugin permission (for validation in users/roles)."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(permissions.c.key).where(permissions.c.plugin_id.isnot(None)))
+    return {r[0] for r in rows}
+
+
+def list_catalog() -> list[dict]:
+    """Effective permission catalog: core (static) + plugin rows (from DB).
+
+    Each entry is ``{key, description, plugin_id, group_label}``. Core perms have
+    ``plugin_id``/``group_label`` = ``None``. This replaces the static
+    ``PERMISSION_CATALOG`` in the ``/api/roles`` response so plugin perms appear
+    in the PermissionPicker automatically."""
+    from server.permissions import PERMISSION_CATALOG
+    catalog = [
+        {"key": k, "description": d, "plugin_id": None, "group_label": None}
+        for k, d in PERMISSION_CATALOG
+    ]
+    catalog.extend(list_plugin_permissions())
+    return catalog
+
+
 # ── Role editor (runtime writes) ──────────────────────────────────────────
 
 def list_roles_with_permissions() -> list[dict]:

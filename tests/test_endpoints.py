@@ -1017,9 +1017,47 @@ check("POST webhook canal desconhecido -> 200 ignored", r.status_code == 200)
 
 r = client.delete("/api/channels/default")
 check("DELETE /channels/default -> 400 (protegido)", r.status_code == 400)
+# Soft-delete (default): arquiva, preserva credenciais/histórico, some da lista.
 r = client.delete("/api/channels/cloud_teste")
-check("DELETE /channels -> 200", r.status_code == 200)
-check("DELETE -> credenciais removidas", _ccrepo.get("cloud_teste", "access_token") is None)
+check("DELETE /channels -> 200 (soft-delete)", r.status_code == 200)
+check("DELETE -> arquivado (archived=True)", r.json()["data"].get("archived") is True)
+check("DELETE soft -> credenciais preservadas", _ccrepo.get("cloud_teste", "access_token") is not None)
+_archived_list = client.get("/api/channels?archived=true").json()["data"]
+_archived_ids = {c["id"] for c in (_archived_list if isinstance(_archived_list, list) else _archived_list.get("channels", []))}
+check("GET /channels?archived=true -> inclui o canal arquivado", "cloud_teste" in _archived_ids)
+_live_list = client.get("/api/channels").json()["data"]
+_live_ids = {c["id"] for c in (_live_list if isinstance(_live_list, list) else _live_list.get("channels", []))}
+check("GET /channels -> esconde o arquivado", "cloud_teste" not in _live_ids)
+# Restore: volta para a lista.
+r = client.post("/api/channels/cloud_teste/restore")
+check("POST /channels/{id}/restore -> 200", r.status_code == 200)
+check("restore -> archived=0", r.json()["data"].get("archived") == 0)
+# Purge: hard-delete remove credenciais + inbox (CASCADE).
+r = client.delete("/api/channels/cloud_teste?purge=true")
+check("DELETE ?purge=true -> 200", r.status_code == 200)
+check("DELETE purge -> purged=True", r.json()["data"].get("purged") is True)
+check("DELETE purge -> credenciais removidas", _ccrepo.get("cloud_teste", "access_token") is None)
+
+# ── Sync de nome canal→inbox + listagem sem órfãs (plano inboxes/canais §4.1/§4.6) ──
+r = client.post("/api/channels", json={
+    "id": "sync_ch", "provider": "whatsapp_cloud", "display_name": "Nome Antigo"})
+check("POST /channels (sync_ch) -> 200", r.status_code == 200)
+_inbx = client.get("/api/inboxes").json()["data"]
+_inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
+check("GET /inboxes -> inbox do canal com nome do canal",
+      any(i["channel_id"] == "sync_ch" and i["name"] == "Nome Antigo" for i in _inbx))
+client.put("/api/channels/sync_ch", json={"display_name": "Nome Novo"})
+_inbx = client.get("/api/inboxes").json()["data"]
+_inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
+check("PUT display_name -> inbox renomeada (sync)",
+      any(i["channel_id"] == "sync_ch" and i["name"] == "Nome Novo" for i in _inbx))
+# Arquivar esconde a inbox da listagem (JOIN exclui canal arquivado).
+client.delete("/api/channels/sync_ch")
+_inbx = client.get("/api/inboxes").json()["data"]
+_inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
+check("GET /inboxes -> esconde inbox de canal arquivado",
+      not any(i["channel_id"] == "sync_ch" for i in _inbx))
+client.delete("/api/channels/sync_ch?purge=true")
 
 # ═══════════════════════════════════════════════════════════════════
 #  15f. RBAC seed (plano 03 Fase 1)
@@ -1290,6 +1328,102 @@ r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
 check("gestor restored to 15 perms", len(_rrepo.get_role_permissions("gestor")) == 15)
 
+# ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
+import asyncio as _asyncio
+import types as _types
+from plugins.manifest import _parse_rbac as _parse_rbac
+from plugins.context import plugin_permission as _plugin_permission
+from plugins import events as _events
+from server import authz as _authz
+from fastapi import HTTPException as _HTTPException
+
+# 1) Manifest: parse + validate the rbac: block (invalid keys dropped).
+_rbac_parsed = _parse_rbac(
+    {"group": "Lembretes", "permissions": [
+        {"key": "view", "label": "Ver"},
+        {"key": "delete", "label": "Excluir"},
+        {"key": "Bad Key", "label": "x"},   # invalid → dropped
+        {"key": "view", "label": "dup"},     # dup → dropped
+    ]}, "lembretes")
+check("manifest rbac -> group parsed", _rbac_parsed["group"] == "Lembretes")
+check("manifest rbac -> invalid/dup keys dropped",
+      [p["key"] for p in _rbac_parsed["permissions"]] == ["view", "delete"])
+check("manifest rbac absent -> {}", _parse_rbac(None, "x") == {})
+
+# 2) Repo: upsert plugin perms → catalog merge + keys + delete cascade.
+_rrepo.upsert_plugin_permission("plugin.lembretes.view", "Ver lembretes",
+                                "lembretes", "Lembretes")
+_rrepo.upsert_plugin_permission("plugin.lembretes.delete", "Excluir lembretes",
+                                "lembretes", "Lembretes")
+_pkeys = _rrepo.plugin_permission_keys()
+check("plugin_permission_keys -> includes plugin perms",
+      {"plugin.lembretes.view", "plugin.lembretes.delete"} <= _pkeys)
+_catalog = _rrepo.list_catalog()
+_cat_view = next((c for c in _catalog if c["key"] == "plugin.lembretes.view"), None)
+check("list_catalog -> core + plugin rows", _cat_view is not None
+      and _cat_view["plugin_id"] == "lembretes" and _cat_view["group_label"] == "Lembretes")
+check("list_catalog -> core perms have plugin_id None",
+      any(c["key"] == "conversation.read" and c["plugin_id"] is None for c in _catalog))
+
+# 3) /api/roles exposes plugin perms with metadata.
+_roles_payload = client.get("/api/roles").json()["data"]
+_api_view = next((p for p in _roles_payload["permissions"]
+                  if p["key"] == "plugin.lembretes.view"), None)
+check("GET /api/roles -> plugin perm in catalog with group_label",
+      _api_view is not None and _api_view.get("group_label") == "Lembretes")
+
+# 4) Create a role with a plugin perm passes; bogus key rejected silently.
+r = client.post("/api/roles", json={"key": "lembrete_admin", "name": "Lembrete Admin",
+    "permission_keys": ["plugin.lembretes.view", "plugin.lembretes.bogus"]})
+check("POST /api/roles (plugin perm) -> 200", r.status_code == 200)
+_lr_id = r.json()["data"]["role"]["id"]
+_lr_keys = r.json()["data"]["role"]["permission_keys"]
+check("create role -> valid plugin perm kept, bogus dropped",
+      _lr_keys == ["plugin.lembretes.view"])
+client.delete(f"/api/roles/{_lr_id}")
+
+# 5) plugin_permission() dependency: infers id from path; default-allow legacy.
+_pu = _urepo.create(email="pluginuser@test.com", name="PU",
+                    password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_pu_id = _pu["id"]
+_dep = _plugin_permission("delete").dependency
+def _freq(user=None, path="/api/plugins/lembretes/items/1"):
+    return _types.SimpleNamespace(state=_types.SimpleNamespace(user=user),
+                                  url=_types.SimpleNamespace(path=path))
+# legacy/open (no user) -> allowed (no raise)
+_asyncio.run(_dep(_freq(user=None)))
+check("plugin_permission -> legacy/open allowed", True)
+# logged-in user WITHOUT the perm -> 403
+_denied = False
+try:
+    _asyncio.run(_dep(_freq(user={"id": _pu_id})))
+except _HTTPException as e:
+    _denied = e.status_code == 403
+check("plugin_permission -> user without perm -> 403", _denied)
+# grant the perm to that user (custom) -> allowed
+_urepo.set_custom_permissions(_pu_id, ["plugin.lembretes.delete"])
+_asyncio.run(_dep(_freq(user={"id": _pu_id})))
+check("plugin_permission -> user with perm -> allowed", True)
+# non-plugin path -> cannot infer id -> allowed (no raise)
+_asyncio.run(_dep(_freq(user={"id": _pu_id}, path="/api/contacts")))
+check("plugin_permission -> non-plugin path allowed", True)
+
+# 6) ABAC seam: filter.authz.decision can downgrade allow->deny.
+def _abac_deny(ctx, value):
+    return {**value, "allow": False}
+_events.register_filter("testabac", "filter.authz.decision", _abac_deny)
+_abac_req = _freq(user={"id": _pu_id})  # user HAS the perm now
+_allowed_after_filter = _asyncio.run(_authz.acheck(_abac_req, "plugin.lembretes.delete"))
+check("filter.authz.decision -> downgrades allow to deny", _allowed_after_filter is False)
+_events._filters.pop("filter.authz.decision", None)  # drop just the test filter
+
+# 7) Delete plugin perms removes rows (role/user grants cascade by FK).
+_removed = _rrepo.delete_plugin_permissions("lembretes")
+check("delete_plugin_permissions -> rows removed", _removed == 2)
+check("delete_plugin_permissions -> keys gone",
+      not _rrepo.plugin_permission_keys())
+_urepo.delete(_pu_id)  # cleanup the test user
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
@@ -1359,6 +1493,53 @@ r = client.post(f"/api/conversations/{_conv2['id']}/assign",
 check("atendente assign -> 403 (lacks conversation.assign)", r.status_code == 403)
 r = client.get("/api/conversations", headers={"Authorization": f"Bearer {_attok}"})
 check("atendente list -> 200 (has conversation.read)", r.status_code == 200)
+
+# ── Escopo de caixa no ENVIO (Bug 2, plano inboxes/canais §4.7) ──
+# att2 (atendente, sem read_all) não é membro de nenhuma inbox ⇒ não vê nem envia.
+from db.repositories import inbox_member_repo as _imrepo
+with _get_engine().connect() as _conn:
+    _scope_phone = _conn.execute(
+        _sa_select(_contacts_t.c.phone).where(_contacts_t.c.id == _cid)).scalar()
+_h_att = {"Authorization": f"Bearer {_attok}"}
+r = client.post(f"/api/contacts/{_scope_phone}/send",
+                json={"message": "oi", "conversation_id": _conv2["id"]}, headers=_h_att)
+check("send (não-membro, sem read_all) -> 403", r.status_code == 403)
+r = client.get(f"/api/conversations/{_conv2['id']}", headers=_h_att)
+check("get conversa (não-membro) -> 404 (escopo leitura)", r.status_code == 404)
+# Vira membro da inbox 1 ⇒ passa a enviar.
+_imrepo.set_inboxes_for_user(_at["id"], [1])
+r = client.post(f"/api/contacts/{_scope_phone}/send",
+                json={"message": "oi agora vai", "conversation_id": _conv2["id"]}, headers=_h_att)
+check("send (membro da inbox) -> 200", r.status_code == 200)
+# Sem read_all e membro só da inbox 1: enviar para conversa de OUTRA inbox bloqueia.
+from db.repositories import inbox_repo as _ibx_repo
+if _chrepo.get("scope_ch") is None:
+    _chrepo.create(id="scope_ch", provider="whatsapp_cloud", display_name="Scope CH")
+_other_ib = _ibx_repo.get_or_create_for_channel("scope_ch", name="Scope CH")
+_other_ci = _ci_repo.get_or_create(inbox_id=_other_ib["id"], contact_id=_cid, source_id=f"scope:{_cid}")
+_other_conv = _conv_repo.create(inbox_id=_other_ib["id"], contact_id=_cid, contact_inbox_id=_other_ci["id"])
+r = client.post(f"/api/contacts/{_scope_phone}/send",
+                json={"message": "nope", "conversation_id": _other_conv["id"]}, headers=_h_att)
+check("send (membro de outra inbox) -> 403", r.status_code == 403)
+
+# ── Escopo na LEITURA por-contato (view legada não pode vazar) ──
+# Contato cujo ÚNICO thread está numa inbox que att2 NÃO acessa (scope_ch).
+from db.repositories import contact_repo as _crepo_scope
+_hidden_c = _crepo_scope.get_or_create("5599911112222", default_ai_enabled=False)
+_hidden_ci = _ci_repo.get_or_create(
+    inbox_id=_other_ib["id"], contact_id=_hidden_c["id"], source_id="scope:hidden")
+_conv_repo.create(inbox_id=_other_ib["id"], contact_id=_hidden_c["id"],
+                  contact_inbox_id=_hidden_ci["id"])
+_imrepo.set_inboxes_for_user(_at["id"], [1])  # membro só da inbox 1
+r = client.get("/api/contacts", headers=_h_att)
+_clist = r.json()["data"]
+_cphones = {c.get("phone") for c in (_clist if isinstance(_clist, list) else _clist.get("contacts", []))}
+check("GET /contacts (escopado) -> exclui contato de inbox não-membro",
+      "5599911112222" not in _cphones)
+r = client.get("/api/contacts/5599911112222", headers=_h_att)
+check("GET /contacts/{phone} (inbox não-membro) -> 404", r.status_code == 404)
+# read_all fura o escopo: admin envia em qualquer caixa mesmo sem membership.
+_imrepo.set_inboxes_for_user(_at["id"], [])  # limpa para não afetar testes seguintes
 
 # ── plano 10 Onda 0: assign-me, ai, agent, info, contact→conversation ──
 # Usuário admin vivo (o _admin original foi deletado num teste anterior)
@@ -3088,6 +3269,8 @@ class _FakeTplChannel(_Ch):
         return {"ok": True}
 
 
+from db.repositories import channel_repo as _tpl_chrepo
+_tpl_chrepo.create(id="cloud_test", provider="whatsapp_cloud", display_name="Cloud Test")
 _tpl_inbox = _ibx_repo.create(channel_id="cloud_test", name="Cloud Test")
 _tpl_ci = _ci_repo.get_or_create(inbox_id=_tpl_inbox["id"], contact_id=_cid, source_id=f"cloud:{_cid}")
 _tpl_conv = _conv_repo.create(inbox_id=_tpl_inbox["id"], contact_id=_cid, contact_inbox_id=_tpl_ci["id"])

@@ -17,6 +17,7 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS`):
 7. **Settings declaráveis** (Pydantic Valves) — campos configuráveis pelo usuário. **Toda configuração do plugin vive na aba de configuração DO PRÓPRIO plugin** (botão "Configurar" em `/plugins`), NUNCA numa aba nova do painel de Configurações do core. Escolha: (a) `settings.py` com `class Settings(BaseModel)` → form auto-gerado; e/ou (b) uma screen `config: true` com UI custom. Pode ser vazio se o plugin não tem o que configurar.
 8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Veja a tabela completa em `CLAUDE.md` → Events.
 9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Veja a tabela completa em `CLAUDE.md` → Filters.
+10. **Controle de acesso (RBAC)**: "Quais funcionalidades têm controle de acesso? Para cada uma, quais ações (ver/editar/excluir)?" → gera o bloco `rbac:` no manifest. Convenção forte de chaves: `view`/`edit`/`delete`. Pode ser vazia (plugin acessível a todos, como hoje).
 
 Se o usuário escreveu tudo no `$ARGUMENTS`, deduza e confirme com **uma** pergunta de validação.
 
@@ -80,7 +81,17 @@ screens:
     component: /plugins/<id>/static/<id>.js
     config: false       # true = tela de configuração do plugin (modal "Configurar"
                         #        em /plugins). false (default) = página no menu da engrenagem.
+    requires: view      # opcional — esconde a screen no menu sem plugin.<id>.view
 permissions: []
+# RBAC de usuário (opcional) — distinto do 'permissions:' de capability acima.
+# Cada chave vira plugin.<id>.<key> e aparece no PermissionPicker da tela Usuários,
+# agrupada por "Plugin: <group>". Omitir = plugin acessível a todos (como hoje).
+rbac:
+  group: <Nome Humano>      # opcional; default = name do plugin
+  permissions:
+    - { key: view,   label: "Ver <funcionalidade>" }
+    - { key: edit,   label: "Criar/editar <funcionalidade>" }
+    - { key: delete, label: "Excluir <funcionalidade>" }
 dependencies: []
 ```
 
@@ -177,17 +188,26 @@ Mounted em `/api/plugins/<id>` automaticamente. Auth do core já cobre.
 ```python
 from fastapi import APIRouter
 from sqlalchemy import text
-from plugins.context import make_plugin_db
+from plugins.context import make_plugin_db, plugin_permission
 
 router = APIRouter()
 
-@router.get("/items")
+# RBAC: gate a rota com a dependency plugin_permission("<key>"). Ela infere o id
+# do path, monta plugin.<id>.<key> e retorna 403 sem a permissão (default-allow
+# em instalação legado/open). Use as chaves declaradas no bloco rbac: do manifest.
+@router.get("/items", dependencies=[plugin_permission("view")])
 async def list_items():
     with make_plugin_db() as conn:
         rows = conn.execute(
             text("SELECT * FROM plugin_<id>_items ORDER BY ts DESC")
         ).mappings().all()
     return {"ok": True, "data": [dict(r) for r in rows]}
+
+@router.delete("/items/{rid}", dependencies=[plugin_permission("delete")])
+async def delete_item(rid: int):
+    with make_plugin_db() as conn:
+        conn.execute(text("DELETE FROM plugin_<id>_items WHERE id = :id"), {"id": rid})
+    return {"ok": True}
 ```
 
 ### settings.py (se houver settings)
@@ -344,7 +364,9 @@ async function apiFetch(url, init = {}) {
   return res;
 }
 
-export default function MyScreen({ apiBase }) {
+// O PluginScreen injeta a prop `can(key)` = hasPermission(user, 'plugin.<id>.<key>')
+// (default-allow em instalação legado/open). Use pra esconder ações sem permissão.
+export default function MyScreen({ apiBase, can }) {
   const [items, setItems] = useState([]);
   useEffect(() => {
     apiFetch(`${apiBase}/items`)
@@ -355,7 +377,10 @@ export default function MyScreen({ apiBase }) {
   return html`
     <div class="p-6 max-w-3xl mx-auto">
       <h1 class="text-2xl font-bold mb-4">Minha Tela</h1>
-      ${items.map(it => html`<div key=${it.id}>${it.name}</div>`)}
+      ${items.map(it => html`<div key=${it.id} class="flex items-center gap-2">
+        <span class="flex-1">${it.name}</span>
+        ${can('delete') ? html`<button class="text-red-600">Excluir</button>` : null}
+      </div>`)}
     </div>
   `;
 }
@@ -379,6 +404,7 @@ Ao terminar, mostre:
 - **Sempre prefixe tabelas com `plugin_<id>_`**. O migrator rejeita o contrário.
 - **Não invente nomes de imports** — use os do importmap (`preact`, `preact/hooks`, `htm`) e os módulos que o core já expõe (`db.engine`, `db.tables`, `db.repositories.*`, `agent.memory`, `plugins.context`). Para acesso ao banco em plugin: `from plugins.context import make_plugin_db` e `from sqlalchemy import text`.
 - **Tool name é global**: se conflitar com um nome existente o loader rejeita o plugin. Prefira nomes específicos como `<id>_<verbo>` (ex: `orders_create`, `cardapio_listar`).
+- **RBAC é declarativo no manifest** (bloco `rbac:`); **nunca cheque permissão na mão** — gate rotas com `dependencies=[plugin_permission("<key>")]` e esconda ações na UI com `can(key)`. Esconda a screen sem permissão com `requires:` no manifest. Convenção de chaves: `view`/`edit`/`delete`. As permissões aparecem sozinhas na tela Usuários, agrupadas pelo plugin.
 - **Settings UI é gerada automaticamente** a partir do schema Pydantic — strings, ints, floats, bools, enums. Não escreva form manual.
 - **Configuração SEMPRE na aba do próprio plugin** (settings declarativas e/ou screen `config: true` → modal "Configurar" em `/plugins`). **NUNCA** adicione seção/aba ao painel de Configurações do core (`web/static/js/components/ConfigPanel.js`) — isso é mexer no core e é proibido.
 - **Migrations rodam uma única vez** por versão. Para evoluir o schema, crie `002_*.sql`, `003_*.sql` — não edite `001`.

@@ -246,6 +246,10 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         _ensure_plugin_deps(manifest, db_row)
         loaded = _load_plugin_module(manifest, plugin_dir)
         run_pending_migrations(manifest, plugin_dir)
+        # Register the plugin's declared RBAC permissions (plano "RBAC para
+        # Plugins"). Idempotent upsert; safe to run every boot.
+        from plugins.rbac import sync_plugin_permissions
+        sync_plugin_permissions(manifest)
         registry.loaded[manifest.id] = loaded
         plugin_repo.set_load_error(manifest.id, None)
         logger.info(

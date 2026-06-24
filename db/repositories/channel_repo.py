@@ -18,7 +18,7 @@ from db.tables import channels
 
 _STATUS_FIELDS = ("connected", "logged_in", "own_phone", "last_error",
                   "enabled", "display_name", "config", "gowa_device_id",
-                  "gowa_isolation", "provider")
+                  "gowa_isolation", "provider", "archived")
 
 # Cached device→channel index for inbound routing (see get_gowa_channel_for_device).
 # Channels change rarely; a short TTL keeps the per-message webhook lookup off the DB.
@@ -27,10 +27,36 @@ _DEVICE_CACHE: dict = {"map": None, "ts": 0.0}
 _DEVICE_TTL = 30.0
 
 
-def list_all() -> list[dict]:
+def list_all(include_archived: bool = False) -> list[dict]:
+    stmt = select(channels)
+    if not include_archived:
+        stmt = stmt.where(channels.c.archived == 0)
+    stmt = stmt.order_by(channels.c.id)
     with get_engine().connect() as conn:
-        rows = conn.execute(select(channels).order_by(channels.c.id)).mappings().all()
+        rows = conn.execute(stmt).mappings().all()
     return [dict(r) for r in rows]
+
+
+def list_archived() -> list[dict]:
+    """Soft-deleted channels (plano inboxes/canais §4.3-c), for the restore UI."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(channels).where(channels.c.archived == 1).order_by(channels.c.id)
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def archive(channel_id: str) -> dict | None:
+    """Soft-delete: hide the channel from the UI but keep its inbox/history.
+
+    Also flips ``enabled`` off so the inbound device→channel index and the
+    operator's channel pickers stop offering it. Restorable via :func:`restore`."""
+    return set_status(channel_id, archived=1, enabled=0)
+
+
+def restore(channel_id: str) -> dict | None:
+    """Undo a soft-delete (leaves ``enabled`` off — the user re-enables explicitly)."""
+    return set_status(channel_id, archived=0)
 
 
 def get(channel_id: str) -> dict | None:

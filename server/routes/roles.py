@@ -23,11 +23,16 @@ logger = logging.getLogger(__name__)
 
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _RESERVED_KEYS = {"admin", "gestor", "atendente"}
-_VALID_PERMISSION_KEYS = set(ALL_PERMISSION_KEYS)
+
+
+def _valid_permission_keys() -> set[str]:
+    """Core (static) + plugin (DB) permission keys (plano "RBAC para Plugins")."""
+    return set(ALL_PERMISSION_KEYS) | rbac_repo.plugin_permission_keys()
 
 
 def _clean_perms(raw) -> list[str]:
-    return [p for p in (raw or []) if p in _VALID_PERMISSION_KEYS]
+    valid = _valid_permission_keys()
+    return [p for p in (raw or []) if p in valid]
 
 
 def register_routes(app, deps):

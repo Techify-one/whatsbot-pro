@@ -11,6 +11,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
 import {
   listChannels,
+  listArchivedChannels,
+  restoreChannel,
   createChannel,
   updateChannel,
   deleteChannel,
@@ -687,7 +689,7 @@ function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, onEdit
           onClick=${() => onToggle(channel)} disabled=${busy}>
           ${channel.enabled ? 'Desativar' : 'Ativar'}</button>
         <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
-          onClick=${() => onDelete(channel)} disabled=${busy}>Excluir</button>
+          onClick=${() => onDelete(channel)} disabled=${busy}>Arquivar</button>
       </div>
     </div>
   `;
@@ -922,6 +924,9 @@ export default function ChannelsManager({ initialEntity }) {
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
   const [busyId, setBusyId] = useState('');
+  // Canais arquivados (soft-delete) + visibilidade da seção de restauração.
+  const [archived, setArchived] = useState([]);
+  const [showArchived, setShowArchived] = useState(false);
   // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
   const [webhookFor, setWebhookFor] = useState(null);
   // {id, display_name} of the GOWA channel whose QR-connect panel is open.
@@ -961,8 +966,18 @@ export default function ChannelsManager({ initialEntity }) {
     const res = await listChannels();
     if (res && res.ok) setChannels((res.data && res.data.channels) || res.data || []);
     else setError((res && res.error) || 'Falha ao carregar canais.');
+    const arc = await listArchivedChannels();
+    if (arc && arc.ok) setArchived((arc.data && arc.data.channels) || arc.data || []);
     setLoading(false);
     refreshStatuses();
+  }
+
+  async function handleRestore(channel) {
+    setBusyId(channel.id); setError('');
+    const res = await restoreChannel(channel.id);
+    setBusyId('');
+    if (res && res.ok) load();
+    else setError((res && res.error) || 'Falha ao restaurar o canal.');
   }
 
   // Pull live connected/logged-in status for every channel and merge into the
@@ -1035,12 +1050,12 @@ export default function ChannelsManager({ initialEntity }) {
   }
 
   async function handleDelete(channel) {
-    if (!confirm(`Excluir o canal "${channel.display_name || channel.id}"? Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de conversas é preservado e pode ser restaurado depois.`)) return;
     setBusyId(channel.id); setError('');
     const res = await deleteChannel(channel.id);
     setBusyId('');
     if (res && res.ok) load();
-    else setError((res && res.error) || 'Falha ao excluir o canal.');
+    else setError((res && res.error) || 'Falha ao arquivar o canal.');
   }
 
   // Refresh just this channel's live status and merge it into the card.
@@ -1108,6 +1123,33 @@ export default function ChannelsManager({ initialEntity }) {
             busyId=${busyId} />
         `)}
       </div>
+
+      ${archived.length ? html`
+        <div class="mt-6 border-t border-wa-border pt-3">
+          <button class="text-[13px] text-wa-secondary hover:text-wa-text transition-colors"
+            onClick=${() => setShowArchived(v => !v)}>
+            ${showArchived ? '▾' : '▸'} Canais arquivados (${archived.length})
+          </button>
+          ${showArchived ? html`
+            <div class="flex flex-col gap-2 mt-2">
+              ${archived.map(channel => html`
+                <div key=${channel.id}
+                  class="flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-wa-panel border border-wa-border">
+                  <div class="min-w-0">
+                    <div class="text-[14px] text-wa-text truncate">${channel.display_name || channel.id}</div>
+                    <div class="text-[12px] text-wa-secondary truncate">
+                      ${(PROVIDERS[channel.provider] || {}).label || channel.provider} · arquivado
+                    </div>
+                  </div>
+                  <button class="px-2 py-1 rounded-md text-[13px] text-wa-teal hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
+                    onClick=${() => handleRestore(channel)} disabled=${busyId === channel.id}>
+                    ${busyId === channel.id ? '…' : 'Restaurar'}</button>
+                </div>
+              `)}
+            </div>
+          ` : null}
+        </div>
+      ` : null}
 
       ${editingChannel ? html`<${ChannelEditForm}
         channel=${editingChannel}

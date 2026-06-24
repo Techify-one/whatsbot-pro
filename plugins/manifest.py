@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 WHATSBOT_API_VERSION = "1.0.0"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# RBAC permission keys (plano "RBAC para Plugins" §3.2): allow ``view``,
+# ``orders.export``, etc. The plugin id is prefixed at registration time.
+_RBAC_KEY_RE = re.compile(r"^[a-z][a-z0-9_.]{0,48}$")
 
 
 @dataclasses.dataclass
@@ -46,6 +49,10 @@ class PluginManifest:
     # touches.
     events: list[str] = dataclasses.field(default_factory=list)
     filters: list[str] = dataclasses.field(default_factory=list)
+    # User-facing RBAC permissions (plano "RBAC para Plugins"). Distinct from the
+    # capability ``permissions`` field above. Shape after parsing:
+    # ``{"group": str | None, "permissions": [{"key": str, "label": str}, ...]}``.
+    rbac: dict = dataclasses.field(default_factory=dict)
     raw: dict = dataclasses.field(default_factory=dict)
 
     def to_public_dict(self) -> dict:
@@ -62,6 +69,7 @@ class PluginManifest:
             "dependencies": self.dependencies,
             "events": self.events,
             "filters": self.filters,
+            "rbac": self.rbac,
         }
 
 
@@ -142,12 +150,16 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
             # When true, the screen is the plugin's configuration UI: shown in the
             # Plugins tab "Configurar" modal instead of as a standalone gear-menu page.
             "config": bool(s.get("config", False)),
+            # Optional RBAC gate (plano "RBAC para Plugins"): when set, the screen
+            # is hidden in the gear menu unless the user holds plugin.<id>.<requires>.
+            "requires": str(s["requires"]).strip() if s.get("requires") else None,
         })
 
     permissions = [str(p) for p in (data.get("permissions") or []) if isinstance(p, str)]
     deps = [str(d) for d in (data.get("dependencies") or []) if isinstance(d, str)]
     events_declared = [str(e) for e in (data.get("events") or []) if isinstance(e, str)]
     filters_declared = [str(f) for f in (data.get("filters") or []) if isinstance(f, str)]
+    rbac = _parse_rbac(data.get("rbac"), pid)
 
     return PluginManifest(
         id=pid,
@@ -163,8 +175,47 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         dependencies=deps,
         events=events_declared,
         filters=filters_declared,
+        rbac=rbac,
         raw=data,
     )
+
+
+def _parse_rbac(raw: Any, pid: str) -> dict:
+    """Parse + validate the optional ``rbac:`` manifest block.
+
+    Returns ``{}`` when absent. Otherwise ``{"group": str | None,
+    "permissions": [{"key", "label"}, ...]}``. Invalid keys are dropped with a
+    warning (a bad permission key never blocks the whole plugin from loading).
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("plugin %s: 'rbac' must be a mapping, ignored", pid)
+        return {}
+    group = raw.get("group")
+    group_str = str(group).strip() if isinstance(group, str) and group.strip() else None
+    perms_in = raw.get("permissions") or []
+    if not isinstance(perms_in, list):
+        logger.warning("plugin %s: 'rbac.permissions' must be a list, ignored", pid)
+        return {"group": group_str, "permissions": []}
+    perms: list[dict] = []
+    seen: set[str] = set()
+    for item in perms_in:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not _RBAC_KEY_RE.match(key):
+            logger.warning(
+                "plugin %s: invalid rbac permission key %r (expect %s), skipped",
+                pid, key, _RBAC_KEY_RE.pattern,
+            )
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        label = str(item.get("label") or key).strip()
+        perms.append({"key": key, "label": label})
+    return {"group": group_str, "permissions": perms}
 
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")

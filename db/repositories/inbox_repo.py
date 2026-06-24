@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert as sa_insert
 from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
-from db.tables import inboxes
+from db.tables import channels, inboxes
 
 _UPDATABLE = ("name", "channel_id", "agent_bot_enabled", "default_agent_key")
 
@@ -78,7 +79,46 @@ def update(inbox_id: int, **fields) -> dict | None:
     return get(inbox_id)
 
 
+def delete(inbox_id: int) -> bool:
+    """Hard-delete an inbox. FK ON DELETE CASCADE on ``conversations``,
+    ``contact_inboxes`` and ``inbox_members`` carries the dependent rows.
+
+    Only used on a genuine purge of a channel (plano inboxes/canais §4.3/§4.4) —
+    the default channel-removal path is a soft-delete that keeps the inbox."""
+    with get_engine().begin() as conn:
+        res = conn.execute(sa_delete(inboxes).where(inboxes.c.id == inbox_id))
+    return (res.rowcount or 0) > 0
+
+
 def list_all() -> list[dict]:
     with get_engine().connect() as conn:
         rows = conn.execute(select(inboxes).order_by(inboxes.c.id)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def list_with_channel(include_archived: bool = False) -> list[dict]:
+    """Inboxes that still have a live channel, named by the channel's current
+    ``display_name`` (plano inboxes/canais §4.6).
+
+    Powers the UI lists (Usuários, Inboxes): the INNER JOIN drops órfãs (canal
+    inexistente) and ``COALESCE`` surfaces the channel's atual nome em vez do
+    ``inbox.name`` (snapshot velho). Archived channels are excluded by default."""
+    stmt = (
+        select(
+            inboxes.c.id,
+            func.coalesce(channels.c.display_name, inboxes.c.name).label("name"),
+            inboxes.c.channel_id,
+            inboxes.c.channel_type,
+            inboxes.c.agent_bot_enabled,
+            inboxes.c.default_agent_key,
+            channels.c.provider.label("provider"),
+            channels.c.enabled.label("channel_enabled"),
+        )
+        .select_from(inboxes.join(channels, channels.c.id == inboxes.c.channel_id))
+    )
+    if not include_archived:
+        stmt = stmt.where(channels.c.archived == 0)
+    stmt = stmt.order_by(channels.c.display_name, inboxes.c.id)
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
     return [dict(r) for r in rows]

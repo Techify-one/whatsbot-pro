@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import unicodedata
 
+from sqlalchemy import bindparam
 from sqlalchemy import case
 from sqlalchemy import func
 from sqlalchemy import delete as sa_delete
@@ -13,7 +14,8 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
-from db.tables import contact_tags, contacts, observations, tags, unread_msg_ids
+from db.tables import (contact_tags, contacts, conversations, observations,
+                       tags, unread_msg_ids)
 
 
 def _fold(s: str) -> str:
@@ -366,9 +368,60 @@ def _contact_ids_matching_message(folded_q: str, archived: bool) -> dict[int, di
     return matched
 
 
-def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
-    """List contacts with last message preview, tags, and unread counts."""
+def contact_has_visible_conversation(contact_id: int,
+                                     inbox_ids: list[int] | None) -> bool:
+    """Whether the contact has at least one conversation in a visible inbox.
+
+    Inbox-membership scoping for the contact-centric (legacy) read surface
+    (plano inboxes/canais §4.7): ``inbox_ids=None`` ⇒ no scoping (sees all);
+    empty list ⇒ member of no inbox ⇒ nothing visible; otherwise the contact is
+    visible só se tiver conversa numa das inboxes do usuário."""
+    if inbox_ids is None:
+        return True
+    if not inbox_ids:
+        return False
+    with get_engine().connect() as conn:
+        hit = conn.execute(
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contact_id,
+                   conversations.c.inbox_id.in_(inbox_ids))
+            .limit(1)
+        ).first()
+    return hit is not None
+
+
+def contact_hidden_by_inbox_scope(contact_id: int,
+                                  inbox_ids: list[int] | None) -> bool:
+    """True if the contact detail must be hidden (404) for a scoped user.
+
+    Hides only contacts that HAVE conversations but none in a visible inbox. A
+    contact without any conversation (brand-new / start-new-conversation flow) is
+    NOT hidden, so a scoped user can still open it to begin a thread on an inbox
+    they belong to."""
+    if inbox_ids is None:
+        return False
+    if contact_has_visible_conversation(contact_id, inbox_ids):
+        return False
+    with get_engine().connect() as conn:
+        has_any = conn.execute(
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contact_id).limit(1)
+        ).first()
+    return has_any is not None
+
+
+def list_contacts(q: str = "", archived: bool = False,
+                  inbox_ids: list[int] | None = None) -> list[dict]:
+    """List contacts with last message preview, tags, and unread counts.
+
+    ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7): ``None``
+    ⇒ no scoping; empty ⇒ nothing; a list ⇒ only contacts with a conversation in
+    one of those inboxes. Mirrors ``conversation_repo.list_conversations`` so the
+    contact-centric sidebar não vaza contatos de caixas que o usuário não acessa."""
     from sqlalchemy import text as sql_text
+
+    if inbox_ids is not None and not inbox_ids:
+        return []  # member of no inbox → sees nothing
 
     # Single SQL statement — easier to read than building it via Core.
     # Only standard SQL (MAX, GROUP BY, INNER JOIN, LEFT JOIN, COALESCE),
@@ -417,12 +470,22 @@ def list_contacts(q: str = "", archived: bool = False) -> list[dict]:
                 GROUP BY contact_id
             ) cv2 ON cv1.contact_id = cv2.contact_id AND cv1.id = cv2.max_id
         ) conv ON conv.contact_id = c.id
-        WHERE c.is_archived = :archived
+        WHERE c.is_archived = :archived {inbox_clause}
         ORDER BY c.is_pinned DESC, COALESCE(lm.ts, c.updated_at) DESC
-    """)
+    """.format(
+        inbox_clause=(
+            "AND EXISTS (SELECT 1 FROM conversations cvx "
+            "WHERE cvx.contact_id = c.id AND cvx.inbox_id IN :inbox_ids)"
+            if inbox_ids is not None else ""
+        )
+    ))
+    params = {"archived": 1 if archived else 0}
+    if inbox_ids is not None:
+        sql = sql.bindparams(bindparam("inbox_ids", expanding=True))
+        params["inbox_ids"] = list(inbox_ids)
 
     with get_engine().connect() as conn:
-        rows = conn.execute(sql, {"archived": 1 if archived else 0}).mappings().all()
+        rows = conn.execute(sql, params).mappings().all()
 
         results = []
         for row in rows:
