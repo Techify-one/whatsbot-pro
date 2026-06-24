@@ -201,6 +201,9 @@ def create_app(
     # steps are best-effort: a failure never blocks the app from booting.
     try:
         agent_factory.seed_default_agent(settings)
+        # Plano 22: preserve any legacy config.system_prompt/model into the
+        # canonical default agent before those config keys are retired (idempotent).
+        agent_factory.migrate_legacy_config_to_default_agent()
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
     # Built-in system custom-attributes (plano 19): seed CPF & friends (idempotent).
@@ -427,7 +430,11 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/contatos", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/atendimentos", "/ai", "/channels", "/auditoria", "/wizard"}
+        # English canonical routes + legacy PT aliases (kept so a hard reload on an
+        # old bookmark still serves index.html; the frontend rewrites them to the
+        # English path via redirectLegacyPath).
+        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
+        | {"/contatos", "/painel", "/atendimentos", "/auditoria"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -526,8 +533,8 @@ def create_app(
     # ── Frontend routes ────────────────────────────────────────────────
 
     @app.get("/")
-    @app.get("/contatos")
-    @app.get("/painel")
+    @app.get("/contacts")
+    @app.get("/dashboard")
     @app.get("/sandbox")
     @app.get("/costs")
     @app.get("/executions")
@@ -537,10 +544,16 @@ def create_app(
     @app.get("/runtime")
     @app.get("/users")
     @app.get("/conversations")
-    @app.get("/atendimentos")
+    @app.get("/attendances")
+    @app.get("/audit")
     @app.get("/ai")
     @app.get("/channels")
     @app.get("/wizard")
+    # Legacy PT aliases (frontend redirects them to the English paths on load).
+    @app.get("/contatos")
+    @app.get("/painel")
+    @app.get("/atendimentos")
+    @app.get("/auditoria")
     @app.get("/contacts/{contact_id:int}")
     @app.get("/conversations/{conversation_id:int}")
     @app.get("/executions/{execution_id:int}")

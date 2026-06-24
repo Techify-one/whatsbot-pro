@@ -330,8 +330,8 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <button
                   onClick=${() => {
                     closeMenus();
-                    if (window.location.pathname !== '/contatos') {
-                      history.pushState(null, '', '/contatos');
+                    if (window.location.pathname !== '/contacts') {
+                      history.pushState(null, '', '/contacts');
                       window.dispatchEvent(new PopStateEvent('popstate'));
                     }
                   }}

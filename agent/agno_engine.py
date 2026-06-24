@@ -54,6 +54,9 @@ _RESERVED_TOOL_KWARGS = {
 }
 
 _DEFAULT_MAX_TOKENS = 1024
+# Last-resort model when an AgentSpec carries no model (config-in-DB only path,
+# plano 22). The AgentHandler no longer has an in-code ``model`` attribute.
+from agent.agent_factory import DEFAULT_MODEL as _FALLBACK_MODEL
 
 
 @dataclass
@@ -91,7 +94,7 @@ def build_model(handler, model_id: str | None = None,
             variables = None
     kwargs = model_factory.build_kwargs(
         model_config,
-        fallback_model=model_id or handler.model,
+        fallback_model=model_id or _FALLBACK_MODEL,
         default_max_tokens=_DEFAULT_MAX_TOKENS,
         variables=variables,
     )
@@ -413,7 +416,7 @@ async def run_async(handler, contact, sender, messages, active_tools,
     functions = build_functions(handler, contact, sender, active_tools, executed,
                                 is_async=True, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
-    model_id = (model_config or {}).get("model") or handler.model
+    model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
     track_step("llm_request", {
         "model": model_id,
@@ -464,7 +467,7 @@ def run_sync(handler, contact, sender, messages, active_tools,
     functions = build_functions(handler, contact, sender, active_tools, executed,
                                 is_async=False, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
-    model_id = (model_config or {}).get("model") or handler.model
+    model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
     track_step("llm_request", {
         "model": model_id,

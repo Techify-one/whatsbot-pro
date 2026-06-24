@@ -670,9 +670,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setSelectedChannelId(row.channel_id || 'default');
     if (row.conversation_id != null) {
       history.pushState(null, '', `/conversations/${row.conversation_id}`);
-    } else if (row.contact_id != null || row.id != null) {
-      history.pushState(null, '', `/contacts/${row.contact_id ?? row.id}`);
     } else {
+      // Sem conversa ainda: a seleção fica no estado; /contacts/{id} agora é a tela
+      // de detalhe do contato (não o hub), então a URL volta pra raiz do hub.
       history.pushState(null, '', '/');
     }
   }, []);

@@ -5,10 +5,8 @@ Handoff PERSISTENTE (estilo "assign" do Chatwoot, mas para agentes de IA): grava
 passam a ser atendidas pelo agente de destino — :func:`agent_factory.build_for_contact`
 resolve a precedência conversa→inbox→default a cada requisição.
 
-Self-gated: só age quando ``ai_engine_enabled`` está ligado (multiagente). Em modo
-legado devolve um erro claro em vez de fazer uma escrita inócua. Valida que o destino
-existe e está ativo; se o agente atual for um roteador (``is_router``) com
-``routing_targets``, exige que o destino esteja na allowlist.
+Valida que o destino existe e está ativo; se o agente atual for um roteador
+(``is_router``) com ``routing_targets``, exige que o destino esteja na allowlist.
 """
 
 import logging
@@ -50,9 +48,6 @@ TRANSFERIR_AGENTE_TOOL = {
 
 def execute(ctx, args: dict) -> str | None:
     """Persist the handoff on the open conversation. Returns feedback for the LLM."""
-    if not getattr(ctx.handler, "ai_engine_enabled", False):
-        return "Erro: o roteamento entre agentes está desativado (ai_engine_enabled)."
-
     target = (args.get("agente") or args.get("target") or "").strip()
     if not target:
         return "Erro: informe a chave do agente de destino em 'agente'."

@@ -48,10 +48,10 @@ const html = htm.bind(h);
 // Core (built-in) routes. Plugin screens are merged in dynamically below.
 const CORE_ROUTES = {
   '/': 'contacts',
-  '/contatos': 'contatos',
-  '/atendimentos': 'attendances',
+  '/contacts': 'contatos',
+  '/attendances': 'attendances',
   '/channels': 'channels',
-  '/painel': 'dashboard',
+  '/dashboard': 'dashboard',
   '/sandbox': 'sandbox',
   '/costs': 'costs',
   '/executions': 'executions',
@@ -60,15 +60,15 @@ const CORE_ROUTES = {
   '/custom-attributes': 'custom-attributes',
   '/runtime': 'runtime',
   '/users': 'users',
-  '/auditoria': 'audit',
+  '/audit': 'audit',
   '/ai': 'ai',
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
-  contatos: '/contatos',
-  attendances: '/atendimentos',
+  contatos: '/contacts',
+  attendances: '/attendances',
   channels: '/channels',
-  dashboard: '/painel',
+  dashboard: '/dashboard',
   sandbox: '/sandbox',
   costs: '/costs',
   executions: '/executions',
@@ -77,9 +77,30 @@ const CORE_TAB_PATHS = {
   'custom-attributes': '/custom-attributes',
   runtime: '/runtime',
   users: '/users',
-  audit: '/auditoria',
+  audit: '/audit',
   ai: '/ai',
 };
+
+// Legacy Portuguese URLs → canonical English paths. The routes were standardized
+// to English; these redirects keep old bookmarks/links working (applied with
+// replaceState so they don't pollute history).
+const LEGACY_PATH_REDIRECTS = {
+  '/contatos': '/contacts',
+  '/atendimentos': '/attendances',
+  '/painel': '/dashboard',
+  '/auditoria': '/audit',
+};
+
+// Rewrite a legacy PT path to its English equivalent in the address bar (no-op
+// for any other path). Returns true when a redirect was applied.
+function redirectLegacyPath() {
+  const to = LEGACY_PATH_REDIRECTS[window.location.pathname];
+  if (to) {
+    history.replaceState(null, '', `${to}${window.location.search}`);
+    return true;
+  }
+  return false;
+}
 
 // Tab id used internally for plugin screens. We encode the plugin id and
 // the screen path so the router can round-trip it.
@@ -87,9 +108,9 @@ function pluginTabId(screen) { return `plugin:${screen.pluginId}:${screen.path}`
 
 function tabFromPath(pluginScreens) {
   const path = window.location.pathname;
-  if (path.match(/^\/contacts\/\d+$/)) return 'contacts';
   // Conversa-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
   // conversa no hub de contatos. (/conversations sem id segue na lista full-page.)
+  // /contacts/<id> (detalhe do contato) é resolvido via entityFromPath → 'contatos'.
   if (path.match(/^\/conversations\/\d+$/)) return 'contacts';
   if (path.match(/^\/executions\/\d+$/)) return 'executions';
   const screen = (pluginScreens || []).find(s => s.path === path);
@@ -398,8 +419,13 @@ function App({ onLogout, hasPassword, currentUser }) {
     }
   }, [pluginScreens]);
 
+  // Boot: rewrite any legacy PT URL (/contatos, /painel, …) to its English path
+  // before the rest of the app reads window.location.
+  useEffect(() => { redirectLegacyPath(); }, []);
+
   useEffect(() => {
     function onPopState() {
+      redirectLegacyPath();
       setTabState(tabFromPath(pluginScreens));
       setInitialContactId(contactIdFromPath());
       setInitialConversationId(conversationIdFromPath());
@@ -683,7 +709,7 @@ function App({ onLogout, hasPassword, currentUser }) {
                     : tab === 'contatos'
                       ? html`<div class="max-w-5xl mx-auto p-4">
                           <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
-                          <${ContactsListScreen} />
+                          <${ContactsListScreen} initialEntity=${entFor('contatos')} />
                         </div>`
                     : tab === 'attendances'
                       ? html`<div class="mx-auto p-4 max-w-none">

@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { fetchQrBlob, refreshQr, setupRequestKey, setupKeyStatus } from '../services/api.js';
+import { fetchQrBlob, refreshQr, setupRequestKey, setupKeyStatus, savePrompt } from '../services/api.js';
 import { formatPhone } from './QRCode.js';
 
 const html = htm.bind(h);
@@ -183,12 +183,14 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
   }, [keyState]);
 
   // ── Step 3: agent prompt ─────────────────────────────────────────
-  const [agentPrompt, setAgentPrompt] = useState((config && config.system_prompt) || '');
+  const [agentPrompt, setAgentPrompt] = useState('');
   const [showExample, setShowExample] = useState(false);
 
   function saveAgentPrompt() {
     const txt = agentPrompt.trim();
-    if (txt && onConfigSave) onConfigSave({ system_prompt: txt });
+    // Plano 22: the prompt is the canonical default agent's prompt (config-in-DB),
+    // saved straight to ai_prompts['default'] — there is no config.system_prompt.
+    if (txt) savePrompt('default', { body: txt });
     setStep(4);
   }
 

@@ -19,55 +19,6 @@ from plugins.events import emit as emit_event, emit_with_filter
 logger = logging.getLogger(__name__)
 
 
-def _mirror_globals_to_default_agent(settings, keys_changed: list[str]) -> None:
-    """Plano 20: keep the DEFAULT agent's prompt/model synced to the global config.
-
-    The global ``system_prompt``/``model`` are the legacy fallback, but the canonical
-    source is the default agent. Mirroring config → default agent is what lets the
-    1st-run wizard (which writes ``config['system_prompt']``) actually reach the agent
-    the multi-agente engine reads. Best-effort — never fails the config save."""
-    from db.repositories import agent_repo, prompt_repo
-    from agent.agent_factory import DEFAULT_PROMPT_KEY
-    if "system_prompt" in keys_changed:
-        try:
-            new_prompt = settings.get("system_prompt", "")
-            current = prompt_repo.get(DEFAULT_PROMPT_KEY)
-            # Guard like the model branch below: keys_changed lists every key PRESENT
-            # in the PUT body, not only the ones whose value actually changed. Saving
-            # unconditionally would bump the prompt version + snapshot history on every
-            # config PUT that merely echoes the same prompt. Only save on a real diff.
-            if current is None or (current.get("body") or "") != new_prompt:
-                prompt_repo.save(DEFAULT_PROMPT_KEY, new_prompt)
-        except Exception as e:
-            logger.warning("mirror system_prompt -> default agent failed: %s", e)
-    if "model" in keys_changed:
-        try:
-            agent = agent_repo.get(agent_repo.DEFAULT_AGENT_KEY)
-            new_model = settings.get("model", "")
-            if agent and (dict(agent.get("model_config") or {}).get("model") != new_model):
-                mc = dict(agent.get("model_config") or {})
-                mc["model"] = new_model
-                agent_repo.save(
-                    agent_repo.DEFAULT_AGENT_KEY,
-                    display_name=agent.get("display_name") or "Agente padrão",
-                    prompt_key=agent.get("prompt_key") or DEFAULT_PROMPT_KEY,
-                    model_config=mc,
-                    tool_names=agent.get("tool_names"),
-                    enabled=bool(agent.get("enabled", True)),
-                    description=agent.get("description", ""),
-                    is_router=bool(agent.get("is_router", False)),
-                    routing_targets=agent.get("routing_targets"),
-                    hooks_config=agent.get("hooks_config") or {},
-                )
-        except Exception as e:
-            logger.warning("mirror model -> default agent failed: %s", e)
-    try:
-        from ai_engine import dynamic_registry
-        dynamic_registry.invalidate()
-    except Exception:
-        pass
-
-
 # ── Models cache ──────────────────────────────────────────────
 _models_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
 _MODELS_CACHE_TTL = 600  # 10 minutes
@@ -88,11 +39,9 @@ def register_routes(app, deps):
     async def get_config():
         return _ok({
             "openrouter_api_key": _mask_key(settings.get("openrouter_api_key", "")),
-            "model": settings.get("model", "deepseek/deepseek-v4-pro"),
             "audio_model": settings.get("audio_model", "google/gemini-2.5-flash"),
             "image_model": settings.get("image_model", "google/gemini-2.5-flash"),
             "document_model": settings.get("document_model", "google/gemini-2.5-flash"),
-            "system_prompt": settings.get("system_prompt", ""),
             "group_reply_mode": settings.get("group_reply_mode", "mention_only"),
             "auto_reply": settings.get("auto_reply", True),
             "max_context_messages": settings.get("max_context_messages", 10),
@@ -108,7 +57,6 @@ def register_routes(app, deps):
             "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
             "max_executions": settings.get("max_executions", 200),
             "default_ai_enabled": settings.get("default_ai_enabled", True),
-            "ai_engine_enabled": settings.get("ai_engine_enabled", False),
             "ai_tools_code_enabled": settings.get("ai_tools_code_enabled", False),
             "has_password": bool(settings.get("web_password_hash", "")),
             "setup_completed": settings.get("setup_completed", False),
@@ -133,14 +81,14 @@ def register_routes(app, deps):
             "audio_transcription_mode", "audio_transcription_target",
             "audio_transcription_chat_prefix", "image_transcription_enabled",
             "document_transcription_enabled",
-            "system_prompt", "auto_reply",
+            "auto_reply",
             "max_context_messages", "message_batch_delay",
             "split_messages", "split_message_delay",
             "transfer_alert_enabled", "transfer_alert_duration",
             "group_reply_mode", "bot_phone",
             "max_executions", "default_ai_enabled", "setup_completed",
             "low_balance_enabled", "low_balance_threshold",
-            "ai_engine_enabled", "ai_tools_code_enabled",
+            "ai_tools_code_enabled",
             "system_notice_assignment", "system_notice_tags",
             "system_notice_conv_labels",
             "system_notice_status", "system_notice_ai",
@@ -166,11 +114,6 @@ def register_routes(app, deps):
 
         settings.save()
 
-        # Plano 20: mirror the global prompt/model into the canonical default agent
-        # (covers the 1st-run wizard, which writes config['system_prompt']).
-        if "system_prompt" in keys_changed or "model" in keys_changed:
-            await asyncio.to_thread(_mirror_globals_to_default_agent, settings, keys_changed)
-
         # Bot phone changed → refresh mention detection (the bot's display name
         # comes from GOWA, not config — see background.py).
         if "bot_phone" in keys_changed:
@@ -178,15 +121,12 @@ def register_routes(app, deps):
 
         agent_handler.update_config(
             api_key=settings.get("openrouter_api_key", ""),
-            system_prompt=settings.get("system_prompt", ""),
-            model=settings.get("model", "deepseek/deepseek-v4-pro"),
             audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),
             image_model=settings.get("image_model", "google/gemini-2.5-flash"),
             document_model=settings.get("document_model", "google/gemini-2.5-flash"),
             max_context_messages=settings.get("max_context_messages", 10),
             split_messages=settings.get("split_messages", True),
             default_ai_enabled=settings.get("default_ai_enabled", True),
-            ai_engine_enabled=settings.get("ai_engine_enabled", False),
         )
 
         await ws_manager.broadcast("config_saved", {})
@@ -209,8 +149,6 @@ def register_routes(app, deps):
             settings.save()
             agent_handler.update_config(
                 api_key=api_key,
-                system_prompt=settings.get("system_prompt", ""),
-                model=settings.get("model", "deepseek/deepseek-v4-pro"),
                 audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),
                 image_model=settings.get("image_model", "google/gemini-2.5-flash"),
                 document_model=settings.get("document_model", "google/gemini-2.5-flash"),
