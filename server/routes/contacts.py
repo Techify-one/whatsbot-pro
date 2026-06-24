@@ -1,6 +1,8 @@
 """Contact CRUD and messaging endpoints."""
 
 import asyncio
+import csv
+import io
 import logging
 import time
 from pathlib import Path
@@ -9,7 +11,7 @@ from fastapi import File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from gowa.client import GOWASendError
 
-from db.repositories import contact_repo, message_repo, config_repo, conversation_repo
+from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
 from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories import inbox_repo
 from db.repositories.custom_attribute_validate import validate_value
@@ -31,6 +33,36 @@ def _is_sandbox_contact(phone: str) -> bool:
     """True when the contact is a sandbox/test number — operator sends to it
     must stay local (a real GOWA send would fail: the number isn't on WhatsApp)."""
     return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
+
+
+def _normalize_import_phone(raw: str) -> str | None:
+    """Strip a CSV phone cell to WhatsApp digits (ensures BR country code).
+
+    Returns ``None`` when too short to be a real number. Mirrors the
+    normalization used by ``/api/contacts/check-phone`` so imported numbers match
+    contacts created through the UI."""
+    digits = "".join(c for c in (raw or "") if c.isdigit())
+    if len(digits) < 10:
+        return None
+    if not digits.startswith("55"):
+        digits = "55" + digits
+    return digits
+
+
+# Aliases aceitos para cada coluna do CSV de importação (case-insensitive),
+# tolerando arquivos exportados do Chatwoot e planilhas em PT-BR.
+_IMPORT_COLUMN_ALIASES = {
+    "phone": ("phone", "telefone", "phone_number", "numero", "número", "whatsapp"),
+    "name": ("name", "nome", "full_name"),
+    "email": ("email", "e-mail", "e_mail"),
+    "profession": ("profession", "profissao", "profissão", "cargo"),
+    "company": ("company", "empresa", "company_name"),
+    "address": ("address", "endereco", "endereço"),
+    "ai_enabled": ("ai_enabled", "ia", "ia_ativa"),
+    "tags": ("tags", "etiquetas", "labels"),
+}
+
+_IMPORT_TAG_COLOR = "#64748b"  # cor default para tags criadas na importação
 
 
 def register_routes(app, deps):
@@ -241,6 +273,133 @@ def register_routes(app, deps):
             return denied
         count = await asyncio.to_thread(contact_repo.unread_conversation_count)
         return _ok({"count": count})
+
+    @app.get("/api/contacts/export")
+    async def export_contacts(request: Request):
+        """Download all contacts as a CSV file (Chatwoot-style export).
+
+        Declared before /api/contacts/{phone} so the static path wins over the
+        path parameter. Scoped by inbox membership, same as the list endpoint."""
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
+        rows = await asyncio.to_thread(
+            contact_repo.list_for_export, visible_inbox_ids(request))
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["phone", "name", "email", "profession", "company",
+                         "address", "ai_enabled", "tags"])
+        for r in rows:
+            writer.writerow([
+                r["phone"], r["name"], r["email"], r["profession"],
+                r["company"], r["address"],
+                "1" if r["ai_enabled"] else "0",
+                ", ".join(r["tags"]),
+            ])
+        # BOM (﻿) so Excel opens the UTF-8 file with the right encoding.
+        content = "﻿" + output.getvalue()
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="contatos.csv"'},
+        )
+
+    @app.post("/api/contacts/import")
+    async def import_contacts(request: Request, file: UploadFile = File(...)):
+        """Import contacts from a CSV file (Chatwoot-style import).
+
+        Expected header: phone, name, email, profession, company, address,
+        ai_enabled, tags (PT-BR/Chatwoot aliases accepted; only ``phone`` is
+        required). Existing contacts (matched by phone) are updated — only
+        non-empty cells overwrite, so a sparse CSV never wipes saved info. New
+        tags referenced in the ``tags`` column are created on the fly."""
+        denied = permission_denied(request, "contact.write")
+        if denied:
+            return denied
+
+        raw = await file.read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("latin-1")
+            except UnicodeDecodeError:
+                return _err("Não foi possível ler o arquivo. Use CSV em UTF-8.")
+
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            return _err("Arquivo CSV vazio ou sem cabeçalho.")
+
+        # Map each canonical field to the actual header present in the file.
+        header_lookup = {(h or "").strip().lower(): h for h in reader.fieldnames}
+        col = {}
+        for field, aliases in _IMPORT_COLUMN_ALIASES.items():
+            for alias in aliases:
+                if alias in header_lookup:
+                    col[field] = header_lookup[alias]
+                    break
+        if "phone" not in col:
+            return _err("CSV precisa de uma coluna de telefone (phone/telefone).")
+
+        ai_default = settings.get("default_ai_enabled", True)
+
+        def _cell(row, field):
+            src = col.get(field)
+            return (row.get(src) or "").strip() if src else ""
+
+        def _do_import():
+            existing_tags = set(tag_repo.get_all().keys())
+            imported = updated = skipped = 0
+            errors = []
+            for idx, row in enumerate(reader, start=2):  # row 1 = header
+                phone = _normalize_import_phone(_cell(row, "phone"))
+                if not phone:
+                    skipped += 1
+                    errors.append({"row": idx, "error": "Telefone inválido."})
+                    continue
+
+                existed = contact_repo.get_by_phone(phone) is not None
+                contact = contact_repo.get_or_create(
+                    phone, default_ai_enabled=ai_default)
+                cid = contact["id"]
+
+                fields = {}
+                for f in ("name", "email", "profession", "company", "address"):
+                    val = _cell(row, f)
+                    if val:
+                        fields[f] = val
+                ai_raw = _cell(row, "ai_enabled").lower()
+                if ai_raw:
+                    fields["ai_enabled"] = 0 if ai_raw in ("0", "false", "nao",
+                                                           "não", "no", "off") else 1
+                if fields:
+                    contact_repo.update(cid, **fields)
+
+                tags_raw = _cell(row, "tags")
+                if tags_raw:
+                    names = [t.strip() for t in tags_raw.replace(";", ",").split(",")
+                             if t.strip()]
+                    for name in names:
+                        if name not in existing_tags:
+                            tag_repo.create(name, _IMPORT_TAG_COLOR)
+                            existing_tags.add(name)
+                    if names:
+                        tag_repo.set_contact_tags(cid, names)
+
+                if existed:
+                    updated += 1
+                else:
+                    imported += 1
+            return imported, updated, skipped, errors
+
+        imported, updated, skipped, errors = await asyncio.to_thread(_do_import)
+        return _ok({
+            "imported": imported,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors[:50],  # cap to keep the response small
+        })
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, request: Request, mark_read: bool = True,

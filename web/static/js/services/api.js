@@ -181,6 +181,31 @@ export async function getContacts(q = '', archived = false) {
   return request('GET', `/api/contacts${query}`);
 }
 
+// Exporta todos os contatos como CSV (download). Retorna o Blob ou null.
+export async function exportContacts() {
+  const res = await fetch(`${BASE}/api/contacts/export`, {
+    method: 'GET',
+    headers: _authHeaders(),
+  });
+  if (res.status === 401) { handleUnauthorized(); return null; }
+  if (!res.ok) return null;
+  return res.blob();
+}
+
+// Importa contatos de um CSV. `file` é um File do input. Retorna {ok, data, error}.
+export async function importContacts(file) {
+  const form = new FormData();
+  form.append('file', file);
+  // Sem 'Content-Type': o browser define o boundary do multipart sozinho.
+  const res = await fetch(`${BASE}/api/contacts/import`, {
+    method: 'POST',
+    headers: _authHeaders(),
+    body: form,
+  });
+  if (res.status === 401) { handleUnauthorized(); return { ok: false, error: 'Não autenticado.' }; }
+  return res.json();
+}
+
 // Number of conversations with unread messages (for the browser-tab badge).
 export async function getUnreadCount() {
   return request('GET', '/api/contacts/unread-count');
