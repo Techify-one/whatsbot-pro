@@ -2,11 +2,11 @@
 // com busca, "Ver detalhes" (modal com infos) e "Iniciar conversa" (abre o chat
 // do contato no hub de conversas). Acessível pelo menu da lista de conversas.
 import { h } from 'preact';
-import { useState, useEffect, useMemo } from 'preact/hooks';
+import { useState, useEffect, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { DefaultAvatar, GroupAvatar, SearchIcon } from './contacts/icons.js';
 import { avatarUrl } from './contacts/utils.js';
-import { getContacts, getContact } from '../services/api.js';
+import { getContacts, getContact, exportContacts, importContacts } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -149,20 +149,87 @@ export default function ContactsListScreen() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState(null); // contato aberto no modal
+  const [importing, setImporting] = useState(false);
+  const [toast, setToast] = useState(null); // {kind:'ok'|'err', text}
+  const [showImport, setShowImport] = useState(false); // modal de importação
+  const [importError, setImportError] = useState(null); // erro dentro do modal
+  const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    let alive = true;
+  function loadContacts() {
     setLoading(true);
-    getContacts('', false)
+    setError(null);
+    return getContacts('', false)
       .then((res) => {
-        if (!alive) return;
         if (res && res.ok) setContacts(res.data || []);
         else setError((res && res.error) || 'Falha ao carregar contatos');
       })
-      .catch((e) => { if (alive) setError(String(e)); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, []);
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => { loadContacts(); }, []);
+
+  // Auto-esconde o toast de feedback após alguns segundos.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  async function handleExport() {
+    try {
+      const blob = await exportContacts();
+      if (!blob) { setToast({ kind: 'err', text: 'Falha ao exportar contatos.' }); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'contatos.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setToast({ kind: 'err', text: 'Falha ao exportar contatos.' });
+    }
+  }
+
+  async function handleImportFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // permite re-selecionar o mesmo arquivo
+    if (!file) return;
+    // Só aceita CSV (alguns navegadores deixam burlar o accept do input).
+    const name = (file.name || '').toLowerCase();
+    const isCsv = name.endsWith('.csv') || (file.type || '').includes('csv');
+    if (!isCsv) {
+      setImportError('Apenas arquivos .csv são aceitos. Selecione um arquivo CSV.');
+      return;
+    }
+    setImportError(null);
+    setImporting(true);
+    setToast(null);
+    try {
+      const res = await importContacts(file);
+      if (res && res.ok) {
+        const d = res.data || {};
+        const parts = [];
+        if (d.imported) parts.push(`${d.imported} novo(s)`);
+        if (d.updated) parts.push(`${d.updated} atualizado(s)`);
+        if (d.skipped) parts.push(`${d.skipped} ignorado(s)`);
+        setToast({
+          kind: 'ok',
+          text: `Importação concluída: ${parts.join(', ') || 'nenhum contato'}.`,
+        });
+        setShowImport(false);
+        await loadContacts();
+      } else {
+        setImportError((res && res.error) || 'Falha ao importar contatos.');
+      }
+    } catch (err) {
+      setImportError('Falha ao importar contatos.');
+    } finally {
+      setImporting(false);
+    }
+  }
 
   // Ordem alfabética por nome (cai no telefone quando não há nome).
   const sorted = useMemo(() => {
@@ -204,6 +271,40 @@ export default function ContactsListScreen() {
 
   return html`
     <div>
+      <!-- Importar / Exportar -->
+      <div class="flex items-center justify-end gap-2 mb-3 flex-wrap">
+        <input
+          ref=${fileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          class="hidden"
+          onChange=${handleImportFile}
+        />
+        <button
+          onClick=${() => { setImportError(null); setShowImport(true); }}
+          disabled=${importing}
+          class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13v6H5v-6H3v6c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z" transform="rotate(180 12 12)"/></svg>
+          ${importing ? 'Importando...' : 'Importar contatos'}
+        </button>
+        <button
+          onClick=${handleExport}
+          class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg bg-wa-teal text-white hover:opacity-90 transition-opacity"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13v6H5v-6H3v6c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z"/></svg>
+          Exportar contatos
+        </button>
+      </div>
+
+      ${toast ? html`
+        <div class=${`mb-3 text-[13px] px-3 py-2 rounded-lg border ${toast.kind === 'ok'
+          ? 'bg-wa-teal/10 border-wa-teal/30 text-wa-teal'
+          : 'bg-red-500/10 border-red-500/30 text-red-500'}`}>
+          ${toast.text}
+        </div>
+      ` : null}
+
       <!-- Busca -->
       <div class="mb-4">
         <div class="flex items-center bg-wa-bg rounded-lg h-[42px] px-[12px] gap-[10px] border border-wa-border">
@@ -304,6 +405,66 @@ export default function ContactsListScreen() {
           onClose=${() => setDetail(null)}
           onStartConversation=${startConversation}
         />
+      ` : null}
+
+      ${showImport ? html`
+        <div
+          class="fixed inset-0 z-[120] bg-black/50 flex items-center justify-center p-4"
+          onClick=${() => { if (!importing) setShowImport(false); }}
+        >
+          <div
+            class="bg-wa-panel rounded-xl shadow-xl border border-wa-border w-full max-w-md"
+            onClick=${(e) => e.stopPropagation()}
+          >
+            <!-- Header -->
+            <div class="flex items-center gap-3 p-4 border-b border-wa-border">
+              <h2 class="text-[16px] font-semibold text-wa-text flex-1">Importar contatos</h2>
+              <button
+                onClick=${() => { if (!importing) setShowImport(false); }}
+                class="w-[34px] h-[34px] rounded-full flex items-center justify-center text-wa-secondary hover:bg-wa-hover transition-colors shrink-0"
+                title="Fechar"
+              >
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </div>
+
+            <!-- Body -->
+            <div class="px-4 py-4 flex flex-col gap-3">
+              <p class="text-[14px] text-wa-text">
+                A importação precisa ser feita com um arquivo no formato <strong>.csv</strong>.
+              </p>
+              <div class="text-[13px] text-wa-secondary bg-wa-bg border border-wa-border rounded-lg px-3 py-2">
+                <div class="mb-1">Colunas esperadas (apenas <strong>phone</strong> é obrigatório):</div>
+                <code class="block text-[12px] text-wa-text break-words">
+                  phone, name, email, profession, company, address, ai_enabled, tags
+                </code>
+              </div>
+
+              ${importError ? html`
+                <div class="text-[13px] px-3 py-2 rounded-lg border bg-red-500/10 border-red-500/30 text-red-500">
+                  ${importError}
+                </div>
+              ` : null}
+            </div>
+
+            <!-- Footer -->
+            <div class="p-4 border-t border-wa-border flex justify-end gap-2">
+              <button
+                onClick=${() => { if (!importing) setShowImport(false); }}
+                disabled=${importing}
+                class="text-[14px] font-medium px-4 py-[8px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >Cancelar</button>
+              <button
+                onClick=${() => fileInputRef.current && fileInputRef.current.click()}
+                disabled=${importing}
+                class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg bg-wa-teal text-white hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13v6H5v-6H3v6c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z" transform="rotate(180 12 12)"/></svg>
+                ${importing ? 'Importando...' : 'Selecionar arquivo CSV'}
+              </button>
+            </div>
+          </div>
+        </div>
       ` : null}
     </div>
   `;
