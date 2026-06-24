@@ -243,12 +243,21 @@ def register_routes(app, deps):
         return _ok({"count": count})
 
     @app.get("/api/contacts/{phone}")
-    async def get_contact(phone: str, request: Request, mark_read: bool = True):
-        """Return full contact data including conversation history."""
+    async def get_contact(phone: str, request: Request, mark_read: bool = True,
+                          channel_id: str = ""):
+        """Return full contact data including conversation history.
+
+        Quando ``channel_id`` é informado (multicanal — abrir uma conversa NOVA pela
+        caixa de entrada escolhida, antes de existir uma conversa nessa caixa), o
+        thread é escopado ao canal: carrega só as mensagens da conversa daquele canal
+        (vazio se ainda não houver). Sem ``channel_id`` o comportamento legado é
+        mantido (funde as mensagens de todos os canais do mesmo número). NUNCA cair na
+        conversa de OUTRO canal — caixas de entrada não se confundem."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
         vis = visible_inbox_ids(request)
+        channel = (channel_id or "").strip()
         def _load():
             data = contact_repo.get_full_contact(phone)
             if data is None:
@@ -265,6 +274,17 @@ def register_routes(app, deps):
             # conversa-cêntrica e fecha o vazamento da view legada por contato.
             if contact_repo.contact_hidden_by_inbox_scope(contact_id, vis):
                 return "__hidden__", []
+            # Channel-scoped resolution (multicanal): the inbox picker chose a
+            # specific channel for a brand-new conversation. Resolve that channel's
+            # conversation (may be None) and scope the thread to it, so a new GOWA
+            # thread never shows the Cloud API conversation (and vice-versa).
+            scoped_conv = None
+            if channel:
+                from db.repositories import inbox_repo
+                inbox = inbox_repo.get_by_channel(channel)
+                if inbox:
+                    scoped_conv = conversation_repo.get_latest_for_contact_inbox(
+                        contact_id, inbox["id"])
             # Mark as read when viewing contact (skip if mark_read=false)
             msg_ids = []
             if mark_read and (data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0):
@@ -275,8 +295,24 @@ def register_routes(app, deps):
                 for cm in agent_handler.iter_cached_contacts(phone):
                     cm.unread_count = 0
                     cm.unread_ai_count = 0
-            # Load messages
-            data["messages"] = message_repo.get_all(contact_id)
+            # Load messages — scoped to the chosen channel's conversation when given
+            # (empty list when that channel has no conversation yet), else legacy
+            # all-channels view.
+            if channel:
+                data["channel_id"] = channel
+                data["conversation_id"] = scoped_conv["id"] if scoped_conv else None
+                data["messages"] = (message_repo.get_by_conversation(scoped_conv["id"])
+                                    if scoped_conv else [])
+                # Compositor hints (Frente C / plano 21): mesmo SEM conversa ainda, o
+                # canal escolhido define se aceita template e se a janela de texto livre
+                # está aberta. Sem isso, abrir um canal Cloud (windowed) sem conversa não
+                # mostra o botão de template — e Cloud exige template fora da janela 24h.
+                last_ts = (message_repo.last_inbound_ts(
+                    conversation_id=scoped_conv["id"]) if scoped_conv else None)
+                data["templates_supported"] = outbound.supports(channel, "templates")
+                data["session_open"] = outbound.session_open(channel, last_ts)
+            else:
+                data["messages"] = message_repo.get_all(contact_id)
             # Load usage for the full response
             data["usage"] = []
             return data, msg_ids

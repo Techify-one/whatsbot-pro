@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels } from '../../services/api.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState } from '../../services/api.js';
 import { ContactList, typingKey } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -253,6 +253,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const selectedRef = useRef(null);
   const selectedConvIdRef = useRef(null);
   const selectedChannelIdRef = useRef('default');
+  // Canal escolhido no picker para uma conversa NOVA ainda sem conversa naquele
+  // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
+  // ao canal certo (multicanal), em vez de fundir/abrir a conversa de outro canal.
+  const newConvChannelRef = useRef(null);
   const typingTimers = useRef({});
   const aiTypingTimers = useRef({});
   const contactsRef = useRef([]);
@@ -752,37 +756,43 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     }
   }, [checkingPhone]);
 
-  // Caixa de entrada escolhida no popup — abre a thread já vinculada ao canal, de
-  // modo que a 1ª mensagem é roteada por ele (selectContact carrega channel_id).
-  const handlePickChannel = useCallback((channel) => {
-    const picker = channelPicker;
-    if (!picker) return;
-    setChannelPicker(null);
+  // Caixa de entrada escolhida no popup — abre a thread DAQUELE canal. Resolve a
+  // conversa existente do contato NAQUELE canal (multicanal): se já houver, abre-a
+  // escopada (não cai na conversa de outro canal do mesmo número); se não houver,
+  // abre um thread vazio do canal escolhido (a 1ª mensagem é roteada por ele).
+  const openInChannel = useCallback(async (phone, channelId) => {
     setSearch('');
-    selectContact({
-      phone: picker.phone,
-      conversation_id: null,
-      channel_id: channel.id,
-      contact_id: null,
-      id: null,
-    });
-    fetchContacts();
-  }, [channelPicker, selectContact, fetchContacts]);
-
-  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
-  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
-  const handleNewConversationSent = useCallback((phone, channelId) => {
-    setShowNewConversation(false);
-    setSearch('');
+    let convId = null;
+    try {
+      const ss = await getChannelSessionState(channelId, phone);
+      if (ss && ss.ok && ss.data && ss.data.conversation_id) convId = ss.data.conversation_id;
+    } catch (e) { /* best-effort: cai no thread vazio do canal */ }
+    // Sem conversa ainda nesse canal: marca o canal para o loader escopar o
+    // getContact (senão ele funde os canais e mostra a conversa errada).
+    newConvChannelRef.current = convId == null ? channelId : null;
     selectContact({
       phone,
-      conversation_id: null,
+      conversation_id: convId,
       channel_id: channelId,
       contact_id: null,
       id: null,
     });
     fetchContacts();
   }, [selectContact, fetchContacts]);
+
+  const handlePickChannel = useCallback((channel) => {
+    const picker = channelPicker;
+    if (!picker) return;
+    setChannelPicker(null);
+    openInChannel(picker.phone, channel.id);
+  }, [channelPicker, openInChannel]);
+
+  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
+  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
+  const handleNewConversationSent = useCallback((phone, channelId) => {
+    setShowNewConversation(false);
+    openInChannel(phone, channelId);
+  }, [openInChannel]);
 
   const handleToggleArchived = useCallback(() => {
     setShowArchived(prev => !prev);
@@ -1017,10 +1027,15 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       ));
     }
     const convId = selectedConvId;
+    // Conversa nova sem conversation_id ainda: escopa o getContact ao canal
+    // escolhido no picker (lido-e-zerado aqui), para não fundir os canais nem
+    // abrir a conversa de outro canal do mesmo número (multicanal).
+    const newConvChannel = newConvChannelRef.current;
+    newConvChannelRef.current = null;
     const loader = convId != null
       ? getConversationMessages(convId, isPageVisible).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
-      : getContact(selected, isPageVisible);
+      : getContact(selected, isPageVisible, newConvChannel);
     loader.then(res => {
       if (res.ok) {
         const data = res.data;
