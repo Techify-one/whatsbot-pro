@@ -108,7 +108,8 @@ def register_routes(app, deps):
             "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
             "max_executions": settings.get("max_executions", 200),
             "default_ai_enabled": settings.get("default_ai_enabled", True),
-            "ai_engine_enabled": settings.get("ai_engine_enabled", False),
+            # Motor de IA sempre ligado — não há mais toggle (removido da UI).
+            "ai_engine_enabled": True,
             "ai_tools_code_enabled": settings.get("ai_tools_code_enabled", False),
             "has_password": bool(settings.get("web_password_hash", "")),
             "setup_completed": settings.get("setup_completed", False),
@@ -140,7 +141,7 @@ def register_routes(app, deps):
             "group_reply_mode", "bot_phone",
             "max_executions", "default_ai_enabled", "setup_completed",
             "low_balance_enabled", "low_balance_threshold",
-            "ai_engine_enabled", "ai_tools_code_enabled",
+            "ai_tools_code_enabled",
             "system_notice_assignment", "system_notice_tags",
             "system_notice_conv_labels",
             "system_notice_status", "system_notice_ai",
@@ -186,7 +187,7 @@ def register_routes(app, deps):
             max_context_messages=settings.get("max_context_messages", 10),
             split_messages=settings.get("split_messages", True),
             default_ai_enabled=settings.get("default_ai_enabled", True),
-            ai_engine_enabled=settings.get("ai_engine_enabled", False),
+            ai_engine_enabled=True,
         )
 
         await ws_manager.broadcast("config_saved", {})

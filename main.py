@@ -71,7 +71,8 @@ def main():
         image_model=settings.get("image_model", "google/gemini-3-flash-preview"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
         default_ai_enabled=settings.get("default_ai_enabled", True),
-        ai_engine_enabled=settings.get("ai_engine_enabled", False),
+        # Motor de IA sempre ligado — não há mais toggle (removido da UI).
+        ai_engine_enabled=True,
     )
 
     app = create_app(

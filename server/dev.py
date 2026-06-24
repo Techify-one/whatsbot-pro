@@ -63,8 +63,7 @@ app = create_app(
         image_model=settings.get("image_model", "google/gemini-2.5-flash"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
         default_ai_enabled=settings.get("default_ai_enabled", True),
-        # Parity with main.py: without this the config-in-DB AI engine never
-        # turns on under uvicorn --reload (dev/hot-reload).
-        ai_engine_enabled=settings.get("ai_engine_enabled", False),
+        # Motor de IA sempre ligado — não há mais toggle (removido da UI).
+        ai_engine_enabled=True,
     ),
 )
