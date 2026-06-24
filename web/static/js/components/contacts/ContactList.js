@@ -39,7 +39,7 @@ const PinIcon = () => html`
 // Conversa-cêntrico (plano 11 D1): cada linha é uma CONVERSA. A identidade é a
 // conversation_id (linhas sem conversa caem no phone) — usada como key do Preact e
 // para casar a seleção. Mantém os dois canais do mesmo número como linhas distintas.
-function rowKeyFor(c) {
+export function rowKeyFor(c) {
   return c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
 }
 
@@ -116,13 +116,15 @@ function highlightParts(text, query) {
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedPhones, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
+  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
-  const selCount = (selectedPhones || []).length;
-  const selectedSet = new Set(selectedPhones || []);
+  const selCount = (selectedKeys || []).length;
+  // Selection is keyed per CONVERSATION row (rowKeyFor), not by phone — so the two
+  // channels of the same number are selectable independently.
+  const selectedSet = new Set(selectedKeys || []);
   // For the bulk-tag toggle indicator: does every selected conversation have this tag?
-  const selectedContacts = (contacts || []).filter(c => selectedSet.has(c.phone));
+  const selectedContacts = (contacts || []).filter(c => selectedSet.has(rowKeyFor(c)));
   const allSelectedHaveTag = (name) =>
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
@@ -199,6 +201,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>
                 ${allSelectedPinned ? 'Desafixar conversas' : 'Fixar conversas'}
               </button>
+              ${selCount <= 1 ? html`
               <button
                 disabled=${selCount === 0}
                 onClick=${() => { onBulkMarkRead && onBulkMarkRead(); closeMenus(); }}
@@ -207,6 +210,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
                 Marcar como lidas
               </button>
+              ` : ''}
               <button
                 disabled=${selCount === 0}
                 onClick=${() => { onBulkMarkUnread && onBulkMarkUnread(); closeMenus(); }}
@@ -415,17 +419,17 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             : contacts.map(c => html`
                 <div
                   key=${rowKeyFor(c)}
-                  onClick=${() => selectionMode ? onToggleSelect(c.phone) : onSelect(c, c.match_msg_id)}
+                  onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
                   onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
-                    (selectionMode && selectedSet.has(c.phone)) ? 'bg-wa-selected'
+                    (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
                       : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
                 >
                   ${selectionMode ? html`
                     <div class="shrink-0 mr-[10px] flex items-center justify-center">
-                      <span class="w-[22px] h-[22px] rounded-full border-2 flex items-center justify-center transition-colors ${selectedSet.has(c.phone) ? 'bg-wa-teal border-wa-teal' : 'border-wa-secondary'}">
-                        ${selectedSet.has(c.phone) ? html`
+                      <span class="w-[22px] h-[22px] rounded-full border-2 flex items-center justify-center transition-colors ${selectedSet.has(rowKeyFor(c)) ? 'bg-wa-teal border-wa-teal' : 'border-wa-secondary'}">
+                        ${selectedSet.has(rowKeyFor(c)) ? html`
                           <svg viewBox="0 0 24 24" width="14" height="14" fill="white"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                         ` : ''}
                       </span>
@@ -443,10 +447,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
                     <div class="flex justify-between items-baseline">
                       <span class="text-wa-text text-[17px] truncate leading-[21px]">
-                        ${c.is_group ? (c.group_name || c.name || c.phone) : ((c.name || '').replace(/^~/, '') || c.phone)}
-                        ${!c.is_group && c.name && c.name.startsWith('~')
-                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] align-middle" title="Nome obtido do WhatsApp">WA</span>`
-                          : null
+                        ${c.is_group
+                          ? (c.group_name || c.name || c.phone)
+                          : html`<span class=${c.name && c.name.startsWith('~') ? 'underline decoration-1 underline-offset-2' : ''} title=${c.name && c.name.startsWith('~') ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${(c.name || '').replace(/^~/, '') || c.phone}</span>`
                         }
                         ${c.archived_by_app
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`

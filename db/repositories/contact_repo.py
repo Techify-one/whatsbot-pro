@@ -410,6 +410,46 @@ def contact_hidden_by_inbox_scope(contact_id: int,
     return has_any is not None
 
 
+def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
+    """Return non-group contacts with full info + tags, for CSV export.
+
+    ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7), mirroring
+    ``list_contacts``: ``None`` ⇒ no scoping; empty ⇒ nothing; a list ⇒ only contacts
+    with a conversation in one of those inboxes. Includes both archived and active
+    contacts (an export should be complete). Groups are skipped — they can't be
+    re-imported by phone."""
+    if inbox_ids is not None and not inbox_ids:
+        return []
+    stmt = select(contacts).where(contacts.c.is_group == 0)
+    if inbox_ids is not None:
+        stmt = stmt.where(contacts.c.id.in_(
+            select(conversations.c.contact_id).where(
+                conversations.c.inbox_id.in_(inbox_ids))
+        ))
+    stmt = stmt.order_by(contacts.c.name, contacts.c.phone)
+    results = []
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+        for row in rows:
+            tag_rows = conn.execute(
+                select(tags.c.name)
+                .join(contact_tags, contact_tags.c.tag_id == tags.c.id)
+                .where(contact_tags.c.contact_id == row["id"])
+                .order_by(tags.c.name)
+            ).all()
+            results.append({
+                "phone": row["phone"],
+                "name": row["name"] or "",
+                "email": row["email"] or "",
+                "profession": row["profession"] or "",
+                "company": row["company"] or "",
+                "address": row["address"] or "",
+                "ai_enabled": bool(row["ai_enabled"]),
+                "tags": [t.name for t in tag_rows],
+            })
+    return results
+
+
 def list_contacts(q: str = "", archived: bool = False,
                   inbox_ids: list[int] | None = None) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts.

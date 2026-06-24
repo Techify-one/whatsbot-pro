@@ -1,8 +1,8 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels } from '../../services/api.js';
-import { ContactList, typingKey } from './ContactList.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState } from '../../services/api.js';
+import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
@@ -248,11 +248,17 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // Modal "Iniciar conversa" (compor número + canal + 1ª mensagem) — menu da engrenagem.
   const [showNewConversation, setShowNewConversation] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
-  const [selectedPhones, setSelectedPhones] = useState([]);
+  // Selection keyed per CONVERSATION row (rowKeyFor), so two conversations of the
+  // same number (different channels) are selected independently.
+  const [selectedKeys, setSelectedKeys] = useState([]);
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
   const selectedConvIdRef = useRef(null);
   const selectedChannelIdRef = useRef('default');
+  // Canal escolhido no picker para uma conversa NOVA ainda sem conversa naquele
+  // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
+  // ao canal certo (multicanal), em vez de fundir/abrir a conversa de outro canal.
+  const newConvChannelRef = useRef(null);
   const typingTimers = useRef({});
   const aiTypingTimers = useRef({});
   const contactsRef = useRef([]);
@@ -513,25 +519,31 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [patchCtxConv]);
 
   // ── Selection mode (bulk actions) ───────────────────────────────
-  const enterSelection = useCallback(() => { setSelectionMode(true); setSelectedPhones([]); }, []);
-  const exitSelection = useCallback(() => { setSelectionMode(false); setSelectedPhones([]); }, []);
-  const toggleSelect = useCallback((phone) => {
-    setSelectedPhones(prev => prev.includes(phone)
-      ? prev.filter(p => p !== phone)
-      : [...prev, phone]);
+  const enterSelection = useCallback(() => { setSelectionMode(true); setSelectedKeys([]); }, []);
+  const exitSelection = useCallback(() => { setSelectionMode(false); setSelectedKeys([]); }, []);
+  const toggleSelect = useCallback((key) => {
+    setSelectedKeys(prev => prev.includes(key)
+      ? prev.filter(k => k !== key)
+      : [...prev, key]);
   }, []);
   const selectAllContacts = useCallback(() => {
-    setSelectedPhones([...new Set(displayedRef.current.map(c => c.phone))]);
+    setSelectedKeys([...new Set(displayedRef.current.map(rowKeyFor))]);
   }, []);
-  const clearSelection = useCallback(() => { setSelectedPhones([]); setSelectionMode(false); }, []);
+  const clearSelection = useCallback(() => { setSelectedKeys([]); setSelectionMode(false); }, []);
+
+  // Resolve the selected row keys back to their conversation rows. Each key maps to
+  // a single row (a specific conversation/channel), so the two channels of the same
+  // number are handled independently.
+  const _selectedRows = useCallback(() => {
+    const keys = new Set(selectedKeys);
+    return contactsRef.current.filter(c => keys.has(rowKeyFor(c)));
+  }, [selectedKeys]);
 
   const handleBulkAI = useCallback(async (enabled) => {
-    const phones = new Set(selectedPhones);
-    if (!phones.size) return;
-    // Operate per CONVERSATION (plano 17): map the selected phones to their visible
-    // conversation rows. Legacy rows without a conversation are skipped.
-    const convIds = displayedRef.current
-      .filter(c => phones.has(c.phone) && c.conversation_id != null)
+    // Operate per CONVERSATION (plano 17): each selected row is one conversation.
+    // Legacy rows without a conversation are skipped.
+    const convIds = _selectedRows()
+      .filter(c => c.conversation_id != null)
       .map(c => c.conversation_id);
     if (!convIds.length) return;
     const idSet = new Set(convIds);
@@ -545,10 +557,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           }
         : c
     ));
-  }, [selectedPhones]);
+  }, [_selectedRows]);
 
   const handleBulkArchive = useCallback(async () => {
-    const phones = [...selectedPhones];
+    // Archive is chat-level (per phone) — dedupe across channels.
+    const phones = [...new Set(_selectedRows().map(c => c.phone))];
     if (!phones.length) return;
     const archived = !showArchivedRef.current; // archive when viewing inbox, unarchive when viewing archived
     await Promise.all(phones.map(p => archiveContact(p, archived).catch(() => null)));
@@ -560,7 +573,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       history.pushState(null, '', '/');
     }
     exitSelection();
-  }, [selectedPhones, exitSelection]);
+  }, [_selectedRows, exitSelection]);
 
   // Create a new global tag and add it to the sidebar's tag map. Returns true on
   // success so the caller (context menu / bulk menu) can then apply it.
@@ -583,10 +596,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, []);
 
   const _selectedTargets = useCallback(() => {
-    const current = contactsRef.current;
-    // One target per selected phone (rows may repeat a phone across channels).
-    return [...selectedPhones].map(p => current.find(c => c.phone === p)).filter(Boolean);
-  }, [selectedPhones]);
+    // Tags are contact-level (per phone) — dedupe the selected rows by phone so each
+    // number is updated once even when both of its channels are selected.
+    const byPhone = new Map();
+    for (const c of _selectedRows()) if (!byPhone.has(c.phone)) byPhone.set(c.phone, c);
+    return [...byPhone.values()];
+  }, [_selectedRows]);
 
   // Toggle a tag across all selected: if every selected conversation already has
   // it, remove it from all; otherwise add it to all (keeping those that had it).
@@ -622,31 +637,32 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
   // Pin/unpin all selected at once (pinned ones sort to the top).
   const handleBulkPin = useCallback(async (pinned) => {
-    const phones = [...selectedPhones];
+    // Pin is contact-level (per phone) — dedupe across channels.
+    const phones = [...new Set(_selectedRows().map(c => c.phone))];
     if (!phones.length) return;
     await Promise.all(phones.map(p => pinContact(p, pinned).catch(() => null)));
     setContacts(prev => sortContacts(prev.map(c =>
       phones.includes(c.phone) ? { ...c, is_pinned: pinned } : c
     )));
-  }, [selectedPhones, sortContacts]);
+  }, [_selectedRows, sortContacts]);
 
   const handleBulkMarkRead = useCallback(async () => {
-    const phones = [...selectedPhones];
+    const phones = [...new Set(_selectedRows().map(c => c.phone))];
     if (!phones.length) return;
     await Promise.all(phones.map(p => markAsRead(p).catch(() => null)));
     setContacts(prev => prev.map(c =>
       phones.includes(c.phone) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
     ));
-  }, [selectedPhones]);
+  }, [_selectedRows]);
 
   const handleBulkMarkUnread = useCallback(async () => {
-    const phones = [...selectedPhones];
+    const phones = [...new Set(_selectedRows().map(c => c.phone))];
     if (!phones.length) return;
     await Promise.all(phones.map(p => markAsUnread(p).catch(() => null)));
     setContacts(prev => prev.map(c =>
       phones.includes(c.phone) ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) } : c
     ));
-  }, [selectedPhones]);
+  }, [_selectedRows]);
 
   // Push URL when selecting/deselecting a conversation row. Accepts a sidebar row
   // (conversation-centric) OR a bare phone string (legacy callers — start
@@ -752,37 +768,43 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     }
   }, [checkingPhone]);
 
-  // Caixa de entrada escolhida no popup — abre a thread já vinculada ao canal, de
-  // modo que a 1ª mensagem é roteada por ele (selectContact carrega channel_id).
-  const handlePickChannel = useCallback((channel) => {
-    const picker = channelPicker;
-    if (!picker) return;
-    setChannelPicker(null);
+  // Caixa de entrada escolhida no popup — abre a thread DAQUELE canal. Resolve a
+  // conversa existente do contato NAQUELE canal (multicanal): se já houver, abre-a
+  // escopada (não cai na conversa de outro canal do mesmo número); se não houver,
+  // abre um thread vazio do canal escolhido (a 1ª mensagem é roteada por ele).
+  const openInChannel = useCallback(async (phone, channelId) => {
     setSearch('');
-    selectContact({
-      phone: picker.phone,
-      conversation_id: null,
-      channel_id: channel.id,
-      contact_id: null,
-      id: null,
-    });
-    fetchContacts();
-  }, [channelPicker, selectContact, fetchContacts]);
-
-  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
-  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
-  const handleNewConversationSent = useCallback((phone, channelId) => {
-    setShowNewConversation(false);
-    setSearch('');
+    let convId = null;
+    try {
+      const ss = await getChannelSessionState(channelId, phone);
+      if (ss && ss.ok && ss.data && ss.data.conversation_id) convId = ss.data.conversation_id;
+    } catch (e) { /* best-effort: cai no thread vazio do canal */ }
+    // Sem conversa ainda nesse canal: marca o canal para o loader escopar o
+    // getContact (senão ele funde os canais e mostra a conversa errada).
+    newConvChannelRef.current = convId == null ? channelId : null;
     selectContact({
       phone,
-      conversation_id: null,
+      conversation_id: convId,
       channel_id: channelId,
       contact_id: null,
       id: null,
     });
     fetchContacts();
   }, [selectContact, fetchContacts]);
+
+  const handlePickChannel = useCallback((channel) => {
+    const picker = channelPicker;
+    if (!picker) return;
+    setChannelPicker(null);
+    openInChannel(picker.phone, channel.id);
+  }, [channelPicker, openInChannel]);
+
+  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
+  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
+  const handleNewConversationSent = useCallback((phone, channelId) => {
+    setShowNewConversation(false);
+    openInChannel(phone, channelId);
+  }, [openInChannel]);
 
   const handleToggleArchived = useCallback(() => {
     setShowArchived(prev => !prev);
@@ -934,7 +956,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [ctxMenu]);
 
   // Reload when archive filter changes (and drop any active selection)
-  useEffect(() => { fetchContacts(search); setSelectionMode(false); setSelectedPhones([]); }, [showArchived]);
+  useEffect(() => { fetchContacts(search); setSelectionMode(false); setSelectedKeys([]); }, [showArchived]);
 
   // Resolve initialConversationId (/conversations/:id) or initialContactId
   // (/contacts/:id, legacy) → a sidebar row, once the list is loaded. Mirrors the
@@ -1017,10 +1039,15 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       ));
     }
     const convId = selectedConvId;
+    // Conversa nova sem conversation_id ainda: escopa o getContact ao canal
+    // escolhido no picker (lido-e-zerado aqui), para não fundir os canais nem
+    // abrir a conversa de outro canal do mesmo número (multicanal).
+    const newConvChannel = newConvChannelRef.current;
+    newConvChannelRef.current = null;
     const loader = convId != null
       ? getConversationMessages(convId, isPageVisible).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
-      : getContact(selected, isPageVisible);
+      : getContact(selected, isPageVisible, newConvChannel);
     loader.then(res => {
       if (res.ok) {
         const data = res.data;
@@ -1475,7 +1502,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           autoReply=${autoReply}
           onToggleAutoReply=${handleToggleAutoReply}
           selectionMode=${selectionMode}
-          selectedPhones=${selectedPhones}
+          selectedKeys=${selectedKeys}
           onEnterSelection=${enterSelection}
           onExitSelection=${exitSelection}
           onToggleSelect=${toggleSelect}
