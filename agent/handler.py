@@ -48,30 +48,24 @@ class AgentHandler:
     def __init__(
         self,
         api_key: str,
-        system_prompt: str,
         max_context_messages: int = 10,
         inactivity_timeout_min: int = 30,
-        model: str = "deepseek/deepseek-v4-pro",
         audio_model: str = "google/gemini-2.5-flash",
         image_model: str = "google/gemini-2.5-flash",
         document_model: str = "google/gemini-2.5-flash",
         pricing_fn=None,
         default_ai_enabled: bool = True,
-        ai_engine_enabled: bool = False,
     ):
         self.api_key = api_key
-        self.system_prompt = system_prompt
         self.max_context_messages = max_context_messages
         self.inactivity_timeout = inactivity_timeout_min * 60
-        self.model = model
+        # Media-transcription models (direct, non-agentic LLM calls). The
+        # agent's prompt/model/tools are resolved per-request from the DB via
+        # agent.agent_factory — there is no in-code prompt/model anymore.
         self.audio_model = audio_model
         self.image_model = image_model
         self.document_model = document_model
         self.default_ai_enabled = default_ai_enabled
-        # When True, prompt/model/tools are resolved per-request from the DB
-        # (config-in-DB, see agent.agent_factory) instead of the in-code values.
-        # Off → legacy behaviour (full parity).
-        self.ai_engine_enabled = ai_engine_enabled
         # Keyed by (channel_id, phone) — plano 11 D3.
         self._contacts: dict[tuple[str, str], ContactMemory] = {}
         self._client: OpenAI | None = None
@@ -348,29 +342,22 @@ class AgentHandler:
     def update_config(
         self,
         api_key: str | None = None,
-        system_prompt: str | None = None,
         max_context_messages: int | None = None,
         inactivity_timeout_min: int | None = None,
-        model: str | None = None,
         audio_model: str | None = None,
         image_model: str | None = None,
         document_model: str | None = None,
         split_messages: bool | None = None,
         default_ai_enabled: bool | None = None,
-        ai_engine_enabled: bool | None = None,
     ):
         if api_key is not None:
             self.api_key = api_key
             self._client = None
             self._async_client = None
-        if system_prompt is not None:
-            self.system_prompt = system_prompt
         if max_context_messages is not None:
             self.max_context_messages = max_context_messages
         if inactivity_timeout_min is not None:
             self.inactivity_timeout = inactivity_timeout_min * 60
-        if model is not None:
-            self.model = model
         if audio_model is not None:
             self.audio_model = audio_model
         if image_model is not None:
@@ -381,8 +368,6 @@ class AgentHandler:
             self.split_messages = split_messages
         if default_ai_enabled is not None:
             self.default_ai_enabled = default_ai_enabled
-        if ai_engine_enabled is not None:
-            self.ai_engine_enabled = ai_engine_enabled
 
     def transcribe_audio(self, audio_path: str, phone: str = "") -> str:
         """Transcribe an audio file using the configured audio model."""
@@ -721,14 +706,13 @@ class AgentHandler:
                              split_messages: bool | None = None) -> str:
         """Build system prompt with contact info and current date/time injected.
 
-        ``base_prompt`` overrides ``self.system_prompt`` as the starting text
-        (config-in-DB path); the dynamic sections (group context, contact info,
-        tags, date, plugin fragments, split-messages format) layer on top
-        unchanged in both paths. ``split_messages`` overrides ``self.split_messages``
-        (per-channel resolution, plano 21).
+        ``base_prompt`` is the DB-resolved agent prompt (config-in-DB); the dynamic
+        sections (group context, contact info, tags, date, plugin fragments,
+        split-messages format) layer on top. ``split_messages`` overrides
+        ``self.split_messages`` (per-channel resolution, plano 21).
         """
         split_on = self.split_messages if split_messages is None else split_messages
-        prompt = base_prompt if base_prompt is not None else self.system_prompt
+        prompt = base_prompt if base_prompt is not None else ""
         if contact.is_group:
             gname = f" chamado '{contact.group_name}'" if contact.group_name else ""
             prompt += (
@@ -902,12 +886,17 @@ class AgentHandler:
 
         def _resolve_next():
             # transferir_agente persisted the handoff on the conversation; re-resolve.
-            nxt_spec = agent_factory.build_for_contact(self, contact)
-            return nxt_spec.agent_key if nxt_spec else None
+            try:
+                return agent_factory.build_for_contact(self, contact).agent_key
+            except agent_factory.AgentResolutionError:
+                return None
 
         async def _run_hop(agent_key):
-            spec = agent_factory.build_for_contact(self, contact)
-            if not spec or spec.agent_key != agent_key:
+            try:
+                spec = agent_factory.build_for_contact(self, contact)
+            except agent_factory.AgentResolutionError:
+                return None
+            if spec.agent_key != agent_key:
                 return None
             set_execution_agent_key(spec.agent_key)
             set_current_step_agent(spec.agent_key)
@@ -917,7 +906,8 @@ class AgentHandler:
                 return None
             if hop.usage:
                 self._record_usage_tokens(
-                    sender, "text", spec.model_config.get("model") or self.model,
+                    sender, "text",
+                    spec.model_config.get("model") or agent_factory.DEFAULT_MODEL,
                     hop.usage.get("prompt_tokens", 0),
                     hop.usage.get("completion_tokens", 0),
                     hop.usage.get("total_tokens", 0))
@@ -976,18 +966,22 @@ class AgentHandler:
         if eff_split:
             context_messages = self._encode_history_for_split(context_messages)
 
-        # Config-in-DB: resolve the DB-driven agent for this contact (or None to
-        # use the in-code prompt/model/tools — full parity when the flag is off).
-        agent_spec = agent_factory.build_for_contact(self, contact)
-        if agent_spec:
-            set_execution_agent_key(agent_spec.agent_key)
-            set_current_step_agent(agent_spec.agent_key)
+        # Config-in-DB: resolve the DB-driven agent for this contact. Always
+        # returns a spec; a genuinely broken DB raises AgentResolutionError, which
+        # we isolate to this one conversation (error card, nothing sent to client).
+        try:
+            agent_spec = agent_factory.build_for_contact(self, contact)
+        except agent_factory.AgentResolutionError as e:
+            self._emit_resolution_error(contact, sender, e)
+            return ProcessResult(reply="")
+        set_execution_agent_key(agent_spec.agent_key)
+        set_current_step_agent(agent_spec.agent_key)
         # The AI is now handling this message: attribute the conversation to it so
         # the inbox shows its assignee chip (covers reopened/legacy threads).
         self._ensure_conversation_agent(contact, agent_spec)
-        model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
-        model_config = agent_spec.model_config if agent_spec else None
-        base_prompt = agent_spec.base_prompt if agent_spec else None
+        model = agent_spec.model_config.get("model") or agent_factory.DEFAULT_MODEL
+        model_config = agent_spec.model_config
+        base_prompt = agent_spec.base_prompt
 
         system_prompt_str = self._build_system_prompt(
             contact, base_prompt=base_prompt, split_messages=eff_split)
@@ -1050,11 +1044,10 @@ class AgentHandler:
             # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
             # agent answer this same message. No-op when no handoff occurred, so
             # the single-agent path is unchanged.
-            if agent_spec:
-                result, executed_tools, usage_dict, _ = await self._continue_routing(
-                    contact, sender, context_messages, agent_spec,
-                    result, executed_tools, usage_dict, disable_tools=disable_tools)
-                reply = result.reply
+            result, executed_tools, usage_dict, _ = await self._continue_routing(
+                contact, sender, context_messages, agent_spec,
+                result, executed_tools, usage_dict, disable_tools=disable_tools)
+            reply = result.reply
 
             if save_response:
                 contact.add_message("assistant", reply)
@@ -1133,18 +1126,22 @@ class AgentHandler:
         if eff_split:
             context_messages = self._encode_history_for_split(context_messages)
 
-        # Config-in-DB: resolve the DB-driven agent for this contact (or None to
-        # use the in-code prompt/model/tools — full parity when the flag is off).
-        agent_spec = agent_factory.build_for_contact(self, contact)
-        if agent_spec:
-            set_execution_agent_key(agent_spec.agent_key)
-            set_current_step_agent(agent_spec.agent_key)
+        # Config-in-DB: resolve the DB-driven agent for this contact. Always
+        # returns a spec; a genuinely broken DB raises AgentResolutionError, which
+        # we isolate to this one conversation (error card, nothing sent to client).
+        try:
+            agent_spec = agent_factory.build_for_contact(self, contact)
+        except agent_factory.AgentResolutionError as e:
+            self._emit_resolution_error(contact, sender, e)
+            return ProcessResult(reply="")
+        set_execution_agent_key(agent_spec.agent_key)
+        set_current_step_agent(agent_spec.agent_key)
         # The AI is now handling this message: attribute the conversation to it so
         # the inbox shows its assignee chip (covers reopened/legacy threads).
         self._ensure_conversation_agent(contact, agent_spec)
-        model = (agent_spec.model_config.get("model") if agent_spec else None) or self.model
-        model_config = agent_spec.model_config if agent_spec else None
-        base_prompt = agent_spec.base_prompt if agent_spec else None
+        model = agent_spec.model_config.get("model") or agent_factory.DEFAULT_MODEL
+        model_config = agent_spec.model_config
+        base_prompt = agent_spec.base_prompt
 
         system_prompt_str = self._build_system_prompt(
             contact, base_prompt=base_prompt, split_messages=eff_split)
@@ -1253,6 +1250,33 @@ class AgentHandler:
             return True, "API key válida!"
         except Exception as e:
             return False, f"Erro: {e}"
+
+    def _emit_resolution_error(self, contact, sender: str, exc: Exception) -> None:
+        """Isolate a broken agent resolution to this one conversation.
+
+        Logs the failure and writes a painel-only ``error`` card to the affected
+        conversation (broadcast live), WITHOUT sending anything to the client. The
+        rest of the service keeps running — only this message is dropped.
+        """
+        logger.error("Resolução de agente falhou para %s: %s", sender, exc)
+        try:
+            from db.repositories import conversation_repo
+            conv = (conversation_repo.get_open_for_contact(contact.id)
+                    if getattr(contact, "id", None) else None)
+            conversation_id = conv["id"] if conv else None
+            content = ("[WhatsBot] Não foi possível resolver o agente de IA desta "
+                       "conversa. Verifique a configuração de Agentes.")
+            msg = message_repo.add(
+                contact.id, "error", content, conversation_id=conversation_id)
+            from plugins.context import broadcast
+            broadcast("new_message", {
+                "phone": sender,
+                "channel_id": getattr(contact, "channel_id", "default"),
+                "message": msg,
+            })
+        except Exception:
+            logger.exception(
+                "Falha ao gravar card de erro de resolução para %s", sender)
 
     def _ensure_conversation_agent(self, contact, agent_spec) -> None:
         """Attribute the active conversation to the AI agent that is answering so

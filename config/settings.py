@@ -37,17 +37,14 @@ TECHIFY_PROVISION_MESSAGE = "Quero Criar conta e receber minha Chave de API"
 
 _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "OPENROUTER_API_KEY": ("openrouter_api_key", str),
-    "WHATSBOT_MODEL": ("model", str),
     "WHATSBOT_AUDIO_MODEL": ("audio_model", str),
     "WHATSBOT_IMAGE_MODEL": ("image_model", str),
     "WHATSBOT_DOCUMENT_MODEL": ("document_model", str),
-    "WHATSBOT_SYSTEM_PROMPT": ("system_prompt", str),
     "WHATSBOT_WEB_PORT": ("web_port", int),
     "WHATSBOT_GOWA_PORT": ("gowa_port", int),
     "WHATSBOT_AUTO_REPLY": ("auto_reply", lambda v: v.lower() in ("1", "true", "yes")),
     "WHATSBOT_MAX_CONTEXT": ("max_context_messages", int),
     "WHATSBOT_BATCH_DELAY": ("message_batch_delay", float),
-    "WHATSBOT_AI_ENGINE": ("ai_engine_enabled", lambda v: v.lower() in ("1", "true", "yes")),
     "WHATSBOT_AI_TOOLS_CODE": ("ai_tools_code_enabled", lambda v: v.lower() in ("1", "true", "yes")),
 }
 
@@ -58,14 +55,9 @@ _ENV_OVERRIDES_BY_KEY: dict[str, tuple[str, Callable[[str], Any]]] = {
 
 DEFAULT_CONFIG = {
     "openrouter_api_key": "",
-    "model": "deepseek/deepseek-v4-pro",
     "audio_model": "google/gemini-2.5-flash",
     "image_model": "google/gemini-2.5-flash",
     "document_model": "google/gemini-2.5-flash",
-    "system_prompt": (
-        "Você é um assistente útil e amigável. Responda de forma clara e concisa. "
-        "Use português brasileiro."
-    ),
     "auto_reply": False,
     "max_context_messages": 10,
     "inactivity_timeout_min": 30,
@@ -86,15 +78,11 @@ DEFAULT_CONFIG = {
     "transfer_alert_duration": 5,
     "group_reply_mode": "mention_only",
     # --- Motor de agente dirigido pelo banco (config-in-DB + code-in-DB) -----
-    # Quando ``ai_engine_enabled`` é True, prompt/modelo/tools do agente são
-    # lidos do banco (tabelas ``ai_*``) em vez das constantes do AgentHandler,
-    # e tools podem ser criadas/editadas como código Python no próprio banco.
-    # Plano 20: o multi-agente é o caminho PADRÃO (single-agent legado aposentado).
-    # ON por default → prompt/modelo/tools vêm do agente default (semeado no boot,
-    # fonte canônica). O caminho legado in-code permanece como rede de segurança
-    # (``build_for_contact`` devolve None em row quebrada). Override env
-    # ``WHATSBOT_AI_ENGINE``.
-    "ai_engine_enabled": True,
+    # Plano 22: o motor multi-agente (config-in-DB) é o ÚNICO motor de IA. Não há
+    # mais flag/caminho legado: prompt/modelo/tools vêm SEMPRE do agente default
+    # (semeado no boot a partir das constantes em agent.agent_factory) e dos
+    # agentes vinculados. A IA é controlada por auto_reply + config por canal +
+    # IA por conversa.
     # ⚠️ KILL-SWITCH DE SEGURANÇA — code-in-DB. Tools ``ai_tools`` guardam código
     # Python no banco que o instalador EXECUTA IN-PROCESS no boot (acesso total a
     # DB/FS/rede/chave do LLM). Enquanto não houver RBAC (plano 03) + runner

@@ -45,10 +45,9 @@ def check(label: str, cond: bool):
 
 
 class FakeHandler:
-    def __init__(self, ai_engine_enabled=True):
-        self.ai_engine_enabled = ai_engine_enabled
-        self.model = "test/model"
-        self.system_prompt = "Prompt base legado"
+    """Plano 22: single AI engine — build_for_contact ignores the handler."""
+    def __init__(self, *_args, **_kwargs):
+        pass
 
 
 class FakeContact:
@@ -65,8 +64,7 @@ class FakeCtx:
 
 
 # ── Seed agents/prompts ─────────────────────────────────────────────
-agent_factory.seed_default_agent({"system_prompt": "Olá, sou o atendimento.",
-                                  "model": "test/model"})
+agent_factory.seed_default_agent()
 prompt_repo.save("suporte_prompt", "Você é o agente de SUPORTE técnico.")
 agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True)
@@ -81,7 +79,7 @@ c = contact_repo.get_or_create("5511888880001")
 conv = conversation_repo.resolve_for_contact(
     c["id"], "5511888880001@s.whatsapp.net", reopen_if_closed=True)
 contact = FakeContact(c["id"], "5511888880001")
-handler_on = FakeHandler(True)
+handler_on = FakeHandler()
 ctx = FakeCtx(handler_on, contact)
 
 print("transferir_agente em CORE_TOOLS:")
@@ -92,12 +90,8 @@ print("\nbuild_for_contact — precedência:")
 spec = agent_factory.build_for_contact(handler_on, contact)
 check("sem binding -> agente default",
       spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)
-check("flag OFF -> None (caminho legado)",
-      agent_factory.build_for_contact(FakeHandler(False), contact) is None)
 
-print("\ntransferir_agente — gating e validação:")
-r = transferir_agente.execute(FakeCtx(FakeHandler(False), contact), {"agente": "suporte"})
-check("flag OFF -> erro de roteamento desativado", r.startswith("Erro: o roteamento"))
+print("\ntransferir_agente — validação:")
 r = transferir_agente.execute(ctx, {"agente": ""})
 check("agente vazio -> erro", r.startswith("Erro:"))
 r = transferir_agente.execute(ctx, {"agente": "inexistente"})

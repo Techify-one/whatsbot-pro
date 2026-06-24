@@ -207,9 +207,9 @@ export function Attendances() {
 
   // ── Navegação: abrir o chat ──────────────────────────────────────
   const openChat = useCallback((convo) => {
-    if (convo.id != null) history.pushState(null, '', `/conversations/${convo.id}`);
-    else if (convo.contact_id != null) history.pushState(null, '', `/contacts/${convo.contact_id}`);
-    else return;
+    // /contacts/{id} agora é o detalhe do contato; o hub abre só por conversa.
+    if (convo.id == null) return;
+    history.pushState(null, '', `/conversations/${convo.id}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
   }, []);
 

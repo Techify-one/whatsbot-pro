@@ -55,16 +55,11 @@ app = create_app(
     gowa_client=GOWAClient(port=port),
     agent_handler=AgentHandler(
         api_key=settings.get("openrouter_api_key", ""),
-        system_prompt=settings.get("system_prompt", "Você é um assistente útil."),
         max_context_messages=settings.get("max_context_messages", 10),
         inactivity_timeout_min=settings.get("inactivity_timeout_min", 30),
-        model=settings.get("model", "deepseek/deepseek-v4-pro"),
         audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),
         image_model=settings.get("image_model", "google/gemini-2.5-flash"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
         default_ai_enabled=settings.get("default_ai_enabled", True),
-        # Parity with main.py: without this the config-in-DB AI engine never
-        # turns on under uvicorn --reload (dev/hot-reload).
-        ai_engine_enabled=settings.get("ai_engine_enabled", False),
     ),
 )
