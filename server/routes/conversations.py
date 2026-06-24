@@ -572,7 +572,7 @@ def register_routes(app, deps):
         try:
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, preview,
-                status="operator", msg_id=msg_id)
+                status="operator", msg_id=msg_id, channel_id=channel_id)
         except Exception as e:  # noqa: BLE001
             logger.error("[Template] save failed for %s: %s", phone, e)
             return _err(f"Template enviado, mas falha ao salvar a mensagem: {e}", status=500)

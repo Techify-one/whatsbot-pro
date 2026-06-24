@@ -153,8 +153,16 @@ def register_routes(app, deps):
         if not digits.startswith("55"):
             digits = "55" + digits
 
+        # Route the check through the SELECTED channel (plano 21): GOWA actually
+        # queries WhatsApp; Cloud API / Telegram can't verify before sending, so
+        # they inherit the base "assume valid". Without a channel_id (legacy
+        # "Iniciar conversa" da busca) keep the original GOWA behavior.
+        channel_id = (body.get("channel_id") or "").strip() or None
         try:
-            result = await asyncio.to_thread(gowa_client.check_phone, digits)
+            if channel_id:
+                result = await asyncio.to_thread(outbound.check_phone, channel_id, digits)
+            else:
+                result = await asyncio.to_thread(gowa_client.check_phone, digits)
         except GOWASendError as e:
             return _err(f"Erro ao verificar número: {e}")
 

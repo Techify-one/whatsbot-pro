@@ -61,7 +61,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const sessionSeq = useRef(0);
   // Respostas rápidas (autocomplete do "/") no campo de mensagem normal.
-  const { getCandidates } = useQuickReplies();
+  const { quickReplies, getCandidates } = useQuickReplies();
   const [quickReplyMenu, setQuickReplyMenu] = useState(null);  // {query, start, index} | null
   const inputRef = useRef(null);
 
@@ -78,7 +78,9 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     return () => { alive = false; };
   }, []);
 
-  // Verifica o número (debounce) sempre que o input muda e parece um telefone.
+  // Verifica o número (debounce) sempre que o input OU o canal muda e parece um
+  // telefone. O canal importa: só o GOWA consulta o WhatsApp; Cloud API/Telegram
+  // assumem válido (não dá pra verificar antes de enviar).
   useEffect(() => {
     setCheckResult(null);
     setCheckError(null);
@@ -89,7 +91,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     setChecking(true);
     const t = setTimeout(async () => {
       try {
-        const res = await checkPhone(normalized, false);  // só valida, não cria o contato
+        const res = await checkPhone(normalized, false, channelId);  // só valida, não cria o contato
         if (seq !== checkSeq.current) return;  // resposta obsoleta
         if (!res.ok) { setCheckError(res.error || 'Erro ao verificar número.'); setChecking(false); return; }
         if (!res.data.registered) { setCheckError('Este número não possui WhatsApp.'); setChecking(false); return; }
@@ -105,7 +107,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [phoneInput]);
+  }, [phoneInput, channelId]);
 
   // Nome a exibir ao lado do número: contato salvo (sem o ~ de "veio do WhatsApp")
   // tem prioridade; senão o pushName retornado pelo check.
@@ -170,7 +172,11 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   function updateQuickReplyMenu(el, val) {
     const pos = (el && el.selectionStart != null) ? el.selectionStart : val.length;
     const m = val.slice(0, pos).match(/(?:^|\s)\/([\w-]*)$/);
-    if (m && getCandidates(m[1]).length) {
+    // Abre quando há candidatos OU quando o token é só "/" (query vazia) — nesse
+    // caso, mesmo sem respostas cadastradas, mostra o estado-vazio com orientação
+    // (antes não abria nada e parecia bug). "/palavra" sem match continua fechado
+    // pra não sequestrar mensagens que começam com "/".
+    if (m && (getCandidates(m[1]).length || m[1] === '')) {
       setQuickReplyMenu({ query: m[1], start: pos - m[1].length - 1, index: 0 });
     } else {
       setQuickReplyMenu(null);
@@ -328,7 +334,17 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
               ></textarea>
               ${quickReplyMenu ? (() => {
                 const cands = getCandidates(quickReplyMenu.query);
-                if (!cands.length) return '';
+                // Estado-vazio: token "/" sem nenhuma resposta rápida cadastrada.
+                if (!cands.length) {
+                  if (quickReplies.length === 0) {
+                    return html`
+                      <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] bg-wa-panel border border-wa-border rounded-[8px] shadow-lg px-[12px] py-[10px] z-30 text-[13px] text-wa-secondary">
+                        Nenhuma resposta rápida cadastrada. Crie no menu <span class="text-wa-text font-medium">⚙ ▸ Respostas Rápidas</span>.
+                      </div>
+                    `;
+                  }
+                  return '';
+                }
                 const sel = Math.min(quickReplyMenu.index || 0, cands.length - 1);
                 return html`
                   <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] max-h-[210px] overflow-y-auto bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] z-30 wa-scrollbar">

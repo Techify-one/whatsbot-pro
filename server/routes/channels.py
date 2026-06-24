@@ -122,7 +122,16 @@ def register_routes(app, deps):
         ``conversation.reply`` instead of ``channel.manage``, no credentials): the
         "start conversation" inbox picker needs only id/provider/name/status.
         Status prefers the live registry instance, falling back to the stored flags.
-        Disconnected or disabled channels are filtered out.
+
+        Inclusion is by ``logged_in`` (the session is authenticated and can send),
+        NOT ``connected``. For GOWA the two flags mean different things —
+        ``connected`` tracks the local subprocess manager (``manager.is_running``),
+        while ``logged_in`` reflects the live WhatsApp session via ``/app/status``.
+        A GOWA inbox can be ``Desconectado · Autenticado`` (subprocess not owned by
+        this process, e.g. launched externally in dev) yet fully usable to send;
+        requiring ``connected`` would wrongly hide it. ``logged_in`` already implies
+        the REST API is reachable, so it is the correct "can I send" signal. For
+        Cloud/Telegram the two flags are always equal, so nothing changes there.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -132,17 +141,15 @@ def register_routes(app, deps):
         for row in rows:
             if not row.get("enabled"):
                 continue
-            connected = bool(row.get("connected"))
             logged_in = bool(row.get("logged_in"))
             inst = registry.get(row["id"]) if registry is not None else None
             if inst is not None:
                 try:
                     st = await asyncio.to_thread(inst.status)
-                    connected = bool(st.get("connected"))
                     logged_in = bool(st.get("logged_in"))
                 except Exception:
                     pass
-            if not (connected and logged_in):
+            if not logged_in:
                 continue
             out.append({
                 "id": row["id"],

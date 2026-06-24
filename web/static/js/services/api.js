@@ -347,8 +347,12 @@ export async function sendPresence(phone, action = 'start', conversationId = nul
 
 // create=false apenas valida o número sem materializar o contato (usado pela
 // verificação ao vivo do modal "Nova conversa" — o contato só nasce no envio).
-export async function checkPhone(phone, create = true) {
-  return request('POST', '/api/contacts/check-phone', { phone, create });
+// channelId roteia a verificação pelo canal escolhido: só o GOWA consulta o
+// WhatsApp; Cloud API/Telegram não verificam antes de enviar (assumem válido).
+export async function checkPhone(phone, create = true, channelId = null) {
+  const body = { phone, create };
+  if (channelId) body.channel_id = channelId;
+  return request('POST', '/api/contacts/check-phone', body);
 }
 
 // ── Tags ─────────────────────────────────────────────────────────────
