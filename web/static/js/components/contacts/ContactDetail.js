@@ -935,7 +935,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         </div>
         <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
           <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
-            <span class="truncate">${displayName}</span>${isAutoName ? html`<span class="text-[10px] font-semibold text-blue-400 bg-blue-500/15 rounded px-[5px] py-[1px] shrink-0" title="Nome obtido do WhatsApp">WA</span>` : null}${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
+            <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
               const tagInfo = globalTags && globalTags[tagName];
               const color = tagInfo ? tagInfo.color : '#6b7280';
               return html`<span
