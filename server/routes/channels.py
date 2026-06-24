@@ -13,6 +13,7 @@ live instance when present, else the stored flags.
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 
@@ -24,6 +25,8 @@ from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
                              inbox_member_repo, user_repo)
 from server.authz import permission_denied
 from server.helpers import _ok, _err
+
+logger = logging.getLogger(__name__)
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _ALLOWED_PROVIDERS = {"gowa", "whatsapp_cloud", "telegram", "test"}
@@ -100,11 +103,12 @@ def register_routes(app, deps):
             pass
 
     @app.get("/api/channels")
-    async def list_channels(request: Request):
+    async def list_channels(request: Request, archived: bool = False):
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        rows = await asyncio.to_thread(channel_repo.list_all)
+        rows = await asyncio.to_thread(
+            channel_repo.list_archived if archived else channel_repo.list_all)
         out = []
         for row in rows:
             creds = await asyncio.to_thread(channel_credential_repo.get_all, row["id"])
@@ -222,7 +226,10 @@ def register_routes(app, deps):
                 inbox_repo.get_or_create_for_channel, cid,
                 name=row.get("display_name") or cid)
         except Exception:
-            pass
+            # A failed inbox creation is the root cause of channel/inbox drift
+            # (órfãs, nomes velhos). resolve_inbox_id self-heals on first inbound,
+            # but log it loudly so the inconsistency is visible.
+            logger.warning("Falha ao criar inbox do canal %s", cid, exc_info=True)
         # Register the live channel now so status/QR/send work without a restart.
         # GOWA needs its per-device client; other providers are built generically
         # from the registered provider class (no-op if the plugin isn't loaded).
@@ -251,6 +258,15 @@ def register_routes(app, deps):
             fields["config"] = json.dumps(cfg) if isinstance(cfg, (dict, list)) else cfg
         if fields:
             row = await asyncio.to_thread(channel_repo.update, channel_id, **fields)
+            # Keep the channel's inbox name in sync (plano inboxes/canais §4.1):
+            # ``channels.display_name`` is the source of truth; the UI shows it, but
+            # ``inbox.name`` is kept current as cache/compat.
+            if "display_name" in fields:
+                inbox = await asyncio.to_thread(inbox_repo.get_by_channel, channel_id)
+                if inbox:
+                    await asyncio.to_thread(
+                        inbox_repo.update, inbox["id"],
+                        name=fields["display_name"] or channel_id)
         # A config edit may change the GOWA JID-type filter — drop its cache so
         # the webhook picks up the new allowed types without waiting for the TTL.
         if "config" in body:
@@ -317,12 +333,25 @@ def register_routes(app, deps):
         return _ok({"inbox_id": inbox["id"], "member_ids": members})
 
     @app.delete("/api/channels/{channel_id}")
-    async def delete_channel(channel_id: str, request: Request):
+    async def delete_channel(channel_id: str, request: Request, purge: bool = False):
+        """Remove a channel.
+
+        Default = soft-delete (plano inboxes/canais §4.3-c): arquiva o canal e sua
+        inbox, escondendo-os da UI mas PRESERVANDO o histórico de conversas. Pode
+        ser desfeito via ``POST /api/channels/{id}/restore``.
+
+        ``?purge=true`` = hard-delete: apaga o canal e a inbox de vez. A FK
+        ``inboxes.channel_id → channels.id ON DELETE CASCADE`` leva conversas,
+        contact_inboxes e inbox_members junto. **Destrói histórico** — irreversível.
+        """
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
         if channel_id == "default":
             return _err("O canal default não pode ser removido.", 400)
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
         # Best-effort: log the GOWA device out so the WhatsApp number is freed.
         inst = registry.get(channel_id) if registry is not None else None
         if inst is not None and getattr(inst, "_client", None) is not None:
@@ -330,16 +359,48 @@ def register_routes(app, deps):
                 await asyncio.to_thread(inst._client.logout)
             except Exception:
                 pass
-        await asyncio.to_thread(channel_credential_repo.delete_all, channel_id)
-        ok = await asyncio.to_thread(channel_repo.delete, channel_id)
-        if not ok:
-            return _err("Canal não encontrado.", 404)
+
+        if purge:
+            # Hard-delete: drop the inbox first (CASCADE clears conversas/membros),
+            # then the credentials and the channel row.
+            inbox = await asyncio.to_thread(inbox_repo.get_by_channel, channel_id)
+            if inbox:
+                await asyncio.to_thread(inbox_repo.delete, inbox["id"])
+            await asyncio.to_thread(channel_credential_repo.delete_all, channel_id)
+            ok = await asyncio.to_thread(channel_repo.delete, channel_id)
+            if not ok:
+                return _err("Canal não encontrado.", 404)
+            if registry is not None:
+                try:
+                    registry.remove_channel(channel_id)
+                except Exception:
+                    pass
+            logger.info("Canal %s removido (purge).", channel_id)
+            return _ok({"deleted": channel_id, "purged": True})
+
+        # Soft-delete: archive the channel; the inbox + history stay intact.
+        await asyncio.to_thread(channel_repo.archive, channel_id)
         if registry is not None:
             try:
                 registry.remove_channel(channel_id)
             except Exception:
                 pass
-        return _ok({"deleted": channel_id})
+        logger.info("Canal %s arquivado (soft-delete).", channel_id)
+        return _ok({"deleted": channel_id, "archived": True})
+
+    @app.post("/api/channels/{channel_id}/restore")
+    async def restore_channel(channel_id: str, request: Request):
+        """Undo a soft-delete: unarchive the channel (stays disabled until the user
+        re-enables it). The live instance is re-created on the next restart."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        row = await asyncio.to_thread(channel_repo.restore, channel_id)
+        creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+        return _ok(_serialize(row, creds))
 
     @app.get("/api/channels/{channel_id}/status")
     async def channel_status(channel_id: str, request: Request):

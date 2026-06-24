@@ -12,12 +12,18 @@ from fastapi import Request
 from db.repositories import user_repo, rbac_repo, inbox_repo, inbox_member_repo
 from server.auth import hash_password_argon2
 from server.authz import permission_denied
-from server.permissions import PERMISSION_CATALOG, ROLE_LABELS, ALL_PERMISSION_KEYS
+from server.permissions import ROLE_LABELS, ALL_PERMISSION_KEYS
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
 
-_VALID_PERMISSION_KEYS = set(ALL_PERMISSION_KEYS)
+
+def _valid_permission_keys() -> set[str]:
+    """Core (static) + plugin (DB) permission keys, resolved per request.
+
+    Plugin perms are registered at load, so they can appear/disappear across a
+    restart — never freeze this set at import time (plano "RBAC para Plugins")."""
+    return set(ALL_PERMISSION_KEYS) | rbac_repo.plugin_permission_keys()
 
 
 def _count_active_admins() -> int:
@@ -55,10 +61,15 @@ def register_routes(app, deps):
             r["label"] = ROLE_LABELS.get(r["key"], r["name"])
         # Catálogo de inboxes p/ a seção "Caixas de entrada" da tela de usuários
         # (servido aqui, gated por users.manage, evitando acoplar com inbox.manage).
-        inboxes = await asyncio.to_thread(inbox_repo.list_all)
+        # list_with_channel: só caixas vivas (sem órfãs) e com o nome atual do canal
+        # (plano inboxes/canais §4.6 — corrige o Bug 1 da tela de Usuários).
+        inboxes = await asyncio.to_thread(inbox_repo.list_with_channel)
+        # Catálogo efetivo: core (estático) + perms de plugin (linhas da tabela
+        # permissions). Cada item carrega plugin_id/group_label p/ o picker agrupar.
+        catalog = await asyncio.to_thread(rbac_repo.list_catalog)
         return _ok({
             "roles": roles,
-            "permissions": [{"key": k, "description": d} for k, d in PERMISSION_CATALOG],
+            "permissions": catalog,
             "inboxes": inboxes,
         })
 
@@ -76,7 +87,8 @@ def register_routes(app, deps):
         if len(password) < 8:
             return _err("A senha deve ter ao menos 8 caracteres.", status=400)
         if custom:
-            perms = [p for p in (body.get("permissions") or []) if p in _VALID_PERMISSION_KEYS]
+            valid_perms = await asyncio.to_thread(_valid_permission_keys)
+            perms = [p for p in (body.get("permissions") or []) if p in valid_perms]
             if not perms:
                 return _err("Selecione ao menos uma permissão.", status=400)
         else:
@@ -138,8 +150,9 @@ def register_routes(app, deps):
 
         if touches_perms:
             if target_custom:
+                valid_perms = await asyncio.to_thread(_valid_permission_keys)
                 perms = [p for p in (body.get("permissions") or [])
-                         if p in _VALID_PERMISSION_KEYS]
+                         if p in valid_perms]
                 if not perms:
                     return _err("Selecione ao menos uma permissão.", status=400)
                 await asyncio.to_thread(user_repo.set_custom_permissions, user_id, perms)

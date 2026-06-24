@@ -217,6 +217,10 @@ channels = Table(
     Column("logged_in", Integer, nullable=False, server_default="0"),
     Column("own_phone", Text, nullable=True),
     Column("last_error", Text, nullable=True),
+    # Soft-delete (plano inboxes/canais §4.3-c): "excluir" um canal o arquiva
+    # (esconde da UI) em vez de apagar, preservando o histórico de conversas da
+    # sua inbox. Hard-delete continua disponível via ?purge=true.
+    Column("archived", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
@@ -270,7 +274,12 @@ permissions = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("key", Text, nullable=False, unique=True),     # conversation.reply etc.
     Column("description", Text, nullable=False, server_default=""),
+    # Plugin RBAC (plano "RBAC para Plugins" §3.1): NULL for core perms; the
+    # plugin id + group label for perms declared in a plugin's ``rbac:`` block.
+    Column("plugin_id", Text, nullable=True),
+    Column("group_label", Text, nullable=True),
 )
+Index("idx_permissions_plugin", permissions.c.plugin_id)
 
 role_permissions = Table(
     "role_permissions",
@@ -328,7 +337,11 @@ inboxes = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False, server_default="WhatsApp"),
     Column("channel_type", Text, nullable=False, server_default="whatsapp"),
-    Column("channel_id", Text),                                  # → channels.id (sem FK no MVP)
+    # → channels.id. FK com ON DELETE CASCADE (plano inboxes/canais §4.5):
+    # garante o invariante 1:1 e a limpeza automática num purge. Nullable: inboxes
+    # cujo canal foi removido ficam com channel_id NULL (órfãs preservadas, escondidas
+    # da UI pelo JOIN de list_with_channel) em vez de violar a FK.
+    Column("channel_id", Text, ForeignKey("channels.id", ondelete="CASCADE")),
     Column("agent_bot_enabled", Integer, nullable=False, server_default="1"),  # gate IA nível 2
     Column("default_agent_key", Text),                          # plano 06: agente default da inbox
     Column("created_at", Float, nullable=False),

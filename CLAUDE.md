@@ -443,6 +443,29 @@ Referências (na Loja de Plugins, ver "Plugins de exemplo"): `auto_signature` (s
 - **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
 - **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
 
+### RBAC de plugins
+
+Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo automaticamente no `PermissionPicker` agrupada por "Plugin: \<label\>" (`rbac.group`, default = nome do plugin). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
+
+```yaml
+rbac:
+  group: "Lembretes"          # opcional; default = name do plugin
+  permissions:
+    - { key: view,   label: "Ver lembretes" }
+    - { key: delete, label: "Excluir lembretes" }
+```
+
+- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando legado/open (sem identidade de usuário) ou RBAC desligado — não quebra single-password. Nunca cheque permissão na mão; use a dependency.
+  ```python
+  from plugins.context import plugin_permission
+  @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])
+  async def delete_item(id: int): ...
+  ```
+- **Esconda a screen** sem permissão com `requires: <key>` no manifest da screen (`screens[].requires`) — o GearMenu filtra (padrão "hide, don't disable"). O componente da screen recebe a prop `can(key)` (= `hasPermission(user, 'plugin.<id>.<key>')`).
+- **Decisão central**: [server/authz.py](server/authz.py) `check()`/`acheck()` resolvem RBAC e então aplicam o seam ABAC `filter.authz.decision` (`{user, permission_key, allow}` → pode rebaixar allow→deny). **Nenhum avaliador é embarcado no core (v1)** — regras por atributo (ex: horário) viram um plugin de filtro depois, sem tocar nos call sites.
+- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático) + linhas com `plugin_id IS NOT NULL`. `/api/roles` e a validação de criação de role/usuário usam o catálogo efetivo.
+- **Disable** mantém as linhas (atribuições sobrevivem ao toggle); **delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
+
 ### Events e Filters (bus do plugin)
 
 Plugins podem reagir a tudo que acontece no WhatsBot e modificar dados em trânsito sem editar o core. Dois mecanismos complementares (padrão WordPress: actions + filters; referências validadas em Baileys / WAHA / Home Assistant):
@@ -512,6 +535,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.reply.raw` | `_send_reply` antes do split | `str` | Nada é enviado | `phone` |
 | `filter.reply.parts` | depois do split | `list[str]` | Nada é enviado | `phone` |
 | `filter.reply.part` | cada parte antes do GOWA (vale pra send manual também) | `str` | Aquela parte é pulada | `phone` |
+| `filter.authz.decision` | `authz.check`/`acheck` DEPOIS do RBAC | `dict {user, permission_key, allow}` | trata como `allow=False` (nega) | `permission_key` |
 
 **Lifecycle events bypassam `filter.event.before_emit`** — `plugin.loaded/enabled/disabled/settings.changed` e `app.startup/shutdown` chamam `emit()` direto. Plugin não pode bloquear seu próprio carregamento.
 

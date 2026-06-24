@@ -391,12 +391,6 @@ export async function getConversation(id) {
   return request('GET', `/api/conversations/${id}`);
 }
 
-// Filter engine (plano 08). The schema describes which dimensions exist so the
-// UI can render only the controls that apply to this install.
-export async function getConversationFilterSchema() {
-  return request('GET', '/api/conversations/filter-schema');
-}
-
 // Filter conversations via the flat-param GET endpoint. Builds the querystring
 // from `params`, dropping empty values and URL-encoding keys (cattr:<key>) and
 // values correctly. AND between distinct params; a comma-separated value (e.g.
@@ -539,6 +533,16 @@ export async function deleteConversationTemplate(convId, name) {
 
 export async function listChannels() {
   return request('GET', '/api/channels');
+}
+
+// Canais arquivados (soft-delete) — para a seção de restauração.
+export async function listArchivedChannels() {
+  return request('GET', '/api/channels?archived=true');
+}
+
+// Desarquiva um canal arquivado (volta para a lista; fica desativado até reativar).
+export async function restoreChannel(id) {
+  return request('POST', `/api/channels/${encodeURIComponent(id)}/restore`);
 }
 
 // Canais conectados (connected + logged_in + enabled) que um operador pode usar

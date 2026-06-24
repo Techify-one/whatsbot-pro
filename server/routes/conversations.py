@@ -90,6 +90,21 @@ def _inbox_hidden(request: Request, inbox_id) -> bool:
     return vis is not None and inbox_id not in vis
 
 
+async def _guard_conv(request: Request, conv_id: int):
+    """Load a conversation and enforce inbox-membership scoping on WRITE paths.
+
+    Returns ``(conv, None)`` when the caller may act on it, or ``(None, err)``
+    (a 404 response) when the conversation is missing OR hidden by the user's
+    inbox scope. Closes Bug 2 (plano inboxes/canais §4.7): ações mutadoras por
+    conversa passam a checar a caixa, não só a leitura."""
+    conv = await asyncio.to_thread(conversation_repo.get, conv_id)
+    if not conv:
+        return None, _err("Conversa não encontrada.", status=404)
+    if _inbox_hidden(request, conv.get("inbox_id")):
+        return None, _err("Conversa não encontrada.", status=404)
+    return conv, None
+
+
 def register_routes(app, deps):
     agent_handler = deps.agent_handler
     settings = deps.settings
@@ -259,6 +274,9 @@ def register_routes(app, deps):
         status = (body.get("status") or "").strip()
         if status not in ("open", "closed"):
             return _err("status deve ser 'open' ou 'closed'.", status=400)
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -273,6 +291,9 @@ def register_routes(app, deps):
         if denied:
             return denied
         assignee = body.get("assignee_user_id")
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_assignee, conv_id, assignee)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -293,6 +314,9 @@ def register_routes(app, deps):
         user = current_user(request)
         if not user:
             return _err("Precisa estar autenticado para assumir a conversa.", status=401)
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_assignee, conv_id, user["id"])
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -307,6 +331,9 @@ def register_routes(app, deps):
         if denied:
             return denied
         agent_key = body.get("agent_key") or None
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_agent, conv_id, agent_key)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -335,6 +362,9 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.assign")
         if denied:
             return denied
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         kind = (body.get("kind") or "").strip()
         contact_ai_enabled = None  # None = leave the contact-level gate untouched
         if kind == "user":
@@ -401,6 +431,9 @@ def register_routes(app, deps):
         if denied:
             return denied
         active = 1 if body.get("active") else 0
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_conversation_ai, conv_id, active)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -447,6 +480,9 @@ def register_routes(app, deps):
         if denied:
             return denied
         archived = 1 if body.get("archived") else 0
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
         conv = await asyncio.to_thread(conversation_repo.set_archived, conv_id, archived)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
@@ -463,6 +499,8 @@ def register_routes(app, deps):
             return denied
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        if _inbox_hidden(request, conv.get("inbox_id")):
             return _err("Conversa não encontrada.", status=404)
         attrs = body.get("custom_attributes")
         changed: dict = {}
@@ -553,6 +591,8 @@ def register_routes(app, deps):
             return _err("components deve ser uma lista.", status=400)
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        if _inbox_hidden(request, conv.get("inbox_id")):
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         phone = conv.get("contact_phone") or ""

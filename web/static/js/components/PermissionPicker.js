@@ -19,13 +19,27 @@ function groupOf(key) {
   return i === -1 ? key : key.slice(0, i);
 }
 
+// Plugin perms (those with a plugin_id) are grouped under a friendly section
+// "Plugin: <label>" instead of the raw domain split — the /api/roles catalog
+// carries plugin_id/group_label for exactly this (plano "RBAC para Plugins").
+function sectionOf(p) {
+  if (p.plugin_id) return `Plugin: ${p.group_label || p.plugin_id}`;
+  return groupOf(p.key);
+}
+
 export default function PermissionPicker({ catalog, selected, onToggle, disabled }) {
   const sel = new Set(selected || []);
   const groups = {};
   for (const p of (catalog || [])) {
-    (groups[groupOf(p.key)] = groups[groupOf(p.key)] || []).push(p);
+    const g = sectionOf(p);
+    (groups[g] = groups[g] || []).push(p);
   }
-  const groupKeys = Object.keys(groups).sort();
+  // Core domains first (alphabetical), then plugin sections (alphabetical).
+  const groupKeys = Object.keys(groups).sort((a, b) => {
+    const ap = a.startsWith('Plugin: '), bp = b.startsWith('Plugin: ');
+    if (ap !== bp) return ap ? 1 : -1;
+    return a.localeCompare(b);
+  });
   return html`
     <div class="flex flex-col gap-3">
       ${groupKeys.map(g => html`

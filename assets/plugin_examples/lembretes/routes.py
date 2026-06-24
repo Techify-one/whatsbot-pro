@@ -3,12 +3,12 @@
 from fastapi import APIRouter
 from sqlalchemy import text
 
-from plugins.context import broadcast, make_plugin_db
+from plugins.context import broadcast, make_plugin_db, plugin_permission
 
 router = APIRouter()
 
 
-@router.get("/items")
+@router.get("/items", dependencies=[plugin_permission("view")])
 async def list_items(limit: int = 100):
     with make_plugin_db() as conn:
         rows = conn.execute(
@@ -21,7 +21,7 @@ async def list_items(limit: int = 100):
     return {"ok": True, "data": [dict(r) for r in rows]}
 
 
-@router.delete("/items/{rid}")
+@router.delete("/items/{rid}", dependencies=[plugin_permission("delete")])
 async def delete_item(rid: int):
     with make_plugin_db() as conn:
         conn.execute(

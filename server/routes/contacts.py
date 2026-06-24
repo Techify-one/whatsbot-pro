@@ -11,11 +11,13 @@ from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo
 from db.repositories import custom_attribute_repo as ca_repo
+from db.repositories import inbox_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from agent import group_mentions
 from server import system_notices
-from server.authz import current_user, permission_denied
+from server.authz import (current_user, permission_denied, can_access_inbox,
+                          visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
 from server.transcription import maybe_transcribe
@@ -57,6 +59,35 @@ def register_routes(app, deps):
         if channel_id:
             return str(channel_id)
         return "default"
+
+    def _resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
+        """Inbox id targeted by an operator write (plano inboxes/canais §4.7).
+
+        Prefers the conversation's inbox; falls back to the channel's inbox when
+        starting a brand-new conversation. ``None`` quando indeterminável — o
+        chamador (``can_access_inbox``) nega para usuários escopados."""
+        if conversation_id:
+            try:
+                conv = conversation_repo.get(int(conversation_id))
+            except (TypeError, ValueError):
+                conv = None
+            if conv:
+                return conv.get("inbox_id")
+        cid = str(channel_id) if channel_id else "default"
+        inbox = inbox_repo.get_by_channel(cid)
+        return inbox["id"] if inbox else None
+
+    async def _inbox_send_denied(request: Request, *, conversation_id=None,
+                                 channel_id=None):
+        """403 response if the user may not write to the target conversation's inbox.
+
+        Returns ``None`` when allowed (legacy/open, read_all, or member). Closes the
+        send half of Bug 2: tirar o usuário da caixa agora também bloqueia o envio."""
+        inbox_id = await asyncio.to_thread(
+            _resolve_inbox_id, conversation_id, channel_id)
+        if not can_access_inbox(request, inbox_id):
+            return _err("Sem acesso a esta caixa de entrada.", status=403)
+        return None
 
     def _route_send_text(channel_id, phone, text, mentions=None, reply_to=None) -> str:
         """Send text via the conversation's channel. Raises GOWASendError on failure
@@ -114,7 +145,11 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
-        results = await asyncio.to_thread(contact_repo.list_contacts, q, archived)
+        # Inbox-membership scoping (plano inboxes/canais §4.7): a sidebar
+        # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
+        # caixas que o usuário não acessa. Espelha GET /api/conversations.
+        results = await asyncio.to_thread(
+            contact_repo.list_contacts, q, archived, visible_inbox_ids(request))
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
         for c in results:
@@ -191,6 +226,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        vis = visible_inbox_ids(request)
         def _load():
             data = contact_repo.get_full_contact(phone)
             if data is None:
@@ -201,6 +237,12 @@ def register_routes(app, deps):
             if data is None:
                 return None, []
             contact_id = data["id"]
+            # Inbox-membership scoping (plano inboxes/canais §4.7): hide (as 404,
+            # BEFORE any mark-read side effect) a contact whose conversations are
+            # all in inboxes the user can't access. Espelha o _inbox_hidden da view
+            # conversa-cêntrica e fecha o vazamento da view legada por contato.
+            if contact_repo.contact_hidden_by_inbox_scope(contact_id, vis):
+                return "__hidden__", []
             # Mark as read when viewing contact (skip if mark_read=false)
             msg_ids = []
             if mark_read and (data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0):
@@ -217,7 +259,7 @@ def register_routes(app, deps):
             data["usage"] = []
             return data, msg_ids
         data, msg_ids = await asyncio.to_thread(_load)
-        if data is None:
+        if data is None or data == "__hidden__":
             return _err("Contato não encontrado.", status=404)
         if msg_ids:
             asyncio.create_task(_send_read_receipts(phone, msg_ids))
@@ -349,6 +391,12 @@ def register_routes(app, deps):
             logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
             return _ok({"message": "Mensagem enviada.", "msg_id": None})
 
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"))
+        if denied_inbox:
+            return denied_inbox
+
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         block = await asyncio.to_thread(
             _session_window_block, channel_id, body.get("conversation_id"))
@@ -450,6 +498,11 @@ def register_routes(app, deps):
         if not msg_id and not db_id:
             return _err("É necessário msg_id ou db_id.")
 
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"))
+        if denied_inbox:
+            return denied_inbox
+
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
 
         if scope == "all":
@@ -509,6 +562,11 @@ def register_routes(app, deps):
         emoji = (body.get("emoji") or "").strip()
         if not msg_id:
             return _err("msg_id é obrigatório.")
+
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"))
+        if denied_inbox:
+            return denied_inbox
 
         if not await asyncio.to_thread(_is_sandbox_contact, phone):
             channel_id = _channel_for(phone, body.get("conversation_id"))
@@ -675,6 +733,12 @@ def register_routes(app, deps):
         if not text:
             return _err("Campo 'text' é obrigatório.")
 
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"))
+        if denied_inbox:
+            return denied_inbox
+
         ai_read = bool(body.get("ai_read", False))
         ai_reply = bool(body.get("ai_reply", True))
 
@@ -716,6 +780,12 @@ def register_routes(app, deps):
         message = (body.get("message") or "").strip()
         if not message:
             return _err("Campo 'message' é obrigatório.")
+
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"))
+        if denied_inbox:
+            return denied_inbox
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         block = await asyncio.to_thread(
@@ -782,6 +852,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
         # Sandbox/test contact — keep the image local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
@@ -865,6 +939,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
         # Sandbox/test contact — keep the audio local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
@@ -972,6 +1050,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);

@@ -4,7 +4,6 @@ import htm from 'htm';
 import { Dashboard } from './components/Dashboard.js';
 import { Sandbox } from './components/Sandbox.js';
 import { Contacts } from './components/Contacts.js';
-import { Conversations } from './components/Conversations.js';
 import { Attendances } from './components/attendances/Attendances.js';
 import ChannelsManager from './components/ChannelsManager.js';
 import { CostsDashboard } from './components/CostsDashboard.js';
@@ -48,7 +47,6 @@ const html = htm.bind(h);
 // Core (built-in) routes. Plugin screens are merged in dynamically below.
 const CORE_ROUTES = {
   '/': 'contacts',
-  '/conversations': 'conversations',
   '/atendimentos': 'attendances',
   '/channels': 'channels',
   '/painel': 'dashboard',
@@ -65,7 +63,6 @@ const CORE_ROUTES = {
 };
 const CORE_TAB_PATHS = {
   contacts: '/',
-  conversations: '/conversations',
   attendances: '/atendimentos',
   channels: '/channels',
   dashboard: '/painel',
@@ -203,9 +200,6 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} gated=${can('settings.manage')} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`}
           >Execuções</${MenuItem}>
-          <${MenuItem} gated=${can('conversation.read')} active=${tab === 'conversations'} href=${CORE_TAB_PATHS.conversations} onClick=${() => { onTabChange('conversations'); close(); }}
-            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>`}
-          >Conversas</${MenuItem}>
           <${MenuItem} gated=${can('conversation.read')} active=${tab === 'attendances'} href=${CORE_TAB_PATHS.attendances} onClick=${() => { onTabChange('attendances'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 5h6v6H4V5zm0 8h6v6H4v-6zm8-8h8v6h-8V5zm0 8h8v6h-8v-6z"/></svg>`}
           >Atendimentos</${MenuItem}>
@@ -213,12 +207,18 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 1a9 9 0 0 0-9 9v7a3 3 0 0 0 3 3h2v-8H5v-2a7 7 0 0 1 14 0v2h-3v8h2a3 3 0 0 0 3-3v-7a9 9 0 0 0-9-9z"/></svg>`}
           >Canais</${MenuItem}>
 
-          ${(pluginScreens && pluginScreens.length > 0) ? html`
+          ${(() => {
+            // Hide, don't disable (P48): a plugin screen with `requires: <key>`
+            // is shown only when the user holds plugin.<id>.<key>. Open/legacy
+            // installs (no currentUser) see everything (plano "RBAC para Plugins").
+            const visible = (pluginScreens || []).filter(s =>
+              !s.requires || can(`plugin.${s.pluginId}.${s.requires}`));
+            return visible.length > 0 ? html`
             <div class="border-t border-wa-border my-1"></div>
             <div class="px-4 py-1.5 text-[11px] uppercase tracking-wide text-wa-secondary">
               Plugins
             </div>
-            ${pluginScreens.map(s => html`
+            ${visible.map(s => html`
               <${MenuItem}
                 key=${pluginTabId(s)}
                 active=${tab === pluginTabId(s)}
@@ -227,7 +227,8 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
                 icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M5 3h6v8H5V3zm8 0h6v6h-6V3zm0 8h6v10h-6V11zm-8 4h6v6H5v-6z"/></svg>`}
               >${s.title}</${MenuItem}>
             `)}
-          ` : null}
+          ` : null;
+          })()}
 
           <div class="border-t border-wa-border my-1"></div>
           ${accountUrl ? html`
@@ -598,7 +599,7 @@ function App({ onLogout, hasPassword, currentUser }) {
         ${activePluginScreen
           ? html`<div class="max-w-5xl mx-auto p-4">
               <${PageHeader} title=${activePluginScreen.title} onBack=${() => setTab('contacts')} />
-              <${PluginScreen} screen=${activePluginScreen} />
+              <${PluginScreen} screen=${activePluginScreen} currentUser=${currentUser} />
             </div>`
           : tab === 'quick-replies'
             ? html`<div class="max-w-5xl mx-auto p-4">
@@ -676,11 +677,6 @@ function App({ onLogout, hasPassword, currentUser }) {
                         }} />
                         <${Executions} />
                       </div>`
-                    : tab === 'conversations'
-                      ? html`<div class="max-w-5xl mx-auto p-4">
-                          <${PageHeader} title="Conversas" onBack=${() => setTab('contacts')} />
-                          <${Conversations} />
-                        </div>`
                     : tab === 'attendances'
                       ? html`<div class="mx-auto p-4 max-w-none">
                           <${PageHeader} title="Atendimentos" onBack=${() => setTab('contacts')} />

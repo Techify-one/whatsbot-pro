@@ -14,7 +14,15 @@ screens:
     path: /lembretes
     icon: bell
     component: /plugins/lembretes/static/lembretes.js
+    requires: view
 permissions:
   - llm.tool
   - db.write
+# RBAC de usuário (distinto do 'permissions' de capability acima): cada chave vira
+# plugin.lembretes.<key> e aparece no PermissionPicker agrupada por "Plugin: Lembretes".
+rbac:
+  group: Lembretes
+  permissions:
+    - { key: view, label: "Ver lembretes" }
+    - { key: delete, label: "Excluir lembretes" }
 dependencies: []

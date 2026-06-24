@@ -133,6 +133,42 @@ def make_plugin_db():
     return get_engine().begin()
 
 
+# ── RBAC dependency for plugin routes (plano "RBAC para Plugins" §3.5) ─────
+import re as _re
+
+_PLUGIN_PATH_RE = _re.compile(r"^/api/plugins/([a-z][a-z0-9_]{0,31})(?:/|$)")
+
+
+def plugin_permission(key: str):
+    """FastAPI dependency that gates a plugin route on ``plugin.<id>.<key>``.
+
+    The plugin id is inferred from the request path (``/api/plugins/<id>/...``),
+    so the plugin does not need to know its own id. Returns 403 when a logged-in
+    user lacks the permission; default-allow for legacy/open installs (no user
+    identity) and when RBAC isn't enforced. The ABAC seam (``filter.authz.decision``)
+    is honored via :func:`server.authz.acheck`.
+
+    Usage in a plugin ``routes.py``::
+
+        from plugins.context import plugin_permission
+
+        @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])
+        async def delete_item(id: int): ...
+    """
+    from fastapi import Depends, HTTPException, Request
+
+    async def _dep(request: Request) -> None:
+        from server.authz import acheck
+        m = _PLUGIN_PATH_RE.match(request.url.path)
+        if not m:
+            return  # not a plugin-namespaced path — cannot infer id, allow.
+        full_key = f"plugin.{m.group(1)}.{key}"
+        if not await acheck(request, full_key):
+            raise HTTPException(status_code=403, detail="Permissão negada.")
+
+    return Depends(_dep)
+
+
 @dataclasses.dataclass
 class ToolContext:
     """Context passed to a tool executor.
