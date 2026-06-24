@@ -201,6 +201,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>
                 ${allSelectedPinned ? 'Desafixar conversas' : 'Fixar conversas'}
               </button>
+              ${selCount <= 1 ? html`
               <button
                 disabled=${selCount === 0}
                 onClick=${() => { onBulkMarkRead && onBulkMarkRead(); closeMenus(); }}
@@ -209,6 +210,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
                 Marcar como lidas
               </button>
+              ` : ''}
               <button
                 disabled=${selCount === 0}
                 onClick=${() => { onBulkMarkUnread && onBulkMarkUnread(); closeMenus(); }}
