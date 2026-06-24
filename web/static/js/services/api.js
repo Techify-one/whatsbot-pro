@@ -347,8 +347,12 @@ export async function sendPresence(phone, action = 'start', conversationId = nul
 
 // create=false apenas valida o número sem materializar o contato (usado pela
 // verificação ao vivo do modal "Nova conversa" — o contato só nasce no envio).
-export async function checkPhone(phone, create = true) {
-  return request('POST', '/api/contacts/check-phone', { phone, create });
+// channelId roteia a verificação pelo canal escolhido: só o GOWA consulta o
+// WhatsApp; Cloud API/Telegram não verificam antes de enviar (assumem válido).
+export async function checkPhone(phone, create = true, channelId = null) {
+  const body = { phone, create };
+  if (channelId) body.channel_id = channelId;
+  return request('POST', '/api/contacts/check-phone', body);
 }
 
 // ── Tags ─────────────────────────────────────────────────────────────
@@ -524,6 +528,37 @@ export async function createConversationTemplate(convId, payload) {
 // Delete a template (all languages) by name — gated by template.delete.
 export async function deleteConversationTemplate(convId, name) {
   return request('DELETE', `/api/conversations/${convId}/templates/${encodeURIComponent(name)}`);
+}
+
+// ── Templates / janela 24h ao iniciar conversa (plano 21) ─────────────
+// Versões CHANNEL-scoped (sem conversa ainda): a "Nova conversa" precisa saber a
+// janela e listar/enviar templates antes que a conversa exista.
+
+// Estado da janela de 24h para iniciar uma conversa em `channelId` com `phone`.
+// Retorna {templates_supported, session_open, has_conversation, conversation_id, last_inbound_ts}.
+export async function getChannelSessionState(channelId, phone) {
+  return request('GET', `/api/channels/${encodeURIComponent(channelId)}/session-state?phone=${encodeURIComponent(phone)}`);
+}
+
+// Lista os templates de um canal (mesmo shape de getConversationTemplates).
+export async function getChannelTemplates(channelId) {
+  return request('GET', `/api/channels/${encodeURIComponent(channelId)}/templates`);
+}
+
+// Envia um template aprovado para `phone` via `channelId` (cria a conversa).
+// body: {phone, template_name, language?, components?, preview_text?}
+export async function sendChannelTemplate(channelId, payload) {
+  return request('POST', `/api/channels/${encodeURIComponent(channelId)}/send-template`, payload);
+}
+
+// Cria um template no canal — gated por template.create.
+export async function createChannelTemplate(channelId, payload) {
+  return request('POST', `/api/channels/${encodeURIComponent(channelId)}/templates`, payload);
+}
+
+// Apaga um template (todas as línguas) no canal — gated por template.delete.
+export async function deleteChannelTemplate(channelId, name) {
+  return request('DELETE', `/api/channels/${encodeURIComponent(channelId)}/templates/${encodeURIComponent(name)}`);
 }
 
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────

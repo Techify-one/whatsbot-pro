@@ -3270,7 +3270,9 @@ class _FakeTplChannel(_Ch):
 
 
 from db.repositories import channel_repo as _tpl_chrepo
-_tpl_chrepo.create(id="cloud_test", provider="whatsapp_cloud", display_name="Cloud Test")
+# DB row so the channel-scoped endpoints (plano 21) resolve it (channel_repo.get
+# finds it; enabled=1 keeps it LIVE) plus the registry fixture below.
+_tpl_chrepo.create(id="cloud_test", provider="whatsapp_cloud", display_name="Cloud Test", enabled=1)
 _tpl_inbox = _ibx_repo.create(channel_id="cloud_test", name="Cloud Test")
 _tpl_ci = _ci_repo.get_or_create(inbox_id=_tpl_inbox["id"], contact_id=_cid, source_id=f"cloud:{_cid}")
 _tpl_conv = _conv_repo.create(inbox_id=_tpl_inbox["id"], contact_id=_cid, contact_inbox_id=_tpl_ci["id"])
@@ -3355,6 +3357,58 @@ check("conv messages (cloud, sem inbound) -> session_open=false (janela 24h)",
       r.json()["data"].get("session_open") is False)
 check("conv messages (default) -> templates_supported=false",
       client.get(f"/api/conversations/{_conv2['id']}/messages").json()["data"].get("templates_supported") is False)
+
+# ── Channel-scoped session-state + templates (plano 21: Nova conversa) ──
+# A "Nova conversa" precisa, ANTES de existir conversa, saber a janela de 24h e
+# (se fechada) listar/enviar templates pelo canal.
+section("Nova conversa — janela 24h + templates por canal (plano 21)")
+from db.repositories import contact_repo as _ct_repo21
+_ph21 = _ct_repo21.get(_cid)["phone"]
+
+# Cloud com conversa existente mas SEM inbound recente -> janela fechada (template).
+r = client.get(f"/api/channels/cloud_test/session-state?phone={_ph21}")
+check("session-state (cloud) -> 200", r.status_code == 200)
+_ss = r.json()["data"]
+check("session-state (cloud) -> templates_supported=true", _ss.get("templates_supported") is True)
+check("session-state (cloud, sem inbound) -> session_open=false", _ss.get("session_open") is False)
+check("session-state (cloud) -> has_conversation=true", _ss.get("has_conversation") is True)
+check("session-state (cloud) -> conversation_id do thread", _ss.get("conversation_id") == _tpl_conv["id"])
+
+# GOWA é sempre aberto e não tem templates.
+_ssg = client.get("/api/channels/default/session-state?phone=5511777770000").json()["data"]
+check("session-state (gowa) -> session_open=true (sempre aberto)", _ssg.get("session_open") is True)
+check("session-state (gowa) -> templates_supported=false", _ssg.get("templates_supported") is False)
+check("session-state (gowa, sem conversa) -> has_conversation=false", _ssg.get("has_conversation") is False)
+
+check("session-state sem phone -> 400",
+      client.get("/api/channels/cloud_test/session-state").status_code == 400)
+check("session-state canal inexistente -> 404",
+      client.get("/api/channels/naoexiste/session-state?phone=5511").status_code == 404)
+
+# Lista de templates por canal (mesmo shape do conversation-scoped).
+_rct = client.get("/api/channels/cloud_test/templates").json()["data"]
+check("channel templates (cloud) -> supported=true", _rct["supported"] is True)
+check("channel templates (cloud) -> lista boas_vindas",
+      any(t["name"] == "boas_vindas" for t in _rct["templates"]))
+check("channel templates (gowa) -> supported=false",
+      client.get("/api/channels/default/templates").json()["data"]["supported"] is False)
+
+# Enviar template por canal cria a conversa nova (telefone fresco, não polui _tpl_conv).
+r = client.post("/api/channels/cloud_test/send-template", json={
+    "phone": "5511888880000", "template_name": "boas_vindas", "language": "pt_BR",
+    "components": [{"type": "body", "parameters": [{"type": "text", "text": "Novo"}]}],
+    "preview_text": "Olá Novo, boas-vindas!"})
+check("channel send-template -> 200", r.status_code == 200)
+check("channel send-template -> msg_id", r.json()["data"].get("msg_id") == "tpl_msg_99")
+check("channel send-template sem phone -> 400",
+      client.post("/api/channels/cloud_test/send-template",
+                  json={"template_name": "x"}).status_code == 400)
+check("channel send-template sem template_name -> 400",
+      client.post("/api/channels/cloud_test/send-template",
+                  json={"phone": "5511"}).status_code == 400)
+check("channel send-template canal sem suporte (gowa) -> 400",
+      client.post("/api/channels/default/send-template",
+                  json={"phone": "5511", "template_name": "x"}).status_code == 400)
 
 # ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
 section("WhatsApp Cloud — list_templates parsing (Frente C)")

@@ -427,7 +427,7 @@ def create_app(
         if s.get("path", "").startswith("/")
     }
     _SPA_PATHS = (
-        {"/", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/atendimentos", "/ai", "/channels", "/auditoria", "/wizard"}
+        {"/", "/contatos", "/painel", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/atendimentos", "/ai", "/channels", "/auditoria", "/wizard"}
         | _PLUGIN_SPA_PATHS
     )
 
@@ -526,6 +526,7 @@ def create_app(
     # ── Frontend routes ────────────────────────────────────────────────
 
     @app.get("/")
+    @app.get("/contatos")
     @app.get("/painel")
     @app.get("/sandbox")
     @app.get("/costs")

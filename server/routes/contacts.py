@@ -103,7 +103,7 @@ def register_routes(app, deps):
             raise GOWASendError(res.error or "Falha no envio de mídia")
         return res.external_msg_id or ""
 
-    def _session_window_block(channel_id, conversation_id):
+    def _session_window_block(channel_id, conversation_id, phone=None):
         """Guard for the WhatsApp Cloud 24h free-text window (plano 02 P17).
 
         Returns a 409 ``_err`` when free text/media is NOT allowed right now —
@@ -114,6 +114,11 @@ def register_routes(app, deps):
         provider name. Outside the window only an approved template may be sent.
         The agentic auto-reply (webhook) does not pass through here and is
         inherently in-window, so it is never affected.
+
+        When ``conversation_id`` is absent (a BRAND-NEW conversation from the "Nova
+        conversa" modal — plano 21) but ``phone`` is given, resolves the contact's
+        latest conversation in this channel's inbox so an already-open 24h window is
+        honored (otherwise a fresh send would be wrongly blocked even mid-window).
         """
         caps = outbound.capabilities(channel_id)
         if not getattr(caps, "session_window_hours", 0):
@@ -124,6 +129,15 @@ def register_routes(app, deps):
                 last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
             except (TypeError, ValueError):
                 last_ts = None
+        elif phone:
+            contact = contact_repo.get_by_phone(phone)
+            if contact:
+                from db.repositories import inbox_repo
+                inbox = inbox_repo.get_by_channel(channel_id)
+                conv = (conversation_repo.get_latest_for_contact_inbox(
+                    contact["id"], inbox["id"]) if inbox else None)
+                if conv:
+                    last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
         if outbound.session_open(channel_id, last_ts):
             return None
         return _err(
@@ -174,8 +188,16 @@ def register_routes(app, deps):
         if not digits.startswith("55"):
             digits = "55" + digits
 
+        # Route the check through the SELECTED channel (plano 21): GOWA actually
+        # queries WhatsApp; Cloud API / Telegram can't verify before sending, so
+        # they inherit the base "assume valid". Without a channel_id (legacy
+        # "Iniciar conversa" da busca) keep the original GOWA behavior.
+        channel_id = (body.get("channel_id") or "").strip() or None
         try:
-            result = await asyncio.to_thread(gowa_client.check_phone, digits)
+            if channel_id:
+                result = await asyncio.to_thread(outbound.check_phone, channel_id, digits)
+            else:
+                result = await asyncio.to_thread(gowa_client.check_phone, digits)
         except GOWASendError as e:
             return _err(f"Erro ao verificar número: {e}")
 
@@ -399,7 +421,7 @@ def register_routes(app, deps):
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         block = await asyncio.to_thread(
-            _session_window_block, channel_id, body.get("conversation_id"))
+            _session_window_block, channel_id, body.get("conversation_id"), phone)
         if block:
             return block
         # Resolve @Name / @todos -> real mentions for group targets, only on channels
@@ -789,7 +811,7 @@ def register_routes(app, deps):
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         block = await asyncio.to_thread(
-            _session_window_block, channel_id, body.get("conversation_id"))
+            _session_window_block, channel_id, body.get("conversation_id"), phone)
         if block:
             return block
         # Track for echo-back filtering (key matches the webhook: channel:phone:text)
@@ -862,7 +884,7 @@ def register_routes(app, deps):
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
             if block:
                 return block
         suffix = Path(image.filename or "img.png").suffix or ".png"
@@ -949,7 +971,7 @@ def register_routes(app, deps):
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
             if block:
                 return block
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
@@ -1059,7 +1081,7 @@ def register_routes(app, deps):
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id)
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
             if block:
                 return block
         filename = document.filename or "arquivo"
