@@ -110,6 +110,17 @@ class Channel(ABC):
         """
         raise NotImplementedError(f"{self.provider} does not support deleting templates")
 
+    def check_phone(self, phone: str) -> dict:
+        """Whether ``phone`` is reachable on this channel.
+
+        Default for providers that CANNOT verify a number before sending (WhatsApp
+        Cloud API, Telegram, …): assume it's valid. Verification only exists on
+        linked-device providers (GOWA, via ``/user/check``), which override this.
+        Returns the GOWA-shaped dict (``registered``, ``canonical_phone``, ``name``)
+        so the caller stays provider-agnostic — never branches on provider name.
+        """
+        return {"registered": True, "canonical_phone": phone, "name": ""}
+
     # ── Inbound ──────────────────────────────────────────────────────
     @abstractmethod
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:

@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactTags } from '../../services/api.js';
 import { TagPicker } from './TagPicker.js';
@@ -13,6 +13,10 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
   const [showTags, setShowTags] = useState(false);
   const [showAssign, setShowAssign] = useState(false);
   const [confirmDeleteConv, setConfirmDeleteConv] = useState(false);
+  // Start at the raw click point; `useLayoutEffect` below measures the rendered
+  // menu and clamps it inside the viewport (the menu can be taller than the
+  // bottom gap, and grows when the Tags/Assign submenus expand).
+  const [pos, setPos] = useState({ left: x, top: y });
 
   // Conversation-level menu state (assign attendant / resolve). The sidebar rows
   // are contact-level, so `conv` is resolved lazily by the parent on right-click.
@@ -38,8 +42,27 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
   // Reset the inline delete confirmation when the menu targets a different row.
   useEffect(() => { setConfirmDeleteConv(false); }, [phone, conv && conv.id]);
 
-  const left = Math.min(x, window.innerWidth - 200);
-  const top = Math.min(y, window.innerHeight - 50);
+  // Keep the menu inside the viewport. Measure the real rendered size and clamp
+  // both axes; re-run whenever the content height changes (submenus toggling).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const margin = 8;
+    const rect = el.getBoundingClientRect();
+    let left = x;
+    let top = y;
+    if (left + rect.width + margin > window.innerWidth) {
+      left = Math.max(margin, window.innerWidth - rect.width - margin);
+    }
+    if (left < margin) left = margin;
+    if (top + rect.height + margin > window.innerHeight) {
+      top = Math.max(margin, window.innerHeight - rect.height - margin);
+    }
+    if (top < margin) top = margin;
+    setPos({ left, top });
+  }, [x, y, showTags, showAssign, confirmDeleteConv, conv && conv.id]);
+
+  const { left, top } = pos;
 
   async function toggleTag(tagName) {
     const current = contactTags || [];

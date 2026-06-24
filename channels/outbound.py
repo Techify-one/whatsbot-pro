@@ -62,6 +62,20 @@ class OutboundRouter:
             return False
         return (time.time() - last_inbound_ts) <= hours * 3600
 
+    def check_phone(self, channel_id: str, phone: str) -> dict:
+        """Verify ``phone`` on the conversation's channel (plano 21).
+
+        Routes to the channel instance so the "Nova conversa" check uses the RIGHT
+        provider: GOWA actually queries WhatsApp, while Cloud API / Telegram inherit
+        the base "assume valid" (they can't verify before sending). Without a live
+        instance the number is assumed valid rather than erroring. Provider errors
+        (e.g. GOWA HTTP 401 when disconnected) propagate so the UI shows them."""
+        inst = self.get(channel_id)
+        if inst is None:
+            logger.warning("OutboundRouter: no live channel %r for check_phone", channel_id)
+            return {"registered": True, "canonical_phone": phone, "name": ""}
+        return inst.check_phone(phone)
+
     # ── Sends ────────────────────────────────────────────────────────
     def send_text(self, channel_id: str, chat_id: str, text: str, *,
                   reply_to: str | None = None, mentions=None) -> SendResult:
