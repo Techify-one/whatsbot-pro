@@ -363,6 +363,28 @@ check("GET /api/contacts/{phone} -> messages expose conversation_id",
 check("GET /api/contacts/{phone} -> has tags", isinstance(data.get("tags"), list))
 check("GET /api/contacts/{phone} -> has observations", isinstance(data.get("info", {}).get("observations"), list))
 
+# Channel-scoped load (multicanal): escolher uma caixa de entrada NUNCA pode mostrar
+# a conversa de OUTRO canal do mesmo número. Com ?channel_id, o thread é escopado à
+# conversa daquele canal (vazio se não houver) — nunca funde as mensagens legadas.
+_unscoped = client.get("/api/contacts/5511999990001").json()["data"]["messages"]
+r = client.get("/api/contacts/5511999990001?channel_id=default")
+check("GET /api/contacts?channel_id -> 200", r.status_code == 200)
+_sd = r.json()["data"]
+check("GET /api/contacts?channel_id -> echoes channel", _sd.get("channel_id") == "default")
+check("GET /api/contacts?channel_id -> escopa (sem fundir canais)",
+      len(_sd.get("messages", [])) < len(_unscoped))
+check("GET /api/contacts?channel_id -> conversation_id presente na resposta",
+      "conversation_id" in _sd)
+# Compositor hints (plano 21): mesmo sem conversa, o thread channel-scoped informa se
+# o canal aceita template e se a janela de texto livre está aberta — senão o botão de
+# template some ao abrir um canal Cloud novo. GOWA (default) → sem template, sempre aberto.
+check("GET /api/contacts?channel_id -> templates_supported presente",
+      "templates_supported" in _sd)
+check("GET /api/contacts?channel_id -> session_open presente",
+      "session_open" in _sd)
+check("GET /api/contacts?channel_id=default (GOWA) -> sem template, janela aberta",
+      _sd.get("templates_supported") is False and _sd.get("session_open") is True)
+
 # Non-existent contact — auto-creates on GET
 r = client.get("/api/contacts/0000000000")
 check("GET /api/contacts/0000 -> auto-create 200", r.status_code == 200 and r.json()["ok"])

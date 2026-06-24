@@ -21,6 +21,7 @@ import {
   getChannelMembers,
   setChannelMembers,
   listChannelAssignableUsers,
+  listChannelProviders,
   getConfig,
 } from '../services/api.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
@@ -281,8 +282,15 @@ function Dot({ on }) {
 }
 
 // ── Create-channel modal ────────────────────────────────────────────
-function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
-  const [provider, setProvider] = useState('gowa');
+function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availableProviders }) {
+  // Only providers whose backing plugin is enabled are offered (GOWA is core and
+  // always present). Falls back to the full catalogue while the list is still
+  // loading. The badge/label catalogue (PROVIDERS) is unfiltered — existing
+  // channels keep their badge even if their provider's plugin is later disabled.
+  const providerEntries = Object.entries(PROVIDERS).filter(
+    ([key]) => !availableProviders || availableProviders.includes(key));
+  const [provider, setProvider] = useState(
+    () => (availableProviders && availableProviders[0]) || 'gowa');
   const [displayName, setDisplayName] = useState('');
   // Per-channel AI settings (config.ai), seeded from the current global config.
   const [ai, setAi] = useState(() => aiDefaults || aiDefaultsFrom({}));
@@ -353,7 +361,7 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults }) {
           <label class="block text-[12px] text-wa-secondary mb-1">Provider</label>
           <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
             value=${provider} onChange=${(e) => setProvider(e.target.value)} disabled=${busy}>
-            ${Object.entries(PROVIDERS).map(([key, meta]) => html`
+            ${providerEntries.map(([key, meta]) => html`
               <option key=${key} value=${key}>${meta.label}</option>
             `)}
           </select>
@@ -936,6 +944,9 @@ export default function ChannelsManager({ initialEntity }) {
   // Per-channel AI defaults, derived from the global config (plano 21): a new
   // channel inherits the values that used to be global.
   const [aiDefaults, setAiDefaults] = useState(() => aiDefaultsFrom({}));
+  // Providers offered in the "Novo canal" picker — only those whose plugin is
+  // enabled (null while loading → ChannelForm shows the full catalogue).
+  const [providers, setProviders] = useState(null);
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
@@ -956,6 +967,15 @@ export default function ChannelsManager({ initialEntity }) {
     (async () => {
       const res = await getConfig();
       if (alive && res && res.ok) setAiDefaults(aiDefaultsFrom(res.data));
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await listChannelProviders();
+      if (alive && res && res.ok) setProviders(res.data.providers || []);
     })();
     return () => { alive = false; };
   }, []);
@@ -1100,7 +1120,8 @@ export default function ChannelsManager({ initialEntity }) {
         onCancel=${() => setCreating(false)}
         busy=${createBusy}
         error=${createError}
-        aiDefaults=${aiDefaults} />` : null}
+        aiDefaults=${aiDefaults}
+        availableProviders=${providers} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 

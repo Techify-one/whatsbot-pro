@@ -181,13 +181,45 @@ export async function getContacts(q = '', archived = false) {
   return request('GET', `/api/contacts${query}`);
 }
 
+// Exporta todos os contatos como CSV (download). Retorna o Blob ou null.
+export async function exportContacts() {
+  const res = await fetch(`${BASE}/api/contacts/export`, {
+    method: 'GET',
+    headers: _authHeaders(),
+  });
+  if (res.status === 401) { handleUnauthorized(); return null; }
+  if (!res.ok) return null;
+  return res.blob();
+}
+
+// Importa contatos de um CSV. `file` é um File do input. Retorna {ok, data, error}.
+export async function importContacts(file) {
+  const form = new FormData();
+  form.append('file', file);
+  // Sem 'Content-Type': o browser define o boundary do multipart sozinho.
+  const res = await fetch(`${BASE}/api/contacts/import`, {
+    method: 'POST',
+    headers: _authHeaders(),
+    body: form,
+  });
+  if (res.status === 401) { handleUnauthorized(); return { ok: false, error: 'Não autenticado.' }; }
+  return res.json();
+}
+
 // Number of conversations with unread messages (for the browser-tab badge).
 export async function getUnreadCount() {
   return request('GET', '/api/contacts/unread-count');
 }
 
-export async function getContact(phone, markRead = true) {
-  const qs = markRead ? '' : '?mark_read=false';
+// `channelId` escopa o thread ao canal escolhido (multicanal): ao abrir uma
+// conversa NOVA pela caixa de entrada selecionada, antes de existir uma conversa
+// nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
+// nunca cai na conversa de outro canal do mesmo número.
+export async function getContact(phone, markRead = true, channelId = null) {
+  const params = [];
+  if (!markRead) params.push('mark_read=false');
+  if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
@@ -609,6 +641,12 @@ export async function deleteChannel(id) {
 // → {users:[{id,name,email,is_admin}]}
 export async function listChannelAssignableUsers() {
   return request('GET', '/api/channels/assignable-users');
+}
+
+// Providers disponíveis para CRIAR um canal — só os cujos plugins estão ativos
+// (GOWA é core e sempre presente). → {providers:["gowa", ...]}
+export async function listChannelProviders() {
+  return request('GET', '/api/channels/providers');
 }
 
 // Agentes (usuários do painel) que veem/recebem a inbox deste canal.
