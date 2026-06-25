@@ -3,8 +3,10 @@
 import asyncio
 import logging
 
+from fastapi import Request
 from fastapi.responses import Response
 
+from server.authz import permission_denied
 from server.helpers import _ok
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,10 @@ def register_routes(app, deps):
     state = deps.state
 
     @app.get("/api/qr")
-    async def get_qr():
+    async def get_qr(request: Request):
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
         if state.connected or not state.qr_data:
             return Response(status_code=204)
         return Response(
@@ -26,14 +31,20 @@ def register_routes(app, deps):
         )
 
     @app.post("/api/qr/refresh")
-    async def refresh_qr():
+    async def refresh_qr(request: Request):
         """Force a new QR code fetch on next poll cycle."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
         state.qr_data = None
         state.qr_fetched_at = 0
         return _ok({"message": "QR refresh solicitado."})
 
     @app.post("/api/whatsapp/reconnect")
-    async def reconnect():
+    async def reconnect(request: Request):
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
         await asyncio.to_thread(gowa_client.reconnect)
         state.qr_data = None
         state.qr_fetched_at = 0
@@ -45,7 +56,10 @@ def register_routes(app, deps):
         return _ok({"message": "Reconectando..."})
 
     @app.post("/api/whatsapp/logout")
-    async def logout():
+    async def logout(request: Request):
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
         await asyncio.to_thread(gowa_client.logout)
         state.qr_data = None
         state.qr_fetched_at = 0

@@ -19,6 +19,25 @@ export WHATSBOT_GOWA_PORT="${WHATSBOT_GOWA_PORT:-64996}"
 
 cd "$(dirname "$0")"
 
+# ===== Carrega variáveis do .env (se existir) =====
+# Loader próprio (NÃO usa `source`): o .env pode ter valores com espaço após o
+# '=' (ex.: "GIT_REPOSITORY_URL= git@..."), e `source` tentaria executar o valor
+# como comando. Aqui só exportamos pares KEY=VALUE, ignorando comentários/brancos.
+# Define DATABASE_URL (Postgres) que o db/engine.py lê com prioridade máxima.
+if [ -f ./.env ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in ''|\#*) continue ;; esac
+        case "$_line" in *=*) : ;; *) continue ;; esac
+        _key=${_line%%=*}
+        _val=${_line#*=}
+        _key="$(printf '%s' "$_key" | tr -d '[:space:]')"
+        while [ "${_val# }" != "$_val" ]; do _val="${_val# }"; done
+        case "$_key" in [A-Za-z_]*) export "$_key=$_val" ;; esac
+    done < ./.env
+    unset _line _key _val
+    echo "[linux_start] .env carregado (DATABASE_URL=${DATABASE_URL:+definido})"
+fi
+
 # Versão do GOWA que casa com o cliente em gowa/client.py e o Dockerfile.
 GOWA_VERSION="${GOWA_VERSION:-8.8.0}"
 
