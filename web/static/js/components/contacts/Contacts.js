@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState } from '../../services/api.js';
+import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState, listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter } from '../../services/api.js';
 import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -16,6 +16,9 @@ import { useWebSocket } from '../../hooks/useWebSocket.js';
 // localStorage (mesmo padrão do tema). No mobile a barra é `w-full` e estes
 // valores não se aplicam.
 const SIDEBAR_WIDTH_KEY = 'whatsbot_sidebar_width';
+// Persists which saved conversation-filter preset is applied, so it survives a
+// page reload (per device). Stores the preset id; re-applied once the presets load.
+const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
 const SIDEBAR_MIN_WIDTH = 280;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_DEFAULT_WIDTH = 400;
@@ -61,6 +64,11 @@ function clauseMatches(c, cl, now) {
     const ch = c.channel_id || 'default';
     return op === 'ne' ? ch !== value : ch === value;
   }
+  if (dim === 'status') {
+    if (value === 'all') return true;                // "Todas" → não restringe
+    const st = c.conv_status || 'open';              // 'open' | 'closed'
+    return op === 'ne' ? st !== value : st === value;
+  }
   if (dim === 'tag') {
     const has = (c.tags || []).includes(value);
     return op === 'ne' ? !has : has;
@@ -97,6 +105,35 @@ function matchesTags(c, tagFilter) {
   const ctags = c.tags || [];
   return tagFilter.some(t => ctags.includes(t));
 }
+// ── Saved-filter spec helpers ──────────────────────────────────────
+// A filter preset is the full snapshot {statusFilter, sortBy, tagFilter,
+// advFilters}. `normalizeSpec` drops the ephemeral clause ids and sorts
+// tags/clauses so two equivalent filters compare equal regardless of the order
+// they were built in. The assignment tab (Minhas / Não atribuídas / Todas) is
+// NOT part of a filter — it's a standalone view selector, so it never counts
+// toward "filtro ativo" nor is saved into a preset.
+const DEFAULT_SPEC = { statusFilter: 'open', sortBy: 'activity', tagFilter: [], advFilters: [] };
+
+function normalizeSpec(spec) {
+  const s = spec || {};
+  const tags = [...(s.tagFilter || [])].sort();
+  const adv = (s.advFilters || [])
+    .map(f => ({ dim: f.dim, op: f.op, value: String(f.value ?? '') }))
+    .sort((a, b) => (a.dim + a.op + a.value).localeCompare(b.dim + b.op + b.value));
+  return {
+    statusFilter: s.statusFilter || 'open',
+    sortBy: s.sortBy || 'activity',
+    tagFilter: tags,
+    advFilters: adv,
+  };
+}
+
+function specsEqual(a, b) {
+  return JSON.stringify(normalizeSpec(a)) === JSON.stringify(normalizeSpec(b));
+}
+
+function isDefaultSpec(spec) { return specsEqual(spec, DEFAULT_SPEC); }
+
 function sortContactsBy(list, sortBy) {
   const arr = [...list];
   const ts = (c) => c.last_message_ts || c.updated_at || 0;
@@ -239,6 +276,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const [sortBy, setSortBy] = useState('activity');           // activity|oldest|unread
   const [tagFilter, setTagFilter] = useState([]);             // funil simples (esquerda) — etiquetas
   const [advFilters, setAdvFilters] = useState([]);           // [{dim, op, value}] — filtro avançado (direita)
+  // Saved filter presets (Chatwoot-style): named snapshots persisted per user.
+  // `activeFilterId` = the preset currently applied (null = ad-hoc/none); the
+  // toolbar shows its name in the corner and flags it "modificado" once the live
+  // filters diverge from the saved spec.
+  const [savedFilters, setSavedFilters] = useState([]);
+  const [activeFilterId, setActiveFilterId] = useState(null);
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
   const [checkingPhone, setCheckingPhone] = useState(false);
@@ -903,8 +946,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // tab + sort produce what's actually rendered.
   const statusTagFiltered = useMemo(() => {
     const now = Date.now() / 1000;
+    // A status clause in the advanced filter overrides the status chip, so the two
+    // never AND into an empty list (e.g. chip "Abertas" + cláusula "Fechada").
+    const hasStatusClause = (advFilters || []).some(
+      cl => cl.dim === 'status' && cl.value !== '' && cl.value != null);
     return activeContacts.filter(c =>
-      matchesStatus(c, statusFilter)
+      (hasStatusClause || matchesStatus(c, statusFilter))
       && matchesTags(c, tagFilter)
       && matchesAdvFilters(c, advFilters, now));
   }, [activeContacts, statusFilter, tagFilter, advFilters]);
@@ -918,6 +965,123 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     [statusTagFiltered, assignmentTab, currentUserId, sortBy],
   );
   useEffect(() => { displayedRef.current = displayedContacts; }, [displayedContacts]);
+
+  // ── Saved filter presets ─────────────────────────────────────────
+  // Load the user's presets once on mount (best-effort; degrade silently). If a
+  // preset was active before a reload (persisted in localStorage), re-apply it so
+  // the inbox comes back filtered — not reset.
+  useEffect(() => {
+    listSavedFilters().then(res => {
+      if (!res || !res.ok || !Array.isArray(res.data)) return;
+      setSavedFilters(res.data);
+      let storedId = null;
+      try { storedId = parseInt(localStorage.getItem(ACTIVE_FILTER_KEY) || '', 10); } catch {}
+      if (storedId != null && !Number.isNaN(storedId)) {
+        const preset = res.data.find(f => f.id === storedId);
+        if (preset) applySavedFilter(preset);
+        else { try { localStorage.removeItem(ACTIVE_FILTER_KEY); } catch {} }
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Live filter snapshot — what a "Salvar filtro" would persist right now.
+  // assignmentTab is intentionally excluded: switching tabs is a view change,
+  // not a filter.
+  const currentSpec = useMemo(() => ({
+    statusFilter, sortBy, tagFilter, advFilters,
+  }), [statusFilter, sortBy, tagFilter, advFilters]);
+
+  // The applied preset (if any) + whether the live filters still match it. Once
+  // the operator tweaks anything, `modified` flips true so the chip can offer to
+  // update/save the preset.
+  const activeFilter = useMemo(() => {
+    if (activeFilterId == null) return null;
+    const preset = savedFilters.find(f => f.id === activeFilterId);
+    if (!preset) return null;
+    return { ...preset, modified: !specsEqual(currentSpec, preset.spec) };
+  }, [activeFilterId, savedFilters, currentSpec]);
+
+  // Drop the active-preset binding whenever the live filters are reset to the
+  // defaults (e.g. "Limpar filtros") — nothing is "in use" then.
+  useEffect(() => {
+    if (activeFilterId != null && isDefaultSpec(currentSpec)) {
+      setActiveFilterId(null);
+      try { localStorage.removeItem(ACTIVE_FILTER_KEY); } catch {}
+    }
+  }, [activeFilterId, currentSpec]);
+
+  // Apply a preset: hydrate every filter dimension from its spec and mark it active.
+  const applySavedFilter = useCallback((preset) => {
+    const s = normalizeSpec(preset.spec);
+    setStatusFilter(s.statusFilter);
+    setSortBy(s.sortBy);
+    setTagFilter(s.tagFilter);
+    // Re-seed clause ids so the advanced dialog can edit rows without collisions.
+    setAdvFilters(s.advFilters.map((f, i) => ({ ...f, id: `s${preset.id}_${i}` })));
+    setActiveFilterId(preset.id);
+    try { localStorage.setItem(ACTIVE_FILTER_KEY, String(preset.id)); } catch {}
+  }, []);
+
+  // Persist the current filters under a new name.
+  const saveCurrentFilter = useCallback(async (name) => {
+    const res = await createSavedFilter(name, normalizeSpec(currentSpec));
+    if (res && res.ok && res.data) {
+      setSavedFilters(prev => [...prev, res.data]);
+      setActiveFilterId(res.data.id);
+      try { localStorage.setItem(ACTIVE_FILTER_KEY, String(res.data.id)); } catch {}
+      return { ok: true };
+    }
+    return { ok: false, error: (res && res.error) || 'Falha ao salvar o filtro.' };
+  }, [currentSpec]);
+
+  // Overwrite an existing preset's spec with the current filters (the "modificado"
+  // chip → "Atualizar" action).
+  const overwriteSavedFilter = useCallback(async (id) => {
+    const res = await updateSavedFilter(id, { spec: normalizeSpec(currentSpec) });
+    if (res && res.ok && res.data) {
+      setSavedFilters(prev => prev.map(f => (f.id === id ? res.data : f)));
+      setActiveFilterId(id);
+      try { localStorage.setItem(ACTIVE_FILTER_KEY, String(id)); } catch {}
+      return { ok: true };
+    }
+    return { ok: false, error: (res && res.error) || 'Falha ao atualizar o filtro.' };
+  }, [currentSpec]);
+
+  const renameSavedFilter = useCallback(async (id, name) => {
+    const res = await updateSavedFilter(id, { name });
+    if (res && res.ok && res.data) {
+      setSavedFilters(prev => prev.map(f => (f.id === id ? res.data : f)));
+      return { ok: true };
+    }
+    return { ok: false, error: (res && res.error) || 'Falha ao renomear o filtro.' };
+  }, []);
+
+  const removeSavedFilter = useCallback(async (id) => {
+    const res = await deleteSavedFilter(id);
+    if (res && res.ok) {
+      setSavedFilters(prev => prev.filter(f => f.id !== id));
+      if (activeFilterId === id) {
+        setActiveFilterId(null);
+        try { localStorage.removeItem(ACTIVE_FILTER_KEY); } catch {}
+      }
+      return { ok: true };
+    }
+    return { ok: false, error: (res && res.error) || 'Falha ao excluir o filtro.' };
+  }, [activeFilterId]);
+
+  // Clear all live filters back to the defaults and unbind any active preset.
+  const clearAllFilters = useCallback(() => {
+    setStatusFilter('open');
+    setSortBy('activity');
+    setTagFilter([]);
+    setAdvFilters([]);
+    setActiveFilterId(null);
+    try { localStorage.removeItem(ACTIVE_FILTER_KEY); } catch {}
+  }, []);
+
+  // True when any filter dimension differs from the defaults — drives the "Salvar
+  // filtro" / "Limpar" affordances in the toolbar.
+  const anyFilterActive = useMemo(() => !isDefaultSpec(currentSpec), [currentSpec]);
 
   // Resolve the assignee badge for a row (human name, or AI agent name).
   const resolveAssignee = useCallback((c) => {
@@ -1481,6 +1645,15 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onTagFilterChange=${setTagFilter}
           advFilters=${advFilters}
           onAdvFiltersChange=${setAdvFilters}
+          savedFilters=${savedFilters}
+          activeFilter=${activeFilter}
+          anyFilterActive=${anyFilterActive}
+          onApplySavedFilter=${applySavedFilter}
+          onSaveCurrentFilter=${saveCurrentFilter}
+          onOverwriteSavedFilter=${overwriteSavedFilter}
+          onRenameSavedFilter=${renameSavedFilter}
+          onRemoveSavedFilter=${removeSavedFilter}
+          onClearFilters=${clearAllFilters}
           channels=${channelOptions}
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}

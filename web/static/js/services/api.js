@@ -427,6 +427,27 @@ export async function getConversation(id) {
   return request('GET', `/api/conversations/${id}`);
 }
 
+// ── Saved conversation filters (presets nomeados, por usuário) ──────
+// Each operator can name and persist one or more inbox filter presets. `spec`
+// is the full filter snapshot ({statusFilter, assignmentTab, sortBy, tagFilter,
+// advFilters}). Scoped server-side to the logged-in user (shared in legacy mode).
+
+export async function listSavedFilters() {
+  return request('GET', '/api/me/conversation-filters');
+}
+
+export async function createSavedFilter(name, spec) {
+  return request('POST', '/api/me/conversation-filters', { name, spec });
+}
+
+export async function updateSavedFilter(id, patch) {
+  return request('PUT', `/api/me/conversation-filters/${id}`, patch);
+}
+
+export async function deleteSavedFilter(id) {
+  return request('DELETE', `/api/me/conversation-filters/${id}`);
+}
+
 // Filter conversations via the flat-param GET endpoint. Builds the querystring
 // from `params`, dropping empty values and URL-encoding keys (cattr:<key>) and
 // values correctly. AND between distinct params; a comma-separated value (e.g.
