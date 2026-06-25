@@ -209,6 +209,18 @@ def create_app(
         seed_system_attributes()
     except Exception as e:
         logger.warning("System attributes seed failed: %s", e)
+    # Built-in (core) tools as editable code-in-DB rows: seed the rows from the
+    # current on-disk source (idempotent) and reconcile each tool's registration
+    # with its row (override edits, unregister disabled). This runs ALWAYS — core
+    # tools run in-process with the live ToolContext and are NOT gated by the
+    # code-in-DB kill-switch below.
+    try:
+        from agent import ai_builtin_tools
+        ai_builtin_tools.seed_builtin_tools()
+        ai_builtin_tools.register_builtin_overrides(agent_handler)
+    except Exception as e:
+        logger.warning("Built-in tools seed/register failed: %s", e)
+
     # ⚠️ Security gate: code-in-DB tools. RBAC (plano 03) e o runner isolado (P62/P67)
     # já existem — o código do banco roda num SUBPROCESSO one-shot isolado, NÃO mais
     # in-process. Mesmo assim a feature fica OFF por default; só roda com opt-in explícito.

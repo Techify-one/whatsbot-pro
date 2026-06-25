@@ -164,6 +164,51 @@ class AgentHandler:
             self._register_tool(schema, executor, plugin_id=None)
         return len(self._tool_executors) - before
 
+    def override_tool(
+        self,
+        schema: dict,
+        executor: callable,
+        plugin_id: str | None = None,
+    ) -> None:
+        """Replace an already-registered tool's schema + executor in place.
+
+        Unlike :meth:`_register_tool` (which no-ops on collision), this REPLACES
+        the existing entry. Used by the built-in tools installer when an operator
+        has edited a ``kind='builtin'`` core tool: the edited DB code overrides
+        the trusted on-disk baseline registered at construction.
+
+        ``_tool_schemas`` is rebuilt from ``_tool_originals`` by
+        :meth:`refresh_tool_overrides` (called once after install at startup), so
+        we only update the source dicts here.
+        """
+        try:
+            name = schema["function"]["name"]
+        except (KeyError, TypeError):
+            logger.warning("override_tool: invalid schema %s", schema)
+            return
+        clean = copy.deepcopy(schema)
+        default_label = clean.pop("display_label", None)
+        if default_label:
+            self._tool_default_labels[name] = str(default_label)
+        self._tool_originals[name] = clean
+        self._tool_executors[name] = (executor, plugin_id)
+        try:
+            tool_override_repo.ensure(name, plugin_id)
+        except Exception as e:
+            logger.warning("tool_overrides.ensure failed for %s: %s", name, e)
+
+    def unregister_tool(self, name: str) -> None:
+        """Remove a tool from the registry (e.g. a disabled built-in tool).
+
+        ``_tool_schemas`` is rebuilt from ``_tool_originals`` by
+        :meth:`refresh_tool_overrides`, so dropping it from the source dicts is
+        enough — the rebuilt effective list won't include it.
+        """
+        self._tool_originals.pop(name, None)
+        self._tool_executors.pop(name, None)
+        self._tool_default_labels.pop(name, None)
+        self._disabled_tools.discard(name)
+
     def register_plugin_prompts(
         self,
         plugin_id: str,
