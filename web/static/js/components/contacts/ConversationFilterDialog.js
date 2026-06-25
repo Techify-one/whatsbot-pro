@@ -1,9 +1,10 @@
 // Chatwoot-style "Filtrar conversas" builder (plano 10 FF6+). Opened from the funnel
 // icon in the inbox toolbar. Each row is a clause: [dimensão] [operador] [valor] [🗑].
-// Dimensions: Canais, Agente (atendente humano + IA), Etiqueta, Última atividade.
+// Dimensions: Status (Aberta/Fechada/Todas), Canais, Agente (atendente humano +
+// IA), Etiqueta, Última atividade.
 //
 // Operators:
-//   - Canais / Agente / Etiqueta → "Igual a" (eq) / "Diferente" (ne)
+//   - Status / Canais / Agente / Etiqueta → "Igual a" (eq) / "Diferente" (ne)
 //   - Última atividade → "É maior que" (gt) / "É menor que" (lt) / "É X dias antes"
 //     (days_before), todos sobre número de DIAS desde a última atividade.
 //
@@ -18,6 +19,7 @@ import htm from 'htm';
 const html = htm.bind(h);
 
 const DIMENSIONS = [
+  { key: 'status',   label: 'Status',           ops: ['eq', 'ne'],                valueType: 'status' },
   { key: 'channel',  label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'agent',    label: 'Agente',           ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',      label: 'Etiqueta',         ops: ['eq', 'ne'],                valueType: 'tag' },
@@ -43,6 +45,14 @@ const FIELD = 'wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-bord
 function ValueInput({ clause, channels, agentsUsers, agentsAi, tagNames, onChange }) {
   const t = DIM_BY_KEY[clause.dim].valueType;
   const cls = `${FIELD} flex-1 min-w-0`;
+  if (t === 'status') {
+    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
+      <option value="">+ Selecione uma opção...</option>
+      <option value="open">Aberta</option>
+      <option value="closed">Fechada</option>
+      <option value="all">Todas</option>
+    </select>`;
+  }
   if (t === 'channel') {
     return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
       <option value="">+ Selecione uma opção...</option>

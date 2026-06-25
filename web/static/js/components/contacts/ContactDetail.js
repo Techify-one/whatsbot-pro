@@ -1,12 +1,12 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage, getQuickReplies } from '../../services/api.js';
+import { sendMessage, retrySend, sendImage, sendAudio, sendDocument, sendPresence, sendPrivateMessage, getGroupMembers, deleteMessage, reactToMessage, getQuickReplies, generateImprovement } from '../../services/api.js';
 import { SendIcon, BackArrowIcon, DefaultAvatar, GroupAvatar, EmojiIcon, AttachIcon, MicIcon, SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon, StopIcon, InfoIcon } from './icons.js';
 import { formatBubbleTime, isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { AudioPlayer } from './AudioPlayer.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, copyToClipboard } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, ImproveIcon, copyToClipboard } from './MessageContextMenu.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
@@ -94,6 +94,11 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
   const [deleteDialog, setDeleteDialog] = useState(null);
+  // Improvement-analysis dialog for a flagged AI reply: { message } | null
+  const [improveDialog, setImproveDialog] = useState(null);
+  const [improveText, setImproveText] = useState('');
+  const [improveLoading, setImproveLoading] = useState(false);
+  const [improveError, setImproveError] = useState('');
   // Message being replied to (quoted) — drives the preview bar above the input.
   const [replyingTo, setReplyingTo] = useState(null);
   const chatRef = useRef(null);
@@ -401,6 +406,41 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   function copyMessageLink(message) {
     const url = messagePermalink(message);
     if (url) copyToClipboard(url);
+  }
+
+  // Open the "Gerar melhoria" dialog for a flagged AI reply.
+  function openImprove(message) {
+    setImproveDialog({ message });
+    setImproveText('');
+    setImproveError('');
+  }
+
+  // Ask the backend for an improvement analysis. The result arrives as a
+  // panel-only "system" message via the WS "new_message" event (no manual
+  // insertion needed), so we just close the dialog on success.
+  async function submitImprovement() {
+    if (!improveDialog || improveLoading) return;
+    setImproveLoading(true);
+    setImproveError('');
+    try {
+      const res = await generateImprovement(phone, {
+        message: {
+          content: improveDialog.message.content,
+          ts: improveDialog.message.ts,
+          _id: improveDialog.message._id,
+        },
+        feedback: improveText.trim(),
+      });
+      if (res && res.ok) {
+        setImproveDialog(null);
+        setImproveText('');
+      } else {
+        setImproveError((res && res.error) || 'Falha ao gerar a análise.');
+      }
+    } catch {
+      setImproveError('Erro de conexão.');
+    }
+    setImproveLoading(false);
   }
 
   // Locate a quoted message in the current thread by its GOWA msg_id.
@@ -985,6 +1025,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               const isSystemNotice = m.role === 'system_notice';
               const isToolCall = m.role === 'tool_call';
               const isConversationEvent = m.role === 'conversation_event';
+              const isSystem = m.role === 'system';
               const isError = m.role === 'error';
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
 
@@ -1092,6 +1133,26 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                     <div class="max-w-[80%] rounded-[10px] px-[12px] py-[5px] bg-wa-bg/80 border border-wa-border text-wa-secondary text-[12px] leading-[16px] text-center whitespace-pre-wrap shadow-sm">
                       <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
                       <span class="ml-[6px] text-[10px] opacity-70 whitespace-nowrap">${formatBubbleTime(m.ts)}</span>
+                    </div>
+                  </div>
+                `];
+              }
+
+              if (isSystem) {
+                // Painel-only "Sistema" card (ex.: análise de melhoria da IA).
+                // Cinza explícito — os tons gray-100/300 + text-gray-600/800 têm
+                // override no html.dark (custom.css), então fica legível nos 2 temas.
+                return [dateSeparator, html`
+                  <div key=${i} data-mid=${m._id} class="flex justify-center mt-[4px]">
+                    <div class="max-w-[80%] rounded-[10px] px-[12px] pt-[7px] pb-[8px] bg-gray-100 border border-gray-300 text-gray-800 text-[13px] leading-[19px] whitespace-pre-wrap relative shadow-sm">
+                      <span class="flex items-center gap-[5px] text-[10.5px] font-semibold mb-[3px] tracking-wide uppercase text-gray-600">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                        Sistema
+                      </span>
+                      <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
+                      <span class="block text-right mt-[3px] text-[10.5px] leading-[14px] whitespace-nowrap text-gray-600 opacity-70">
+                        ${formatBubbleTime(m.ts)}
+                      </span>
                     </div>
                   </div>
                 `];
@@ -1593,6 +1654,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               { label: 'Apagar', icon: TrashIcon, danger: true,
                 onClick: () => setDeleteDialog({ message: msgMenu.message, isFromMe: msgMenu.isFromMe }) },
             ]),
+            ...((!msgMenu.message.revoked && !sandbox
+                 && msgMenu.message.role === 'assistant'
+                 && msgMenu.message.status !== 'operator') ? [
+              { label: 'Gerar melhoria', icon: ImproveIcon,
+                onClick: () => openImprove(msgMenu.message) },
+            ] : []),
           ]}
           onClose=${() => setMsgMenu(null)}
         />
@@ -1622,6 +1689,62 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 onClick=${() => setDeleteDialog(null)}
                 class="px-[20px] py-[8px] rounded-full text-wa-teal text-[14px] font-medium hover:bg-wa-teal/10 transition-colors"
               >Cancelar</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+      ${improveDialog ? html`
+        <div
+          class="fixed inset-0 z-[130] bg-black/40 flex items-center justify-center p-4"
+          onClick=${() => { if (!improveLoading) setImproveDialog(null); }}
+        >
+          <div
+            class="bg-wa-panel rounded-lg shadow-xl w-[440px] max-w-[92vw] p-[22px] flex flex-col gap-3"
+            onClick=${(e) => e.stopPropagation()}
+          >
+            <div class="flex items-center gap-2 text-[15px] font-semibold text-wa-text">
+              <span class="text-wa-teal">${ImproveIcon}</span>
+              Gerar melhoria
+            </div>
+            <p class="text-[13px] text-wa-secondary -mt-1">
+              A IA vai analisar o prompt, as ferramentas e o histórico para sugerir
+              ajustes. O resultado aparece como uma mensagem de Sistema no chat
+              (visível só no painel).
+            </p>
+            <div>
+              <span class="block text-[12px] font-medium text-wa-secondary mb-1">Resposta marcada como incorreta</span>
+              <div class="max-h-[120px] overflow-y-auto rounded-md border border-wa-border bg-wa-bg px-3 py-2 text-[13px] text-wa-text whitespace-pre-wrap">
+                ${(improveDialog.message.content || '').trim() || '(sem conteúdo)'}
+              </div>
+            </div>
+            <div>
+              <label class="block text-[12px] font-medium text-wa-secondary mb-1">O que saiu errado? (opcional)</label>
+              <textarea
+                value=${improveText}
+                onInput=${(e) => setImproveText(e.target.value)}
+                disabled=${improveLoading}
+                rows="3"
+                placeholder="Ex.: respondeu o valor errado, não usou a ferramenta de agenda, tom inadequado…"
+                class="wa-field w-full px-3 py-2 rounded-md text-[13px] resize-none"
+              ></textarea>
+            </div>
+            ${improveError ? html`<div class="text-[12px] text-red-500">${improveError}</div>` : ''}
+            <div class="flex justify-end gap-2 mt-1">
+              <button
+                onClick=${() => setImproveDialog(null)}
+                disabled=${improveLoading}
+                class="px-4 py-2 rounded-lg text-[14px] font-medium text-wa-text bg-wa-bg hover:bg-wa-hover border border-wa-border transition-colors disabled:opacity-50"
+              >Cancelar</button>
+              <button
+                onClick=${submitImprovement}
+                disabled=${improveLoading}
+                class="px-4 py-2 rounded-lg text-[14px] font-medium text-white bg-wa-teal hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                ${improveLoading ? html`
+                  <span class="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>
+                  Analisando…
+                ` : 'Gerar análise'}
+              </button>
             </div>
           </div>
         </div>

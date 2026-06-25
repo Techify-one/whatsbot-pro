@@ -195,7 +195,7 @@ def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = F
 
 
 # Roles excluded from the last-message preview (mirrors contact_repo.list_contacts).
-_PREVIEW_EXCLUDED = ("transcription", "system_notice", "conversation_event")
+_PREVIEW_EXCLUDED = ("transcription", "system_notice", "conversation_event", "system")
 
 
 def _last_msg_subq(col):

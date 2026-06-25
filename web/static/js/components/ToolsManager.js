@@ -19,7 +19,7 @@ function PencilIcon() {
 }
 
 
-function EditModal({ tool, onClose, onSave, busy }) {
+export function EditModal({ tool, onClose, onSave, busy }) {
   const [description, setDescription] = useState(tool.current_description || '');
   const [label, setLabel] = useState(tool.current_label || '');
 

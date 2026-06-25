@@ -583,6 +583,10 @@ ai_tools = Table(
     metadata,
     # ``name`` is identity (== schema function name; == usage.call_type).
     Column("name", Text, primary_key=True),
+    # 'code' = user-authored, runs ISOLATED in a subprocess (gated by
+    # ai_tools_code_enabled). 'builtin' = a seeded core tool, runs IN-PROCESS
+    # with the live ToolContext (handler/DB), always available, can't be deleted.
+    Column("kind", Text, nullable=False, server_default="code"),
     Column("description", Text, nullable=False, server_default=""),
     # Python source materialised to storages/ai_tools/<name>.py and imported.
     Column("code", Text, nullable=False, server_default=""),
@@ -662,6 +666,25 @@ Index("idx_audit_created", audit_log.c.created_at)
 Index("idx_audit_actor", audit_log.c.actor_user_id, audit_log.c.created_at)
 Index("idx_audit_resource", audit_log.c.resource_type, audit_log.c.resource_id)
 Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
+
+
+# Saved conversation filters (Chatwoot-style): each user can name and persist one
+# or more inbox filter presets. ``user_id`` is NULL for legacy single-password
+# sessions (no user identity) → those presets are shared on that install. ``spec``
+# is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
+saved_conversation_filters = Table(
+    "saved_conversation_filters",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
+    Column("name", Text, nullable=False),
+    Column("spec", _json_type(), nullable=False),              # {statusFilter, assignmentTab, sortBy, tagFilter, advFilters}
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+Index("idx_saved_filters_user", saved_conversation_filters.c.user_id,
+      saved_conversation_filters.c.position)
 
 
 # Set of core table names — used by the SQLite → Postgres migration helper to
