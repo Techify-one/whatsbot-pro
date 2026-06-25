@@ -319,7 +319,6 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [wabaId, setWabaId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
-  const [appSecret, setAppSecret] = useState('');
   const [botToken, setBotToken] = useState('');
   // Agents to assign to the new channel's inbox (all providers). Loaded once.
   const [users, setUsers] = useState([]);
@@ -354,7 +353,6 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
       if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
       if (wabaId.trim()) credentials.waba_id = wabaId.trim();
       if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
-      if (appSecret.trim()) credentials.app_secret = appSecret.trim();
       if (Object.keys(credentials).length) payload.credentials = credentials;
     } else if (provider === 'telegram') {
       if (botToken.trim()) payload.credentials = { bot_token: botToken.trim() };
@@ -440,12 +438,6 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
                 class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
                 onClick=${() => setVerifyToken(randomToken())}>Sugerir</button>
             </div>
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">App Secret <span class="text-wa-secondary">(opcional)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="password" placeholder="App Secret do app Meta" value=${appSecret}
-              onInput=${(e) => setAppSecret(e.target.value)} />
           </div>
         ` : null}
 
@@ -796,7 +788,6 @@ function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
-  const [appSecret, setAppSecret] = useState('');
   // WABA ID is NOT a secret (returned in clear), so it is pre-filled and editable.
   const [wabaId, setWabaId] = useState((channel.credentials && channel.credentials.waba_id) || '');
 
@@ -838,7 +829,6 @@ function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
       if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
       if (wabaId.trim()) credentials.waba_id = wabaId.trim();
       if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
-      if (appSecret.trim()) credentials.app_secret = appSecret.trim();
       if (Object.keys(credentials).length) payload.credentials = credentials;
     }
     const r1 = await updateChannel(channel.id, payload);
@@ -901,9 +891,6 @@ function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
                 <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="text"
                   placeholder="Verify Token (manter)" value=${verifyToken}
                   onInput=${(e) => setVerifyToken(e.target.value)} />
-                <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]" type="password"
-                  placeholder="App Secret (manter)" value=${appSecret}
-                  onInput=${(e) => setAppSecret(e.target.value)} />
               </div>
             </div>
           ` : null}
