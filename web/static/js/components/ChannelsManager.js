@@ -108,6 +108,7 @@ function aiDefaultsFrom(cfg) {
     split_message_delay: cfg.split_message_delay ?? 2,
     transfer_alert_enabled: cfg.transfer_alert_enabled ?? true,
     transfer_alert_duration: cfg.transfer_alert_duration ?? 5,
+    ai_sequential_delay: cfg.ai_sequential_delay ?? 2,
   };
 }
 
@@ -218,6 +219,20 @@ function AiSettingsFields({ value, onChange }) {
               value=${ai.message_batch_delay ?? 3}
               onInput=${(e) => num('message_batch_delay', e.target.value, 0)} />
             <span class="text-[11px] text-wa-secondary">Espera antes de responder</span>
+          </div>
+        </div>
+
+        <!-- Modo sequencial (anti-bloqueio) — sempre ativo -->
+        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+          <div class="text-[13px] font-semibold text-wa-text">Resposta sequencial (sempre ativa)</div>
+          <span class="text-[11px] text-wa-secondary">A IA nunca responde dois contatos ao mesmo tempo neste canal — reduz o risco de bloqueio do WhatsApp/Meta por envios em paralelo.</span>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Intervalo entre respostas (s)</label>
+            <input type="number" min="2" step="1"
+              class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+              value=${ai.ai_sequential_delay ?? 2}
+              onInput=${(e) => num('ai_sequential_delay', e.target.value, 2)} />
+            <span class="block text-[11px] text-wa-secondary mt-1">Espera aplicada antes de cada resposta (mínimo 2s, sem limite).</span>
           </div>
         </div>
 
