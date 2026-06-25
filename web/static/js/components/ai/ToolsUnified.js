@@ -18,6 +18,7 @@ import {
   listTools,
   getTool,
   saveTool,
+  deleteTool,
   getToolHistory,
   rollbackTool,
 } from '../../services/api.js';
@@ -26,6 +27,30 @@ import { EditModal } from '../ToolsManager.js';
 import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
 
 const html = htm.bind(h);
+
+// In-app confirmation modal (substitui o confirm() nativo do navegador). Estilo
+// alinhado ao HistoryModal/EditModal, legível no modo escuro (classes wa-*).
+function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = false, busy = false, onConfirm, onClose }) {
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-sm"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[15px] font-medium text-wa-text">${title}</div>
+          <button class="text-wa-secondary hover:text-wa-text text-xl leading-none" onClick=${onClose}>×</button>
+        </div>
+        <div class="text-[13px] text-wa-secondary mb-4 break-words">${message}</div>
+        <div class="flex gap-2 justify-end">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onClose} disabled=${busy}>Cancelar</button>
+          <button
+            class="px-4 py-2 rounded-md text-[14px] text-white transition-opacity disabled:opacity-50 ${danger ? 'bg-red-600 hover:opacity-90' : 'bg-wa-teal hover:opacity-90'}"
+            onClick=${onConfirm} disabled=${busy}>${busy ? 'Aguarde…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
 
 export default function ToolsUnified({ initialEntity }) {
   const [regTools, setRegTools] = useState([]);   // /api/tools rows
@@ -43,6 +68,8 @@ export default function ToolsUnified({ initialEntity }) {
   const [historyFor, setHistoryFor] = useState(null); // {name, version}
   const [historyRows, setHistoryRows] = useState([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+
+  const [confirmDelete, setConfirmDelete] = useState(null); // row pendente de exclusão
 
   async function load() {
     setLoading(true);
@@ -89,6 +116,9 @@ export default function ToolsUnified({ initialEntity }) {
         reg,
         code,
         isCode: !!code,
+        // 'builtin' = core tool (não excluível); 'code' = code-in-DB do usuário
+        // (excluível); 'plugin' = tool de plugin (override-only).
+        kind: code ? (code.kind || 'code') : (reg && reg.plugin_id ? 'plugin' : 'core'),
         registered: !!reg,
         plugin_id: reg ? reg.plugin_id : null,
         label: (reg && reg.current_label) || name,
@@ -222,6 +252,19 @@ export default function ToolsUnified({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao reverter a versão.');
   }
 
+  // ---- Delete (code-in-DB criada pelo usuário; core/plugin não são excluíveis)
+  // Abre o modal de confirmação in-app (não usa o confirm() nativo do navegador).
+  async function confirmDeleteNow() {
+    const row = confirmDelete;
+    if (!row) return;
+    setBusy(row.name);
+    const res = await deleteTool(row.name);
+    setBusy(null);
+    setConfirmDelete(null);
+    if (res && res.ok) load();
+    else setError((res && res.error) || 'Falha ao excluir a tool.');
+  }
+
   const editingOverrideTool = editingOverride ? regTools.find((t) => t.name === editingOverride) : null;
   const showForm = creating || editingCode;
 
@@ -312,6 +355,13 @@ export default function ToolsUnified({ initialEntity }) {
                         class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                       >Histórico</button>
                     ` : null}
+                    ${r.kind === 'code' ? html`
+                      <button
+                        onClick=${() => setConfirmDelete(r)}
+                        disabled=${busy === r.name}
+                        class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
+                      >Excluir</button>
+                    ` : null}
                   </div>
                 </div>
               `;
@@ -337,6 +387,17 @@ export default function ToolsUnified({ initialEntity }) {
           busy=${historyBusy}
           onRollback=${handleRollback}
           onClose=${() => setHistoryFor(null)} />
+      ` : null}
+
+      ${confirmDelete ? html`
+        <${ConfirmModal}
+          title="Excluir tool"
+          message=${html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
+          confirmLabel="Excluir"
+          danger=${true}
+          busy=${busy === confirmDelete.name}
+          onConfirm=${confirmDeleteNow}
+          onClose=${() => setConfirmDelete(null)} />
       ` : null}
     </div>
   `;
