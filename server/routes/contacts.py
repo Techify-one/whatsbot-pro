@@ -802,6 +802,42 @@ def register_routes(app, deps):
         logger.info("[React] %s reacted %r to msg %s", phone, emoji, msg_id)
         return _ok({"message": "Reação registrada.", "reactions": reactions})
 
+    @app.post("/api/contacts/{phone}/improve")
+    async def improve_message(phone: str, body: dict, request: Request):
+        """Gerar uma análise de melhoria para uma resposta da IA marcada como incorreta.
+
+        O operador clica com o botão direito numa resposta da IA → "Gerar melhoria"
+        → (opcionalmente) escreve o que saiu errado → o LLM analisa o prompt, as
+        ferramentas e o histórico e devolve um diagnóstico + recomendações. O
+        resultado é salvo como mensagem ``role="system"`` (painel-only, excluída do
+        contexto do LLM) e transmitido via WS ``new_message``."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        target = body.get("message") or {}
+        feedback = (body.get("feedback") or "").strip()
+        if not (target.get("content") or "").strip():
+            return _err("Mensagem inválida para análise.")
+        try:
+            analysis = await asyncio.to_thread(
+                agent_handler.generate_improvement, phone, target, feedback)
+        except Exception as e:
+            logger.exception("Falha ao gerar análise de melhoria para %s", phone)
+            return _err(f"Erro ao gerar análise: {e}", status=500)
+
+        note_text = f"🔧 Análise de melhoria\n\n{analysis}"
+
+        def _save():
+            contact = agent_handler._get_contact(phone)
+            contact.add_message("system", note_text)
+            return message_repo.get_last(contact.id)
+
+        note_msg = await asyncio.to_thread(_save)
+        if not note_msg:
+            return _err("Falha ao salvar a análise.", status=500)
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+        return _ok(note_msg)
+
     async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True,
                               conversation_id=None):
         """Process a private message via the LLM.
