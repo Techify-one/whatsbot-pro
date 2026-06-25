@@ -583,6 +583,10 @@ ai_tools = Table(
     metadata,
     # ``name`` is identity (== schema function name; == usage.call_type).
     Column("name", Text, primary_key=True),
+    # 'code' = user-authored, runs ISOLATED in a subprocess (gated by
+    # ai_tools_code_enabled). 'builtin' = a seeded core tool, runs IN-PROCESS
+    # with the live ToolContext (handler/DB), always available, can't be deleted.
+    Column("kind", Text, nullable=False, server_default="code"),
     Column("description", Text, nullable=False, server_default=""),
     # Python source materialised to storages/ai_tools/<name>.py and imported.
     Column("code", Text, nullable=False, server_default=""),

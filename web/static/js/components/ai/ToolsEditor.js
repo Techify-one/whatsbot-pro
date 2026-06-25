@@ -33,7 +33,7 @@ function fmtDate(epoch) {
   } catch (e) { return String(epoch); }
 }
 
-function StatusBadge({ status }) {
+export function StatusBadge({ status }) {
   const map = {
     ok: ['bg-green-500/10', 'text-green-600', 'instalada'],
     pending: ['bg-amber-500/10', 'text-amber-600', 'pendente'],
@@ -44,7 +44,7 @@ function StatusBadge({ status }) {
   return html`<span class="px-2 py-0.5 rounded-full text-[11px] ${bg} ${fg}">${label}</span>`;
 }
 
-function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
+export function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
   return html`
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
       <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-md max-h-[80vh] overflow-y-auto"
@@ -76,7 +76,7 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
   `;
 }
 
-function ToolForm({ editing, onSave, onCancel, busy }) {
+export function ToolForm({ editing, onSave, onCancel, busy }) {
   const [name, setName] = useState(editing ? editing.name : '');
   const [description, setDescription] = useState(editing ? (editing.description || '') : '');
   const [code, setCode] = useState(editing ? (editing.code || '') : '');
