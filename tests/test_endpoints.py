@@ -1707,6 +1707,25 @@ _cm.add_message("user", "voltei")
 check("inbound reabre conversa closed",
       _conv_repo.get(_live_conv["id"])["status"] == "open")
 
+# reopen automático também emite conversation_status_changed (espelha o status no
+# painel ao vivo: a sidebar migra a conversa Resolvidas->Abertas e o painel
+# Atendimentos refetcha, sem refresh manual).
+import plugins.context as _pctx
+_orig_bcast = _pctx.broadcast
+_bcast_events = []
+_pctx.broadcast = lambda ev, data: _bcast_events.append((ev, data))
+try:
+    _conv_repo.set_status(_live_conv["id"], "closed")
+    _cm.add_message("user", "voltei de novo")
+finally:
+    _pctx.broadcast = _orig_bcast
+_reopen_evts = [d for ev, d in _bcast_events
+                if ev == "conversation_status_changed"
+                and d.get("conversation_id") == _live_conv["id"]]
+check("reopen automático emite conversation_status_changed", len(_reopen_evts) == 1)
+check("reopen broadcast status=open",
+      bool(_reopen_evts) and _reopen_evts[0]["status"] == "open")
+
 # Fatia 2: gate ai_active por conversa
 from server.routes.webhook import _conversation_ai_active as _ai_gate
 check("gate ai_active default True (ai_active=1)", _ai_gate(_cm) is True)

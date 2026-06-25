@@ -18,7 +18,7 @@ from server.helpers import _ok, _err
 logger = logging.getLogger(__name__)
 
 _LOGIN_WINDOW_SECONDS = 15 * 60
-_LOGIN_MAX_FAILURES = 5
+_LOGIN_MAX_FAILURES = 10
 
 
 def _client_ip(request: Request) -> str:

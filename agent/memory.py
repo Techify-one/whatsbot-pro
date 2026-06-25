@@ -221,6 +221,13 @@ class ContactMemory:
             # aviso (este é uma atualização de lista, não um card no fio).
             if transition == "created" and conv is not None:
                 self._broadcast_conversation_created(conversation_id, conv)
+            # Auto-reopen por mensagem do cliente: o backend já reativou a row
+            # (set_status 'open'), mas SEM um evento de status o painel não migra a
+            # conversa de "Resolvidas" → "Abertas" ao vivo (a sidebar mantém o
+            # conv_status antigo; o painel Atendimentos não refetcha). Espelha o novo
+            # status no painel — mesmo contrato do POST /status — sem tocar no banco.
+            elif transition == "reopened" and conv is not None:
+                self._broadcast_conversation_reopened(conversation_id, conv)
         # Touch updated_at
         contact_repo.update(self.id)
 
@@ -240,6 +247,31 @@ class ContactMemory:
             })
         except Exception:
             logger.exception("Falha ao emitir conversation_created para %s", self.phone)
+
+    def _broadcast_conversation_reopened(self, conversation_id: int, conv: dict):
+        """Fire a ``conversation_status_changed`` WS event when an inbound client
+        message auto-reopens a resolved conversation, so the sidebar and the
+        Atendimentos panel migrate the thread back to "Abertas" / refetch ao vivo —
+        sem esperar refresh manual. The row was already reopened in the DB; this só
+        espelha o estado no painel, usando o MESMO payload/contrato do POST /status
+        (já tratado por onConversationChanged no frontend). Fire-and-forget; lazy
+        import evita ciclo agent→server."""
+        try:
+            from plugins.context import broadcast
+            broadcast("conversation_status_changed", {
+                "conversation_id": conversation_id,
+                "display_id": conv.get("display_id"),
+                "contact_id": self.id,
+                "phone": self.phone,
+                "inbox_id": conv.get("inbox_id"),
+                "status": conv.get("status"),
+                "assignee_user_id": conv.get("assignee_user_id"),
+                "active_agent_key": conv.get("active_agent_key"),
+                "ai_active": conv.get("ai_active"),
+                "is_archived": conv.get("is_archived"),
+            })
+        except Exception:
+            logger.exception("Falha ao emitir conversation_status_changed para %s", self.phone)
 
     def _emit_lifecycle_notice(self, conversation_id: int, transition: str, conv: dict):
         """Surface an automatic conversation-lifecycle card (plano 12 §3).

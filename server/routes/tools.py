@@ -8,6 +8,7 @@ from fastapi import Request
 
 from db.repositories import tool_override_repo
 from plugins.events import emit as emit_event, emit_with_filter
+from server.authz import permission_denied
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -18,14 +19,20 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
 
     @app.get("/api/tools")
-    async def list_tools():
+    async def list_tools(request: Request):
         """Return every registered tool with override state merged."""
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         items = await asyncio.to_thread(agent_handler.list_tools)
         return _ok({"tools": items})
 
     @app.put("/api/tools/{name}")
     async def update_tool(name: str, request: Request):
         """Apply a partial override. ``description=null`` clears the override."""
+        denied = permission_denied(request, "agent.manage")
+        if denied:
+            return denied
         if name not in agent_handler.known_tool_names():
             return _err(f"Tool '{name}' não encontrada.", 404)
         body = await request.json()

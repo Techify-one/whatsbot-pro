@@ -5,7 +5,10 @@ import os
 from collections import deque
 from pathlib import Path
 
+from fastapi import Request
+
 from db.repositories import execution_repo
+from server.authz import permission_denied
 from server.helpers import _ok
 
 
@@ -33,18 +36,27 @@ def register_routes(app, deps):
     state = deps.state
 
     @app.get("/api/logs")
-    async def get_logs(limit: int = 200):
+    async def get_logs(request: Request, limit: int = 200):
         """Return recent log entries from the in-memory buffer."""
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         return _ok(memory_log_handler.get_logs(limit))
 
     @app.delete("/api/logs")
-    async def clear_logs():
+    async def clear_logs(request: Request):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         memory_log_handler.clear()
         return _ok({"message": "Logs limpos."})
 
     @app.get("/api/webhook-payloads")
-    async def get_webhook_payloads(limit: int = 50):
+    async def get_webhook_payloads(request: Request, limit: int = 50):
         """Return last N raw webhook payloads (from DB executions, fallback to in-memory)."""
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         try:
             entries = await asyncio.to_thread(execution_repo.get_webhook_payloads, limit)
             if entries:
@@ -56,11 +68,14 @@ def register_routes(app, deps):
         return _ok(entries[-limit:])
 
     @app.get("/api/gowa-logs")
-    async def get_gowa_logs(limit: int = 500):
+    async def get_gowa_logs(request: Request, limit: int = 500):
         """Return last N lines of the GOWA stdout/stderr debug log.
 
         Active only when WHATSBOT_GOWA_DEBUG=1 is set in the environment.
         """
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         limit = max(1, min(limit, 5000))
         path = _gowa_log_path()
         debug_on = os.environ.get("WHATSBOT_GOWA_DEBUG", "").strip().lower() in {
