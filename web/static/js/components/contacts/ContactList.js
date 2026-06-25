@@ -117,7 +117,8 @@ function highlightParts(text, query) {
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
-  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity }) {
+  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
+  savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   const selCount = (selectedKeys || []).length;
   // Selection is keyed per CONVERSATION row (rowKeyFor), not by phone — so the two
@@ -379,6 +380,15 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           onTagFilterChange=${onTagFilterChange}
           advFilters=${advFilters}
           onAdvFiltersChange=${onAdvFiltersChange}
+          savedFilters=${savedFilters}
+          activeFilter=${activeFilter}
+          anyFilterActive=${anyFilterActive}
+          onApplySavedFilter=${onApplySavedFilter}
+          onSaveCurrentFilter=${onSaveCurrentFilter}
+          onOverwriteSavedFilter=${onOverwriteSavedFilter}
+          onRenameSavedFilter=${onRenameSavedFilter}
+          onRemoveSavedFilter=${onRemoveSavedFilter}
+          onClearFilters=${onClearFilters}
           channels=${channels}
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}

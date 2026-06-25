@@ -738,6 +738,58 @@ check("PUT /tags (404) -> ok False + non-empty error",
       r.json().get("ok") is False and isinstance(r.json().get("error"), str) and r.json().get("error") != "")
 
 # ═══════════════════════════════════════════════════════════════════
+#  15a2. Saved conversation filters (presets nomeados por usuário)
+# ═══════════════════════════════════════════════════════════════════
+section("Saved conversation filters")
+
+# Empty to start
+r = client.get("/api/me/conversation-filters")
+check("GET /api/me/conversation-filters -> 200", r.status_code == 200)
+check("GET /api/me/conversation-filters -> empty list", r.json()["data"] == [])
+
+# Create
+_spec = {"statusFilter": "open", "assignmentTab": "mine", "sortBy": "activity",
+         "tagFilter": ["vip"], "advFilters": [{"dim": "tag", "op": "eq", "value": "vip"}]}
+r = client.post("/api/me/conversation-filters", json={"name": "VIPs abertas", "spec": _spec})
+check("POST /api/me/conversation-filters -> 200", r.status_code == 200)
+_fid = r.json()["data"]["id"]
+check("POST saved-filter -> name", r.json()["data"]["name"] == "VIPs abertas")
+check("POST saved-filter -> spec persisted", r.json()["data"]["spec"]["assignmentTab"] == "mine")
+
+# Missing name
+r = client.post("/api/me/conversation-filters", json={"name": "", "spec": _spec})
+check("POST saved-filter (no name) -> ok False", r.json().get("ok") is False)
+
+# Invalid spec
+r = client.post("/api/me/conversation-filters", json={"name": "ruim", "spec": "naodict"})
+check("POST saved-filter (bad spec) -> ok False", r.json().get("ok") is False)
+
+# Duplicate name (case-insensitive)
+r = client.post("/api/me/conversation-filters", json={"name": "vips abertas", "spec": _spec})
+check("POST saved-filter (dup name) -> ok False", r.json().get("ok") is False)
+
+# List now has one
+r = client.get("/api/me/conversation-filters")
+check("GET saved-filters -> 1 item", len(r.json()["data"]) == 1)
+
+# Rename + overwrite spec
+r = client.put(f"/api/me/conversation-filters/{_fid}",
+               json={"name": "VIPs", "spec": {**_spec, "statusFilter": "all"}})
+check("PUT saved-filter -> 200", r.status_code == 200)
+check("PUT saved-filter -> renamed", r.json()["data"]["name"] == "VIPs")
+check("PUT saved-filter -> spec updated", r.json()["data"]["spec"]["statusFilter"] == "all")
+
+# Update unknown id
+r = client.put("/api/me/conversation-filters/999999", json={"name": "x"})
+check("PUT saved-filter (404) -> 404", r.status_code == 404)
+
+# Delete
+r = client.delete(f"/api/me/conversation-filters/{_fid}")
+check("DELETE saved-filter -> 200", r.status_code == 200)
+r = client.delete(f"/api/me/conversation-filters/{_fid}")
+check("DELETE saved-filter (404) -> 404", r.status_code == 404)
+
+# ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
 # ═══════════════════════════════════════════════════════════════════
 section("Quick Replies")

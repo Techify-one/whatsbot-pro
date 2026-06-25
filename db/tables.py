@@ -664,6 +664,25 @@ Index("idx_audit_resource", audit_log.c.resource_type, audit_log.c.resource_id)
 Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
 
 
+# Saved conversation filters (Chatwoot-style): each user can name and persist one
+# or more inbox filter presets. ``user_id`` is NULL for legacy single-password
+# sessions (no user identity) → those presets are shared on that install. ``spec``
+# is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
+saved_conversation_filters = Table(
+    "saved_conversation_filters",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
+    Column("name", Text, nullable=False),
+    Column("spec", _json_type(), nullable=False),              # {statusFilter, assignmentTab, sortBy, tagFilter, advFilters}
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+Index("idx_saved_filters_user", saved_conversation_filters.c.user_id,
+      saved_conversation_filters.c.position)
+
+
 # Set of core table names — used by the SQLite → Postgres migration helper to
 # distinguish what belongs to the app vs. plugin-owned tables.
 CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)
