@@ -70,6 +70,7 @@ def main():
         audio_model=settings.get("audio_model", "google/gemini-3-flash-preview"),
         image_model=settings.get("image_model", "google/gemini-3-flash-preview"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
+        improvement_model=settings.get("improvement_model", ""),
         default_ai_enabled=settings.get("default_ai_enabled", True),
         # Motor de IA sempre ligado — não há mais toggle (removido da UI).
         ai_engine_enabled=True,

@@ -92,6 +92,7 @@ def register_routes(app, deps):
             "audio_model": settings.get("audio_model", "google/gemini-2.5-flash"),
             "image_model": settings.get("image_model", "google/gemini-2.5-flash"),
             "document_model": settings.get("document_model", "google/gemini-2.5-flash"),
+            "improvement_model": settings.get("improvement_model", ""),
             "system_prompt": settings.get("system_prompt", ""),
             "group_reply_mode": settings.get("group_reply_mode", "mention_only"),
             "auto_reply": settings.get("auto_reply", True),
@@ -130,7 +131,7 @@ def register_routes(app, deps):
             return denied
         allowed_keys = {
             "openrouter_api_key", "model", "audio_model", "image_model",
-            "document_model",
+            "document_model", "improvement_model",
             "audio_transcription_mode", "audio_transcription_target",
             "audio_transcription_chat_prefix", "image_transcription_enabled",
             "document_transcription_enabled",
@@ -184,6 +185,7 @@ def register_routes(app, deps):
             audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),
             image_model=settings.get("image_model", "google/gemini-2.5-flash"),
             document_model=settings.get("document_model", "google/gemini-2.5-flash"),
+            improvement_model=settings.get("improvement_model", ""),
             max_context_messages=settings.get("max_context_messages", 10),
             split_messages=settings.get("split_messages", True),
             default_ai_enabled=settings.get("default_ai_enabled", True),

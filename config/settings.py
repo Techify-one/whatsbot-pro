@@ -41,6 +41,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "WHATSBOT_AUDIO_MODEL": ("audio_model", str),
     "WHATSBOT_IMAGE_MODEL": ("image_model", str),
     "WHATSBOT_DOCUMENT_MODEL": ("document_model", str),
+    "WHATSBOT_IMPROVEMENT_MODEL": ("improvement_model", str),
     "WHATSBOT_SYSTEM_PROMPT": ("system_prompt", str),
     "WHATSBOT_WEB_PORT": ("web_port", int),
     "WHATSBOT_GOWA_PORT": ("gowa_port", int),
@@ -62,6 +63,9 @@ DEFAULT_CONFIG = {
     "audio_model": "google/gemini-2.5-flash",
     "image_model": "google/gemini-2.5-flash",
     "document_model": "google/gemini-2.5-flash",
+    # Model for the one-shot "improvement analysis" of a flagged AI reply.
+    # Empty → falls back to the chat ``model``. Override env WHATSBOT_IMPROVEMENT_MODEL.
+    "improvement_model": "",
     "system_prompt": (
         "Você é um assistente útil e amigável. Responda de forma clara e concisa. "
         "Use português brasileiro."
