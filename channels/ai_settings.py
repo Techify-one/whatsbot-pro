@@ -39,6 +39,7 @@ PER_CHANNEL_AI_KEYS = (
     "split_message_delay",
     "transfer_alert_enabled",
     "transfer_alert_duration",
+    "ai_sequential_delay",
 )
 
 _CACHE: dict[str, tuple[dict, float]] = {}

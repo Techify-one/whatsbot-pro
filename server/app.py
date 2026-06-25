@@ -17,7 +17,7 @@ from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import audit_purge_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, audit as audit_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, audit as audit_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -212,6 +212,18 @@ def create_app(
         seed_system_attributes()
     except Exception as e:
         logger.warning("System attributes seed failed: %s", e)
+    # Built-in (core) tools as editable code-in-DB rows: seed the rows from the
+    # current on-disk source (idempotent) and reconcile each tool's registration
+    # with its row (override edits, unregister disabled). This runs ALWAYS — core
+    # tools run in-process with the live ToolContext and are NOT gated by the
+    # code-in-DB kill-switch below.
+    try:
+        from agent import ai_builtin_tools
+        ai_builtin_tools.seed_builtin_tools()
+        ai_builtin_tools.register_builtin_overrides(agent_handler)
+    except Exception as e:
+        logger.warning("Built-in tools seed/register failed: %s", e)
+
     # ⚠️ Security gate: code-in-DB tools. RBAC (plano 03) e o runner isolado (P62/P67)
     # já existem — o código do banco roda num SUBPROCESSO one-shot isolado, NÃO mais
     # in-process. Mesmo assim a feature fica OFF por default; só roda com opt-in explícito.
@@ -612,6 +624,7 @@ def create_app(
     roles_routes.register_routes(app, deps)
     conversations_routes.register_routes(app, deps)
     conversation_labels_routes.register_routes(app, deps)
+    saved_filters_routes.register_routes(app, deps)
     webhook.register_routes(app, deps)
     logs.register_routes(app, deps)
     sandbox.register_routes(app, deps)

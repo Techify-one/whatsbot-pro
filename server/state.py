@@ -99,6 +99,11 @@ class AppState:
         self.presence_conv_cache: dict[str, tuple[int | None, float]] = {}
         # Active orchestrator task per contact (replaces batch_tasks for typing-aware flow)
         self.processing_tasks: dict[str, asyncio.Task] = {}
+        # Per-channel AI serialization lock (plano 21 — modo sequencial): quando o
+        # canal tem ``ai_sequential`` ligado, a IA processa um contato por vez nesse
+        # canal (evita bloqueios da Meta por enviar a vários clientes em paralelo).
+        # Keyed by channel_id; criado sob demanda dentro do loop async.
+        self.channel_ai_locks: dict[str, asyncio.Lock] = {}
         # True while a reply is mid-flight to WhatsApp — webhook must NOT cancel during this phase
         self.sending: dict[str, bool] = {}
         # Track recently sent replies to filter GOWA webhook echo-backs

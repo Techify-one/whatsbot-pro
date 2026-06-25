@@ -36,6 +36,7 @@ def _row_to_dict(row) -> dict:
     d["dependencies"] = _decode_list(d.get("dependencies"))
     d["installed_deps"] = _decode_list(d.get("installed_deps"))
     d["enabled"] = bool(d.get("enabled", 1))
+    d["kind"] = d.get("kind") or "code"
     return d
 
 
@@ -68,15 +69,22 @@ def save(
     code: str,
     dependencies: list[str] | None,
     enabled: bool,
+    kind: str | None = None,
 ) -> dict:
     """Upsert a tool (CRUD path). Resets install_status to ``pending`` so the
-    next boot re-validates, bumps version and snapshots to history."""
+    next boot re-validates, bumps version and snapshots to history.
+
+    ``kind`` defaults to the existing row's kind (or ``'code'`` for a new tool),
+    so editing a builtin tool keeps it a builtin.
+    """
     now = time.time()
     existing = get(name)
     version = (existing["version"] + 1) if existing else 1
+    row_kind = kind or (existing or {}).get("kind") or "code"
     deps = dependencies or []
     values = {
         "name": name,
+        "kind": row_kind,
         "description": description,
         "code": code,
         "dependencies": json.dumps(deps, ensure_ascii=False),
@@ -93,7 +101,7 @@ def save(
     with get_engine().begin() as conn:
         conn.execute(upsert(
             ai_tools, values, conflict_cols=["name"],
-            update_cols=["description", "code", "dependencies", "enabled",
+            update_cols=["kind", "description", "code", "dependencies", "enabled",
                          "install_status", "install_error", "version", "updated_at"],
         ))
         conn.execute(ai_tools_history.insert().values(

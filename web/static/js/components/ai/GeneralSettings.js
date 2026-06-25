@@ -11,6 +11,7 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
+import { ModelSelect } from '../ModelSelect.js';
 
 const html = htm.bind(h);
 
@@ -25,6 +26,8 @@ export default function GeneralSettings() {
   // Saldo
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
+  // Modelo da análise de melhoria ('' = usar o mesmo do chat).
+  const [improvementModel, setImprovementModel] = useState('');
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -36,6 +39,7 @@ export default function GeneralSettings() {
     setAutoReply(cfg.auto_reply ?? true);
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
+    setImprovementModel(cfg.improvement_model ?? '');
   }
 
   async function load() {
@@ -83,6 +87,7 @@ export default function GeneralSettings() {
       auto_reply: autoReply,
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
+      improvement_model: improvementModel || '',
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -206,6 +211,23 @@ export default function GeneralSettings() {
             <span class="text-[12px] text-wa-secondary block mt-1">Padrão: 0.50 (50 centavos de dólar)</span>
           </div>
         ` : null}
+      </div>
+
+      <!-- Modelo da sugestão de melhoria -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="text-[14px] font-semibold text-wa-text">Modelo de IA (sugestão de melhoria)</label>
+        <span class="text-[12px] text-wa-secondary">
+          Modelo usado ao gerar a análise de uma resposta marcada como incorreta
+          (botão direito numa resposta da IA → "Gerar melhoria"). Deixe em branco para
+          usar o mesmo modelo do chat.
+        </span>
+        <${ModelSelect}
+          value=${improvementModel}
+          onChange=${(v) => setImprovementModel(v || '')}
+          allowEmpty=${true}
+          emptyLabel="— Usar o mesmo do chat —"
+          placeholder="Usar o mesmo do chat"
+        />
       </div>
 
       <!-- Save -->

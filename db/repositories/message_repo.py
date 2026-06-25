@@ -80,7 +80,7 @@ def get_by_conversation(conversation_id: int) -> list[dict]:
 
 def get_context(contact_id: int, limit: int) -> list[dict]:
     """Return the last N eligible messages for LLM context."""
-    excluded = ("transcription", "tool_call", "system_notice", "conversation_event")
+    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
