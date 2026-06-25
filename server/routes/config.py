@@ -77,7 +77,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         allowed_keys = {
-            "openrouter_api_key", "model", "audio_model", "image_model",
+            "openrouter_api_key", "audio_model", "image_model",
             "document_model", "improvement_model",
             "audio_transcription_mode", "audio_transcription_target",
             "audio_transcription_chat_prefix", "image_transcription_enabled",
