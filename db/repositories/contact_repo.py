@@ -437,6 +437,7 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
                 .where(contact_tags.c.contact_id == row["id"])
                 .order_by(tags.c.name)
             ).all()
+            custom = row["custom_attributes"]
             results.append({
                 "phone": row["phone"],
                 "name": row["name"] or "",
@@ -446,6 +447,7 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
                 "address": row["address"] or "",
                 "ai_enabled": bool(row["ai_enabled"]),
                 "tags": [t.name for t in tag_rows],
+                "custom_attributes": custom if isinstance(custom, dict) else {},
             })
     return results
 
