@@ -1,0 +1,27 @@
+id: telegram
+name: Telegram
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Caixa de entrada Telegram via Bot API. Crie um bot no @BotFather, cole o token
+  em um canal "telegram" na tela Canais. Recebe por long-poll (sem host público,
+  ideal p/ desktop/EXE) ou por webhook. Construído 100% sobre o ponto de extensão
+  de canal — prova do sistema multi-canal dinâmico, sem tocar no core.
+author: WhatsBot
+entry:
+  channels: channels
+  lifecycle: lifecycle
+  routes: routes
+  settings: settings
+screens:
+  - id: telegram-config
+    title: Telegram
+    path: /telegram/config
+    icon: telegram
+    config: true
+    component: /plugins/telegram/static/telegram.js
+permissions:
+  - channel.provider
+  - runtime.task
+  - net.outbound
+dependencies: []

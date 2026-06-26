@@ -58,6 +58,11 @@ class WhatsAppCloudChannel(Channel):
                 media=True,
                 inbound_route="path",
                 session_window_hours=24,  # free text only within 24h of last inbound
+                # No QR / connect step: a channel missing these can never connect,
+                # send or receive (status() pings phone_number_id+access_token; the
+                # core webhook handshake needs verify_token). The core rejects
+                # creating one without them — see channels.base.required_credentials.
+                required_credentials=("access_token", "phone_number_id", "verify_token"),
             ),
         )
         self.registry = registry

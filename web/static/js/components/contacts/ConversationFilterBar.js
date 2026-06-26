@@ -34,6 +34,45 @@ const SORT_OPTIONS = [
   { value: 'unread', label: 'Não lidas primeiro' },
 ];
 
+// ── Removable per-dimension filter chips (plano 10 FF6) ─────────────────────────
+// Each active filter dimension renders as its own chip with an individual ✕, so the
+// operator can drop one filter without reopening a dropdown/modal. Labels reuse the
+// same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
+const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta', activity: 'Atividade' };
+
+function _channelLabel(channels, value) {
+  const ch = (channels || []).find(c => String(c.id) === String(value));
+  return ch ? ch.label : value;
+}
+function _agentLabel(agentsUsers, agentsAi, value) {
+  if (value === 'none') return 'Não atribuído';
+  if (typeof value === 'string' && value.startsWith('user:')) {
+    const u = (agentsUsers || []).find(x => String(x.id) === value.slice(5));
+    return u ? (u.name || u.email || value) : value;
+  }
+  if (typeof value === 'string' && value.startsWith('ai:')) {
+    const a = (agentsAi || []).find(x => x.agent_key === value.slice(3));
+    return a ? (a.display_name || value) : value;
+  }
+  return value;
+}
+function advClauseLabel(cl, channels, agentsUsers, agentsAi) {
+  const dimLabel = DIM_LABELS[cl.dim] || cl.dim;
+  if (cl.dim === 'activity') {
+    const days = `${cl.value} dia${String(cl.value) === '1' ? '' : 's'}`;
+    if (cl.op === 'gt') return `Atividade: há mais de ${days}`;
+    if (cl.op === 'lt') return `Atividade: há menos de ${days}`;
+    return `Atividade: há ${days}`;
+  }
+  let val;
+  if (cl.dim === 'status') val = STATUS_LABELS[cl.value] || cl.value;
+  else if (cl.dim === 'channel') val = _channelLabel(channels, cl.value);
+  else if (cl.dim === 'agent') val = _agentLabel(agentsUsers, agentsAi, cl.value);
+  else val = cl.value;   // tag
+  const sep = cl.op === 'ne' ? ' ≠ ' : ': ';
+  return `${dimLabel}${sep}${val}`;
+}
+
 function TuneIcon() {
   return html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
     <path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>`;
@@ -181,6 +220,30 @@ export function ConversationFilterBar({
   const advActive = advCount > 0;
   const presets = savedFilters || [];
 
+  // One removable chip per active filter dimension. Each ✕ drops only that filter,
+  // reusing the setters already owned by Contacts.js (no clear-all).
+  const filterChips = [];
+  if (statusFilter && statusFilter !== 'open') {
+    filterChips.push({
+      key: 'status',
+      label: `Status: ${STATUS_LABELS[statusFilter] || statusFilter}`,
+      onRemove: () => onStatusChange('open'),
+    });
+  }
+  (tagFilter || []).forEach(t => filterChips.push({
+    key: `tag:${t}`,
+    label: `Etiqueta: ${t}`,
+    onRemove: () => onTagFilterChange((tagFilter || []).filter(x => x !== t)),
+  }));
+  (advFilters || []).forEach(cl => {
+    if (cl.value === '' || cl.value == null) return;   // incomplete clause — not applied
+    filterChips.push({
+      key: `adv:${cl.id}`,
+      label: advClauseLabel(cl, channels, agentsUsers, agentsAi),
+      onRemove: () => onAdvFiltersChange((advFilters || []).filter(c => c.id !== cl.id)),
+    });
+  });
+
   // Escape fecha os modais centralizados (avançado / filtros salvos).
   useEffect(() => {
     if (!advOpen && !savedOpen) return;
@@ -269,22 +332,35 @@ export function ConversationFilterBar({
         </div>
       </div>
 
-      <!-- Chip do filtro salvo em uso (canto) -->
-      ${activeFilter ? html`
-        <div class="flex items-center gap-2 px-[12px] pt-1.5">
-          <span class="inline-flex items-center gap-1.5 max-w-full text-[12px] bg-wa-teal/15 text-wa-teal rounded-full pl-2 pr-1 py-0.5">
-            <${BookmarkIcon} />
-            <span class="truncate font-medium" title=${activeFilter.name}>${activeFilter.name}</span>
-            ${activeFilter.modified ? html`<span class="text-[11px] text-wa-secondary">(modificado)</span>` : null}
-            <button onClick=${() => onClearFilters && onClearFilters()} title="Remover filtro ativo"
-              class="w-[18px] h-[18px] flex items-center justify-center rounded-full hover:bg-wa-teal/20 transition-colors">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-            </button>
-          </span>
-          ${activeFilter.modified ? html`
-            <button onClick=${async () => { await onOverwriteSavedFilter(activeFilter.id); }}
-              class="text-[12px] text-wa-teal hover:underline">Atualizar</button>
+      <!-- Chips de filtros ativos: preset salvo (✕ remove o preset/limpa tudo) +
+           um chip removível POR dimensão (✕ remove só aquela). -->
+      ${(activeFilter || filterChips.length > 0) ? html`
+        <div class="flex flex-wrap items-center gap-1.5 px-[12px] pt-1.5">
+          ${activeFilter ? html`
+            <span class="inline-flex items-center gap-1.5 max-w-full text-[12px] bg-wa-teal/15 text-wa-teal rounded-full pl-2 pr-1 py-0.5">
+              <${BookmarkIcon} />
+              <span class="truncate font-medium" title=${activeFilter.name}>${activeFilter.name}</span>
+              ${activeFilter.modified ? html`<span class="text-[11px] text-wa-secondary">(modificado)</span>` : null}
+              <button onClick=${() => onClearFilters && onClearFilters()} title="Remover filtro salvo (limpa tudo)"
+                class="w-[18px] h-[18px] flex items-center justify-center rounded-full hover:bg-wa-teal/20 transition-colors">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </span>
+            ${activeFilter.modified ? html`
+              <button onClick=${async () => { await onOverwriteSavedFilter(activeFilter.id); }}
+                class="text-[12px] text-wa-teal hover:underline">Atualizar</button>
+            ` : null}
           ` : null}
+          ${filterChips.map(chip => html`
+            <span key=${chip.key}
+              class="inline-flex items-center gap-1 max-w-full text-[12px] bg-wa-hover text-wa-text rounded-full pl-2.5 pr-1 py-0.5 border border-wa-border">
+              <span class="truncate max-w-[180px]" title=${chip.label}>${chip.label}</span>
+              <button onClick=${chip.onRemove} title="Remover este filtro"
+                class="shrink-0 w-[16px] h-[16px] flex items-center justify-center rounded-full text-wa-secondary hover:bg-wa-border hover:text-red-400 transition-colors">
+                <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </span>
+          `)}
         </div>
       ` : null}
 

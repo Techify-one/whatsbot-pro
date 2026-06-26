@@ -96,7 +96,10 @@ def register_routes(app, deps):
         if not ok:
             return _err("plugin não encontrado", 404)
         # Emit BEFORE schedule_restart — after the os._exit the bus is gone.
-        emit_event("plugin.enabled", {"plugin_id": plugin_id, "ts": _time.time()})
+        emit_event("plugin.enabled", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "_audit_before": {"enabled": False}, "_audit_after": {"enabled": True},
+        })
         schedule_restart(reason=f"plugin {plugin_id} enabled")
         return _ok({"id": plugin_id, "enabled": True, "restarting": True})
 
@@ -110,7 +113,10 @@ def register_routes(app, deps):
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, False)
         if not ok:
             return _err("plugin não encontrado", 404)
-        emit_event("plugin.disabled", {"plugin_id": plugin_id, "ts": _time.time()})
+        emit_event("plugin.disabled", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "_audit_before": {"enabled": True}, "_audit_after": {"enabled": False},
+        })
         # plano 09 Fase 2: run the plugin's teardown BEFORE the hard exit.
         schedule_restart(
             reason=f"plugin {plugin_id} disabled",
@@ -189,12 +195,19 @@ def register_routes(app, deps):
         except Exception as e:
             return _err(f"valores inválidos: {e}")
         prefix = f"plugin.{plugin_id}."
-        kv = {prefix + k: v for k, v in validated.model_dump().items()}
+        new_values = validated.model_dump()
+        kv = {prefix + k: v for k, v in new_values.items()}
+        # Snapshot the prior values (namespaced config, falling back to defaults)
+        # BEFORE the write, for the audit "before".
+        all_cfg = await asyncio.to_thread(config_repo.get_all)
+        defaults = loaded.settings_cls().model_dump()
+        before_values = {k: all_cfg.get(prefix + k, defaults.get(k)) for k in new_values}
         await asyncio.to_thread(config_repo.set_many, kv)
         emit_event("plugin.settings.changed", {
             "plugin_id": plugin_id,
-            "values": validated.model_dump(),
+            "values": new_values,
             "ts": _time.time(),
+            "_audit_before": before_values,
         })
         return _ok({"id": plugin_id, "values": validated.model_dump()})
 

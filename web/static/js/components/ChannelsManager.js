@@ -44,6 +44,25 @@ function providerMeta(provider) {
   return PROVIDERS[provider] || { label: provider || '—', tint: 'bg-gray-100 text-wa-secondary' };
 }
 
+// Credential keys each provider MUST have to ever connect (anti zombie-channel).
+// The backend is the source of truth (capabilities → GET /api/channels/providers);
+// this mirror only gates the form before that fetch resolves. GOWA omitted = no
+// required creds (it bootstraps via QR).
+const REQUIRED_CREDS_FALLBACK = {
+  whatsapp_cloud: ['access_token', 'phone_number_id', 'verify_token'],
+  telegram: ['bot_token'],
+};
+
+// Friendly PT-BR label for a credential key (used in the form + card warning).
+const CRED_LABELS = {
+  access_token: 'Access Token',
+  phone_number_id: 'Phone Number ID',
+  verify_token: 'Verify Token',
+  waba_id: 'WABA ID',
+  bot_token: 'Bot Token',
+};
+const credLabel = (k) => CRED_LABELS[k] || k;
+
 // Which WhatsApp chat types (by JID suffix) a GOWA channel surfaces as
 // conversations. The keys are stable identifiers persisted in the channel's
 // config (config.allowed_jid_types) and mirror channels/jid.py on the backend.
@@ -299,7 +318,7 @@ function Dot({ on }) {
 }
 
 // ── Create-channel modal ────────────────────────────────────────────
-function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availableProviders }) {
+function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availableProviders, requiredCreds }) {
   // Only providers whose backing plugin is enabled are offered (GOWA is core and
   // always present). Falls back to the full catalogue while the list is still
   // loading. The badge/label catalogue (PROVIDERS) is unfiltered — existing
@@ -337,7 +356,17 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
 
   // O ID do canal é gerado automaticamente pelo backend (o usuário só escolhe o
   // nome de exibição). GOWA reusa o device id; demais providers, "<provider>_<hex>".
-  const canSave = !busy && displayName.trim();
+  // Credenciais obrigatórias do provider (capability-driven; backend é a fonte da
+  // verdade, com fallback local enquanto a lista não chega) — sem elas o canal
+  // nasceria "morto" (nunca conecta). O backend também rejeita; aqui é só UX.
+  const required = (requiredCreds && requiredCreds[provider]) || REQUIRED_CREDS_FALLBACK[provider] || [];
+  const credValues = {
+    access_token: accessToken, phone_number_id: phoneNumberId,
+    waba_id: wabaId, verify_token: verifyToken, bot_token: botToken,
+  };
+  const credsOk = required.every((k) => (credValues[k] || '').trim());
+  const isRequired = (k) => required.includes(k);
+  const canSave = !busy && displayName.trim() && credsOk;
 
   function buildPayload() {
     const payload = {
@@ -410,13 +439,13 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
 
         ${provider === 'whatsapp_cloud' ? html`
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Access Token</label>
+            <label class="block text-[12px] text-wa-secondary mb-1">Access Token${isRequired('access_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="password" placeholder="EAAB..." value=${accessToken}
               onInput=${(e) => setAccessToken(e.target.value)} />
           </div>
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Phone Number ID</label>
+            <label class="block text-[12px] text-wa-secondary mb-1">Phone Number ID${isRequired('phone_number_id') ? html`<span class="text-red-500"> *</span>` : null}</label>
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="text" placeholder="ID do número (Meta)" value=${phoneNumberId}
               onInput=${(e) => setPhoneNumberId(e.target.value)} />
@@ -431,7 +460,7 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
             </div>
           </div>
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Verify Token</label>
+            <label class="block text-[12px] text-wa-secondary mb-1">Verify Token${isRequired('verify_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
             <div class="flex gap-2">
               <input class="wa-field flex-1 px-3 py-2 rounded-md text-[14px]"
                 type="text" placeholder="token de verificação do webhook" value=${verifyToken}
@@ -445,7 +474,7 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
 
         ${provider === 'telegram' ? html`
           <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Bot Token</label>
+            <label class="block text-[12px] text-wa-secondary mb-1">Bot Token${isRequired('bot_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="password" placeholder="123456:ABC-DEF... (do @BotFather)" value=${botToken}
               onInput=${(e) => setBotToken(e.target.value)} />
@@ -712,12 +741,22 @@ function QRConnect({ channelId, displayName, onClose }) {
 }
 
 // ── Single channel card ─────────────────────────────────────────────
-function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onEdit, busyId }) {
+function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onEdit, busyId, requiredCreds }) {
   const meta = providerMeta(channel.provider);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
   const busy = busyId === channel.id;
   const canConnect = channel.provider === 'gowa' && !channel.logged_in;
+  // Zombie-channel detection: required credentials this channel is missing
+  // (capability-driven via the providers fetch, local fallback otherwise). A
+  // credential-only provider missing these can never connect — flag it with a
+  // shortcut to Editar instead of leaving the raw "missing_credentials" error.
+  const required = (requiredCreds && requiredCreds[channel.provider])
+    || REQUIRED_CREDS_FALLBACK[channel.provider] || [];
+  const missingCreds = required.filter((k) => !cred[k]);
+  // The backend status() returns this raw code for the same condition; the
+  // friendly warning below replaces it, so don't show both.
+  const showRawError = channel.last_error && channel.last_error !== 'missing_credentials';
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex items-start gap-3 flex-wrap">
@@ -751,7 +790,16 @@ function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnec
           </div>
         ` : null}
 
-        ${channel.last_error ? html`
+        ${missingCreds.length ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mt-2 break-words">
+            ⚠️ Credenciais faltando: ${missingCreds.map(credLabel).join(', ')}.
+            Este canal não vai conectar até serem preenchidas —
+            <button class="underline hover:no-underline font-medium"
+              onClick=${() => onEdit(channel)}>editar agora</button>.
+          </div>
+        ` : null}
+
+        ${showRawError ? html`
           <div class="text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-md px-2 py-1 mt-2 break-words">
             ${channel.last_error}
           </div>
@@ -1070,6 +1118,9 @@ export default function ChannelsManager({ initialEntity }) {
   // Providers offered in the "Novo canal" picker — only those whose plugin is
   // enabled (null while loading → ChannelForm shows the full catalogue).
   const [providers, setProviders] = useState(null);
+  // Required credentials per provider (capability-driven, from the providers
+  // fetch) — gates the create form and flags zombie channels on the cards.
+  const [requiredCreds, setRequiredCreds] = useState({});
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
@@ -1098,7 +1149,10 @@ export default function ChannelsManager({ initialEntity }) {
     let alive = true;
     (async () => {
       const res = await listChannelProviders();
-      if (alive && res && res.ok) setProviders(res.data.providers || []);
+      if (alive && res && res.ok) {
+        setProviders(res.data.providers || []);
+        setRequiredCreds(res.data.required_credentials || {});
+      }
     })();
     return () => { alive = false; };
   }, []);
@@ -1279,7 +1333,8 @@ export default function ChannelsManager({ initialEntity }) {
         busy=${createBusy}
         error=${createError}
         aiDefaults=${aiDefaults}
-        availableProviders=${providers} />` : null}
+        availableProviders=${providers}
+        requiredCreds=${requiredCreds} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -1300,7 +1355,8 @@ export default function ChannelsManager({ initialEntity }) {
             onRefresh=${handleRefresh}
             onConnect=${handleConnect}
             onEdit=${handleEdit}
-            busyId=${busyId} />
+            busyId=${busyId}
+            requiredCreds=${requiredCreds} />
         `)}
       </div>
 

@@ -52,6 +52,7 @@ def register_routes(app, deps):
             return _err("Nome da tag deve ter no máximo 30 caracteres.")
         if new_name and new_name != name and agent_handler.tag_registry.get(new_name):
             return _err(f"Tag '{new_name}' já existe.")
+        old_tag = agent_handler.tag_registry.get(name)   # snapshot for the audit "before"
         if not agent_handler.tag_registry.update(name, new_name=new_name, color=color):
             return _err(f"Tag '{name}' não encontrada.", 404)
         # Tag rename in contact_tags is handled automatically by tag_repo.update()
@@ -69,12 +70,14 @@ def register_routes(app, deps):
             "old_name": name, "name": final_name,
             "color": tag_data["color"] if tag_data else color,
             "ts": time.time(),
+            "_audit_before": {"name": name, "color": (old_tag or {}).get("color")},
         })
         return _ok({"name": final_name, "color": tag_data["color"] if tag_data else color})
 
     @app.delete("/api/tags/{name}")
     async def delete_tag(name: str):
         """Delete a global tag and remove it from all contacts."""
+        old_tag = agent_handler.tag_registry.get(name)   # snapshot for the audit "before"
         if not agent_handler.tag_registry.delete(name):
             return _err(f"Tag '{name}' não encontrada.", 404)
         # tag_repo.delete() already handles DELETE FROM contact_tags
@@ -83,7 +86,10 @@ def register_routes(app, deps):
             if name in contact.tags:
                 contact.tags.remove(name)
         await ws_manager.broadcast("tags_changed", agent_handler.tag_registry.all())
-        await emit_with_filter("tag.deleted", {"name": name, "ts": time.time()})
+        await emit_with_filter("tag.deleted", {
+            "name": name, "ts": time.time(),
+            "_audit_before": {"name": name, "color": (old_tag or {}).get("color")},
+        })
         return _ok({"deleted": name})
 
     @app.put("/api/contacts/{phone}/tags")
