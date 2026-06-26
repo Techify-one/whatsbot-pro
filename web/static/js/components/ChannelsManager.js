@@ -22,6 +22,8 @@ import {
   setChannelMembers,
   listChannelAssignableUsers,
   listChannelProviders,
+  telegramAutoconfigure,
+  telegramChannelStatus,
   getConfig,
 } from '../services/api.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
@@ -481,6 +483,19 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
   `;
 }
 
+// Copy `text` via the legacy execCommand path (navigator.clipboard is unavailable
+// over plain HTTP / non-secure contexts, common when the panel is on a LAN IP).
+function fallbackCopyText(text, onOk) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok && onOk) onOk();
+  } catch (e) { /* clipboard truly unavailable */ }
+}
+
 // ── Webhook-URL notice (shown after creating a whatsapp_cloud channel) ──
 function WebhookNotice({ channelId, onDismiss }) {
   const url = `${window.location.origin}/api/webhook/whatsapp_cloud/${channelId}`;
@@ -524,6 +539,59 @@ function WebhookNotice({ channelId, onDismiss }) {
         <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
           onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
       </div>
+      <div class="flex justify-end mt-3">
+        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+          onClick=${onDismiss}>Fechar</button>
+      </div>
+    </div>
+  `;
+}
+
+// ── Telegram post-create notice ─────────────────────────────────────
+// Shown right after creating a Telegram inbox. The backend (autoconfigure)
+// already detected the domain and either registered the webhook or fell back to
+// long-poll; here we surface the webhook URL (copiable) + the resulting mode so
+// the user can confirm. ``result`` = {mode, webhook_url, registered, reason}.
+function TelegramWebhookNotice({ result, onDismiss }) {
+  const url = (result && result.webhook_url) || '';
+  const isWebhook = result && result.mode === 'webhook';
+  const [copied, setCopied] = useState(false);
+  function flagCopied() { setCopied(true); setTimeout(() => setCopied(false), 2000); }
+  function fallbackCopy() {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) flagCopied();
+    } catch (e) { /* clipboard truly unavailable */ }
+  }
+  function copy() {
+    if (!url) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(flagCopied).catch(fallbackCopy);
+    } else { fallbackCopy(); }
+  }
+  const tint = isWebhook ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200';
+  const titleColor = isWebhook ? 'text-green-700' : 'text-amber-700';
+  return html`
+    <div class=${`${tint} border rounded-lg p-4 mb-4`}>
+      <div class=${`text-[14px] font-medium ${titleColor} mb-1`}>
+        ${isWebhook ? '✓ Inbox criada — webhook registrado automaticamente'
+                    : 'Inbox criada — usando long-poll'}
+      </div>
+      <p class="text-[13px] text-wa-text mb-2">
+        ${isWebhook
+          ? html`O Telegram já está entregando as mensagens neste endereço. Guarde a URL caso precise reconfigurar:`
+          : html`Não foi possível usar webhook${result && result.reason ? html` (${result.reason})` : ''} — a inbox recebe por <span class="font-medium">long-poll</span> e já está funcionando. Para usar webhook é necessário um domínio público (HTTPS).`}
+      </p>
+      ${isWebhook ? html`
+        <div class="flex gap-2 items-center flex-wrap">
+          <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url || '—'}</code>
+          <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+            onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
+        </div>` : null}
       <div class="flex justify-end mt-3">
         <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
           onClick=${onDismiss}>Fechar</button>
@@ -644,7 +712,7 @@ function QRConnect({ channelId, displayName, onClose }) {
 }
 
 // ── Single channel card ─────────────────────────────────────────────
-function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, onEdit, busyId }) {
+function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onEdit, busyId }) {
   const meta = providerMeta(channel.provider);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
@@ -705,6 +773,8 @@ function ChannelCard({ channel, onToggle, onDelete, onRefresh, onConnect, onEdit
           ${channel.enabled ? 'Desativar' : 'Ativar'}</button>
         <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onDelete(channel)} disabled=${busy}>Arquivar</button>
+        <button class="px-2 py-1 rounded-md text-[13px] text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+          onClick=${() => onPurge(channel)} disabled=${busy}>Excluir</button>
       </div>
     </div>
   `;
@@ -769,6 +839,32 @@ function AgentPicker({ users, selected, onChange }) {
 function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
   const isCloud = channel.provider === 'whatsapp_cloud';
   const isGowa = channel.provider === 'gowa';
+  const isTelegram = channel.provider === 'telegram';
+  // Telegram: live inbound status (per-channel mode + the actually-registered
+  // webhook URL from getWebhookInfo), so a webhook channel can show + copy its URL.
+  const [tgStatus, setTgStatus] = useState(null);
+  const [tgCopied, setTgCopied] = useState(false);
+  useEffect(() => {
+    if (!isTelegram) return;
+    let alive = true;
+    (async () => {
+      const res = await telegramChannelStatus(channel.id);
+      if (alive && res && res.ok) setTgStatus(res.data || null);
+    })();
+    return () => { alive = false; };
+  }, [isTelegram, channel.id]);
+  // Webhook URL: prefer the one Telegram reports as registered; else the canonical
+  // route for this channel on the current origin.
+  const tgWebhookUrl = (tgStatus && tgStatus.webhook && tgStatus.webhook.url)
+    || `${window.location.origin}/api/webhook/telegram/${channel.id}`;
+  const tgIsWebhook = !!(tgStatus && (tgStatus.mode === 'webhook'
+    || (tgStatus.webhook && tgStatus.webhook.url)));
+  function copyTgWebhook() {
+    const done = () => { setTgCopied(true); setTimeout(() => setTgCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(tgWebhookUrl).then(done).catch(() => fallbackCopyText(tgWebhookUrl, done));
+    } else { fallbackCopyText(tgWebhookUrl, done); }
+  }
   const [displayName, setDisplayName] = useState(channel.display_name || channel.id);
   // Per-channel AI settings (config.ai): the stored overrides layered on top of
   // the global-derived defaults (so unset keys show the inherited value).
@@ -860,6 +956,28 @@ function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
               type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
           </div>
 
+          ${isTelegram ? html`
+            <div class="border-t border-wa-border pt-3">
+              <label class="block text-[12px] text-wa-secondary mb-1">Recebimento de mensagens</label>
+              ${tgIsWebhook ? html`
+                <p class="text-[12px] text-wa-secondary mb-2">
+                  Este canal recebe por <span class="font-medium text-wa-text">webhook</span>. URL registrada na Bot API do Telegram:
+                </p>
+                <div class="flex gap-2 items-center flex-wrap">
+                  <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-panel border border-wa-border text-wa-text">${tgWebhookUrl}</code>
+                  <button type="button" class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+                    onClick=${copyTgWebhook}>${tgCopied ? 'Copiado!' : 'Copiar'}</button>
+                </div>
+                ${tgStatus && tgStatus.webhook && tgStatus.webhook.last_error_message ? html`
+                  <div class="text-[12px] text-red-500 mt-1">Último erro do Telegram: ${tgStatus.webhook.last_error_message}</div>` : null}
+              ` : html`
+                <p class="text-[12px] text-wa-secondary">
+                  Este canal recebe por <span class="font-medium text-wa-text">long-poll</span> (getUpdates) — não usa webhook.
+                  ${tgStatus ? '' : ' Carregando estado…'}
+                </p>`}
+            </div>
+          ` : null}
+
           ${isGowa ? html`
             <div class="border-t border-wa-border pt-3">
               <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
@@ -939,10 +1057,13 @@ export default function ChannelsManager({ initialEntity }) {
   const [showArchived, setShowArchived] = useState(false);
   // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
   const [webhookFor, setWebhookFor] = useState(null);
+  const [telegramNotice, setTelegramNotice] = useState(null);
   // {id, display_name} of the GOWA channel whose QR-connect panel is open.
   const [connectFor, setConnectFor] = useState(null);
   // The channel object being edited (display info + inbox agents), or null.
   const [editingChannel, setEditingChannel] = useState(null);
+  // The channel pending hard-delete confirmation, or null.
+  const [purgeTarget, setPurgeTarget] = useState(null);
   // Per-channel AI defaults, derived from the global config (plano 21): a new
   // channel inherits the values that used to be global.
   const [aiDefaults, setAiDefaults] = useState(() => aiDefaultsFrom({}));
@@ -1047,6 +1168,23 @@ export default function ChannelsManager({ initialEntity }) {
       if (payload.provider === 'gowa') {
         setConnectFor({ id: newId, display_name: created.display_name || payload.display_name });
       }
+      // Telegram: auto-detect a public domain and register the webhook (or fall
+      // back to long-poll), then show the resulting webhook URL so the operator
+      // can copy it / confirm — no need to open the plugin config.
+      if (payload.provider === 'telegram' && newId) {
+        const auto = await telegramAutoconfigure(newId);
+        if (auto && auto.ok && auto.data) {
+          setTelegramNotice(auto.data);
+        } else {
+          // Autoconfigure failed (plugin off?): still show the webhook URL with a
+          // long-poll fallback so the inbox isn't left in limbo.
+          setTelegramNotice({
+            mode: 'poll', registered: false,
+            reason: (auto && auto.error) || 'plugin Telegram indisponível',
+            webhook_url: `${window.location.origin}/api/webhook/telegram/${newId}`,
+          });
+        }
+      }
       load();
     } else {
       setCreateBusy(false);
@@ -1080,6 +1218,23 @@ export default function ChannelsManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao arquivar o canal.');
   }
 
+  // Hard-delete (purge): abre o modal de confirmação.
+  function handlePurge(channel) {
+    setError('');
+    setPurgeTarget(channel);
+  }
+
+  async function confirmPurge() {
+    const channel = purgeTarget;
+    if (!channel) return;
+    setPurgeTarget(null);
+    setBusyId(channel.id); setError('');
+    const res = await deleteChannel(channel.id, { purge: true });
+    setBusyId('');
+    if (res && res.ok) load();
+    else setError((res && res.error) || 'Falha ao excluir o canal.');
+  }
+
   // Refresh just this channel's live status and merge it into the card.
   async function handleRefresh(channel) {
     setBusyId(channel.id); setError('');
@@ -1111,6 +1266,7 @@ export default function ChannelsManager({ initialEntity }) {
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
       ${webhookFor ? html`<${WebhookNotice} channelId=${webhookFor} onDismiss=${() => setWebhookFor(null)} />` : null}
+      ${telegramNotice ? html`<${TelegramWebhookNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
 
       ${connectFor ? html`<${QRConnect}
         channelId=${connectFor.id}
@@ -1140,6 +1296,7 @@ export default function ChannelsManager({ initialEntity }) {
             channel=${channel}
             onToggle=${handleToggle}
             onDelete=${handleDelete}
+            onPurge=${handlePurge}
             onRefresh=${handleRefresh}
             onConnect=${handleConnect}
             onEdit=${handleEdit}
@@ -1179,6 +1336,40 @@ export default function ChannelsManager({ initialEntity }) {
         aiDefaults=${aiDefaults}
         onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
         onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
+
+      ${purgeTarget ? html`<${PurgeChannelModal}
+        channel=${purgeTarget}
+        onCancel=${() => setPurgeTarget(null)}
+        onConfirm=${confirmPurge} />` : null}
+    </div>
+  `;
+}
+
+// Confirmation modal for a hard-delete (purge) of a channel. Hard-delete is
+// irreversible: it removes the channel and its entire inbox/history.
+function PurgeChannelModal({ channel, onCancel, onConfirm }) {
+  const name = channel.display_name || channel.id;
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick=${onCancel}>
+      <div class="bg-wa-panel border border-wa-border rounded-lg shadow-xl max-w-md w-full p-5"
+        onClick=${(e) => e.stopPropagation()}>
+        <h3 class="text-[16px] font-medium text-wa-text mb-2">Excluir canal</h3>
+        <p class="text-[13px] text-wa-secondary mb-1">
+          Tem certeza que deseja excluir o canal
+          <span class="font-medium text-wa-text">"${name}"</span>?
+        </p>
+        <p class="text-[13px] text-red-600 mb-5">
+          Esta ação é permanente e não pode ser desfeita: o canal e todo o
+          histórico de conversas da inbox serão apagados.
+        </p>
+        <div class="flex justify-end gap-2">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onCancel}>Cancelar</button>
+          <button class="px-3 py-2 rounded-md text-[14px] text-white bg-red-600 hover:bg-red-700 transition-colors"
+            onClick=${onConfirm}>Excluir definitivamente</button>
+        </div>
+      </div>
     </div>
   `;
 }
