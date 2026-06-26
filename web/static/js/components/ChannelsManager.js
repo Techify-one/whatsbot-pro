@@ -136,7 +136,7 @@ function aiDefaultsFrom(cfg) {
 // Per-channel AI settings form (config.ai). Controlled: `value` is the ai object,
 // `onChange` receives the full updated object. Mirrors the knobs that used to be
 // global in the IA "Configurações" tab — now configured per channel.
-function AiSettingsFields({ value, onChange }) {
+function AiSettingsFields({ value, onChange, sequentialDefault = true }) {
   const ai = value || {};
   const set = (key, v) => onChange({ ...ai, [key]: v });
   const num = (key, v, fallback) => {
@@ -144,6 +144,10 @@ function AiSettingsFields({ value, onChange }) {
     set(key, isNaN(n) ? fallback : n);
   };
   const aiOn = ai.ai_enabled !== false;
+  // Sequential reply toggle (per channel). When the channel hasn't set it yet,
+  // fall back to ``sequentialDefault`` (GOWA → on, other providers → off on new
+  // channels; legacy channels inherit "on" to preserve prior always-active behavior).
+  const seqOn = ai.ai_sequential_enabled ?? sequentialDefault;
   return html`
     <div class="flex flex-col gap-3">
       <!-- Master switch for this channel -->
@@ -243,18 +247,25 @@ function AiSettingsFields({ value, onChange }) {
           </div>
         </div>
 
-        <!-- Modo sequencial (anti-bloqueio) — sempre ativo -->
+        <!-- Modo sequencial (anti-bloqueio) — ligável/desligável por canal -->
         <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
-          <div class="text-[13px] font-semibold text-wa-text">Resposta sequencial (sempre ativa)</div>
+          <label class="flex items-center gap-2 text-[13px] font-semibold text-wa-text cursor-pointer">
+            <input type="checkbox" checked=${seqOn}
+              onChange=${(e) => set('ai_sequential_enabled', e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+            Resposta sequencial (anti-bloqueio)
+          </label>
           <span class="text-[11px] text-wa-secondary">A IA nunca responde dois contatos ao mesmo tempo neste canal — reduz o risco de bloqueio do WhatsApp/Meta por envios em paralelo.</span>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Intervalo entre respostas (s)</label>
-            <input type="number" min="2" step="1"
-              class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-              value=${ai.ai_sequential_delay ?? 2}
-              onInput=${(e) => num('ai_sequential_delay', e.target.value, 2)} />
-            <span class="block text-[11px] text-wa-secondary mt-1">Espera aplicada antes de cada resposta (mínimo 2s, sem limite).</span>
-          </div>
+          ${seqOn ? html`
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Intervalo entre respostas (s)</label>
+              <input type="number" min="2" step="1"
+                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+                value=${ai.ai_sequential_delay ?? 2}
+                onInput=${(e) => num('ai_sequential_delay', e.target.value, 2)} />
+              <span class="block text-[11px] text-wa-secondary mt-1">Espera aplicada antes de cada resposta (mínimo 2s, sem limite).</span>
+            </div>
+          ` : null}
         </div>
 
         <!-- Mensagens picadas -->
@@ -374,7 +385,12 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
       display_name: displayName.trim(),
     };
     // Per-channel AI settings live under config.ai for every provider (plano 21).
-    const config = { ai };
+    // Persist the sequential-reply toggle explicitly: when the user never touched
+    // it, default ON for GOWA (anti-block) and OFF for the other providers, so a
+    // new non-GOWA channel doesn't inherit the backend's legacy "always on" fallback.
+    const config = {
+      ai: { ...ai, ai_sequential_enabled: ai.ai_sequential_enabled ?? (provider === 'gowa') },
+    };
     if (provider === 'gowa') {
       config.allowed_jid_types = jidTypes;
       if (gowaDeviceId.trim()) config.gowa_device_id = gowaDeviceId.trim();
@@ -487,7 +503,7 @@ function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availablePr
 
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-          <${AiSettingsFields} value=${ai} onChange=${setAi} />
+          <${AiSettingsFields} value=${ai} onChange=${setAi} sequentialDefault=${provider === 'gowa'} />
         </div>
 
         <div class="border-t border-wa-border pt-3">
