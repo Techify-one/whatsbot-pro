@@ -347,7 +347,14 @@ def register_routes(app, deps):
         ai_enabled, tags (PT-BR/Chatwoot aliases accepted; only ``phone`` is
         required). Existing contacts (matched by phone) are updated — only
         non-empty cells overwrite, so a sparse CSV never wipes saved info. New
-        tags referenced in the ``tags`` column are created on the fly."""
+        tags referenced in the ``tags`` column are created on the fly.
+
+        Custom attributes (plano 05): any extra column whose header matches an
+        existing attribute definition by name (attribute_key OR display_name) is
+        imported into the contact's custom_attributes; values are type-validated
+        and an invalid/unrecognized value is silently discarded. Columns that
+        don't match any defined attribute are ignored (for now) — the contact is
+        still saved regardless."""
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
@@ -381,6 +388,26 @@ def register_routes(app, deps):
         def _cell(row, field):
             src = col.get(field)
             return (row.get(src) or "").strip() if src else ""
+
+        # Map extra CSV columns to custom attribute definitions by name
+        # (attribute_key OR display_name, case-insensitive). Columns consumed by
+        # core fields are excluded; columns matching no definition are dropped.
+        attr_defs_map = ca_repo.get_definitions_map("contact")
+        attr_by_name = {}
+        for key, d in attr_defs_map.items():
+            attr_by_name[key.strip().lower()] = d
+            display = (d.get("display_name") or "").strip().lower()
+            if display:
+                attr_by_name.setdefault(display, d)
+        consumed_headers = {(h or "").strip().lower() for h in col.values()}
+        custom_cols = {}  # actual CSV header -> definition
+        for h in reader.fieldnames:
+            hl = (h or "").strip().lower()
+            if not hl or hl in consumed_headers:
+                continue
+            d = attr_by_name.get(hl)
+            if d is not None:
+                custom_cols[h] = d
 
         def _do_import():
             existing_tags = set(tag_repo.get_all().keys())
@@ -420,6 +447,21 @@ def register_routes(app, deps):
                             existing_tags.add(name)
                     if names:
                         tag_repo.set_contact_tags(cid, names)
+
+                # Custom attributes: only columns matching a defined attribute by
+                # name are kept; invalid values are discarded (contact still saved).
+                if custom_cols:
+                    partial = {}
+                    for header, d in custom_cols.items():
+                        raw_val = (row.get(header) or "").strip()
+                        if not raw_val:
+                            continue
+                        norm, err = validate_value(d, raw_val)
+                        if err or norm is None:
+                            continue
+                        partial[d["attribute_key"]] = norm
+                    if partial:
+                        ca_repo.set_values(contacts_table, cid, partial)
 
                 if existed:
                     updated += 1
