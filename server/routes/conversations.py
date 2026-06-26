@@ -434,16 +434,26 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        conv = await asyncio.to_thread(conversation_repo.set_conversation_ai, conv_id, active)
+        # Turning the AI OFF hands the conversation to whoever turned it off (plano
+        # 17): they are taking over, so it lands in their queue instead of "Não
+        # atribuídas". None (legacy/open mode) falls back to unassigned.
+        me = current_user(request)
+        new_assignee = (me or {}).get("id") if not active else None
+        conv = await asyncio.to_thread(
+            conversation_repo.set_conversation_ai, conv_id, active, new_assignee)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        # Toggling the AI per-conversation also (un)assigns it (plano 17): turning
-        # the AI OFF drops the assignment so the row falls into "Não atribuídas";
-        # turning it ON re-binds the default agent. Emit the assignment event so the
+        # Toggling the AI per-conversation also (re)assigns it (plano 17): turning
+        # the AI OFF assigns it to the operator; turning it ON re-binds the default
+        # agent and clears the human assignee. Emit the assignment event so the
         # sidebar repositions the row, plus the ai_toggled event for the badge.
         await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
         await _broadcast(deps, "conversation_ai_toggled", "conversation.ai_toggled", conv)
         await _emit_notice(request, conv, "ai_on" if active else "ai_off")
+        # Surface the takeover as an assignment card too when an operator turned the
+        # AI off and thereby took the conversation.
+        if not active and new_assignee is not None:
+            await _emit_notice(request, conv, "assigned_me")
         return _ok({"conversation": conv})
 
     @app.delete("/api/conversations/{conv_id}")

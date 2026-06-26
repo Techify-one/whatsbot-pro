@@ -83,6 +83,31 @@ def register_routes(app, deps):
         except Exception:
             pass
 
+    def _required_credentials(provider: str) -> list[str]:
+        """Credential keys a provider MUST have to ever become operational
+        (capability-driven, anti zombie-channel).
+
+        Read from the provider's ``ChannelCapabilities.required_credentials`` by
+        probing a throwaway instance — a pure constructor (no network/DB). Empty
+        for QR/linked-device providers (GOWA): they bootstrap from an empty channel
+        via the QR connect flow, so an empty channel is legitimate. Best-effort →
+        ``[]`` on any failure, so a probe issue never spuriously blocks creation.
+        Never branches on provider name (the knowledge lives in each provider)."""
+        if registry is None:
+            return []
+        provider_cls = registry.get_provider(provider)
+        if provider_cls is None:
+            return []
+        try:
+            try:
+                inst = provider_cls("__probe__", registry=registry)
+            except TypeError:
+                inst = provider_cls("__probe__")
+            caps = getattr(inst, "capabilities", None)
+            return list(getattr(caps, "required_credentials", ()) or ())
+        except Exception:
+            return []
+
     def _register_live_provider(cid: str, provider: str) -> None:
         """Make a freshly-created non-GOWA channel (Cloud/Telegram/…) live without
         a restart, when its provider plugin is loaded.
@@ -389,7 +414,11 @@ def register_routes(app, deps):
             names = sorted(set(registry.providers()) & _ALLOWED_PROVIDERS)
         else:
             names = sorted(_ALLOWED_PROVIDERS)
-        return _ok({"providers": names})
+        # Required credentials per provider (capability-driven) so the "Novo canal"
+        # form can require those fields and the card can flag a misconfigured
+        # channel — single source of truth is the provider's capabilities.
+        required = {p: _required_credentials(p) for p in names}
+        return _ok({"providers": names, "required_credentials": required})
 
     @app.get("/api/channels/{channel_id}")
     async def get_channel(channel_id: str, request: Request):
@@ -411,6 +440,18 @@ def register_routes(app, deps):
         provider = (body.get("provider") or "").strip()
         if provider not in _ALLOWED_PROVIDERS:
             return _err(f"provider deve ser um de: {', '.join(sorted(_ALLOWED_PROVIDERS))}.", 400)
+        # Anti zombie-channel (capability-driven): a credential-only provider with no
+        # connect step (Cloud/Telegram) is useless without its required credentials —
+        # it would sit forever "Desconectado" with no way to fix it from the UI.
+        # Reject the create up front. GOWA's required set is empty (QR flow), so it is
+        # unaffected. Validated against the SUBMITTED credentials (before storing).
+        submitted_creds = body.get("credentials") or {}
+        missing_creds = [k for k in _required_credentials(provider)
+                         if not str(submitted_creds.get(k) or "").strip()]
+        if missing_creds:
+            return _err(
+                f"Credenciais obrigatórias faltando para {provider}: "
+                f"{', '.join(missing_creds)}.", 400)
         config = body.get("config")
         # The UI may nest gowa_device_id inside config; accept either spot.
         gowa_device_id = body.get("gowa_device_id")
@@ -440,8 +481,7 @@ def register_routes(app, deps):
             gowa_device_id=gowa_device_id,
             config=json.dumps(config) if isinstance(config, (dict, list)) else config,
         )
-        creds = body.get("credentials") or {}
-        for key, value in creds.items():
+        for key, value in submitted_creds.items():
             if value:  # never store an empty/placeholder secret
                 await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
         # One inbox per channel (plano 11): conversations on this channel get their

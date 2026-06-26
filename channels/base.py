@@ -30,6 +30,14 @@ class ChannelCapabilities:
     # outside it requires an approved template (HSM). Drives the pipeline by
     # CAPABILITY, never by provider name.
     session_window_hours: int = 0
+    # Credential keys a channel of this provider MUST have to ever become
+    # operational (plano 02 — anti zombie-channel). Empty for QR/linked-device
+    # providers (GOWA): they legitimately bootstrap from an empty channel via the
+    # QR connect flow. For credential-only providers without a connect step
+    # (WhatsApp Cloud API, Telegram) a channel missing these can never connect nor
+    # send — so ``create_channel`` rejects it. Drives validation by CAPABILITY,
+    # never by provider name. Tuple (immutable) so it is safe as a default.
+    required_credentials: tuple = ()
 
 
 @dataclasses.dataclass

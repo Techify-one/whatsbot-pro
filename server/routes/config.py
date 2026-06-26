@@ -95,9 +95,13 @@ def register_routes(app, deps):
             "system_notice_status", "system_notice_ai",
         }
         keys_changed = []
+        audit_before = {}   # {key: old_value} for the audit trail
+        audit_after = {}    # {key: new_value} for the audit trail
         for key, value in body.items():
             if key in allowed_keys:
+                audit_before[key] = settings.get(key)
                 settings[key] = value
+                audit_after[key] = value
                 keys_changed.append(key)
 
         # Handle password set/change/remove
@@ -135,6 +139,8 @@ def register_routes(app, deps):
         await emit_with_filter("config.changed", {
             "keys_changed": keys_changed,
             "ts": time.time(),
+            "_audit_before": audit_before,
+            "_audit_after": audit_after,
         })
         logger.info("Config saved.")
         return _ok({"message": "Configurações salvas!"})

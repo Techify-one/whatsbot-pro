@@ -435,24 +435,28 @@ def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
     return _update(conv_id, {"ai_active": ai_active})
 
 
-def set_conversation_ai(conv_id: int, active: int) -> dict | None:
-    """Toggle the AI for a conversation AND (un)assign it (plano 17).
+def set_conversation_ai(conv_id: int, active: int,
+                        assignee_user_id: int | None = None) -> dict | None:
+    """Toggle the AI for a conversation AND (re)assign it (plano 17).
 
-    OFF (``active=0``) mirrors ``set_status('closed')``: pausing the AI also drops
-    the assignment (``active_agent_key`` + ``assignee_user_id`` → None) so the
-    conversation lands back in the "Não atribuídas" fila for a human to pick up.
-    ON (``active=1``) re-attributes it to the inbox's default AI agent so the row
-    leaves the fila immediately, without waiting for the next inbound message.
-    The human assignee is left untouched on the ON path (it is normally already
-    None, cleared by a prior OFF)."""
+    OFF (``active=0``): pausing the AI hands the conversation to the human who
+    turned it off (``assignee_user_id``) — they are taking over, so the row lands
+    in THEIR queue instead of "Não atribuídas". When no operator identity is
+    available (legacy/open mode, ``assignee_user_id=None``) it falls back to
+    unassigned, mirroring ``set_status('closed')``. The AI agent is cleared either
+    way.
+    ON (``active=1``) re-attributes it to the inbox's default AI agent and clears
+    any human assignee (the bot is taking over), so the row leaves the fila
+    immediately without waiting for the next inbound message."""
     if active:
         conv = get(conv_id)
         if conv is None:
             return None
         agent_key = _default_agent_key_for_inbox(conv.get("inbox_id"))
-        return _update(conv_id, {"ai_active": 1, "active_agent_key": agent_key})
+        return _update(conv_id, {
+            "ai_active": 1, "active_agent_key": agent_key, "assignee_user_id": None})
     return _update(conv_id, {
-        "ai_active": 0, "active_agent_key": None, "assignee_user_id": None})
+        "ai_active": 0, "active_agent_key": None, "assignee_user_id": assignee_user_id})
 
 
 def set_custom_attributes(conv_id: int, attrs: dict) -> dict | None:

@@ -1742,19 +1742,29 @@ check("gate volta a True", _ai_gate(_cm) is True)
 # ═══════════════════════════════════════════════════════════════════
 section("Planos 16-20 (apagar, IA por conversa, atributos de sistema)")
 
-# ── P17: desligar IA despausa + tira atribuição (Não atribuídas) e zera agente ──
+# ── P17: desligar IA entrega a conversa a quem desligou + zera agente; ligar
+#    rebinda o agente default e limpa o responsável humano (IA assume) ──
 _p17 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17["id"], _mgr["id"])  # responsável humano + agente default
-r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": False})
+# Operador autenticado desliga a IA -> assume a conversa.
+r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": False},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
 _d = r.json()["data"]["conversation"]
 check("P17 ai off -> ai_active=0", _d["ai_active"] == 0)
 check("P17 ai off -> active_agent_key limpo", not _d["active_agent_key"])
-check("P17 ai off -> assignee removido (cai em Não atribuídas)", _d["assignee_user_id"] is None)
-r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": True})
+check("P17 ai off -> assignee = quem desligou", _d["assignee_user_id"] == _mgr["id"])
+r = client.post(f"/api/conversations/{_p17['id']}/ai", json={"active": True},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
 _d2 = r.json()["data"]["conversation"]
 check("P17 ai on -> ai_active=1", _d2["ai_active"] == 1)
 check("P17 ai on -> religa agente default", _d2["active_agent_key"] == "default")
-check("P17 ai on -> não restaura responsável humano", _d2["assignee_user_id"] is None)
+check("P17 ai on -> limpa responsável humano (IA assume)", _d2["assignee_user_id"] is None)
+# Legacy/open (sem identidade de operador) cai em "Não atribuídas".
+_p17b = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_p17b["id"], _mgr["id"])
+r = client.post(f"/api/conversations/{_p17b['id']}/ai", json={"active": False})
+_db17 = r.json()["data"]["conversation"]
+check("P17 ai off (sem auth) -> Não atribuídas", _db17["assignee_user_id"] is None)
 
 # ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
 _cmdel = _CM("5500077766655")
@@ -1903,11 +1913,15 @@ check("assigned -> nomeia alvo (Mgr)", any("para Mgr" in c for c in _after[_n:])
 check("unassigned -> 'removeu a atribuição'",
       any("removeu a atribuição" in c for c in _after[_n:]))
 
-# (d) ai off/on (conversa) -> grupo ai
+# (d) ai off (conversa) -> aviso do grupo ai + card "assumiu" (P17: quem desliga
+#     a IA assume a conversa); ai on -> grupo ai
 _n = len(_notices(_snconv["id"]))
 client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": False}, headers=_snhdr)
 client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": True}, headers=_snhdr)
-check("ai off/on -> 2 avisos (grupo ai)", len(_notices(_snconv["id"])) - _n == 2)
+_after = _notices(_snconv["id"])
+check("ai off/on -> 3 avisos (ai off + assumiu + ai on)", len(_after) - _n == 3)
+check("ai off -> card 'assumiu a conversa'",
+      any("assumiu a conversa" in c for c in _after[_n:]))
 
 # (e) agent_changed -> grupo ai
 _n = len(_notices(_snconv["id"]))
@@ -2550,7 +2564,7 @@ check("telegram parse: raw não-dict -> []", _tg.parse_inbound(None) == [])
 
 # Outbound/status sem rede: patch do _request
 _tg_calls = []
-def _tg_fake_request(method, payload=None, files=None):
+def _tg_fake_request(method, payload=None, files=None, timeout=None):
     _tg_calls.append((method, payload, files))
     if method == "getMe":
         return {"ok": True, "result": {"id": 1, "username": "meubot", "first_name": "Bot"}}

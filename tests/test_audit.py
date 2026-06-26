@@ -94,6 +94,33 @@ audit_listener.audit_event_handler(_ctx("config.changed"),
 _cfg = audit_repo.query(action="config.update", limit=1)[0]
 check("listener mascara segredo do payload", "sk" not in (_cfg["after_json"] or ""))
 
+# ── before/after: emit sites anexam _audit_before/_audit_after ──────────────
+audit_listener.audit_event_handler(_ctx("config.changed"), {
+    "keys_changed": ["model"], "ts": 0,
+    "_audit_before": {"model": "old-model"},
+    "_audit_after": {"model": "new-model"},
+})
+_cfg2 = audit_repo.query(action="config.update", limit=1)[0]
+check("before gravado (estado antigo)", '"model": "old-model"' in (_cfg2["before_json"] or ""))
+check("after = _audit_after explícito", '"model": "new-model"' in (_cfg2["after_json"] or ""))
+check("after não vaza chaves _audit_* nem o payload bruto",
+      "_audit_" not in (_cfg2["after_json"] or "") and "keys_changed" not in (_cfg2["after_json"] or ""))
+# Segredo no before também é mascarado.
+audit_listener.audit_event_handler(_ctx("config.changed"), {
+    "keys_changed": ["openrouter_api_key"], "ts": 0,
+    "_audit_before": {"openrouter_api_key": "sk-OLD"},
+    "_audit_after": {"openrouter_api_key": "sk-NEW"},
+})
+_cfg3 = audit_repo.query(action="config.update", limit=1)[0]
+check("segredo no before é mascarado",
+      "sk-OLD" not in (_cfg3["before_json"] or "") and "sk-NEW" not in (_cfg3["after_json"] or ""))
+# tag.deleted carrega o estado anterior.
+audit_listener.audit_event_handler(_ctx("tag.deleted"), {
+    "name": "VIP", "ts": 0, "_audit_before": {"name": "VIP", "color": "#f00"}})
+_tagdel = audit_repo.query(action="tag.delete", limit=1)[0]
+check("tag.delete grava before", '"color": "#f00"' in (_tagdel["before_json"] or ""))
+check("tag.delete resource_id = nome", _tagdel["resource_id"] == "VIP")
+
 # ── ator via contextvar ─────────────────────────────────────────────────
 _tok = set_current_actor(ActorCtx(id=42, type="user", label="Thiago", ip="1.2.3.4", request_id="req1"))
 audit_listener.audit_event_handler(_ctx("plugin.disabled"), {"plugin_id": "x"})
