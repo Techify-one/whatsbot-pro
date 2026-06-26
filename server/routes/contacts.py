@@ -239,13 +239,23 @@ def register_routes(app, deps):
         # they inherit the base "assume valid". Without a channel_id (legacy
         # "Iniciar conversa" da busca) keep the original GOWA behavior.
         channel_id = (body.get("channel_id") or "").strip() or None
+        assumed = False
         try:
             if channel_id:
                 result = await asyncio.to_thread(outbound.check_phone, channel_id, digits)
             else:
                 result = await asyncio.to_thread(gowa_client.check_phone, digits)
         except GOWASendError as e:
-            return _err(f"Erro ao verificar número: {e}")
+            # Verification couldn't run (e.g. GOWA logged in but momentarily
+            # disconnected from WhatsApp's services server → HTTP 401
+            # "not connect to services server"). Rather than blocking contact
+            # creation on a transient connectivity hiccup, fall back to the same
+            # "assume valid" behavior used by Cloud API / Telegram channels. A
+            # number that is genuinely NOT on WhatsApp does not raise — it
+            # returns is_on_whatsapp=false and is handled below.
+            logger.warning("check_phone: verification failed, assuming valid (%s)", e)
+            result = {"registered": True, "canonical_phone": digits, "name": ""}
+            assumed = True
 
         registered = result.get("registered", False)
         name = result.get("name", "")
@@ -274,6 +284,7 @@ def register_routes(app, deps):
             "registered": registered,
             "jid": result.get("jid", ""),
             "name": name,
+            "assumed": assumed,
         })
 
     @app.get("/api/contacts/unread-count")
