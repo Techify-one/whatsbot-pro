@@ -872,21 +872,28 @@ def register_routes(app, deps):
             # Consume now: a NEW message arriving during _run_one_cycle goes into a fresh batch
             state.pending_messages.pop(key, None)
 
-            # Modo sequencial (plano 21): SEMPRE ativo — só UM contato roda o ciclo da
-            # IA por vez em cada canal. Um asyncio.Lock por canal serializa o ciclo
-            # inteiro (LLM + envio) e espaça respostas consecutivas por
-            # ``ai_sequential_delay`` segundos (default 2s, mínimo 2, sem teto), para
-            # reduzir o risco de bloqueio da Meta quando o número responde a vários
-            # clientes. O único parâmetro configurável é o intervalo.
-            lock = state.channel_ai_locks.get(channel_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                state.channel_ai_locks[channel_id] = lock
-            async with lock:
-                delay = float(ai_settings.value(
-                    channel_id, "ai_sequential_delay", 2.0) or 0)
-                if delay > 0:
-                    await asyncio.sleep(delay)
+            # Modo sequencial (plano 21): quando LIGADO no canal, só UM contato
+            # roda o ciclo da IA por vez nesse canal. Um asyncio.Lock por canal
+            # serializa o ciclo inteiro (LLM + envio) e espaça respostas
+            # consecutivas por ``ai_sequential_delay`` segundos (mínimo 2s, sem
+            # teto), reduzindo o risco de bloqueio da Meta quando o número
+            # responde a vários clientes em paralelo. O toggle é per-canal
+            # (``ai_sequential_enabled``); o default herdado é LIGADO, preservando
+            # o comportamento legado sempre-ativo para canais sem o override.
+            sequential_on = bool(ai_settings.value(
+                channel_id, "ai_sequential_enabled", True))
+            if sequential_on:
+                lock = state.channel_ai_locks.get(channel_id)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    state.channel_ai_locks[channel_id] = lock
+                async with lock:
+                    delay = float(ai_settings.value(
+                        channel_id, "ai_sequential_delay", 2.0) or 0)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await _run_one_cycle(channel_id, phone, items)
+            else:
                 await _run_one_cycle(channel_id, phone, items)
 
             # If new messages arrived during the SEND phase (when cancellation is blocked),
