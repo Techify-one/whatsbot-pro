@@ -35,6 +35,20 @@ def _is_sandbox_contact(phone: str) -> bool:
     return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
 
 
+def _format_attr_cell(value) -> str:
+    """Render a custom-attribute value as a flat CSV cell.
+
+    Handles the JSON types stored in ``contacts.custom_attributes``: booleans
+    (checkbox) → ``1``/``0``, lists → comma-joined, ``None``/missing → empty."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
 def _normalize_import_phone(raw: str) -> str | None:
     """Strip a CSV phone cell to WhatsApp digits (ensures BR country code).
 
@@ -285,18 +299,27 @@ def register_routes(app, deps):
             return denied
         rows = await asyncio.to_thread(
             contact_repo.list_for_export, visible_inbox_ids(request))
+        # Custom attribute definitions (plano 05) become extra CSV columns,
+        # dynamically — a newly created attribute shows up here automatically.
+        attr_defs = await asyncio.to_thread(ca_repo.list_definitions, "contact")
 
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["phone", "name", "email", "profession", "company",
-                         "address", "ai_enabled", "tags"])
+        header = ["phone", "name", "email", "profession", "company",
+                  "address", "ai_enabled", "tags"]
+        header.extend(d["attribute_key"] for d in attr_defs)
+        writer.writerow(header)
         for r in rows:
-            writer.writerow([
+            custom = r.get("custom_attributes") or {}
+            row_out = [
                 r["phone"], r["name"], r["email"], r["profession"],
                 r["company"], r["address"],
                 "1" if r["ai_enabled"] else "0",
                 ", ".join(r["tags"]),
-            ])
+            ]
+            for d in attr_defs:
+                row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
+            writer.writerow(row_out)
         # BOM (﻿) so Excel opens the UTF-8 file with the right encoding.
         content = "﻿" + output.getvalue()
         return Response(
