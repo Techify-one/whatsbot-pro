@@ -88,13 +88,12 @@ DEFAULT_CONFIG = {
     # agentes vinculados. A IA é controlada por auto_reply + config por canal +
     # IA por conversa.
     # ⚠️ KILL-SWITCH DE SEGURANÇA — code-in-DB. Tools ``ai_tools`` guardam código
-    # Python no banco que o instalador EXECUTA IN-PROCESS no boot (acesso total a
-    # DB/FS/rede/chave do LLM). Enquanto não houver RBAC (plano 03) + runner
-    # isolado (P62), o code-in-DB fica DESLIGADO por padrão: o instalador só
-    # materializa/importa/registra tools quando ``ai_tools_code_enabled`` é True.
-    # Ligar só conscientemente, num servidor confiável. Override env
-    # ``WHATSBOT_AI_TOOLS_CODE``. Ver DECISOES.md P62.
-    "ai_tools_code_enabled": False,
+    # Python no banco que o instalador executa num SUBPROCESSO isolado no boot
+    # (RLIMIT_CPU/RLIMIT_AS/timeout — P62/P67). Default LIGADO para que tools
+    # criadas pelo usuário sejam instaladas/registradas automaticamente no boot
+    # sem precisar de env nem toggle manual. Para travar (host não confiável),
+    # setar a env ``WHATSBOT_AI_TOOLS_CODE=0``. Ver DECISOES.md P62.
+    "ai_tools_code_enabled": True,
     "bot_phone": "",
     "bot_name": "",
     "default_ai_enabled": True,
