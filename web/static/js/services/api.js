@@ -654,14 +654,27 @@ export async function getChannel(id) {
 export async function createChannel(payload) {
   return request('POST', '/api/channels', payload);
 }
+// Telegram plugin: ao criar uma inbox, detecta domínio público e registra o
+// webhook automaticamente (ou cai em long-poll). Retorna {mode, webhook_url, ...}.
+export async function telegramAutoconfigure(channelId) {
+  return request('POST', '/api/plugins/telegram/autoconfigure', { channel_id: channelId });
+}
+// Telegram plugin: estado do canal (modo por-canal + getMe + getWebhookInfo).
+// Retorna {configured, mode, me, webhook:{url,...}}.
+export async function telegramChannelStatus(channelId) {
+  return request('GET', `/api/plugins/telegram/status?channel_id=${encodeURIComponent(channelId)}`);
+}
 
 // body: {display_name?, enabled?, config?, credentials?:{key:value}}
 export async function updateChannel(id, payload) {
   return request('PUT', `/api/channels/${encodeURIComponent(id)}`, payload);
 }
 
-export async function deleteChannel(id) {
-  return request('DELETE', `/api/channels/${encodeURIComponent(id)}`);
+// Soft-delete (arquivar) por padrão; `{ purge: true }` faz hard-delete:
+// apaga o canal e a inbox de vez (não é restaurável).
+export async function deleteChannel(id, { purge = false } = {}) {
+  const qs = purge ? '?purge=true' : '';
+  return request('DELETE', `/api/channels/${encodeURIComponent(id)}${qs}`);
 }
 
 // Usuários do painel atribuíveis como agentes de um canal (criação + edição).
