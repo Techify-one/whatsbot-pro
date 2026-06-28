@@ -74,6 +74,25 @@ def register_routes(app, deps):
             cache[ckey] = (conv_id, now + 30.0)
         return conv_id
 
+    def _clear_unread_for_msg_ids(msg_ids: list) -> list:
+        """Clear unread state for any loaded contact whose unread ids intersect
+        ``msg_ids`` (legacy GOWA ``message.ack`` read-receipt parity). Returns the
+        phone keys that were marked read so the caller can broadcast
+        ``messages_read``. Sync (DB writes) — call via ``asyncio.to_thread``."""
+        cleared: list = []
+        if agent_handler is None:
+            return cleared
+        # ``_contacts`` is keyed by (channel_id, phone) — plano 11.
+        for (_ch, phone_key), contact in list(agent_handler._contacts.items()):
+            try:
+                unread_ids = contact.get_unread_msg_ids()
+                if any(mid in unread_ids for mid in msg_ids):
+                    contact.mark_as_read()
+                    cleared.append(phone_key)
+            except Exception:
+                logger.debug("unread clear failed for %s", phone_key, exc_info=True)
+        return cleared
+
     async def _dispatch_events(events: list) -> int:
         """Route parsed InboundEvents (plano 11 Fase 2 / plano 13 Fase 0).
 
@@ -123,6 +142,18 @@ def register_routes(app, deps):
                         await emit_with_filter("receipt.changed", {
                             "phone": ev.chat_id, "msg_ids": [mid], "status": status,
                             "channel_id": ev.channel_id, "ts": ev.ts or time.time()})
+                        # Unread tracking parity with the legacy GOWA handler: a
+                        # "read" ack on an INCOMING message we hadn't read yet
+                        # clears its unread state (marks the contact read +
+                        # broadcasts ``messages_read``). delivered acks never touch
+                        # unread (only the outgoing status).
+                        if status == "read" and agent_handler is not None:
+                            cleared = await asyncio.to_thread(
+                                _clear_unread_for_msg_ids, [mid])
+                            if cleared and ws_manager is not None:
+                                for phone_key in cleared:
+                                    await ws_manager.broadcast(
+                                        "messages_read", {"phone": phone_key})
                     handled += 1
                 elif kind == "edited":
                     await emit_with_filter("message.edited", {
