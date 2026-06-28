@@ -1,0 +1,6 @@
+{
+  "executor_plugin_id": null,
+  "isolated_call_count": 1,
+  "isolated_tool_name": "charz_ks_inert",
+  "routes_through_isolated_runner": true
+}

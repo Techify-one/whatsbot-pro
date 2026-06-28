@@ -1,0 +1,28 @@
+{
+  "conversation": {
+    "active_agent_key": null,
+    "ai_active": 1,
+    "assignee_user_id": null,
+    "status": "open"
+  },
+  "events": {
+    "counts": {
+      "conversation.reopened": 1,
+      "conversation.status_changed": 1
+    },
+    "sequence": [
+      "conversation.status_changed",
+      "conversation.reopened"
+    ],
+    "set": [
+      "conversation.reopened",
+      "conversation.status_changed"
+    ]
+  },
+  "notices": [
+    {
+      "content": "🔄 Conversa reaberta.",
+      "role": "conversation_event"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+[
+  {
+    "agent_key": "default",
+    "error": null,
+    "phone": "5511975500001",
+    "routing_steps": null,
+    "status": "completed",
+    "step_count": 6,
+    "step_types": [
+      "webhook_received",
+      "batch_accumulated",
+      "llm_request",
+      "llm_response",
+      "channel_send",
+      "response_sent"
+    ],
+    "steps": [
+      {
+        "agent_key": null,
+        "data": {
+          "items": [
+            {
+              "image_path": null,
+              "media_extras": null,
+              "media_path": null,
+              "media_type": null,
+              "msg_id": "<MSGID>",
+              "reply_to_msg_id": null,
+              "text": "oi, quero falar com a IA"
+            }
+          ],
+          "phone": "5511975500001"
+        },
+        "status": "ok",
+        "step_type": "webhook_received"
+      },
+      {
+        "agent_key": null,
+        "data": {
+          "combined_preview": "oi, quero falar com a IA",
+          "media_count": 0,
+          "text_count": 1
+        },
+        "status": "ok",
+        "step_type": "batch_accumulated"
+      },
+      {
+        "agent_key": "default",
+        "data": {
+          "context_messages": 2,
+          "engine": "agno",
+          "model": "<MODEL>",
+          "tools": [
+            "save_contact_info",
+            "transfer_to_human",
+            "set_custom_attribute",
+            "transferir_agente"
+          ]
+        },
+        "status": "ok",
+        "step_type": "llm_request"
+      },
+      {
+        "agent_key": "default",
+        "data": {
+          "completion_tokens": 5,
+          "engine": "agno",
+          "has_tool_calls": false,
+          "model": "<MODEL>",
+          "prompt_tokens": 10
+        },
+        "status": "ok",
+        "step_type": "llm_response"
+      },
+      {
+        "agent_key": "default",
+        "data": {
+          "channel_id": "default",
+          "part": 1,
+          "phone": "5511975500001",
+          "total_parts": 1
+        },
+        "status": "ok",
+        "step_type": "channel_send"
+      },
+      {
+        "agent_key": "default",
+        "data": {
+          "channel_id": "default",
+          "parts": 1,
+          "phone": "5511975500001",
+          "reply_preview": "resposta da IA"
+        },
+        "status": "ok",
+        "step_type": "response_sent"
+      }
+    ],
+    "total_cost_usd": 0.0,
+    "total_tokens": 15,
+    "trigger_type": "webhook"
+  }
+]

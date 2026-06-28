@@ -1,0 +1,23 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "tag.update",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "color": "#303030",
+        "name": "AudTagUpd2",
+        "old_name": "AudTagUpd",
+        "ts": "<TS>"
+      },
+      "before": {
+        "color": "#303030",
+        "name": "AudTagUpd"
+      },
+      "resource_id": "AudTagUpd2",
+      "resource_id_resolved": true,
+      "resource_type": "tag"
+    }
+  ]
+}

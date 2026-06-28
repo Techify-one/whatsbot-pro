@@ -1,0 +1,21 @@
+{
+  "messages": [
+    {
+      "content": "Oi sandbox",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    }
+  ],
+  "process_message_called": true,
+  "response": {
+    "data": {
+      "phone": "5511975000005",
+      "replies": [],
+      "reply": ""
+    },
+    "ok": true
+  },
+  "status_code": 200
+}

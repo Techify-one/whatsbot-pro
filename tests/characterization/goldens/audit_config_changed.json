@@ -1,0 +1,19 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "config.update",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "max_context_messages": 7
+      },
+      "before": {
+        "max_context_messages": 10
+      },
+      "resource_id": null,
+      "resource_id_resolved": false,
+      "resource_type": "config"
+    }
+  ]
+}

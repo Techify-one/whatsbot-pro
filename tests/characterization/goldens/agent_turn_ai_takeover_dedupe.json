@@ -1,0 +1,29 @@
+{
+  "events": {
+    "ai_takeover_count": 1,
+    "set": [
+      "conversation.ai_takeover",
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved",
+      "message.sent"
+    ]
+  },
+  "sent": [
+    {
+      "kind": "message",
+      "mentions": null,
+      "phone": "5511976000004",
+      "reply_message_id": null,
+      "text": "primeira resposta da IA"
+    },
+    {
+      "kind": "message",
+      "mentions": null,
+      "phone": "5511976000004",
+      "reply_message_id": null,
+      "text": "segunda resposta da IA"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "contact.tagged",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "phone": "5511970050003",
+        "tags": [
+          "AudVip"
+        ],
+        "ts": "<TS>"
+      },
+      "before": null,
+      "resource_id": "5511970050003",
+      "resource_id_resolved": true,
+      "resource_type": "contact"
+    }
+  ]
+}

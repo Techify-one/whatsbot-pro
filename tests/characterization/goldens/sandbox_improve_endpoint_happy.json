@@ -1,0 +1,34 @@
+{
+  "messages": [
+    {
+      "content": "preciso de ajuda",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "resposta marcada",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": null
+    },
+    {
+      "content": "🔧 Análise de melhoria\n\n**Diagnóstico**\nA IA respondeu fora do escopo.\n\n**Recomendações**\n- Ajustar o prompt para focar no produto.",
+      "media_type": null,
+      "msg_id": null,
+      "role": "system",
+      "status": null
+    }
+  ],
+  "note": {
+    "content": "🔧 Análise de melhoria\n\n**Diagnóstico**\nA IA respondeu fora do escopo.\n\n**Recomendações**\n- Ajustar o prompt para focar no produto.",
+    "msg_id": null,
+    "role": "system",
+    "status": null,
+    "ts": "<TS>"
+  },
+  "ok": true,
+  "status_code": 200
+}

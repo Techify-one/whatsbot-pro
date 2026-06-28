@@ -1,0 +1,19 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "plugin.enable",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "enabled": true
+      },
+      "before": {
+        "enabled": false
+      },
+      "resource_id": "telegram",
+      "resource_id_resolved": true,
+      "resource_type": "plugin"
+    }
+  ]
+}

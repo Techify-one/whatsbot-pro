@@ -1,0 +1,19 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "tag.create",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "color": "#101010",
+        "name": "AudTagCreate",
+        "ts": "<TS>"
+      },
+      "before": null,
+      "resource_id": "AudTagCreate",
+      "resource_id_resolved": true,
+      "resource_type": "tag"
+    }
+  ]
+}
