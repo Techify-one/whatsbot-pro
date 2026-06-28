@@ -1,0 +1,8 @@
+# Development / test-only dependencies.
+# Keep production deps in requirements.txt — this file is additive and never
+# installed into the EXE/Docker runtime.
+#
+#   ./venv/bin/pip install -r requirements-dev.txt
+#
+pytest>=8
+pytest-timeout>=2.3
