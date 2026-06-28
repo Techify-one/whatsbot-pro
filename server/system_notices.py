@@ -79,6 +79,7 @@ EVENT_GROUP_OF: dict[str, str] = {
     "status_closed": "status",
     "status_open": "status",
     "status_reopened_auto": "status",
+    "status_reopened_auto_agent": "status",
     "archived": "status",
     "unarchived": "status",
     "created": "status",
@@ -159,6 +160,10 @@ def _f_status_reopened_auto(**_) -> str:
     return "🔄 Conversa reaberta automaticamente (cliente enviou mensagem)."
 
 
+def _f_status_reopened_auto_agent(**_) -> str:
+    return "🔄 Conversa reaberta automaticamente (resposta enviada)."
+
+
 def _f_archived(actor=None, **_) -> str:
     if actor:
         return f"🗄️ {actor} arquivou a conversa."
@@ -222,6 +227,7 @@ FORMATTERS: dict[str, callable] = {
     "status_closed": _f_status_closed,
     "status_open": _f_status_open,
     "status_reopened_auto": _f_status_reopened_auto,
+    "status_reopened_auto_agent": _f_status_reopened_auto_agent,
     "archived": _f_archived,
     "unarchived": _f_unarchived,
     "created": _f_created,

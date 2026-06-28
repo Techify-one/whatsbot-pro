@@ -178,8 +178,12 @@ class ContactMemory:
         conv = None
         transition = None  # "created" | "reopened" | None (plano 12 §3)
         try:
+            # Uma conversa closed é reaberta tanto por mensagem do cliente ("user")
+            # quanto por resposta do atendente/IA ("assistant") — qualquer um dos dois
+            # lados voltando a falar reativa o atendimento (comportamento Chatwoot).
+            # Roles painel-only (private_note, system, tool_call, …) NÃO reabrem.
             conv, transition = conversation_repo.resolve_for_contact_ex(
-                self.id, self._jid(), reopen_if_closed=(role == "user"),
+                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
                 inbox_id=self.inbox_id)
             conversation_id = conv["id"]
             # New thread → tell the panel so the inbox row shows its assignee
@@ -215,12 +219,20 @@ class ContactMemory:
             # Emitido APÓS o save para casar com a ordem ao vivo (a msg inbound já
             # foi transmitida no recebimento, antes deste batch).
             if transition in ("created", "reopened") and conv is not None:
-                self._emit_lifecycle_notice(conversation_id, transition, conv)
+                self._emit_lifecycle_notice(conversation_id, transition, conv, role)
             # plano 11 D1: a nova conversa precisa materializar AO VIVO na sidebar
             # conversa-cêntrica / lista de conversas — sinal independente do gate de
             # aviso (este é uma atualização de lista, não um card no fio).
             if transition == "created" and conv is not None:
                 self._broadcast_conversation_created(conversation_id, conv)
+            # Reabertura closed→open: a lista de conversas (sidebar + kanban) precisa
+            # re-filtrar a conversa de volta pra "Abertas" AO VIVO. O único sinal hoje
+            # era o card painel-only (status_reopened_auto), que a lista IGNORA — daí a
+            # conversa só reaparecia após F5. Espelha o broadcast do path manual
+            # Resolver/Reabrir (server/routes/conversations.py). Independente do gate
+            # de aviso (é atualização de lista, não card no fio).
+            if transition == "reopened" and conv is not None:
+                self._broadcast_conversation_status(conversation_id, conv)
         # Touch updated_at
         contact_repo.update(self.id)
 
@@ -241,18 +253,46 @@ class ContactMemory:
         except Exception:
             logger.exception("Falha ao emitir conversation_created para %s", self.phone)
 
-    def _emit_lifecycle_notice(self, conversation_id: int, transition: str, conv: dict):
+    def _broadcast_conversation_status(self, conversation_id: int, conv: dict):
+        """Fire a ``conversation_status_changed`` WS event when an inbound (client) or
+        outbound (operator/AI) message reopens a closed conversation, so the
+        conversation list (sidebar + kanban) re-files it into "Abertas" live — without
+        this, the reopen only surfaced as a painel-only card (which the list ignores)
+        and the row stayed hidden until a full page reload. Payload mirrors the manual
+        Resolver/Reabrir path (server/routes/conversations.py ``_broadcast``).
+        Fire-and-forget; lazy import avoids an agent→server import cycle."""
+        try:
+            from plugins.context import broadcast
+            broadcast("conversation_status_changed", {
+                "conversation_id": conversation_id,
+                "display_id": conv.get("display_id"),
+                "contact_id": self.id,
+                "phone": self.phone,
+                "inbox_id": conv.get("inbox_id"),
+                "status": conv.get("status"),
+                "assignee_user_id": conv.get("assignee_user_id"),
+                "active_agent_key": conv.get("active_agent_key"),
+                "ai_active": conv.get("ai_active"),
+                "is_archived": conv.get("is_archived"),
+            })
+        except Exception:
+            logger.exception("Falha ao emitir conversation_status_changed para %s", self.phone)
+
+    def _emit_lifecycle_notice(self, conversation_id: int, transition: str, conv: dict, role: str = "user"):
         """Surface an automatic conversation-lifecycle card (plano 12 §3).
 
-        ``reopened`` ⇒ cliente reabriu uma conversa fechada; ``created`` ⇒ nova
-        conversa. O gate de config (grupo ``status``) decide se algo é gravado.
-        Lazy import evita ciclo agent→server no carregamento do módulo.
+        ``reopened`` ⇒ a conversa fechada voltou a ficar ativa (cliente mandou
+        mensagem se ``role == "user"``, atendente/IA respondeu caso contrário);
+        ``created`` ⇒ nova conversa. O gate de config (grupo ``status``) decide se
+        algo é gravado. Lazy import evita ciclo agent→server no carregamento do módulo.
         """
         try:
             from server import system_notices
             if transition == "reopened":
+                event_type = ("status_reopened_auto" if role == "user"
+                              else "status_reopened_auto_agent")
                 system_notices.emit_conversation_notice(
-                    event_type="status_reopened_auto", conversation_id=conversation_id,
+                    event_type=event_type, conversation_id=conversation_id,
                     contact_id=self.id, phone=self.phone)
             elif transition == "created":
                 system_notices.emit_conversation_notice(
