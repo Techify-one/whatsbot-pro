@@ -16,6 +16,36 @@ from plugins.events import apply_filter
 
 logger = logging.getLogger(__name__)
 
+# Fixed PT-BR labels prepended to a transcribed/described media payload. The
+# label and the join order (prefix-before-text for images, text-before-prefix for
+# audio/documents) are part of the observed behaviour — do NOT change them.
+_MEDIA_PREFIX = {
+    "audio": "[Transcrição do áudio]: ",
+    "image": "[Descrição da imagem]: ",
+    "document": "[Conteúdo do documento]: ",
+}
+
+
+def format_media_content(media_kind: str, transcription: str, text: str = "") -> str:
+    """Combine an existing text body with a media transcription/description.
+
+    Single source of the ``[Transcrição]/[Descrição]/[Conteúdo]`` prefixing used
+    when persisting transcribed inbound/outbound media and when building the LLM
+    input. Join order matches the legacy call sites exactly:
+
+    - ``image``  → ``"<prefix><transcription>\\n<text>"`` (prefix first);
+    - ``audio``/``document`` → ``"<text>\\n<prefix><transcription>"`` (text first).
+
+    With an empty ``text`` (all media-only sites) the result is just the prefixed
+    transcription, identical to the previous inline code.
+    """
+    prefix = f"{_MEDIA_PREFIX[media_kind]}{transcription}"
+    if not text:
+        return prefix
+    if media_kind == "image":
+        return f"{prefix}\n{text}"
+    return f"{text}\n{prefix}"
+
 
 async def maybe_transcribe(
     media_kind: str,            # "audio" | "image" | "document"

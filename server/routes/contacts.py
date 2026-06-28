@@ -29,6 +29,20 @@ from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 logger = logging.getLogger(__name__)
 
 
+async def _emit_send_error(ws_manager, phone: str, content: str) -> None:
+    """Broadcast a ``role:'error'`` message card for a failed send (R3).
+
+    Single place that builds the error-bubble WS payload the panel renders as a
+    centered error card. Shape is intentionally fixed (``phone`` + a ``message``
+    with ``role``/``content``/``ts``) — every send route delegates here instead
+    of inlining the same ``ws_manager.broadcast`` ceremony.
+    """
+    await ws_manager.broadcast("new_message", {
+        "phone": phone,
+        "message": {"role": "error", "content": content, "ts": time.time()},
+    })
+
+
 def _is_sandbox_contact(phone: str) -> bool:
     """True when the contact is a sandbox/test number — operator sends to it
     must stay local (a real GOWA send would fail: the number isn't on WhatsApp)."""
@@ -738,14 +752,7 @@ def register_routes(app, deps):
 
         if send_failed:
             # Broadcast error event for frontend toast/error bubble
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao enviar mensagem: {error_msg}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Falha ao enviar mensagem: {error_msg}")
             return _err(f"Falha ao enviar mensagem: {error_msg}", status=500)
 
         logger.info("[Send] Manual message to %s: %s", phone, message[:80])
@@ -936,12 +943,7 @@ def register_routes(app, deps):
             raise
         except Exception as e:
             logger.exception("[PrivateAI] aprocess_message failed for %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {"role": "error",
-                            "content": f"Erro ao processar IA: {e}",
-                            "ts": time.time()},
-            })
+            await _emit_send_error(ws_manager, phone, f"Erro ao processar IA: {e}")
             return
 
         if result.tool_calls:
@@ -1030,12 +1032,8 @@ def register_routes(app, deps):
                 }
 
             if send_failed:
-                await ws_manager.broadcast("new_message", {
-                    "phone": phone,
-                    "message": {"role": "error",
-                                "content": f"Falha ao enviar resposta da IA: {send_error}",
-                                "ts": time.time()},
-                })
+                await _emit_send_error(
+                    ws_manager, phone, f"Falha ao enviar resposta da IA: {send_error}")
                 return
             await ws_manager.broadcast("new_message", {
                 "phone": phone, "channel_id": channel_id, "message": msg_data,
@@ -1129,25 +1127,11 @@ def register_routes(app, deps):
             msg_id = await asyncio.to_thread(_route_send_text, channel_id, phone, message)
         except GOWASendError as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao reenviar mensagem: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Falha ao reenviar mensagem: {e}")
             return _err(f"Falha ao reenviar: {e}", status=500)
         except Exception as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Erro inesperado ao reenviar: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao reenviar: {e}")
             return _err(f"Erro ao reenviar: {e}", status=500)
 
         # msg_id is the channel's external id (string)
@@ -1205,25 +1189,11 @@ def register_routes(app, deps):
                     _route_send_media, channel_id, phone, "image", str(dest), caption)
         except GOWASendError as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao enviar imagem: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Falha ao enviar imagem: {e}")
             return _err(f"Falha ao enviar imagem: {e}", status=500)
         except Exception as e:
             logger.error("[Send] Failed to send image to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Erro inesperado ao enviar imagem: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar imagem: {e}")
             return _err(f"Erro ao enviar imagem: {e}", status=500)
 
         # msg_id is the channel external id (None for sandbox). Mark it processed so
@@ -1292,25 +1262,11 @@ def register_routes(app, deps):
                     _route_send_media, channel_id, phone, "audio", str(dest))
         except GOWASendError as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao enviar áudio: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Falha ao enviar áudio: {e}")
             return _err(f"Falha ao enviar áudio: {e}", status=500)
         except Exception as e:
             logger.error("[Send] Failed to send audio to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Erro inesperado ao enviar áudio: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar áudio: {e}")
             return _err(f"Erro ao enviar áudio: {e}", status=500)
 
         # msg_id is the channel external id (None for sandbox). Mark it processed so
@@ -1406,25 +1362,11 @@ def register_routes(app, deps):
                     caption, safe_name)
         except GOWASendError as e:
             logger.error("[Send] Failed to send document to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Falha ao enviar documento: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Falha ao enviar documento: {e}")
             return _err(f"Falha ao enviar documento: {e}", status=500)
         except Exception as e:
             logger.error("[Send] Failed to send document to %s: %s", phone, e)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "message": {
-                    "role": "error",
-                    "content": f"Erro inesperado ao enviar documento: {e}",
-                    "ts": time.time(),
-                },
-            })
+            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar documento: {e}")
             return _err(f"Erro ao enviar documento: {e}", status=500)
 
         # msg_id is the channel external id (None for sandbox).
@@ -1568,28 +1510,24 @@ def register_routes(app, deps):
         await emit_with_filter("contact.ai_toggled", {
             "phone": phone, "ai_enabled": result, "ts": time.time(),
         })
-        # Chat notice (plano 12, grupo `ai`): gate nível-contato. Ancora no fio da
-        # conversa aberta (fallback: a mais recente) do contato.
+        # Chat notice (plano 12, grupo `ai`): gate nível-contato. Resolve a conversa
+        # aberta (fallback: a mais recente) do contato e emite o aviso nela (R20).
         actor = (current_user(request) or {}).get("name") or None
-        conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact_id)
-        if conv is None:
-            conv = await asyncio.to_thread(conversation_repo.get_latest_for_contact, contact_id)
+        conv = await asyncio.to_thread(
+            system_notices.emit_for_contact,
+            event_type="ai_on" if result else "ai_off",
+            contact_id=contact_id, phone=phone, actor=actor)
         if conv is not None:
             # P17: the AI gate is per-conversation now — the contact flag above no
             # longer silences the bot. Mirror the toggle onto the contact's conversation
             # (low-level ai_active flip, no (un)assign) so the AI actually pauses/resumes
-            # and the chat notice below stays truthful. Push conversation_ai_toggled so
-            # the sidebar badge flips live.
+            # and the chat notice stays truthful. Push conversation_ai_toggled so the
+            # sidebar badge flips live.
             await asyncio.to_thread(
                 conversation_repo.set_ai_active, conv["id"], 1 if result else 0)
             await ws_manager.broadcast("conversation_ai_toggled", {
                 "conversation_id": conv["id"], "contact_id": contact_id,
                 "ai_active": 1 if result else 0, "ts": time.time()})
-            await asyncio.to_thread(
-                system_notices.emit_conversation_notice,
-                event_type="ai_on" if result else "ai_off",
-                conversation_id=conv["id"], contact_id=contact_id, phone=phone,
-                actor=actor)
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")

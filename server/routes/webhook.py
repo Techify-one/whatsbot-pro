@@ -30,10 +30,45 @@ from gowa.inbound import (_extract_media, _extract_reply_to, _coerce_path,
 from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, parse_split_reply
-from server.transcription import maybe_transcribe
+from server.transcription import maybe_transcribe, format_media_content
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 
 logger = logging.getLogger(__name__)
+
+from collections import namedtuple
+
+# Result of applying a content filter to a message dict (R5): the full (possibly
+# mutated) dict — for sites that re-emit it, e.g. ``message.received`` — plus the
+# 6 fields the inbound/outgoing pipelines pull back out.
+_FilteredMessage = namedtuple(
+    "_FilteredMessage",
+    ["msg", "text", "msg_id", "reply_to_msg_id", "media_type", "media_path",
+     "media_extras"],
+)
+
+
+async def _apply_message_filter(filter_name: str, msg: dict, extras: dict):
+    """Apply a content filter to a message dict and re-extract the 6 fields.
+
+    Returns a :class:`_FilteredMessage` carrying the full filtered dict (``.msg``)
+    and the re-extracted ``text``/``msg_id``/``reply_to_msg_id``/``media_type``/
+    ``media_path``/``media_extras`` values, or ``None`` when a plugin aborted the
+    action (filter returned ``None``). Each field falls back to the pre-filter
+    value so a plugin that drops a key never changes it — byte-identical to the
+    previous inline ``.get(key, current)`` ceremony at every call site.
+    """
+    filtered = await apply_filter(filter_name, msg, extras)
+    if filtered is None:
+        return None
+    return _FilteredMessage(
+        msg=filtered,
+        text=filtered.get("text", msg.get("text")),
+        msg_id=filtered.get("msg_id", msg.get("msg_id")),
+        reply_to_msg_id=filtered.get("reply_to_msg_id", msg.get("reply_to_msg_id")),
+        media_type=filtered.get("media_type", msg.get("media_type")),
+        media_path=filtered.get("media_path", msg.get("media_path")),
+        media_extras=filtered.get("media_extras", msg.get("media_extras")),
+    )
 
 
 def _conversation_ai_active(contact) -> bool:
@@ -757,13 +792,11 @@ def register_routes(app, deps):
 
                 if transcription:
                     if audio_path:
-                        new_content = f"[Transcrição do áudio]: {transcription}"
+                        new_content = format_media_content("audio", transcription)
                     elif image_path:
-                        desc_prefix = f"[Descrição da imagem]: {transcription}"
-                        new_content = f"{desc_prefix}\n{text}" if text else desc_prefix
+                        new_content = format_media_content("image", transcription, text)
                     elif document_path:
-                        doc_prefix = f"[Conteúdo do documento]: {transcription}"
-                        new_content = f"{text}\n{doc_prefix}" if text else doc_prefix
+                        new_content = format_media_content("document", transcription, text)
                     else:
                         new_content = None
                     if new_content:
@@ -801,15 +834,13 @@ def register_routes(app, deps):
                 llm_text = text or ""
                 if audio_path:
                     if transcription:
-                        llm_text = f"[Transcrição do áudio]: {transcription}"
+                        llm_text = format_media_content("audio", transcription)
                     else:
                         llm_text = llm_text or "[Áudio recebido]"
                 elif image_path and transcription:
-                    prefix = f"[Descrição da imagem]: {transcription}"
-                    llm_text = f"{prefix}\n{text}" if text else prefix
+                    llm_text = format_media_content("image", transcription, text)
                 elif document_path and transcription:
-                    doc_prefix = f"[Conteúdo do documento]: {transcription}"
-                    llm_text = f"{text}\n{doc_prefix}" if text else doc_prefix
+                    llm_text = format_media_content("document", transcription, text)
 
                 try:
                     await asyncio.to_thread(outbound.send_presence, channel_id, phone, "composing")
@@ -1002,17 +1033,17 @@ def register_routes(app, deps):
             "reply_to_msg_id": event.reply_to_msg_id, "is_from_me": True,
             "source": "echo", "raw": event.raw or {}, "ts": event.ts or time.time(),
         }
-        outgoing_msg = await apply_filter(
+        _filtered = await _apply_message_filter(
             "filter.message.outgoing", outgoing_msg, {"phone": phone})
-        if outgoing_msg is None:
+        if _filtered is None:
             logger.info("[Ingest] outgoing echo from %s filtered out", phone)
             return
-        text = outgoing_msg.get("text", text)
-        msg_id = outgoing_msg.get("msg_id", msg_id)
-        media_type = outgoing_msg.get("media_type", media_type)
-        media_path = outgoing_msg.get("media_path", media_path)
-        media_extras = outgoing_msg.get("media_extras", media_extras)
-        reply_to = outgoing_msg.get("reply_to_msg_id", event.reply_to_msg_id)
+        text = _filtered.text
+        msg_id = _filtered.msg_id
+        media_type = _filtered.media_type
+        media_path = _filtered.media_path
+        media_extras = _filtered.media_extras
+        reply_to = _filtered.reply_to_msg_id
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
         await asyncio.to_thread(
@@ -1115,17 +1146,18 @@ def register_routes(app, deps):
             "raw": event.raw or {},
             "ts": event.ts or time.time(),
         }
-        parsed_msg = await apply_filter(
+        _filtered = await _apply_message_filter(
             "filter.message.before_save", parsed_msg, {"phone": phone})
-        if parsed_msg is None:
+        if _filtered is None:
             logger.info("[Ingest] inbound from %s filtered out before save", phone)
             return
-        display_text = parsed_msg.get("text", display_text)
-        msg_id = parsed_msg.get("msg_id", msg_id)
-        reply_to = parsed_msg.get("reply_to_msg_id", reply_to)
-        media_type = parsed_msg.get("media_type", media_type)
-        media_path = parsed_msg.get("media_path", media_path)
-        media_extras = parsed_msg.get("media_extras", media_extras)
+        parsed_msg = _filtered.msg  # full filtered dict, re-emitted via message.received
+        display_text = _filtered.text
+        msg_id = _filtered.msg_id
+        reply_to = _filtered.reply_to_msg_id
+        media_type = _filtered.media_type
+        media_path = _filtered.media_path
+        media_extras = _filtered.media_extras
 
         broadcast_msg: dict = {"role": "user", "content": display_text,
                                "ts": time.time(), "msg_id": msg_id}
@@ -1421,14 +1453,7 @@ def register_routes(app, deps):
             msg_ids = data.get("ids", [])
 
             # Extract phone from ack payload (try multiple fields, GOWA is inconsistent)
-            ack_phone = ""
-            for field in ("chat_id", "from", "jid", "phone"):
-                val = data.get(field, "")
-                if val and "@" in val:
-                    ack_phone = val.split("@")[0]
-                    break
-                elif val and not ack_phone:
-                    ack_phone = val
+            ack_phone = jid_classifier.phone_from_ack_payload(data)
 
             # Fallback: look up phone from the message in DB
             if not ack_phone and msg_ids:
@@ -1681,20 +1706,20 @@ def register_routes(app, deps):
                 "raw": data,
                 "ts": time.time(),
             }
-            outgoing_msg = await apply_filter(
+            _filtered = await _apply_message_filter(
                 "filter.message.outgoing", outgoing_msg, {"phone": phone}
             )
-            if outgoing_msg is None:
+            if _filtered is None:
                 logger.info(
                     "[Webhook] outgoing echo from %s filtered out", phone
                 )
                 return _ok({"status": "filtered_out"})
-            text = outgoing_msg.get("text", text)
-            msg_id = outgoing_msg.get("msg_id", msg_id)
-            media_type = outgoing_msg.get("media_type", media_type)
-            media_path = outgoing_msg.get("media_path", media_path)
-            media_extras = outgoing_msg.get("media_extras", media_extras)
-            reply_to_msg_id = outgoing_msg.get("reply_to_msg_id", reply_to_msg_id)
+            text = _filtered.text
+            msg_id = _filtered.msg_id
+            media_type = _filtered.media_type
+            media_path = _filtered.media_path
+            media_extras = _filtered.media_extras
+            reply_to_msg_id = _filtered.reply_to_msg_id
 
             logger.info("[Webhook] Syncing outgoing %s to %s: %s",
                         media_type or "message", phone,
@@ -1891,20 +1916,21 @@ def register_routes(app, deps):
             "ts": time.time(),
         }
         # Plugin filter: can rewrite/anonymize/translate or return None to drop
-        parsed_msg = await apply_filter(
+        _filtered = await _apply_message_filter(
             "filter.message.before_save", parsed_msg, {"phone": phone}
         )
-        if parsed_msg is None:
+        if _filtered is None:
             logger.info("[Webhook] inbound from %s filtered out before save", phone)
             return _ok({"status": "filtered_out"})
 
         # Filter may have rewritten user-facing strings — propagate.
-        display_text = parsed_msg.get("text", display_text)
-        msg_id = parsed_msg.get("msg_id", msg_id)
-        reply_to_msg_id = parsed_msg.get("reply_to_msg_id", reply_to_msg_id)
-        media_type = parsed_msg.get("media_type", media_type)
-        media_path = parsed_msg.get("media_path", media_path)
-        media_extras = parsed_msg.get("media_extras", media_extras)
+        parsed_msg = _filtered.msg  # full filtered dict, re-emitted via message.received
+        display_text = _filtered.text
+        msg_id = _filtered.msg_id
+        reply_to_msg_id = _filtered.reply_to_msg_id
+        media_type = _filtered.media_type
+        media_path = _filtered.media_path
+        media_extras = _filtered.media_extras
 
         # Broadcast incoming message to frontend in real-time
         broadcast_msg: dict = {"role": "user", "content": display_text, "ts": time.time(), "msg_id": msg_id}
@@ -1956,13 +1982,11 @@ def register_routes(app, deps):
 
             saved_text = display_text
             if transcription and audio_path:
-                saved_text = f"{display_text}\n[Transcrição do áudio]: {transcription}" if display_text else f"[Transcrição do áudio]: {transcription}"
+                saved_text = format_media_content("audio", transcription, display_text)
             elif transcription and image_path:
-                desc_prefix = f"[Descrição da imagem]: {transcription}"
-                saved_text = f"{desc_prefix}\n{display_text}" if display_text else desc_prefix
+                saved_text = format_media_content("image", transcription, display_text)
             elif transcription and doc_path_grp:
-                doc_prefix = f"[Conteúdo do documento]: {transcription}"
-                saved_text = f"{display_text}\n{doc_prefix}" if display_text else doc_prefix
+                saved_text = format_media_content("document", transcription, display_text)
 
             contact_obj = agent_handler._get_contact(phone)
             await asyncio.to_thread(
