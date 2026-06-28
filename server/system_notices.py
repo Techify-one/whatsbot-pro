@@ -284,6 +284,41 @@ def has_event(conversation_id: int, event_type: str) -> bool:
         return False
 
 
+def resolve_conversation_for_contact(contact_id: int) -> dict | None:
+    """Resolve the contact's conversation to anchor a notice on (open → latest).
+
+    Prefers the contact's OPEN conversation; falls back to the most recent one
+    (events like "fechada" leave the conversation closed). Returns ``None`` when
+    the contact has no conversation. Best-effort — never raises."""
+    try:
+        conv = conversation_repo.get_open_for_contact(contact_id)
+        if conv is None:
+            conv = conversation_repo.get_latest_for_contact(contact_id)
+        return conv
+    except Exception:
+        logger.exception("[SystemNotice] resolve_conversation_for_contact falhou (%s)",
+                         contact_id)
+        return None
+
+
+def emit_for_contact(*, event_type: str, contact_id: int, phone: str | None = None,
+                     **ctx) -> dict | None:
+    """Resolve the contact's conversation (open → latest) and emit a notice on it.
+
+    Convenience over :func:`emit_conversation_notice` for call sites that only
+    have a contact: it resolves the anchor conversation, emits the notice, and
+    returns the resolved conversation (so the caller can chain further per-conv
+    actions). Returns ``None`` when no conversation exists (nothing emitted).
+    Never raises — a failed notice never breaks the action."""
+    conv = resolve_conversation_for_contact(contact_id)
+    if conv is None:
+        return None
+    emit_conversation_notice(
+        event_type=event_type, conversation_id=conv.get("id"),
+        contact_id=contact_id, phone=phone, **ctx)
+    return conv
+
+
 def emit_conversation_notice(*, event_type: str, conversation_id: int | None,
                              contact_id: int | None = None, phone: str | None = None,
                              **ctx) -> None:

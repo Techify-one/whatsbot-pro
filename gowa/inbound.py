@@ -29,6 +29,7 @@ import re
 import uuid
 
 from channels.events import InboundEvent
+from channels.jid import phone_from_ack_payload
 from agent import group_mentions
 
 logger = logging.getLogger(__name__)
@@ -582,14 +583,7 @@ def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
         ids = data.get("ids", []) or []
         if not status or not ids:
             return []
-        ack_phone = ""
-        for f in ("chat_id", "from", "jid", "phone"):
-            v = data.get(f, "")
-            if v and "@" in v:
-                ack_phone = v.split("@")[0]
-                break
-            if v and not ack_phone:
-                ack_phone = v
+        ack_phone = phone_from_ack_payload(data)
         return [_ev(kind="receipt", external_msg_id=mid, chat_id=ack_phone,
                     direction="out", media_extras={"status": status}, raw=data)
                 for mid in ids]

@@ -47,6 +47,26 @@ def _aggregate_columns():
     ]
 
 
+def _by_type_entry(row) -> dict:
+    """Shape one aggregated ``call_type`` row into the public ``by_type`` value.
+
+    Single source of the 5-key shape (``cost_usd``/``prompt_tokens``/
+    ``completion_tokens``/``total_tokens``/``call_count``) used by every usage
+    summary — the order/keys are part of the API contract."""
+    return {
+        "cost_usd": row["cost_usd"],
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
+        "total_tokens": row["total_tokens"],
+        "call_count": row["call_count"],
+    }
+
+
+def _shape_by_type(rows) -> dict:
+    """Build a ``{call_type: entry}`` map from aggregated rows (grouped by call_type)."""
+    return {r["call_type"]: _by_type_entry(r) for r in rows}
+
+
 def summary(contact_id: int, start_ts: float | None = None,
             end_ts: float | None = None) -> dict:
     """Return aggregated usage stats for a single contact."""
@@ -67,16 +87,8 @@ def summary(contact_id: int, start_ts: float | None = None,
         "total_tokens": totals_row["total_tokens"],
         "cost_usd": totals_row["cost_usd"],
         "call_count": totals_row["call_count"],
-        "by_type": {},
+        "by_type": _shape_by_type(by_type_rows),
     }
-    for r in by_type_rows:
-        totals["by_type"][r["call_type"]] = {
-            "cost_usd": r["cost_usd"],
-            "prompt_tokens": r["prompt_tokens"],
-            "completion_tokens": r["completion_tokens"],
-            "total_tokens": r["total_tokens"],
-            "call_count": r["call_count"],
-        }
     return totals
 
 
@@ -101,16 +113,8 @@ def global_summary(start_ts: float | None = None,
         "total_tokens": totals_row["total_tokens"],
         "cost_usd": totals_row["cost_usd"],
         "call_count": totals_row["call_count"],
-        "by_type": {},
+        "by_type": _shape_by_type(by_type_rows),
     }
-    for r in by_type_rows:
-        totals["by_type"][r["call_type"]] = {
-            "cost_usd": r["cost_usd"],
-            "prompt_tokens": r["prompt_tokens"],
-            "completion_tokens": r["completion_tokens"],
-            "total_tokens": r["total_tokens"],
-            "call_count": r["call_count"],
-        }
     return totals
 
 
@@ -134,26 +138,24 @@ def by_contact(start_ts: float | None = None,
     if time_clauses:
         base_stmt = base_stmt.where(and_(*time_clauses))
 
+    # Single aggregate of by_type for ALL contacts in one GROUP BY (fixes the
+    # per-contact N+1: previously one query per contact row). Same per-call_type
+    # shape via the shared ``_by_type_entry``.
+    by_type_stmt = (
+        select(usage.c.contact_id, usage.c.call_type, *_aggregate_columns())
+        .group_by(usage.c.contact_id, usage.c.call_type)
+    )
+    if time_clauses:
+        by_type_stmt = by_type_stmt.where(and_(*time_clauses))
+
     results: list[dict] = []
     with get_engine().connect() as conn:
         rows = conn.execute(base_stmt).mappings().all()
+        by_type_by_contact: dict = {}
+        for r in conn.execute(by_type_stmt).mappings().all():
+            by_type_by_contact.setdefault(r["contact_id"], {})[r["call_type"]] = \
+                _by_type_entry(r)
         for row in rows:
-            cid = row["contact_id"]
-            inner_clauses = [usage.c.contact_id == cid, *time_clauses]
-            by_type_rows = conn.execute(
-                select(usage.c.call_type, *_aggregate_columns())
-                .where(and_(*inner_clauses))
-                .group_by(usage.c.call_type)
-            ).mappings().all()
-            by_type = {}
-            for r in by_type_rows:
-                by_type[r["call_type"]] = {
-                    "cost_usd": r["cost_usd"],
-                    "prompt_tokens": r["prompt_tokens"],
-                    "completion_tokens": r["completion_tokens"],
-                    "total_tokens": r["total_tokens"],
-                    "call_count": r["call_count"],
-                }
             results.append({
                 "phone": row["phone"],
                 "name": row["name"] or "",
@@ -162,7 +164,7 @@ def by_contact(start_ts: float | None = None,
                 "total_tokens": row["total_tokens"],
                 "cost_usd": row["cost_usd"],
                 "call_count": row["call_count"],
-                "by_type": by_type,
+                "by_type": by_type_by_contact.get(row["contact_id"], {}),
             })
     return results
 

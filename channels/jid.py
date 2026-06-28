@@ -89,3 +89,24 @@ def is_allowed(jid_type: str, allowed: list[str]) -> bool:
     if jid_type not in ALL_JID_TYPES:
         return True
     return jid_type in allowed
+
+
+def phone_from_ack_payload(payload: dict) -> str:
+    """Extract a phone from a GOWA ``message.ack`` payload (best-effort).
+
+    GOWA is inconsistent about which field carries the chat JID on receipts, so
+    try ``chat_id``/``from``/``jid``/``phone`` in order: the first value that
+    contains ``@`` wins (its local part before ``@`` is returned); otherwise the
+    first non-empty raw value is kept as a fallback. Returns ``""`` when nothing
+    usable is present.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    ack_phone = ""
+    for field in ("chat_id", "from", "jid", "phone"):
+        val = payload.get(field, "")
+        if val and "@" in val:
+            return val.split("@")[0]
+        if val and not ack_phone:
+            ack_phone = val
+    return ack_phone
