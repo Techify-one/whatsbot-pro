@@ -32,9 +32,7 @@ gowa_client.get_own_number = MagicMock(return_value="5511999990001")
 settings = Settings()
 agent_handler = AgentHandler(
     api_key="test-key-fake",
-    system_prompt="teste",
     max_context_messages=10,
-    model="openai/gpt-4o-mini",
 )
 app = create_app(
     settings=settings,
