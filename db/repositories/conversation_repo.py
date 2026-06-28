@@ -12,6 +12,7 @@ import time
 from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
 
 from db.engine import get_engine
+from db.repositories._mapping import _PREVIEW_EXCLUDED, media_preview
 from db.tables import (conversations, contacts, conversation_counters, inboxes,
                        channels, messages, unread_msg_ids, conversation_label_links)
 
@@ -194,10 +195,6 @@ def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = F
     return conv
 
 
-# Roles excluded from the last-message preview (mirrors contact_repo.list_contacts).
-_PREVIEW_EXCLUDED = ("transcription", "system_notice", "conversation_event", "system")
-
-
 def _last_msg_subq(col):
     """Correlated scalar subquery: ``col`` of the latest visible msg of the conversation."""
     return (
@@ -256,17 +253,8 @@ def _enriched_from():
 def _finalize_conv(row) -> dict:
     """Shape a raw enriched row into the dict the sidebar/list consumes."""
     d = dict(row)
-    mt = d.get("last_msg_media_type")
-    content = d.get("last_msg_content")
-    if content is None:
-        preview = ""
-    elif mt == "image":
-        preview = (content or "")[:80] or "\U0001f4f7 Imagem"
-    elif mt == "audio":
-        preview = "\U0001f3a4 Áudio"
-    else:
-        preview = (content or "")[:80]
-    d["last_message"] = preview
+    d["last_message"] = media_preview(d.get("last_msg_content"),
+                                      d.get("last_msg_media_type"))
     d["last_message_role"] = d.get("last_msg_role") or ""
     d["last_message_ts"] = d.get("last_msg_ts") or 0
     d["last_message_status"] = d.get("last_msg_status") or ""

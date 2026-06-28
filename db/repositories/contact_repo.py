@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
+from db.repositories._mapping import (_PREVIEW_EXCLUDED, coerce_json,
+                                      media_preview)
 from db.tables import (contact_tags, contacts, conversations, observations,
                        tags, unread_msg_ids)
 
@@ -65,25 +67,14 @@ def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
             updated_at=now,
         ))
         new_id = result.inserted_primary_key[0]
-    return {
-        "id": new_id,
-        "phone": phone,
-        "name": "",
-        "email": "",
-        "profession": "",
-        "company": "",
-        "address": "",
-        "ai_enabled": default_ai_enabled,
-        "is_group": False,
-        "group_name": "",
-        "is_archived": False,
-        "archived_by_app": False,
-        "can_send": True,
-        "unread_count": 0,
-        "unread_ai_count": 0,
-        "created_at": now,
-        "updated_at": now,
-    }
+        # Re-read the inserted row so the INSERT path returns the SAME shape as the
+        # existing-contact path (plano 23 E1 — fixes the divergent hand-built dict
+        # that was missing is_pinned/custom_attributes and could drift from the
+        # column defaults).
+        new_row = conn.execute(
+            select(contacts).where(contacts.c.id == new_id)
+        ).mappings().first()
+    return _row_to_dict(new_row)
 
 
 def delete(contact_id: int) -> None:
@@ -494,7 +485,7 @@ def list_contacts(q: str = "", archived: bool = False,
             INNER JOIN (
                 SELECT contact_id, MAX(ts) AS max_ts
                 FROM messages
-                WHERE role NOT IN ('transcription', 'system_notice', 'conversation_event', 'system')
+                WHERE role NOT IN ({preview_excluded})
                 GROUP BY contact_id
             ) m2 ON m1.contact_id = m2.contact_id AND m1.ts = m2.max_ts
         ) lm ON lm.contact_id = c.id
@@ -515,6 +506,9 @@ def list_contacts(q: str = "", archived: bool = False,
         WHERE c.is_archived = :archived {inbox_clause}
         ORDER BY c.is_pinned DESC, COALESCE(lm.ts, c.updated_at) DESC
     """.format(
+        # Shared single source of truth (db.repositories._mapping); the names are
+        # fixed lowercase identifiers (no user input), so this literal is safe.
+        preview_excluded=", ".join(f"'{r}'" for r in _PREVIEW_EXCLUDED),
         inbox_clause=(
             "AND EXISTS (SELECT 1 FROM conversations cvx "
             "WHERE cvx.contact_id = c.id AND cvx.inbox_id IN :inbox_ids)"
@@ -539,15 +533,7 @@ def list_contacts(q: str = "", archived: bool = False,
             ).all()
             tags_list = [t.name for t in tag_rows]
 
-            last_content = ""
-            lmt = row["last_msg_media_type"]
-            if row["last_msg_content"] is not None:
-                if lmt == "image":
-                    last_content = (row["last_msg_content"] or "")[:80] or "\U0001f4f7 Imagem"
-                elif lmt == "audio":
-                    last_content = "\U0001f3a4 Áudio"
-                else:
-                    last_content = (row["last_msg_content"] or "")[:80]
+            last_content = media_preview(row["last_msg_content"], row["last_msg_media_type"])
 
             is_group = bool(row["is_group"])
             group_name = row["group_name"] or ""
@@ -681,13 +667,5 @@ def _coerce_attrs(row) -> dict:
         val = row["custom_attributes"]
     except (KeyError, IndexError, TypeError):
         return {}
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str) and val:
-        try:
-            import json
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except (ValueError, TypeError):
-            return {}
-    return {}
+    parsed = coerce_json(val, {})
+    return parsed if isinstance(parsed, dict) else {}
