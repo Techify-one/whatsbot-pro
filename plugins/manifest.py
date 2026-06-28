@@ -53,6 +53,13 @@ class PluginManifest:
     # capability ``permissions`` field above. Shape after parsing:
     # ``{"group": str | None, "permissions": [{"key": str, "label": str}, ...]}``.
     rbac: dict = dataclasses.field(default_factory=dict)
+    # Frontend extension layer (camada de extensão de frontend). ``frontend_extends``
+    # is the URL of an ES module the app imports ONCE at boot (separate from screens)
+    # to register filters / UI slots / route-overrides via the client-side registry.
+    # ``frontend_api_version`` is the semver range that module targets; the client
+    # checks it against FRONTEND_API_VERSION at load time (informational on the server).
+    frontend_extends: str = ""
+    frontend_api_version: str = "*"
     raw: dict = dataclasses.field(default_factory=dict)
 
     def to_public_dict(self) -> dict:
@@ -70,6 +77,8 @@ class PluginManifest:
             "events": self.events,
             "filters": self.filters,
             "rbac": self.rbac,
+            "frontend_extends": self.frontend_extends,
+            "frontend_api_version": self.frontend_api_version,
         }
 
 
@@ -161,6 +170,10 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
     filters_declared = [str(f) for f in (data.get("filters") or []) if isinstance(f, str)]
     rbac = _parse_rbac(data.get("rbac"), pid)
 
+    # Frontend extension module (optional). Normalized to a string; empty = none.
+    frontend_extends = str(data.get("frontend_extends") or "")
+    frontend_api_version = str(data.get("frontend_api_version") or "*")
+
     return PluginManifest(
         id=pid,
         name=str(name),
@@ -176,6 +189,8 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         events=events_declared,
         filters=filters_declared,
         rbac=rbac,
+        frontend_extends=frontend_extends,
+        frontend_api_version=frontend_api_version,
         raw=data,
     )
 

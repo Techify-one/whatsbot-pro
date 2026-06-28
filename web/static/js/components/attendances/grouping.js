@@ -115,7 +115,8 @@ export function buildGrouping(mode, ctx) {
         ],
         columnIdOf: (c) => (c.status === 'closed' ? 'closed' : 'open'),
         patchFor: (colId) => ({ status: colId }),
-        onDrop: (c, colId) => actions.setStatus(c.id, colId),
+        // Pass the full conversation so resolveConversation can run beforeResolve.
+        onDrop: (c, colId) => actions.setStatus(c, colId),
       };
   }
 }
