@@ -22,25 +22,28 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
-from server.transcription import maybe_transcribe
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
+# ``app.services.messaging_service`` is imported INSIDE ``register_routes`` (not
+# at module top) to avoid a latent import cycle: ``server.app`` loads this module,
+# and ``messaging_service`` imports back into ``server``. Deferring to call time
+# (after ``server.app`` has finished loading) keeps the module importable in any
+# order.
 
 logger = logging.getLogger(__name__)
 
 
 async def _emit_send_error(ws_manager, phone: str, content: str) -> None:
-    """Broadcast a ``role:'error'`` message card for a failed send (R3).
+    """Broadcast a ``role:'error'`` message card for a failed send (R3 / B2).
 
     Single place that builds the error-bubble WS payload the panel renders as a
-    centered error card. Shape is intentionally fixed (``phone`` + a ``message``
-    with ``role``/``content``/``ts``) — every send route delegates here instead
-    of inlining the same ``ws_manager.broadcast`` ceremony.
+    centered error card. Plano 23 Fase B3 lifted the implementation into
+    ``app.services.messaging_service.error_bubble`` (one source for both the
+    operator send routes and the outbound pipeline); this wrapper keeps the
+    existing call sites (send text / retry / private-AI) unchanged.
     """
-    await ws_manager.broadcast("new_message", {
-        "phone": phone,
-        "message": {"role": "error", "content": content, "ts": time.time()},
-    })
+    from app.services.messaging_service import error_bubble
+    await error_bubble(ws_manager, phone, content)
 
 
 def _is_sandbox_contact(phone: str) -> bool:
@@ -102,6 +105,24 @@ def register_routes(app, deps):
     statics_outbox_dir = deps.statics_outbox_dir
     outbound = deps.outbound_router
 
+    # Outbound messaging service (plano 23 Fase B3): the operator media-send tail
+    # (R14 — image/audio/document unified) lives in ``MessagingService.send_media``.
+    # The AI gate isn't exercised by ``send_media`` but the context requires it;
+    # mirror the webhook's master gate so the service is wired identically.
+    from app.services.messaging_service import MessagingContext, MessagingService
+
+    def _channel_ai_enabled(channel_id: str) -> bool:
+        if not settings.get("auto_reply", True):
+            return False
+        from channels import ai_settings as _ais
+        return bool(_ais.value(channel_id, "ai_enabled", True))
+
+    messaging = MessagingService(MessagingContext(
+        deps=deps, agent_handler=agent_handler, ws_manager=ws_manager,
+        state=state, settings=settings, outbound=outbound,
+        channel_ai_enabled=_channel_ai_enabled,
+    ))
+
     def _channel_for(phone: str, conversation_id=None, channel_id=None) -> str:
         """Channel a conversation belongs to (plano 11 D1). The conversa-cêntrica UI
         passes ``conversation_id``; an explicit ``channel_id`` is used when starting a
@@ -155,12 +176,6 @@ def register_routes(app, deps):
         res = outbound.send_text(channel_id, phone, text, reply_to=reply_to, mentions=mentions)
         if not res.ok:
             raise GOWASendError(res.error or "Falha no envio")
-        return res.external_msg_id or ""
-
-    def _route_send_media(channel_id, phone, kind, path, caption="", filename=None) -> str:
-        res = outbound.send_media(channel_id, phone, kind, path, caption=caption, filename=filename)
-        if not res.ok:
-            raise GOWASendError(res.error or "Falha no envio de mídia")
         return res.external_msg_id or ""
 
     def _session_window_block(channel_id, conversation_id, phone=None):
@@ -1182,47 +1197,14 @@ def register_routes(app, deps):
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await image.read()
         dest.write_bytes(content)
-        msg_id = None
-        try:
-            if not is_sandbox:
-                msg_id = await asyncio.to_thread(
-                    _route_send_media, channel_id, phone, "image", str(dest), caption)
-        except GOWASendError as e:
-            logger.error("[Send] Failed to send image to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Falha ao enviar imagem: {e}")
-            return _err(f"Falha ao enviar imagem: {e}", status=500)
-        except Exception as e:
-            logger.error("[Send] Failed to send image to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar imagem: {e}")
-            return _err(f"Erro ao enviar imagem: {e}", status=500)
-
-        # msg_id is the channel external id (None for sandbox). Mark it processed so
-        # the webhook ignores the WhatsApp echo of our own message.
-        if msg_id:
-            state.processed_messages.add(msg_id)
-
-        # Relative path for storage and frontend
-        rel_path = f"statics/outbox/{dest.name}"
-        msg_data = {
-            "role": "assistant",
-            "content": caption,
-            "ts": time.time(),
-            "media_type": "image",
-            "media_path": rel_path,
-            "status": "operator",
-            "msg_id": msg_id,
-        }
-        contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        contact.add_message("assistant", caption, media_type="image", media_path=rel_path,
-                            status="operator", msg_id=msg_id)
-
-        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": caption, "msg_id": msg_id,
-            "media_type": "image", "media_path": rel_path,
-            "source": "operator", "status": "operator",
-            "ts": time.time(),
-        })
+        # R14: shared operator media-send tail (send → persist → broadcast → emit).
+        result = await messaging.send_media(
+            channel_id=channel_id, phone=phone, kind="image", dest=dest,
+            is_sandbox=is_sandbox, content=caption, emit_text=caption,
+            caption=caption, error_label="imagem")
+        if not result["ok"]:
+            verb = "Falha" if result["kind"] == "send" else "Erro"
+            return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
         logger.info("[Send] Image sent to %s", phone)
         return _ok({"message": "Imagem enviada."})
 
@@ -1255,70 +1237,16 @@ def register_routes(app, deps):
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
         dest.write_bytes(content)
-        msg_id = None
-        try:
-            if not is_sandbox:
-                msg_id = await asyncio.to_thread(
-                    _route_send_media, channel_id, phone, "audio", str(dest))
-        except GOWASendError as e:
-            logger.error("[Send] Failed to send audio to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Falha ao enviar áudio: {e}")
-            return _err(f"Falha ao enviar áudio: {e}", status=500)
-        except Exception as e:
-            logger.error("[Send] Failed to send audio to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar áudio: {e}")
-            return _err(f"Erro ao enviar áudio: {e}", status=500)
-
-        # msg_id is the channel external id (None for sandbox). Mark it processed so
-        # the webhook ignores the WhatsApp echo of our own message.
-        if msg_id:
-            state.processed_messages.add(msg_id)
-
-        rel_path = f"statics/outbox/{dest.name}"
-        msg_data = {
-            "role": "assistant",
-            "content": "[Áudio]",
-            "ts": time.time(),
-            "media_type": "audio",
-            "media_path": rel_path,
-            "status": "operator",
-            "msg_id": msg_id,
-        }
-        contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        contact.add_message("assistant", "[Áudio]", media_type="audio", media_path=rel_path,
-                            status="operator", msg_id=msg_id)
-
-        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": "", "msg_id": msg_id,
-            "media_type": "audio", "media_path": rel_path,
-            "source": "operator", "status": "operator",
-            "ts": time.time(),
-        })
-
-        # Transcribe the operator-sent audio when enabled (audio_transcription_mode
-        # in sent/both) so the panel/AI can read what was said — same private card
-        # used for inbound media. Defensive: a transcription failure never breaks
-        # the send (the audio was already delivered above).
-        transcription = await maybe_transcribe(
-            "audio", str(dest),
-            settings=settings, agent_handler=agent_handler,
-            phone=phone, source="operator",
-            is_group=contact.is_group,
-            group_jid=phone if contact.is_group else None,
-        )
-        if transcription:
-            contact.add_message("transcription", transcription)
-            await ws_manager.broadcast("new_message", {
-                "phone": phone,
-                "channel_id": channel_id,
-                "message": {
-                    "role": "transcription",
-                    "content": transcription,
-                    "ts": time.time(),
-                },
-            })
-
+        # R14: shared media-send tail. Audio sends with no caption, persists
+        # "[Áudio]" / emits empty text, and runs the operator-audio transcription
+        # tail (audio_transcription_mode in sent/both) inside the service.
+        result = await messaging.send_media(
+            channel_id=channel_id, phone=phone, kind="audio", dest=dest,
+            is_sandbox=is_sandbox, content="[Áudio]", emit_text="",
+            error_label="áudio", transcribe_audio=True)
+        if not result["ok"]:
+            verb = "Falha" if result["kind"] == "send" else "Erro"
+            return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
         logger.info("[Send] Audio sent to %s", phone)
         return _ok({"message": "Áudio enviado."})
 
@@ -1354,50 +1282,19 @@ def register_routes(app, deps):
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
         content = await document.read()
         dest.write_bytes(content)
-        msg_id = None
-        try:
-            if not is_sandbox:
-                msg_id = await asyncio.to_thread(
-                    _route_send_media, channel_id, phone, "document", str(dest),
-                    caption, safe_name)
-        except GOWASendError as e:
-            logger.error("[Send] Failed to send document to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Falha ao enviar documento: {e}")
-            return _err(f"Falha ao enviar documento: {e}", status=500)
-        except Exception as e:
-            logger.error("[Send] Failed to send document to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao enviar documento: {e}")
-            return _err(f"Erro ao enviar documento: {e}", status=500)
-
-        # msg_id is the channel external id (None for sandbox).
-        if msg_id:
-            state.processed_messages.add(msg_id)
-
-        rel_path = f"statics/outbox/{dest.name}"
         text_content = f"[Documento enviado: {safe_name}]"
         if caption.strip():
             text_content = f"{text_content}\n{caption.strip()}"
-
-        msg_data = {
-            "role": "assistant",
-            "content": text_content,
-            "ts": time.time(),
-            "media_type": "document",
-            "media_path": rel_path,
-            "status": "operator",
-            "msg_id": msg_id,
-        }
-        contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        contact.add_message("assistant", text_content, media_type="document",
-                            media_path=rel_path, status="operator", msg_id=msg_id)
-
-        await ws_manager.broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": msg_data})
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": caption, "msg_id": msg_id,
-            "media_type": "document", "media_path": rel_path,
-            "source": "operator", "status": "operator",
-            "ts": time.time(),
-        })
+        # R14: shared media-send tail. Document persists/broadcasts the label
+        # (+caption) body, emits the caption as the message.sent text, and sends
+        # with the caption + the safe original filename.
+        result = await messaging.send_media(
+            channel_id=channel_id, phone=phone, kind="document", dest=dest,
+            is_sandbox=is_sandbox, content=text_content, emit_text=caption,
+            caption=caption, filename=safe_name, error_label="documento")
+        if not result["ok"]:
+            verb = "Falha" if result["kind"] == "send" else "Erro"
+            return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
         logger.info("[Send] Document sent to %s: %s", phone, safe_name)
         return _ok({"message": "Documento enviado."})
 
