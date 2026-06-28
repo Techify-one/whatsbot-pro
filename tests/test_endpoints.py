@@ -1726,6 +1726,19 @@ check("reopen automático emite conversation_status_changed", len(_reopen_evts) 
 check("reopen broadcast status=open",
       bool(_reopen_evts) and _reopen_evts[0]["status"] == "open")
 
+# reopen pelo atendente: a resposta (assistant) também reabre uma conversa closed
+_conv_repo.set_status(_live_conv["id"], "closed")
+_cm.add_message("assistant", "olá, retomando o atendimento")
+check("resposta do atendente reabre conversa closed",
+      _conv_repo.get(_live_conv["id"])["status"] == "open")
+
+# roles painel-only NÃO reabrem (nota privada não reativa o atendimento)
+_conv_repo.set_status(_live_conv["id"], "closed")
+_cm.add_message("private_note", "anotação interna")
+check("private_note NÃO reabre conversa closed",
+      _conv_repo.get(_live_conv["id"])["status"] == "closed")
+_conv_repo.set_status(_live_conv["id"], "open")  # restaura p/ os testes seguintes
+
 # Fatia 2: gate ai_active por conversa
 from server.routes.webhook import _conversation_ai_active as _ai_gate
 check("gate ai_active default True (ai_active=1)", _ai_gate(_cm) is True)
@@ -1969,6 +1982,13 @@ _n = len(_notices(_snconv["id"]))
 _sncm.add_message("user", "oi de novo")
 check("auto-reopen -> aviso 'reaberta automaticamente'",
       any("reaberta automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
+
+# (j2) auto-reabertura pelo atendente: resposta (assistant) numa conversa closed
+_conv_repo.set_status(_snconv["id"], "closed")
+_n = len(_notices(_snconv["id"]))
+_sncm.add_message("assistant", "retomando")
+check("auto-reopen por atendente -> aviso 'resposta enviada'",
+      any("resposta enviada" in c for c in _notices(_snconv["id"])[_n:]))
 
 # (k) ai_takeover: 1×/conversa via has_event (dedupe)
 check("ai_takeover ainda não existe", _sn.has_event(_snconv["id"], "ai_takeover") is False)

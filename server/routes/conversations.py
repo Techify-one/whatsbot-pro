@@ -12,7 +12,7 @@ from db.repositories.custom_attribute_validate import validate_value
 from server.avatars import avatar_version
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
-from plugins.events import emit_with_filter
+from plugins.events import emit_with_filter, apply_filter
 from server import system_notices
 from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
@@ -277,6 +277,20 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
+        # Plugin enforcement (filter.conversation.before_status): a plugin may REFUSE
+        # closing (e.g. required fields not yet filled) by returning None. This is the
+        # server-side counterpart of the frontend beforeResolve popup, so a direct API
+        # call can't bypass it. No-op when no plugin registers the filter — the endpoint
+        # behaves exactly as before.
+        if status == "closed":
+            user = current_user(request)
+            allowed = await apply_filter(
+                "filter.conversation.before_status",
+                {"conversation_id": conv_id, "new_status": status},
+                ctx_extras={"user_id": (user or {}).get("id")},
+            )
+            if allowed is None:
+                return _err("Fechamento bloqueado por um plugin.", status=403)
         conv = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
         if not conv:
             return _err("Conversa não encontrada.", status=404)

@@ -12,6 +12,10 @@ import { Executions } from './components/Executions.js';
 import { LoginScreen } from './components/LoginScreen.js';
 import { PluginsManager } from './components/PluginsManager.js';
 import { PluginScreen } from './components/PluginScreen.js';
+import { PluginModalHost } from './plugins/ModalHost.js';
+import { Slot } from './plugins/Slot.js';
+import { buildPluginApi, isFrontendApiCompatible } from './plugins/api.js';
+import { getRouteOverride, reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory } from './plugins/registry.js';
 import QuickReplies from './components/QuickReplies.js';
 import CustomAttributesManager from './components/CustomAttributesManager.js';
 import RuntimePanel from './components/RuntimePanel.js';
@@ -150,6 +154,33 @@ function scrollMsgFromSearch() {
   return Number.isNaN(n) ? null : n;
 }
 
+// Frontend extension layer: import each enabled plugin's `frontend_extends` ES
+// module once and call its default export `register(api)`. Resets the registry
+// first so a re-fetch (after a plugin toggle) re-registers from the current
+// manifest only. Failures are isolated — a broken plugin never breaks the app.
+async function loadPluginExtensions(plugins) {
+  resetRegistry();
+  for (const p of (plugins || [])) {
+    if (!p || !p.frontend_extends) continue;
+    if (!isFrontendApiCompatible(p.frontend_api_version)) {
+      console.warn(`[plugins] ${p.id}: frontend_api_version "${p.frontend_api_version}" incompatible — skipping extends`);
+      continue;
+    }
+    try {
+      const mod = await import(p.frontend_extends);
+      const register = mod && (mod.default || mod.register);
+      if (typeof register === 'function') {
+        await register(buildPluginApi(p.id));
+      } else {
+        console.warn(`[plugins] ${p.id}: extends module has no default export (register fn)`);
+      }
+    } catch (e) {
+      console.warn(`[plugins] ${p.id}: failed to load extends module`, e);
+    }
+  }
+  try { window.__whatsbotExtensions = registryInventory(); } catch (_) { /* ignore */ }
+}
+
 function MenuItem({ active, href, onClick, icon, children, gated = true }) {
   if (!gated) return null;  // permission gate (P48: hide, don't disable)
   function handleClick(e) {
@@ -224,7 +255,7 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
           <${MenuItem} gated=${can('settings.manage')} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`}
           >Execuções</${MenuItem}>
-          <${MenuItem} gated=${can('conversation.read')} active=${tab === 'attendances'} href=${CORE_TAB_PATHS.attendances} onClick=${() => { onTabChange('attendances'); close(); }}
+          <${MenuItem} gated=${can('conversation.read') && !getRouteOverride('attendances')} active=${tab === 'attendances'} href=${CORE_TAB_PATHS.attendances} onClick=${() => { onTabChange('attendances'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 5h6v6H4V5zm0 8h6v6H4v-6zm8-8h8v6h-8V5zm0 8h8v6h-8v-6z"/></svg>`}
           >Atendimentos</${MenuItem}>
           <${MenuItem} gated=${can('channel.manage')} active=${tab === 'channels'} href=${CORE_TAB_PATHS.channels} onClick=${() => { onTabChange('channels'); close(); }}
@@ -253,6 +284,9 @@ function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, acco
             `)}
           ` : null;
           })()}
+
+          <!-- Plugin-contributed menu entries (extension slot). -->
+          <${Slot} name="gear.menu.items" ctx=${{ onTabChange, close, tab }} />
 
           <div class="border-t border-wa-border my-1"></div>
           ${accountUrl ? html`
@@ -348,6 +382,10 @@ function App({ onLogout, hasPassword, currentUser }) {
   const [notification, setNotification] = useState('Iniciando...');
   const [wsConnected, setWsConnected] = useState(true);
   const [pluginScreens, setPluginScreens] = useState([]);
+  // Bumped whenever the plugin extension registry changes (slots/filters/route
+  // overrides) so route-override resolution and <Slot>s re-render once the async
+  // extends modules register (they load after first paint).
+  const [extVersion, setExtVersion] = useState(0);
   const [tab, setTabState] = useState(() => tabFromPath([]));
   const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
@@ -396,17 +434,24 @@ function App({ onLogout, hasPassword, currentUser }) {
       .then(r => r.json())
       .then(res => {
         if (!res || !res.ok) return;
-        const screens = (res.data.plugins || []).flatMap(p =>
+        const plugins = res.data.plugins || [];
+        const screens = plugins.flatMap(p =>
           (p.screens || [])
             .filter(s => !s.config)  // config screens live in the Plugins tab, not the gear menu
             .map(s => ({ ...s, pluginId: s.pluginId || p.id }))
         );
         setPluginScreens(screens);
+        // Load plugin frontend-extension modules (filters / UI slots / route overrides).
+        loadPluginExtensions(plugins);
         // Re-evaluate tab now that we know about plugin paths.
         setTabState(tabFromPath(screens));
       })
       .catch(() => { /* ignore */ });
   }, []);
+
+  // Re-render when the extension registry mutates (extends modules register after
+  // first paint; route overrides / slots must take effect immediately).
+  useEffect(() => subscribeRegistry(() => setExtVersion(v => v + 1)), []);
 
   const setTab = useCallback((t) => {
     setTabState(t);
@@ -616,6 +661,12 @@ function App({ onLogout, hasPassword, currentUser }) {
     ? pluginScreens.find(s => pluginTabId(s) === tab)
     : null;
 
+  // A plugin may claim (override) a CORE route (e.g. 'attendances'); when it does
+  // we render its registered component instead of the native screen. `extVersion`
+  // is read so this recomputes after async extends modules register.
+  void extVersion;
+  const activeRouteOverride = (tab && !tab.startsWith('plugin:')) ? getRouteOverride(tab) : null;
+
   // Seleção de entidade relevante para a tela `t` (ou null). Cada tela só recebe
   // o deep-link da sua própria tab.
   const entFor = (t) => (initialEntity && initialEntity.tab === t ? initialEntity : null);
@@ -625,7 +676,15 @@ function App({ onLogout, hasPassword, currentUser }) {
       <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
-        ${activePluginScreen
+        ${activeRouteOverride
+          ? html`<div class="mx-auto p-4 max-w-none">
+              <${activeRouteOverride.component}
+                apiBase=${`/api/plugins/${activeRouteOverride.pluginId}`}
+                tab=${tab}
+                setTab=${setTab}
+              />
+            </div>`
+          : activePluginScreen
           ? html`<div class="max-w-5xl mx-auto p-4">
               <${PageHeader} title=${activePluginScreen.title} onBack=${() => setTab('contacts')} />
               <${PluginScreen} screen=${activePluginScreen} currentUser=${currentUser} />
@@ -666,12 +725,16 @@ function App({ onLogout, hasPassword, currentUser }) {
                 <${PluginsManager} initialEntity=${entFor('plugins')} onPluginsChanged=${() => {
                   fetch('/api/plugins/manifest', { headers: authHeaders() }).then(r => r.json()).then(res => {
                     if (res && res.ok) {
-                      const sc = (res.data.plugins || []).flatMap(p =>
+                      const plugins = res.data.plugins || [];
+                      const sc = plugins.flatMap(p =>
                         (p.screens || [])
                           .filter(s => !s.config)
                           .map(s => ({ ...s, pluginId: s.pluginId || p.id }))
                       );
                       setPluginScreens(sc);
+                      // Re-register frontend extensions from the now-current manifest
+                      // (a disabled plugin drops out → its slots/overrides disappear).
+                      loadPluginExtensions(plugins);
                     }
                   });
                 }} />
@@ -732,6 +795,9 @@ function App({ onLogout, hasPassword, currentUser }) {
         onClose=${() => setLowBalance(null)}
         onSnooze=${(ms) => snoozeLowBalance(ms)}
       />` : null}
+
+      <!-- Host for plugin-opened modals (e.g. the "popup ao resolver" flow). -->
+      <${PluginModalHost} />
     </div>
   `;
 }
