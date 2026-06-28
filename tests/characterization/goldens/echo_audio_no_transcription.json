@@ -1,0 +1,21 @@
+{
+  "events": {
+    "sequence": [
+      "message.sent"
+    ],
+    "set": [
+      "message.sent"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Áudio enviado]",
+      "media_path": "statics/media/myvoice.ogg",
+      "media_type": "audio",
+      "msg_id": "<MSGID>",
+      "role": "assistant",
+      "status": "operator"
+    }
+  ],
+  "sent": []
+}

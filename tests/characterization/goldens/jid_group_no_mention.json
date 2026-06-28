@@ -1,0 +1,23 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "message.saved"
+    ],
+    "set": [
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Membro do Grupo]: mensagem no grupo sem mencionar o bot",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    }
+  ],
+  "sent": []
+}

@@ -1,0 +1,27 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended"
+    ],
+    "set": [
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Contato compartilhado: João Silva (5511988887777)]",
+      "media_path": null,
+      "media_type": "contact",
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    }
+  ],
+  "sent": []
+}

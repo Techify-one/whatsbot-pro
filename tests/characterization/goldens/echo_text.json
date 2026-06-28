@@ -1,0 +1,21 @@
+{
+  "events": {
+    "sequence": [
+      "message.sent"
+    ],
+    "set": [
+      "message.sent"
+    ]
+  },
+  "messages": [
+    {
+      "content": "mensagem que eu mesmo enviei do celular",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": "<MSGID>",
+      "role": "assistant",
+      "status": "operator"
+    }
+  ],
+  "sent": []
+}
