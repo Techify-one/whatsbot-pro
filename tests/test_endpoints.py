@@ -2242,26 +2242,30 @@ check("GET /api/webhook-payloads -> is list", isinstance(r.json()["data"], list)
 # ═══════════════════════════════════════════════════════════════════
 section("Webhook")
 
-# Presence event
-r = client.post("/api/webhook", json={
-    "type": "chat_presence",
-    "data": [{"from": "5511999990001@s.whatsapp.net", "state": "composing"}],
+# Presence event (live generic GOWA route — v8 ``event``/``payload`` envelope).
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "chat_presence",
+    "payload": {"from": "5511999990001@s.whatsapp.net", "state": "composing"},
 })
 check("POST /webhook (presence) -> 200", r.status_code == 200)
 
-# is_from_me echo (should be ignored)
-r = client.post("/api/webhook", json={
-    "body": "echo test",
-    "from": "5511999990001@s.whatsapp.net",
-    "id": "echo_001",
-    "is_from_me": True,
+# is_from_me echo (should be ignored / saved as echo, not replied)
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message",
+    "payload": {
+        "body": "echo test",
+        "from": "5511999990001@s.whatsapp.net",
+        "id": "echo_001",
+        "is_from_me": True,
+    },
 })
 check("POST /webhook (echo) -> 200", r.status_code == 200)
 
-# message.ack event
-r = client.post("/api/webhook", json={
-    "type": "message.ack",
-    "data": [{"id": "msg_001", "chat_jid": "5511999990002@s.whatsapp.net", "ack": 3}],
+# message.ack event (read receipt; GOWA ``receipt_type``/``ids`` shape)
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.ack",
+    "payload": {"ids": ["msg_001"], "from": "5511999990002@s.whatsapp.net",
+                "receipt_type": "read"},
 })
 check("POST /webhook (ack) -> 200", r.status_code == 200)
 
@@ -2316,12 +2320,19 @@ check("is_allowed newsletter bloqueado por default",
 _reset_jid_cache()
 for _suffix, _label in (("newsletter", "canal"), ("broadcast", "status"), ("bot", "bot")):
     _jidstr = f"120363000000000001@{_suffix}" if _suffix != "broadcast" else "status@broadcast"
-    r = client.post("/api/webhook", json={
-        "body": f"post de {_label}", "from": _jidstr,
-        "chat_id": _jidstr, "id": f"jidfilter_{_suffix}_001", "is_from_me": False,
+    # Live generic GOWA route: the JID-type discard runs inside ``ingest_event``
+    # BEFORE any contact is materialized (parity with the retired legacy handler),
+    # so the route still answers 200 — the discard is asserted by "no phantom
+    # contact" below (and the characterization golden ``jid_*_discarded``).
+    r = client.post("/api/webhook/gowa/default", json={
+        "event": "message",
+        "payload": {
+            "body": f"post de {_label}", "from": _jidstr,
+            "chat_id": _jidstr, "id": f"jidfilter_{_suffix}_001", "is_from_me": False,
+        },
     })
-    check(f"POST /webhook ({_label}) -> ignorado por tipo",
-          r.status_code == 200 and r.json()["data"]["status"] == "ignored_jid_type")
+    check(f"POST /webhook ({_label}) -> ignorado por tipo (200)",
+          r.status_code == 200)
 
 # E nenhum contato fantasma foi materializado para esses JIDs.
 _clist = client.get("/api/contacts").json()["data"]
@@ -3080,8 +3091,9 @@ check("GET /api/config (no auth) -> 401", r.status_code == 401)
 r = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
 check("GET /api/config (with auth) -> 200", r.status_code == 200)
 
-# Webhook should be exempt from auth
-r = client.post("/api/webhook", json={"type": "unknown"})
+# Webhook should be exempt from auth (live generic route, exempt via the
+# ``/api/webhook/`` prefix — the legacy exact ``/api/webhook`` route is retired).
+r = client.post("/api/webhook/gowa/default", json={"event": "unknown"})
 check("POST /webhook (auth exempt) -> 200", r.status_code == 200)
 
 # Health should be exempt
@@ -3221,7 +3233,7 @@ async def _capture_bcast(event, data):
     return await _orig_bcast(event, data)
 _deps_pres.ws_manager.broadcast = _capture_bcast
 try:
-    r = client.post("/api/webhook", json={
+    r = client.post("/api/webhook/gowa/default", json={
         "event": "chat_presence",
         "payload": {"from": "5511999990001@s.whatsapp.net", "state": "composing"},
     })
@@ -3237,7 +3249,7 @@ _deps_pres.state.presence_conv_cache.clear()
 _captured_pres.clear()
 _deps_pres.ws_manager.broadcast = _capture_bcast
 try:
-    r = client.post("/api/webhook", json={
+    r = client.post("/api/webhook/gowa/default", json={
         "event": "chat_presence",
         "payload": {"from": "5511000000999@s.whatsapp.net", "state": "composing"},
     })

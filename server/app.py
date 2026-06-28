@@ -430,11 +430,13 @@ def create_app(
     # ── Auth middleware ────────────────────────────────────────────────
 
     # Paths exempt from authentication
-    # NOTE: "/api/webhook/" (trailing slash) exempts per-provider webhooks
-    # (Cloud API/Telegram authenticate themselves). The EXACT "/api/webhook"
-    # (GOWA, no slash) and "/health" stay in _AUTH_EXEMPT_EXACT — INTOCÁVEIS.
+    # NOTE: "/api/webhook/" (trailing slash) exempts every per-provider webhook
+    # (the generic ``/api/webhook/{provider}/{channel_id}`` route — GOWA, Cloud
+    # API, Telegram — each authenticates the request itself). The legacy exact
+    # ``/api/webhook`` (GOWA fallback) was retired in plano 23 Fase F2, so only
+    # "/health" remains in _AUTH_EXEMPT_EXACT.
     _AUTH_EXEMPT_PREFIXES = ("/static/", "/statics/", "/plugins/", "/api/auth/", "/api/webhook/")
-    _AUTH_EXEMPT_EXACT = {"/api/webhook", "/health"}
+    _AUTH_EXEMPT_EXACT = {"/health"}
     _PLUGIN_SPA_PATHS = {
         s["path"]
         for loaded in registry.loaded.values()
