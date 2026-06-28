@@ -1,4 +1,13 @@
-"""Conversation endpoints (plano 01 Fase 1). Gated by conversation.* permissions."""
+"""Conversation endpoints (plano 01 Fase 1). Gated by conversation.* permissions.
+
+Plano 23 Fase B4: the LIFECYCLE + OWNERSHIP behaviour (status / assign / archive /
+attributes / agent / per-conversation AI) lives in
+``app.services.conversation_service`` (Branch by Abstraction). The routes here own
+the HTTP surface — permission check, inbox-scope guard, body validation, 404
+mapping — then delegate the WRITE + the side effects (WS broadcast, plugin-bus
+emit, system-notice card) to that service, which guarantees every domain event
+fires EXACTLY once. The route no longer emits anything it delegates.
+"""
 
 import asyncio
 import logging
@@ -12,8 +21,7 @@ from db.repositories.custom_attribute_validate import validate_value
 from server.avatars import avatar_version
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
-from plugins.events import emit_with_filter, apply_filter
-from server import system_notices
+from plugins.events import emit_with_filter
 from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
 
@@ -28,57 +36,12 @@ def _filter_context(request: Request) -> FilterContext:
         user_id=(user or {}).get("id"), now=time.time(), cattr_keys=cattr_keys)
 
 
-async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
-    """Push a conversation change to the panel (WS) and the plugin bus.
-
-    ``conv`` is the updated row; ``extra`` overrides/adds payload keys. Defensive:
-    a broadcast failure never fails the HTTP action.
-
-    Plano 23 Fase B3 (R-bc): this projects the conversation payload (unchanged) and
-    delegates the WS-broadcast + bus-emit to the generalized
-    ``app.services.messaging_service.broadcast_and_emit`` (which other services
-    reuse for non-conversation events). B4 will move the rest of this module's
-    lifecycle logic into ``conversation_service``.
-    """
-    from app.services.messaging_service import broadcast_and_emit
-
-    payload = {
-        "conversation_id": conv.get("id"),
-        "display_id": conv.get("display_id"),
-        "contact_id": conv.get("contact_id"),
-        "status": conv.get("status"),
-        "assignee_user_id": conv.get("assignee_user_id"),
-        "active_agent_key": conv.get("active_agent_key"),
-        "ai_active": conv.get("ai_active"),
-        "is_archived": conv.get("is_archived"),
-        "inbox_id": conv.get("inbox_id"),
-        **extra,
-        "ts": time.time(),
-    }
-    await broadcast_and_emit(deps, ws_event, bus_event, payload)
-
-
-async def _emit_notice(request: Request, conv: dict, event_type: str, **ctx):
-    """Write a conversation lifecycle notice into the chat thread (plano 12).
-
-    Resolves the actor name from the current user (``None`` ⇒ neutral phrasing)
-    and delegates to ``system_notices.emit_conversation_notice`` off-thread. The
-    config gate (global, per group) decides whether anything is stored/emitted, so
-    call sites stay dumb. Never raises — a failed notice never fails the action.
-    """
+def _actor(request: Request) -> tuple[object, str | None]:
+    """Resolve the (actor_id, actor_name) pair the service needs for events +
+    notices, so the service stays free of the ``Request`` object. ``actor_name``
+    is ``None`` for an anonymous caller (neutral notice phrasing)."""
     user = current_user(request)
-    actor = (user or {}).get("name") or None
-    try:
-        await asyncio.to_thread(
-            system_notices.emit_conversation_notice,
-            event_type=event_type,
-            conversation_id=conv.get("id"),
-            contact_id=conv.get("contact_id"),
-            actor=actor,
-            **ctx,
-        )
-    except Exception as e:
-        logger.debug("conversation notice %s failed: %s", event_type, e)
+    return (user or {}).get("id"), ((user or {}).get("name") or None)
 
 
 def _inbox_hidden(request: Request, inbox_id) -> bool:
@@ -110,6 +73,12 @@ def register_routes(app, deps):
     agent_handler = deps.agent_handler
     settings = deps.settings
     outbound = deps.outbound_router
+
+    # Conversation lifecycle + ownership service (plano 23 Fase B4). Imported here
+    # (not at module top) to mirror B3's cycle-avoidance: the service imports
+    # ``messaging_service`` which imports back into ``server``; deferring to call
+    # time keeps this module importable in any order.
+    from app.services import conversation_service as conv_svc
 
     async def _send_conv_read_receipts(channel_id: str, phone: str, msg_ids: list[str]):
         """Read receipts for ONE conversation, routed through its own channel."""
@@ -278,41 +247,18 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        # Plugin enforcement (filter.conversation.before_status): a plugin may REFUSE
-        # closing (e.g. required fields not yet filled) by returning None. This is the
-        # server-side counterpart of the frontend beforeResolve popup, so a direct API
-        # call can't bypass it. No-op when no plugin registers the filter — the endpoint
-        # behaves exactly as before.
-        if status == "closed":
-            user = current_user(request)
-            allowed = await apply_filter(
-                "filter.conversation.before_status",
-                {"conversation_id": conv_id, "new_status": status},
-                ctx_extras={"user_id": (user or {}).get("id")},
-            )
-            if allowed is None:
-                return _err("Fechamento bloqueado por um plugin.", status=403)
-        previous_status = (_conv or {}).get("status")
-        conv = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
+        actor_id, actor_name = _actor(request)
+        # The service applies ``filter.conversation.before_status`` (a plugin may
+        # REFUSE closing by returning None — the server-side counterpart of the
+        # frontend beforeResolve popup), owns the close POLICY (clear assignee +
+        # active agent), and emits conversation.status_changed (+ conversation.reopened
+        # on a closed→open transition) + the status notice, each exactly once.
+        conv = await conv_svc.set_status(deps, _conv, status,
+                                         actor_id=actor_id, actor_name=actor_name)
+        if conv == "blocked":
+            return _err("Fechamento bloqueado por um plugin.", status=403)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        await _broadcast(deps, "conversation_status_changed", "conversation.status_changed", conv)
-        # plano 23 Fase C0: distinct ``conversation.reopened`` verb when a closed
-        # conversation is reactivated by an explicit (manual) status change. Kept
-        # alongside ``conversation.status_changed`` — the reopened verb is additive.
-        if status == "open" and previous_status == "closed":
-            user = current_user(request)
-            await emit_with_filter("conversation.reopened", {
-                "conversation_id": conv.get("id"),
-                "contact_id": conv.get("contact_id"),
-                "phone": conv.get("contact_phone"),
-                "previous_status": previous_status,
-                "trigger": "manual",
-                "actor": (user or {}).get("id"),
-                "ts": time.time(),
-            })
-        await _emit_notice(request, conv,
-                           "status_closed" if status == "closed" else "status_open")
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/assign")
@@ -324,23 +270,16 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        previous_assignee = (_conv or {}).get("assignee_user_id")
-        conv = await asyncio.to_thread(conversation_repo.set_assignee, conv_id, assignee)
+        actor_id, actor_name = _actor(request)
+        # The service applies ``filter.conversation.before_assign`` (None aborts),
+        # writes the assignee, and emits conversation.assigned (set) OR
+        # conversation.unassigned (cleared) + the assigned/unassigned notice, once.
+        conv = await conv_svc.assign(deps, _conv, assignee,
+                                     actor_id=actor_id, actor_name=actor_name)
+        if conv == "blocked":
+            return _err("Atribuição bloqueada por um plugin.", status=403)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        # plano 23 Fase C0: emit a DISTINCT verb for the removal case. WS stays the
-        # same (``conversation_assigned``) but the bus event is ``conversation.assigned``
-        # when an assignee is set and ``conversation.unassigned`` when it is cleared,
-        # so subscribers can tell the two actions apart without inspecting the payload.
-        bus_event = "conversation.assigned" if assignee else "conversation.unassigned"
-        await _broadcast(deps, "conversation_assigned", bus_event, conv,
-                         previous_assignee=previous_assignee)
-        if assignee:
-            target = await asyncio.to_thread(user_repo.get, assignee)
-            await _emit_notice(request, conv, "assigned",
-                               target=(target or {}).get("name") or f"usuário #{assignee}")
-        else:
-            await _emit_notice(request, conv, "unassigned")
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/assign-me")
@@ -354,12 +293,10 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        conv = await asyncio.to_thread(conversation_repo.set_assignee, conv_id, user["id"])
+        _aid, actor_name = _actor(request)
+        conv = await conv_svc.assign_me(deps, _conv, user["id"], actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv,
-                         by_user_id=user["id"])
-        await _emit_notice(request, conv, "assigned_me")
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/agent")
@@ -371,16 +308,10 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        conv = await asyncio.to_thread(conversation_repo.set_agent, conv_id, agent_key)
+        _aid, actor_name = _actor(request)
+        conv = await conv_svc.set_agent(deps, _conv, agent_key, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        await _broadcast(deps, "conversation_updated", "conversation.updated", conv,
-                         fields={"active_agent_key": conv.get("active_agent_key")})
-        agent_name = None
-        if conv.get("active_agent_key"):
-            ag = await asyncio.to_thread(agent_repo.get, conv["active_agent_key"])
-            agent_name = (ag or {}).get("display_name") or conv["active_agent_key"]
-        await _emit_notice(request, conv, "agent_changed", agent=agent_name)
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/assign-agent")
@@ -403,63 +334,29 @@ def register_routes(app, deps):
         if err:
             return err
         kind = (body.get("kind") or "").strip()
-        contact_ai_enabled = None  # None = leave the contact-level gate untouched
+        uid = None
+        agent_key = None
         if kind == "user":
             uid = body.get("user_id")
             if not isinstance(uid, int):
                 return _err("user_id é obrigatório para kind=user.", status=400)
-            conv = await asyncio.to_thread(
-                conversation_repo.assign_agent, conv_id,
-                assignee_user_id=uid, active_agent_key=None, ai_active=0)
-            contact_ai_enabled = False
         elif kind == "ai":
             agent_key = (body.get("agent_key") or "").strip()
             if not agent_key:
                 return _err("agent_key é obrigatório para kind=ai.", status=400)
-            conv = await asyncio.to_thread(
-                conversation_repo.assign_agent, conv_id,
-                assignee_user_id=None, active_agent_key=agent_key, ai_active=1)
-            contact_ai_enabled = True
-        elif kind == "none":
-            conv = await asyncio.to_thread(
-                conversation_repo.assign_agent, conv_id,
-                assignee_user_id=None, active_agent_key=None, ai_active=None)
-        else:
+        elif kind != "none":
             return _err("kind deve ser 'user', 'ai' ou 'none'.", status=400)
+        actor_id, actor_name = _actor(request)
+        # The service converges the three ownership transitions (user/ai/none) through
+        # its unified _transfer policy: it writes the assignee/agent/ai columns, mirrors
+        # the contact-level AI gate (+ contact.ai_toggled) for user/ai, and emits
+        # conversation.assigned + the matching notice (assigned/assigned_me/unassigned/
+        # agent_changed), each exactly once.
+        conv = await conv_svc.assign_unified(
+            deps, _conv, kind=kind, user_id=uid, agent_key=agent_key,
+            actor_id=actor_id, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        # Sync the contact-level AI gate + badge with the new owner.
-        if contact_ai_enabled is not None:
-            contact = await asyncio.to_thread(contact_repo.get, conv["contact_id"])
-            if contact:
-                await asyncio.to_thread(
-                    contact_repo.update, contact["id"],
-                    ai_enabled=1 if contact_ai_enabled else 0)
-                try:
-                    await deps.ws_manager.broadcast("contact_ai_toggled", {
-                        "phone": contact["phone"], "ai_enabled": contact_ai_enabled})
-                    await emit_with_filter("contact.ai_toggled", {
-                        "phone": contact["phone"], "ai_enabled": contact_ai_enabled})
-                except Exception as e:
-                    logger.debug("contact_ai_toggled broadcast failed: %s", e)
-        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
-        # Parity with the sidebar right-click (POST /assign, /assign-me, /agent):
-        # surface a lifecycle card in the thread when the assignee changes via the
-        # "?" info panel. Defensive — a failed notice never fails the assignment.
-        if kind == "user":
-            me = current_user(request)
-            if me and uid == me.get("id"):
-                await _emit_notice(request, conv, "assigned_me")
-            else:
-                target = await asyncio.to_thread(user_repo.get, uid)
-                await _emit_notice(request, conv, "assigned",
-                                   target=(target or {}).get("name") or f"usuário #{uid}")
-        elif kind == "none":
-            await _emit_notice(request, conv, "unassigned")
-        elif kind == "ai":
-            ag = await asyncio.to_thread(agent_repo.get, agent_key)
-            await _emit_notice(request, conv, "agent_changed",
-                               agent=(ag or {}).get("display_name") or agent_key)
         return _ok({"conversation": conv})
 
     @app.post("/api/conversations/{conv_id}/ai")
@@ -471,26 +368,16 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        # Turning the AI OFF hands the conversation to whoever turned it off (plano
-        # 17): they are taking over, so it lands in their queue instead of "Não
-        # atribuídas". None (legacy/open mode) falls back to unassigned.
-        me = current_user(request)
-        new_assignee = (me or {}).get("id") if not active else None
-        conv = await asyncio.to_thread(
-            conversation_repo.set_conversation_ai, conv_id, active, new_assignee)
+        actor_id, actor_name = _actor(request)
+        # The service owns the per-conversation AI transfer POLICY (plano 17, unified
+        # via _transfer): OFF hands the chat to whoever turned it off (actor_id, else
+        # unassigned) and clears the agent; ON re-binds the inbox's default AI agent
+        # and clears the human assignee. It emits conversation.assigned +
+        # conversation.ai_toggled + the ai_on/ai_off (and assigned_me) notice, once each.
+        conv = await conv_svc.set_ai(deps, _conv, active,
+                                     actor_id=actor_id, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        # Toggling the AI per-conversation also (re)assigns it (plano 17): turning
-        # the AI OFF assigns it to the operator; turning it ON re-binds the default
-        # agent and clears the human assignee. Emit the assignment event so the
-        # sidebar repositions the row, plus the ai_toggled event for the badge.
-        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
-        await _broadcast(deps, "conversation_ai_toggled", "conversation.ai_toggled", conv)
-        await _emit_notice(request, conv, "ai_on" if active else "ai_off")
-        # Surface the takeover as an assignment card too when an operator turned the
-        # AI off and thereby took the conversation.
-        if not active and new_assignee is not None:
-            await _emit_notice(request, conv, "assigned_me")
         return _ok({"conversation": conv})
 
     @app.delete("/api/conversations/{conv_id}")
@@ -512,12 +399,13 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         if _inbox_hidden(request, conv.get("inbox_id")):
             return _err("Conversa não encontrada.", status=404)
-        await asyncio.to_thread(conversation_repo.delete, conv_id)
         try:
             deps.agent_handler.drop_cached_contact(conv.get("contact_phone"))
         except Exception:
             pass
-        await _broadcast(deps, "conversation_deleted", "conversation.deleted", conv)
+        # The service deletes the row and emits conversation.deleted once. The
+        # cached-contact drop stays in the route (it touches agent_handler state).
+        await conv_svc.delete(deps, conv)
         return _ok({"message": "Conversa apagada.", "conversation_id": conv_id,
                     "contact_id": conv.get("contact_id")})
 
@@ -530,11 +418,10 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
-        conv = await asyncio.to_thread(conversation_repo.set_archived, conv_id, archived)
+        _aid, actor_name = _actor(request)
+        conv = await conv_svc.archive(deps, _conv, archived, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        await _broadcast(deps, "conversation_archived", "conversation.archived", conv)
-        await _emit_notice(request, conv, "archived" if archived else "unarchived")
         return _ok({"conversation": conv})
 
     @app.put("/api/conversations/{conv_id}/info")
@@ -552,6 +439,7 @@ def register_routes(app, deps):
         attrs = body.get("custom_attributes")
         changed: dict = {}
         defs: dict = {}
+        merged: dict | None = None  # None = no custom_attributes in body → no write
         if attrs is not None:
             if not isinstance(attrs, dict):
                 return _err("custom_attributes deve ser um objeto.", status=400)
@@ -578,32 +466,13 @@ def register_routes(app, deps):
                     merged.pop(k, None)
                 else:
                     merged[k] = v
-            conv = await asyncio.to_thread(
-                conversation_repo.set_custom_attributes, conv_id, merged)
-        await _broadcast(deps, "conversation_updated", "conversation.updated", conv,
-                         fields={"custom_attributes": conv.get("custom_attributes")})
-        if changed:
-            # Aggregate a batch of attribute changes into a single card (plano 12 §6).
-            if len(changed) == 1:
-                key, value = next(iter(changed.items()))
-                label = (defs.get(key) or {}).get("display_name") or key
-                await _emit_notice(request, conv, "attribute_set",
-                                   attribute=label, value=value)
-            else:
-                await _emit_notice(request, conv, "attribute_set", count=len(changed))
-            # plano 23 Fase C0: one ``conversation.attribute_set`` bus event PER changed
-            # key (the card above is aggregated; the bus event is granular so a
-            # subscriber gets each key/value pair).
-            user = current_user(request)
-            actor = (user or {}).get("id")
-            for key, value in changed.items():
-                await emit_with_filter("conversation.attribute_set", {
-                    "conversation_id": conv.get("id"),
-                    "key": key,
-                    "value": value,
-                    "actor": actor,
-                    "ts": time.time(),
-                })
+        actor_id, actor_name = _actor(request)
+        # The service persists ``merged`` (None ⇒ no write), broadcasts
+        # conversation.updated, and emits the aggregated attribute_set notice + one
+        # conversation.attribute_set bus event per changed key — each exactly once.
+        conv = await conv_svc.set_attributes(
+            deps, conv, merged, changed, defs,
+            actor_id=actor_id, actor_name=actor_name)
         return _ok({"conversation": conv})
 
     @app.get("/api/conversations/{conv_id}/templates")

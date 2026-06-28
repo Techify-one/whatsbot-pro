@@ -77,6 +77,27 @@ KNOWN_EVENTS: set[str] = {
     "subprocess.crashed", "subprocess.restarted",
 }
 
+# Filter names the core applies (informational catalogue — there is no enforced
+# KNOWN_FILTERS registry yet; filters are tracked dynamically in ``_filters``).
+# Plano 23 Fase B4 added ``filter.conversation.before_assign`` and RELOCATED
+# ``filter.conversation.before_status`` from the route into
+# ``conversation_service``; both are recorded here so Fase C2 (filter-catalogue /
+# docs reconciliation) can promote this to a validated registry.
+_CORE_FILTER_NAMES: set[str] = {
+    "filter.webhook.payload",
+    "filter.message.before_save", "filter.message.outgoing",
+    "filter.transcription.should_run", "filter.transcription.result",
+    "filter.media.unknown",
+    "filter.contact.tags",
+    "filter.event.before_emit",
+    "filter.system_prompt", "filter.llm.messages", "filter.llm.tools",
+    "filter.tool.args", "filter.tool.result",
+    "filter.reply.raw", "filter.reply.parts", "filter.reply.part",
+    "filter.authz.decision",
+    # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
+    "filter.conversation.before_status", "filter.conversation.before_assign",
+}
+
 # Subscription keys that are dispatch targets, not emission sources.
 # ``message.any`` is re-dispatched automatically by :func:`emit` whenever
 # ``message.received`` or ``message.sent`` fires, with ``direction`` added
