@@ -150,7 +150,7 @@ def list_catalog() -> list[dict]:
     ``plugin_id``/``group_label`` = ``None``. This replaces the static
     ``PERMISSION_CATALOG`` in the ``/api/roles`` response so plugin perms appear
     in the PermissionPicker automatically."""
-    from server.permissions import PERMISSION_CATALOG
+    from domain.permission_catalog import PERMISSION_CATALOG
     catalog = [
         {"key": k, "description": d, "plugin_id": None, "group_label": None}
         for k, d in PERMISSION_CATALOG

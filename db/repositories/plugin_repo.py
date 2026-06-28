@@ -12,6 +12,7 @@ from sqlalchemy import inspect, insert as sa_insert, select, text as sa_text
 from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
+from db.repositories._mapping import coerce_json
 from db.tables import plugin_migrations, plugins
 from db.upsert import upsert_ignore
 
@@ -22,13 +23,8 @@ _SAFE_NAME_RE = re.compile(r"^plugin_[a-z][a-z0-9_]{0,31}_[A-Za-z0-9_]+$")
 
 
 def _decode_list(value):
-    if value is None:
-        return []
-    try:
-        out = json.loads(value)
-        return out if isinstance(out, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
+    out = coerce_json(value, [])
+    return out if isinstance(out, list) else []
 
 
 def _row_to_dict(row) -> dict:

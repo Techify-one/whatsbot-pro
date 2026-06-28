@@ -14,6 +14,7 @@ import time
 from sqlalchemy import select
 
 from db.engine import get_engine
+from db.repositories._mapping import coerce_json
 from db.tables import ai_agents, ai_agents_history
 from db.upsert import upsert, upsert_ignore
 
@@ -21,20 +22,15 @@ DEFAULT_AGENT_KEY = "default"
 
 
 def _decode_json(value, fallback):
-    if value is None:
-        return fallback
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return fallback
+    return coerce_json(value, fallback)
 
 
 def _row_to_dict(row) -> dict:
     d = dict(row)
-    d["model_config"] = _decode_json(d.get("model_config"), {})
-    d["tool_names"] = _decode_json(d.get("tool_names"), None)
-    d["routing_targets"] = _decode_json(d.get("routing_targets"), None)
-    d["hooks_config"] = _decode_json(d.get("hooks_config"), {})
+    d["model_config"] = coerce_json(d.get("model_config"), {})
+    d["tool_names"] = coerce_json(d.get("tool_names"), None)
+    d["routing_targets"] = coerce_json(d.get("routing_targets"), None)
+    d["hooks_config"] = coerce_json(d.get("hooks_config"), {})
     d["enabled"] = bool(d.get("enabled", 1))
     d["is_router"] = bool(d.get("is_router", 0))
     return d

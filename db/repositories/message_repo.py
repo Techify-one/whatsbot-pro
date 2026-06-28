@@ -8,6 +8,7 @@ import time
 from sqlalchemy import and_, delete as sa_delete, insert as sa_insert, select, update as sa_update
 
 from db.engine import get_engine
+from db.repositories._mapping import coerce_json
 from db.tables import messages
 
 
@@ -316,9 +317,8 @@ def set_reaction(msg_id: str, emoji: str, reactor: str) -> dict | None:
         ).mappings().first()
         if row is None:
             return None
-        try:
-            data = json.loads(row["reactions"]) if row["reactions"] else {}
-        except (ValueError, TypeError):
+        data = coerce_json(row["reactions"], {})
+        if not isinstance(data, dict):
             data = {}
         # Drop the reactor from every emoji (one reaction per person).
         for em in list(data.keys()):
@@ -355,12 +355,9 @@ def _row_to_dict(row) -> dict:
         d["revoked"] = True
         d["revoke_scope"] = "me" if row["revoked"] == 2 else "all"
     if row.get("reactions"):
-        try:
-            parsed = json.loads(row["reactions"])
-            if parsed:
-                d["reactions"] = parsed
-        except (ValueError, TypeError):
-            pass
+        parsed = coerce_json(row["reactions"], None)
+        if parsed:
+            d["reactions"] = parsed
     # `reply_to_msg_id` may be absent on old rows read before the column existed.
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]

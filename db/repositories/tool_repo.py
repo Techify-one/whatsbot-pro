@@ -17,18 +17,14 @@ from sqlalchemy import update as sa_update
 from sqlalchemy import delete as sa_delete
 
 from db.engine import get_engine
+from db.repositories._mapping import coerce_json
 from db.tables import ai_tools, ai_tools_history
 from db.upsert import upsert
 
 
 def _decode_list(value):
-    if value is None:
-        return []
-    try:
-        out = json.loads(value)
-        return out if isinstance(out, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
+    out = coerce_json(value, [])
+    return out if isinstance(out, list) else []
 
 
 def _row_to_dict(row) -> dict:
