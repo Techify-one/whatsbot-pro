@@ -16,6 +16,7 @@ import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
 } from '../services/api.js';
+import { formatPhoneDisplay } from '../utils/phone.js';
 
 const html = htm.bind(h);
 
@@ -27,11 +28,6 @@ function foldStr(s) {
   return (s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
 
-function formatPhoneDisplay(phone) {
-  if (!phone || phone.length < 12) return phone || '';
-  // 55 85 97360559 → +55 (85) 97360-559
-  return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
-}
 
 // Navega para uma rota do SPA reusando o mesmo mecanismo do app.js (pushState +
 // popstate re-sincroniza a aba a partir da URL).

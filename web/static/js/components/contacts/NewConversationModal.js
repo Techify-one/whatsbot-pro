@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState } from '../../services/api.js';
+import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
 
@@ -26,12 +27,6 @@ function looksLikePhone(input) {
   return (input || '').replace(/\D/g, '').length >= 10;
 }
 
-// 5564900000000 → +55 (64) 99232-7255 (espelha o helper da sidebar). Preserva o
-// que o operador digitou (não normaliza o 9º dígito).
-function formatPhoneDisplay(phone) {
-  if (!phone || phone.length < 12) return phone || '';
-  return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
-}
 
 function channelLabel(ch) {
   const meta = PROVIDER_META[ch.provider] || { label: ch.provider || 'Canal' };

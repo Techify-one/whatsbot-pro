@@ -3,6 +3,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks'
 import htm from 'htm';
 import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState, listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter } from '../../services/api.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
+import { formatPhoneDisplay } from '../../utils/phone.js';
+import { isDuplicateMessage, findDuplicateIndex, mediaPreviewLabel } from '../../services/messages.js';
+import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../services/conversationPatch.js';
 import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -167,11 +170,6 @@ const html = htm.bind(h);
 // `conversation_id`; contatos sem conversa ainda aparecem como linha única (phone).
 
 // 55 85 97360559 → +55 (85) 97360-559 (espelha o helper da ContactList).
-function formatPhoneDisplay(phone) {
-  if (!phone || phone.length < 12) return phone || '';
-  return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
-}
-
 function buildRows(contacts, conversations) {
   const byContact = new Map();
   for (const cv of conversations) {
@@ -920,21 +918,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     // P19: a conversation-scope custom-attribute write arrives as conversation_updated
     // with fields.custom_attributes — forward it to the open ConversationInfoPanel so
     // it refreshes live (the sidebar patch below doesn't render attribute values).
-    if (convId != null && data.fields && data.fields.custom_attributes !== undefined) {
+    if (isConversationAttributeWrite(data)) {
       setConvAttrPatch({ conversation_id: convId, custom_attributes: data.fields.custom_attributes, ts: Date.now() });
     }
-    setContacts(prev => prev.map(c => {
-      const isTarget = (convId != null && c.conversation_id === convId)
-        || (c.conversation_id == null && cid != null && c.id === cid);
-      if (!isTarget) return c;
-      const patch = {};
-      if (data.status !== undefined) patch.conv_status = data.status;
-      if (data.assignee_user_id !== undefined) patch.assignee_user_id = data.assignee_user_id;
-      if (data.active_agent_key !== undefined) patch.active_agent_key = data.active_agent_key;
-      if (data.ai_active !== undefined) patch.conv_ai_active = data.ai_active;
-      if (data.conversation_id != null && c.conversation_id == null) patch.conversation_id = data.conversation_id;
-      return { ...c, ...patch };
-    }));
+    setContacts(prev => applyConversationEvent(prev, data));
     // Membership safety net: a status change can move a conversation INTO the active
     // (client-side) status filter. The patch above only touches rows already loaded —
     // if the (re)opened conversation isn't in the list yet (e.g. it was closed and
@@ -942,9 +929,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     // of waiting for an F5. Mirrors the new_message + kanban fallbacks; debounced so a
     // burst of events refetches once.
     if (data.status !== undefined) {
-      const present = contactsRef.current.some(c =>
-        (convId != null && c.conversation_id === convId)
-        || (c.conversation_id == null && cid != null && c.id === cid));
+      const present = contactsRef.current.some(c => eventTargetsRow(c, data));
       if (!present) {
         if (convListRefetchTimer.current) clearTimeout(convListRefetchTimer.current);
         convListRefetchTimer.current = setTimeout(() => {
@@ -1251,12 +1236,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
           const existing = data.messages || [];
-          const newMsgs = pending.filter(m =>
-            !existing.some(e =>
-              (e.ts === m.ts && e.role === m.role) ||
-              (e.role === m.role && e.content === m.content && Math.abs(e.ts - m.ts) < 30)
-            )
-          );
+          const newMsgs = pending.filter(m => !isDuplicateMessage(m, existing));
           if (newMsgs.length > 0) {
             data.messages = [...(data.messages || []), ...newMsgs];
           }
@@ -1525,10 +1505,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         if (!prev) {
           // Detail still loading — buffer under the open thread's phone key
           const buf = pendingWsMessages.current[phone] || [];
-          if (!buf.some(m =>
-            (m.ts === message.ts && m.role === message.role) ||
-            (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
-          )) {
+          if (!isDuplicateMessage(message, buf)) {
             pendingWsMessages.current[phone] = [...buf, message];
           }
           return prev;
@@ -1551,10 +1528,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           }
         }
         // Deduplicate by ts + role, or by content + role (within 30s window)
-        const dupIdx = prev.messages ? prev.messages.findIndex(m =>
-          (m.ts === message.ts && m.role === message.role) ||
-          (m.role === message.role && m.content === message.content && Math.abs(m.ts - message.ts) < 30)
-        ) : -1;
+        const dupIdx = prev.messages ? findDuplicateIndex(message, prev.messages) : -1;
         if (dupIdx !== -1) {
           // Merge ids/status from server into existing (optimistic) message
           if (message.msg_id || message.status || message._id) {
@@ -1597,19 +1571,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         const updated = [...prev];
         const isUserMsg = message.role === 'user';
         const isViewing = isOpenRow(updated[idx]) && pageVisibleRef.current;
-        let lastPreview = (message.content || '').substring(0, 80);
-        if (message.media_type === 'image') lastPreview = message.content || '📷 Imagem';
-        else if (message.media_type === 'audio') lastPreview = '🎤 Áudio';
-        else if (message.media_type === 'video') lastPreview = message.content || '🎥 Vídeo';
-        else if (message.media_type === 'sticker') lastPreview = '🎨 Sticker';
-        else if (message.media_type === 'document') lastPreview = message.content || '📄 Documento';
-        else if (message.media_type === 'location') lastPreview = message.content || '📍 Localização';
-        else if (message.media_type === 'live_location') lastPreview = '📍 Localização ao vivo';
-        else if (message.media_type === 'poll') lastPreview = message.content || '📊 Enquete';
-        else if (message.media_type === 'interactive') lastPreview = message.content || '↩️ Resposta';
-        else if (message.media_type === 'order') lastPreview = message.content || '🛒 Pedido';
-        else if (message.media_type === 'product') lastPreview = '🏷️ Produto';
-        else if (message.media_type === 'contact' || message.media_type === 'contacts') lastPreview = message.content || '👤 Contato';
+        const lastPreview = mediaPreviewLabel(message);
         updated[idx] = {
           ...updated[idx],
           last_message: lastPreview,

@@ -57,3 +57,34 @@ jobs:
         env:
           WHATSBOT_TEST_DB_URL: postgresql+psycopg://whatsbot:whatsbot@localhost:5432/whatsbot_test
         run: pytest
+
+  # Frontend pure-module checks (Plano 23 · D0). NON-BLOCKING for now: the
+  # no-build-step ESM frontend has no bundler gate, so we run `node --test` over
+  # the extracted pure modules and an opt-in `// @ts-check` pass. continue-on-error
+  # keeps it informational until the frontend decomposition (Wave 4) lands.
+  frontend:
+    name: frontend (node --test + checkJs)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run node --test (pure ESM modules)
+        run: node --test "web/static/js/**/*.test.js"
+
+      - name: Type-check opt-in (// @ts-check) modules
+        run: |
+          npx --yes typescript@5 tsc \
+            --noEmit --allowJs --checkJs --strict \
+            --target es2022 --module esnext --moduleResolution bundler \
+            --lib es2022,dom,dom.iterable --skipLibCheck \
+            web/static/js/utils/phone.js \
+            web/static/js/services/httpClient.js \
+            web/static/js/services/messages.js \
+            web/static/js/services/conversationPatch.js
