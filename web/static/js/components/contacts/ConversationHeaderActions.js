@@ -17,6 +17,8 @@ import {
 import { hasPermission } from '../../utils/permissions.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
+import { resolveConversation } from '../../utils/resolveConversation.js';
+import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
@@ -151,7 +153,9 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
     const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
     if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
-    run(() => setConversationStatus(conv.id, 'closed'));
+    // Plugin filter (filter.conversation.beforeResolve) runs after the native guard;
+    // a plugin can show a popup / fill fields, or abort the close by returning null.
+    run(() => resolveConversation(conv, 'closed'));
   }
 
   // Modal "OK": close it and open the panel that holds the pending attributes so
@@ -227,6 +231,9 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
           ` : null}
         </div>
       ` : null}
+
+      <!-- Extension point: plugins can inject extra conversation actions here. -->
+      <${Slot} name="conversation.header.actions" ctx=${{ conv, user }} />
 
       ${missingAttrs ? html`
         <${RequiredAttributesModal} missing=${missingAttrs.list} onConfirm=${onMissingConfirm} />

@@ -12,6 +12,12 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+# Imported at MODULE level (not inside plugin_permission) so the ``request: Request``
+# annotation on its inner dependency resolves under ``from __future__ import
+# annotations`` — otherwise FastAPI can't evaluate the forward ref and treats
+# ``request`` as a required QUERY param (HTTP 422 on every gated plugin route).
+from fastapi import Depends, HTTPException, Request
+
 if TYPE_CHECKING:
     from agent.handler import AgentHandler
     from agent.memory import ContactMemory, TagRegistry
@@ -155,7 +161,6 @@ def plugin_permission(key: str):
         @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])
         async def delete_item(id: int): ...
     """
-    from fastapi import Depends, HTTPException, Request
 
     async def _dep(request: Request) -> None:
         from server.authz import acheck
