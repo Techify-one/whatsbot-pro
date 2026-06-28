@@ -1,0 +1,19 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "contact.toggle_ai",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "ai_enabled": false,
+        "phone": "5511970050002",
+        "ts": "<TS>"
+      },
+      "before": null,
+      "resource_id": "5511970050002",
+      "resource_id_resolved": true,
+      "resource_type": "contact"
+    }
+  ]
+}

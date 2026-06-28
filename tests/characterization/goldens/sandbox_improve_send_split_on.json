@@ -1,0 +1,46 @@
+{
+  "messages": [
+    {
+      "content": "Oi sandbox",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "primeira parte",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    },
+    {
+      "content": "segunda parte",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    },
+    {
+      "content": "terceira parte",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    }
+  ],
+  "process_message_called": true,
+  "response": {
+    "data": {
+      "phone": "5511975000002",
+      "replies": [
+        "primeira parte",
+        "segunda parte",
+        "terceira parte"
+      ],
+      "reply": "primeira parte\nsegunda parte\nterceira parte"
+    },
+    "ok": true
+  },
+  "status_code": 200
+}

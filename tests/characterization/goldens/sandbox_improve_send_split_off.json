@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "content": "Oi sandbox",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "[\"primeira parte\", \"segunda parte\"]",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    }
+  ],
+  "process_message_called": true,
+  "response": {
+    "data": {
+      "phone": "5511975000003",
+      "replies": [
+        "[\"primeira parte\", \"segunda parte\"]"
+      ],
+      "reply": "[\"primeira parte\", \"segunda parte\"]"
+    },
+    "ok": true
+  },
+  "status_code": 200
+}

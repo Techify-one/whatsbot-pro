@@ -1,0 +1,28 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "contact.update",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "custom_attributes": {},
+        "info": {
+          "address": "",
+          "company": "",
+          "custom_attributes": {},
+          "email": "a@x.com",
+          "name": "Auditado",
+          "observations": [],
+          "profession": ""
+        },
+        "phone": "5511970050001",
+        "ts": "<TS>"
+      },
+      "before": null,
+      "resource_id": "5511970050001",
+      "resource_id_resolved": true,
+      "resource_type": "contact"
+    }
+  ]
+}

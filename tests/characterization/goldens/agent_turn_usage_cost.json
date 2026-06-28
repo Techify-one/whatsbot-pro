@@ -1,0 +1,64 @@
+{
+  "events": {
+    "sequence": [
+      "llm.before",
+      "tool.before",
+      "tool.after",
+      "llm.after"
+    ],
+    "set": [
+      "llm.after",
+      "llm.before",
+      "tool.after",
+      "tool.before"
+    ]
+  },
+  "messages": [
+    {
+      "content": "sou a Dora",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "anotado!",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": null
+    }
+  ],
+  "result": {
+    "contact_info": {
+      "address": "",
+      "company": "",
+      "email": "",
+      "name": "Dora Lima",
+      "observations": [],
+      "profession": ""
+    },
+    "reply": "anotado!",
+    "tool_calls": [
+      {
+        "args": {
+          "name": "Dora Lima"
+        },
+        "result": null,
+        "tool": "save_contact_info"
+      }
+    ]
+  },
+  "usage": [
+    {
+      "call_type": "text",
+      "completion_tokens": 30,
+      "cost_usd": 0.18,
+      "model": "deepseek/deepseek-v4-pro",
+      "prompt_tokens": 120,
+      "total_tokens": 150
+    }
+  ]
+}

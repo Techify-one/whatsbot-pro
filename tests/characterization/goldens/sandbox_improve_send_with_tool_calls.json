@@ -1,0 +1,37 @@
+{
+  "messages": [
+    {
+      "content": "Oi sandbox",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "🔧 save_contact_info\nname: Maria\nemail: maria@example.com\n→ Dados salvos.",
+      "media_type": null,
+      "msg_id": null,
+      "role": "tool_call",
+      "status": null
+    },
+    {
+      "content": "anotei seus dados!",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    }
+  ],
+  "process_message_called": true,
+  "response": {
+    "data": {
+      "phone": "5511975000006",
+      "replies": [
+        "anotei seus dados!"
+      ],
+      "reply": "anotei seus dados!"
+    },
+    "ok": true
+  },
+  "status_code": 200
+}

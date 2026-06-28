@@ -1,0 +1,29 @@
+{
+  "conversation": {
+    "active_agent_key": null,
+    "ai_active": 0,
+    "assignee_user_id": null,
+    "status": "open"
+  },
+  "events": {
+    "counts": {
+      "conversation.ai_toggled": 1,
+      "conversation.assigned": 1
+    },
+    "sequence": [
+      "conversation.assigned",
+      "conversation.ai_toggled"
+    ],
+    "set": [
+      "conversation.ai_toggled",
+      "conversation.assigned"
+    ]
+  },
+  "notices": [
+    {
+      "content": "🤖 IA pausada.",
+      "role": "conversation_event"
+    }
+  ],
+  "scope": "conversation"
+}

@@ -1,0 +1,21 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "tool.override",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "fields_changed": [
+          "enabled"
+        ],
+        "tool_name": "save_contact_info",
+        "ts": "<TS>"
+      },
+      "before": null,
+      "resource_id": null,
+      "resource_id_resolved": false,
+      "resource_type": "tool"
+    }
+  ]
+}

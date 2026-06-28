@@ -1,0 +1,60 @@
+{
+  "assign": {
+    "conversation": {
+      "active_agent_key": "default",
+      "ai_active": 1,
+      "assignee_user_id": "<USER>",
+      "status": "open"
+    },
+    "events": {
+      "counts": {
+        "conversation.assigned": 1
+      },
+      "sequence": [
+        "conversation.assigned"
+      ],
+      "set": [
+        "conversation.assigned"
+      ]
+    },
+    "notices": [
+      {
+        "content": "🧑‍💼 Conversa atribuída para Atendente A2b.",
+        "role": "conversation_event"
+      },
+      {
+        "content": "✅ Conversa resolvida.",
+        "role": "conversation_event"
+      }
+    ]
+  },
+  "close": {
+    "conversation": {
+      "active_agent_key": null,
+      "ai_active": 1,
+      "assignee_user_id": null,
+      "status": "closed"
+    },
+    "events": {
+      "counts": {
+        "conversation.status_changed": 1
+      },
+      "sequence": [
+        "conversation.status_changed"
+      ],
+      "set": [
+        "conversation.status_changed"
+      ]
+    }
+  },
+  "final_notices": [
+    {
+      "content": "🧑‍💼 Conversa atribuída para Atendente A2b.",
+      "role": "conversation_event"
+    },
+    {
+      "content": "✅ Conversa resolvida.",
+      "role": "conversation_event"
+    }
+  ]
+}

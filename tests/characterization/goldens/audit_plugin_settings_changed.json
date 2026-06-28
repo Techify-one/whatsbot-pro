@@ -1,0 +1,25 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "plugin.settings_update",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "plugin_id": "telegram",
+        "ts": "<TS>",
+        "values": {
+          "inbound_mode": "poll",
+          "poll_interval": 3.0
+        }
+      },
+      "before": {
+        "inbound_mode": "poll",
+        "poll_interval": 2.0
+      },
+      "resource_id": "telegram",
+      "resource_id_resolved": true,
+      "resource_type": "plugin"
+    }
+  ]
+}

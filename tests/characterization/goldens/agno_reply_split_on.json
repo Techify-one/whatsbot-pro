@@ -1,0 +1,9 @@
+{
+  "extracted_reply": "[\"primeira parte\", \"segunda parte\", \"terceira parte\"]",
+  "num_parts": 3,
+  "parse_split_reply": [
+    "primeira parte",
+    "segunda parte",
+    "terceira parte"
+  ]
+}

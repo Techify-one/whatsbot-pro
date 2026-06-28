@@ -1,0 +1,7 @@
+{
+  "response": {
+    "error": "Mensagem inválida para análise.",
+    "ok": false
+  },
+  "status_code": 400
+}
