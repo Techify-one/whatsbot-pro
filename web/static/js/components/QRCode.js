@@ -2,19 +2,13 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { fetchQrBlob, reconnect, logout, refreshQr } from '../services/api.js';
+import { formatPhoneDisplay } from '../utils/phone.js';
 
 const html = htm.bind(h);
 
-export function formatPhone(phone) {
-  if (!phone) return '';
-  if (phone.length === 13 && phone.startsWith('55')) {
-    return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 9)}-${phone.slice(9)}`;
-  }
-  if (phone.length === 12 && phone.startsWith('55')) {
-    return `+${phone.slice(0, 2)} (${phone.slice(2, 4)}) ${phone.slice(4, 8)}-${phone.slice(8)}`;
-  }
-  return `+${phone}`;
-}
+// Re-export the canonical formatter under the historical `formatPhone` name so
+// existing `import { formatPhone } from './QRCode.js'` call sites keep working.
+export { formatPhoneDisplay as formatPhone } from '../utils/phone.js';
 
 export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
   const [copied, setCopied] = useState(false);
@@ -41,7 +35,7 @@ export function ConnectionStatus({ connected, botPhone, botName, onOpenQR }) {
             <span class="text-wa-text font-medium">${botName}</span>
           ` : null}
           ${connected && botPhone ? html`
-            <span class="text-wa-secondary text-xs">${formatPhone(botPhone)}</span>
+            <span class="text-wa-secondary text-xs">${formatPhoneDisplay(botPhone)}</span>
             <button
               onClick=${handleCopyLink}
               class="px-2 py-0.5 text-xs rounded border transition-colors ${copied ? 'bg-green-100 border-green-300 text-green-700' : 'bg-wa-bg border-wa-border text-wa-secondary hover:text-wa-text hover:bg-wa-panel'}"
@@ -119,7 +113,7 @@ export function QRCodeModal({ connected, qrAvailable, qrVersion, botPhone, botNa
               ${botPhone ? html`
                 <div class="mt-2 text-sm text-wa-secondary">
                   ${botName ? html`<div class="font-medium text-wa-text">${botName}</div>` : ''}
-                  <div class="text-xs text-wa-secondary">${formatPhone(botPhone)}</div>
+                  <div class="text-xs text-wa-secondary">${formatPhoneDisplay(botPhone)}</div>
                 </div>
               ` : ''}
             </div>
@@ -141,7 +135,7 @@ export function QRCodeModal({ connected, qrAvailable, qrVersion, botPhone, botNa
 
         ${connected ? html`
           <span class="text-green-600 text-sm font-medium">
-            Conectado ao WhatsApp${botPhone ? html` · <span class="text-wa-secondary font-normal">${formatPhone(botPhone)}</span>` : ''}
+            Conectado ao WhatsApp${botPhone ? html` · <span class="text-wa-secondary font-normal">${formatPhoneDisplay(botPhone)}</span>` : ''}
           </span>
         ` : qrAvailable ? html`
           <span class="text-yellow-600 text-sm mb-1">Escaneie o QR Code com seu celular</span>

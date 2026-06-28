@@ -1,41 +1,38 @@
 /**
  * REST API client for WhatsBot backend.
+ *
+ * FACADE over `services/httpClient.js` (Plano 23 · R2): the JSON `request` and
+ * multipart `uploadRequest` transports — incl. the single shared 401 branch —
+ * live there now. This module keeps every public function and its signature, so
+ * existing imports (`import { sendImage } from '.../api.js'`, `authHeaders`,
+ * `handleUnauthorized`, …) keep resolving unchanged.
  */
+
+import {
+  request,
+  uploadRequest,
+  authHeaders as _authHeadersBase,
+  handleUnauthorized,
+} from './httpClient.js';
 
 const BASE = '';
 
-function _getToken() {
-  return localStorage.getItem('whatsbot_token') || '';
-}
+// Re-exported so the historical `import { handleUnauthorized } from '.../api.js'`
+// keeps working (e.g. websocket.js, app.js).
+export { handleUnauthorized };
 
-function _authHeaders(headers = {}) {
-  const token = _getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return headers;
-}
-
+/**
+ * Auth headers for callers that build their own fetch (returns a fresh object
+ * so the caller can safely mutate). Mirrors the legacy `api.authHeaders`.
+ */
 export function authHeaders(extra = {}) {
-  return _authHeaders({ ...extra });
+  return _authHeadersBase({ ...extra });
 }
 
-export function handleUnauthorized() {
-  localStorage.removeItem('whatsbot_token');
-  window.dispatchEvent(new Event('whatsbot:unauthorized'));
-}
-
-async function request(method, path, body) {
-  const opts = {
-    method,
-    headers: _authHeaders({ 'Content-Type': 'application/json' }),
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${BASE}${path}`, opts);
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+// Internal alias kept for the handful of functions below that build their own
+// `fetch` (blob downloads / QR image) and therefore can't use `request`.
+function _authHeaders(headers = {}) {
+  return _authHeadersBase(headers);
 }
 
 export async function getConfig() {
@@ -139,36 +136,17 @@ export async function sandboxClear(phone) {
   return request('POST', '/api/sandbox/clear', { phone: phone || '' });
 }
 
-async function _sandboxUpload(path, fields) {
-  const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) {
-    if (value instanceof Blob) form.append(key, value, value.name || 'file');
-    else form.append(key, value ?? '');
-  }
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
-}
-
 export async function sandboxSendImage(phone, file, caption = '') {
-  return _sandboxUpload('/api/sandbox/send-image', { phone, caption, image: file });
+  return uploadRequest('/api/sandbox/send-image', { phone, caption, image: file });
 }
 
 export async function sandboxSendAudio(phone, blob, filename = 'voice.ogg') {
   const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
-  return _sandboxUpload('/api/sandbox/send-audio', { phone, audio: named });
+  return uploadRequest('/api/sandbox/send-audio', { phone, audio: named });
 }
 
 export async function sandboxSendDocument(phone, file, caption = '') {
-  return _sandboxUpload('/api/sandbox/send-document', { phone, caption, document: file });
+  return uploadRequest('/api/sandbox/send-document', { phone, caption, document: file });
 }
 
 // ── Contacts ──────────────────────────────────────────────────────
@@ -194,16 +172,7 @@ export async function exportContacts() {
 
 // Importa contatos de um CSV. `file` é um File do input. Retorna {ok, data, error}.
 export async function importContacts(file) {
-  const form = new FormData();
-  form.append('file', file);
-  // Sem 'Content-Type': o browser define o boundary do multipart sozinho.
-  const res = await fetch(`${BASE}/api/contacts/import`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) { handleUnauthorized(); return { ok: false, error: 'Não autenticado.' }; }
-  return res.json();
+  return uploadRequest('/api/contacts/import', { file });
 }
 
 // Number of conversations with unread messages (for the browser-tab badge).
@@ -321,60 +290,31 @@ export async function getGroupMembers(groupJid, force = false) {
   return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
+// Only append conversation_id/channel_id when present (the backend distinguishes
+// absent from empty), so build the fields conditionally before uploadRequest.
+function _scopeFields(conversationId, channelId) {
+  const f = {};
+  if (conversationId != null) f.conversation_id = String(conversationId);
+  if (channelId != null) f.channel_id = String(channelId);
+  return f;
+}
+
 export async function sendImage(phone, file, caption = '', conversationId = null, channelId = null) {
-  const form = new FormData();
-  form.append('image', file);
-  form.append('caption', caption);
-  if (conversationId != null) form.append('conversation_id', String(conversationId));
-  if (channelId != null) form.append('channel_id', String(channelId));
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-image`,
+    { image: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
 export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null, channelId = null) {
-  const form = new FormData();
-  form.append('audio', blob, filename);
-  if (conversationId != null) form.append('conversation_id', String(conversationId));
-  if (channelId != null) form.append('channel_id', String(channelId));
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+  // Preserve the filename: uploadRequest names Blob parts by `.name` (default
+  // 'file'), so wrap a bare Blob in a File carrying `filename`.
+  const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-audio`,
+    { audio: named, ..._scopeFields(conversationId, channelId) });
 }
 
 export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
-  const form = new FormData();
-  form.append('document', file);
-  form.append('caption', caption);
-  if (conversationId != null) form.append('conversation_id', String(conversationId));
-  if (channelId != null) form.append('channel_id', String(channelId));
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-document`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-document`,
+    { document: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
 export async function sendPresence(phone, action = 'start', conversationId = null) {

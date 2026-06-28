@@ -17,6 +17,94 @@ import { hasPermission, hasAnyPermission } from '../utils/permissions.js';
 // Plugins declare `frontend_api_version` in plugin.yaml; the loader checks it.
 export const FRONTEND_API_VERSION = '1.0';
 
+// ──────────────────────────────────────────────────────────────────────────
+// PLUGIN_SERVICES — frozen plugin-facing core API allowlist (Plano 23 · D0)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// CONTRACT (versioned by PLUGIN_SERVICES_VERSION below):
+//   `api.services` exposes ONLY the core `api.js` functions named here, plus the
+//   non-`api.js` extras wired in `buildPluginApi` (useWebSocket, hasPermission,
+//   hasAnyPermission). This is the stable surface a plugin screen may call.
+//
+//   • ADDITIVE / MINOR: adding a NON-sensitive function to PLUGIN_SERVICES is a
+//     MINOR bump (back-compatible — never remove a name a plugin already uses).
+//   • REMOVING a name, or moving one into PLUGIN_SERVICES_DENY, is a MAJOR bump.
+//   • A function in PLUGIN_SERVICES_DENY must NEVER appear in PLUGIN_SERVICES.
+//
+// D0 SCOPE: this only DEFINES + DOCUMENTS the allowlist. Enforcement (replacing
+// the `...coreApi` spread in buildPluginApi with a curated pick) is Fase D1.
+// The list below is the current FULL non-sensitive `coreApi` surface
+// (grandfathering everything except the deny-list), validated against the
+// `atendimentos` plugin, which imports: authHeaders, hasPermission,
+// getAssignableAgents — all present here.
+//
+// DENY-LIST rationale: anything touching users / roles / permissions / admin /
+// migrate / auth bootstrap / API-key / global-config mutation / AI-engine
+// lifecycle is core-operator surface and must NOT be reachable from a plugin
+// screen, even if it currently leaks through the `...coreApi` spread.
+
+export const PLUGIN_SERVICES_VERSION = '1.0';
+
+/** Sensitive core functions a plugin screen must NEVER reach. Frozen. */
+export const PLUGIN_SERVICES_DENY = Object.freeze([
+  // Users / roles / permissions (RBAC administration)
+  'getUsers', 'createUser', 'updateUser', 'deleteUser', 'resetUserPassword',
+  'getRoles', 'createRole', 'updateRole', 'deleteRole', 'resetRole',
+  // Auth / session bootstrap
+  'login', 'logoutSession', 'bootstrapAdmin', 'checkAuth',
+  // API key / global config mutation
+  'testApiKey', 'saveConfig', 'getConfig',
+  // WhatsApp connection lifecycle / provisioning
+  'reconnect', 'logout', 'setupRequestKey', 'setupKeyStatus',
+  // AI engine config-in-DB (agents/prompts/tools/variables) + restart
+  'listAgents', 'getAgent', 'saveAgent', 'getAgentHistory', 'rollbackAgent', 'deleteAgent',
+  'listPrompts', 'getPrompt', 'savePrompt', 'getPromptHistory', 'rollbackPrompt',
+  'listVariables', 'saveVariable', 'deleteVariable',
+  'listTools', 'getTool', 'saveTool', 'deleteTool', 'getToolHistory', 'rollbackTool',
+  'listRegisteredTools', 'restartAi',
+  // Channel administration (create/delete/membership/credentials)
+  'createChannel', 'updateChannel', 'deleteChannel', 'restoreChannel',
+  'setChannelMembers', 'getChannelMembers',
+  'telegramAutoconfigure', 'telegramChannelStatus',
+  // Audit log + raw log access
+  'listAudit', 'getAuditActions', 'downloadAuditExport', 'getLogs', 'clearLogs',
+  // Runtime/subprocess introspection
+  'getRuntimeTasks', 'getRuntimeSubprocesses',
+]);
+
+const _DENY_SET = new Set(PLUGIN_SERVICES_DENY);
+
+/**
+ * The frozen allowlist: every `coreApi` export NOT in the deny-list. Computed
+ * once from the live module so a newly-added non-sensitive function is
+ * grandfathered automatically — while any name placed in PLUGIN_SERVICES_DENY
+ * is excluded even if present on `coreApi`. (D0 documents this; D1 will use it
+ * to build the curated `api.services` instead of `...coreApi`.)
+ *
+ * @type {ReadonlyArray<string>}
+ */
+export const PLUGIN_SERVICES = Object.freeze(
+  Object.keys(coreApi)
+    .filter((name) => typeof coreApi[name] === 'function' && !_DENY_SET.has(name))
+    .sort()
+);
+
+/**
+ * Build the curated `services` object for D1 enforcement: only the allowlisted
+ * core functions, plus the non-`api.js` extras. Defined now (unused by the
+ * grandfathered spread below) so D1 is a one-line swap and tests can assert the
+ * surface today.
+ *
+ * @param {Record<string, any>} extras - non-api.js additions (useWebSocket, …).
+ * @returns {Record<string, any>}
+ */
+export function buildAllowedServices(extras = {}) {
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const name of PLUGIN_SERVICES) out[name] = coreApi[name];
+  return { ...out, ...extras };
+}
+
 /** Minimal compat guard: '*' or matching MAJOR is accepted. */
 export function isFrontendApiCompatible(range) {
   if (!range || range === '*') return true;
@@ -44,6 +132,10 @@ export function buildPluginApi(pluginId) {
     ui: { openModal },
 
     // ── curated core utilities (so plugins don't depend on internal paths) ──
+    // D0: the frozen plugin-facing contract is PLUGIN_SERVICES (+ deny-list)
+    // above. Enforcement (swap `...coreApi` → `buildAllowedServices({...})`) is
+    // deferred to Fase D1 so this stays ADDITIVE and grandfathers what the
+    // `atendimentos` plugin already imports. DO NOT remove `...coreApi` here yet.
     services: {
       ...coreApi,            // setConversationStatus, filterConversations, updateConversationInfo, authHeaders, …
       useWebSocket,

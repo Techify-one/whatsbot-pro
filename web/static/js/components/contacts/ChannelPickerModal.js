@@ -12,6 +12,9 @@ const PROVIDER_META = {
   test:           { label: 'Teste',     dot: 'bg-wa-secondary' },
 };
 
+// Distinct from utils/phone.js `formatPhoneDisplay` ON PURPOSE: a channel's
+// `own_phone` may already carry a leading `+` and is not always a BR-grouped
+// number, so we only normalise the `+` prefix here (no DDD/grouping). Kept local.
 function formatPhone(p) {
   if (!p) return '';
   return p.startsWith('+') ? p : `+${p}`;
