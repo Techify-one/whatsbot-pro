@@ -10,6 +10,7 @@ Valida que o destino existe e está ativo; se o agente atual for um roteador
 """
 
 import logging
+import time
 
 from db.repositories import agent_repo, conversation_repo
 
@@ -79,6 +80,22 @@ def execute(ctx, args: dict) -> str | None:
         conversation_repo.set_agent(conv["id"], target)
         logger.info("Handoff: conversa %s -> agente '%s' (motivo=%s)",
                     conv["id"], target, args.get("motivo") or "-")
+        # plano 23 Fase C0: handoff between AI agents is a domain event
+        # (``conversation.agent_changed``). ``current_key`` is the agent that was
+        # answering before this hop (None if the conversation had no bound agent).
+        # Best-effort — a failed emit never breaks the handoff.
+        try:
+            from plugins.events import emit_with_filter_sync
+            emit_with_filter_sync("conversation.agent_changed", {
+                "conversation_id": conv["id"],
+                "from_agent": current_key,
+                "to_agent": target,
+                "reason": args.get("motivo"),
+                "ts": time.time(),
+            })
+        except Exception:
+            logger.debug("conversation.agent_changed emit falhou para conversa %s",
+                         conv["id"])
     except Exception as e:
         logger.warning("transferir_agente failed for %s: %s",
                        getattr(ctx.contact, "phone", "?"), e)

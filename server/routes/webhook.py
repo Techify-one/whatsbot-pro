@@ -552,19 +552,31 @@ def register_routes(app, deps):
 
         Deduped por conversa: ``has_event`` checa se o card já existe no fio. Gateado
         pela config (grupo ``ai``). Best-effort — nunca quebra o envio da resposta.
+
+        plano 23 Fase C0: além do card painel-only, promove ``conversation.ai_takeover``
+        a evento de domínio no bus de plugins (1×/conversa, preservando o dedupe — o
+        emit só dispara quando o card ainda não existia).
         """
         def _emit():
             contact = agent_handler._get_contact(phone, channel_id=channel_id)
             if contact is None:
-                return
+                return None
             conv = conversation_repo.get_open_for_contact(contact.id)
             if conv is None or system_notices.has_event(conv["id"], "ai_takeover"):
-                return
+                return None
             system_notices.emit_conversation_notice(
                 event_type="ai_takeover", conversation_id=conv["id"],
                 contact_id=contact.id, phone=phone)
+            return {"conversation_id": conv["id"],
+                    "agent_key": conv.get("active_agent_key")}
         try:
-            await asyncio.to_thread(_emit)
+            fired = await asyncio.to_thread(_emit)
+            if fired is not None:
+                await emit_with_filter("conversation.ai_takeover", {
+                    "conversation_id": fired["conversation_id"],
+                    "agent_key": fired["agent_key"],
+                    "ts": time.time(),
+                })
         except Exception:
             logger.debug("[Webhook] ai_takeover notice failed for %s", phone)
 

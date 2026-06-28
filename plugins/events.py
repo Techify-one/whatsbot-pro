@@ -64,6 +64,10 @@ KNOWN_EVENTS: set[str] = {
     "conversation.created", "conversation.status_changed", "conversation.assigned",
     "conversation.archived", "conversation.ai_toggled", "conversation.updated",
     "conversation.deleted",
+    # Conversation lifecycle verbs (plano 23 Fase C0 — Expand antecipado)
+    "conversation.reopened", "conversation.unassigned",
+    "conversation.transferred_to_human", "conversation.agent_changed",
+    "conversation.attribute_set", "conversation.ai_takeover",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",

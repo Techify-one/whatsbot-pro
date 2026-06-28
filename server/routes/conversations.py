@@ -291,10 +291,25 @@ def register_routes(app, deps):
             )
             if allowed is None:
                 return _err("Fechamento bloqueado por um plugin.", status=403)
+        previous_status = (_conv or {}).get("status")
         conv = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
         await _broadcast(deps, "conversation_status_changed", "conversation.status_changed", conv)
+        # plano 23 Fase C0: distinct ``conversation.reopened`` verb when a closed
+        # conversation is reactivated by an explicit (manual) status change. Kept
+        # alongside ``conversation.status_changed`` — the reopened verb is additive.
+        if status == "open" and previous_status == "closed":
+            user = current_user(request)
+            await emit_with_filter("conversation.reopened", {
+                "conversation_id": conv.get("id"),
+                "contact_id": conv.get("contact_id"),
+                "phone": conv.get("contact_phone"),
+                "previous_status": previous_status,
+                "trigger": "manual",
+                "actor": (user or {}).get("id"),
+                "ts": time.time(),
+            })
         await _emit_notice(request, conv,
                            "status_closed" if status == "closed" else "status_open")
         return _ok({"conversation": conv})
@@ -308,10 +323,17 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
+        previous_assignee = (_conv or {}).get("assignee_user_id")
         conv = await asyncio.to_thread(conversation_repo.set_assignee, conv_id, assignee)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        await _broadcast(deps, "conversation_assigned", "conversation.assigned", conv)
+        # plano 23 Fase C0: emit a DISTINCT verb for the removal case. WS stays the
+        # same (``conversation_assigned``) but the bus event is ``conversation.assigned``
+        # when an assignee is set and ``conversation.unassigned`` when it is cleared,
+        # so subscribers can tell the two actions apart without inspecting the payload.
+        bus_event = "conversation.assigned" if assignee else "conversation.unassigned"
+        await _broadcast(deps, "conversation_assigned", bus_event, conv,
+                         previous_assignee=previous_assignee)
         if assignee:
             target = await asyncio.to_thread(user_repo.get, assignee)
             await _emit_notice(request, conv, "assigned",
@@ -568,6 +590,19 @@ def register_routes(app, deps):
                                    attribute=label, value=value)
             else:
                 await _emit_notice(request, conv, "attribute_set", count=len(changed))
+            # plano 23 Fase C0: one ``conversation.attribute_set`` bus event PER changed
+            # key (the card above is aggregated; the bus event is granular so a
+            # subscriber gets each key/value pair).
+            user = current_user(request)
+            actor = (user or {}).get("id")
+            for key, value in changed.items():
+                await emit_with_filter("conversation.attribute_set", {
+                    "conversation_id": conv.get("id"),
+                    "key": key,
+                    "value": value,
+                    "actor": actor,
+                    "ts": time.time(),
+                })
         return _ok({"conversation": conv})
 
     @app.get("/api/conversations/{conv_id}/templates")

@@ -235,6 +235,22 @@ class ContactMemory:
             # atualização de lista, não card no fio).
             elif transition == "reopened" and conv is not None:
                 self._broadcast_conversation_status(conversation_id, conv)
+                # plano 23 Fase C0: promote the automatic reopen to a distinct domain
+                # event (``conversation.reopened``) on the plugin bus. The status WS
+                # broadcast above is for the panel list; this is for plugin subscribers.
+                # Defensive — a failed emit never breaks the inbound save.
+                try:
+                    from plugins.events import emit_with_filter_sync
+                    emit_with_filter_sync("conversation.reopened", {
+                        "conversation_id": conversation_id,
+                        "contact_id": self.id,
+                        "phone": self.phone,
+                        "previous_status": "closed",
+                        "trigger": "inbound",
+                        "ts": time.time(),
+                    })
+                except Exception:
+                    logger.debug("conversation.reopened emit falhou para %s", self.phone)
         # Touch updated_at
         contact_repo.update(self.id)
 
