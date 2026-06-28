@@ -39,10 +39,13 @@ def _next_display_id(conn) -> int:
     return current
 
 
-def _default_agent_key_for_inbox(inbox_id: int) -> str | None:
+def default_agent_key_for_inbox(inbox_id: int) -> str | None:
     """Agent a brand-new conversation is bound to so the panel shows "IA padrão"
     handling it from the start: the inbox's ``default_agent_key`` if configured,
-    otherwise the global default AI agent. Best-effort — never blocks creation."""
+    otherwise the global default AI agent. Best-effort — never blocks creation.
+
+    Public (plano 23 Fase B4) so ``conversation_service`` can resolve the default
+    agent for the AI-on transfer policy (which moved out of the repo)."""
     from db.repositories import inbox_repo, agent_repo
     try:
         inbox = inbox_repo.get(inbox_id)
@@ -75,7 +78,7 @@ def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
     if ai_active is None:
         ai_active = 1 if _default_ai_enabled() else 0
     if active_agent_key is None:
-        active_agent_key = _default_agent_key_for_inbox(inbox_id)
+        active_agent_key = default_agent_key_for_inbox(inbox_id)
     with get_engine().begin() as conn:
         display_id = _next_display_id(conn)
         result = conn.execute(conversations.insert().values(
@@ -398,11 +401,23 @@ def _update(conv_id: int, values: dict) -> dict | None:
 
 
 def set_status(conv_id: int, status: str) -> dict | None:
+    """Set a conversation's status and the columns DERIVED from it (data write).
+
+    Writes ``status`` plus the status-derived columns: on close, stamps
+    ``resolved_at`` AND drops the assignment (``assignee_user_id`` +
+    ``active_agent_key``) so the conversation leaves any agent's queue and lands
+    back as "Não atribuída"; on open, clears ``resolved_at``.
+
+    Plano 23 Fase B4: this stays a single status-derived data write (the inbound
+    auto-reopen path ``resolve_for_contact_ex`` and test setup depend on the exact
+    column shape). The LIFECYCLE ORCHESTRATION that the routes need — the
+    ``filter.conversation.before_status`` gate, the WS broadcast, the
+    ``conversation.status_changed`` / ``conversation.reopened`` bus emits, and the
+    status notice — moved to ``conversation_service.set_status`` (which calls this
+    for the write). The repo no longer emits or notices."""
     values = {"status": status}
     if status == "closed":
         values["resolved_at"] = time.time()
-        # Resolving a conversation also drops the assignment so it leaves any
-        # agent's queue and lands back as "Não atribuída".
         values["assignee_user_id"] = None
         values["active_agent_key"] = None
     elif status == "open":
@@ -423,28 +438,12 @@ def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
     return _update(conv_id, {"ai_active": ai_active})
 
 
-def set_conversation_ai(conv_id: int, active: int,
-                        assignee_user_id: int | None = None) -> dict | None:
-    """Toggle the AI for a conversation AND (re)assign it (plano 17).
-
-    OFF (``active=0``): pausing the AI hands the conversation to the human who
-    turned it off (``assignee_user_id``) — they are taking over, so the row lands
-    in THEIR queue instead of "Não atribuídas". When no operator identity is
-    available (legacy/open mode, ``assignee_user_id=None``) it falls back to
-    unassigned, mirroring ``set_status('closed')``. The AI agent is cleared either
-    way.
-    ON (``active=1``) re-attributes it to the inbox's default AI agent and clears
-    any human assignee (the bot is taking over), so the row leaves the fila
-    immediately without waiting for the next inbound message."""
-    if active:
-        conv = get(conv_id)
-        if conv is None:
-            return None
-        agent_key = _default_agent_key_for_inbox(conv.get("inbox_id"))
-        return _update(conv_id, {
-            "ai_active": 1, "active_agent_key": agent_key, "assignee_user_id": None})
-    return _update(conv_id, {
-        "ai_active": 0, "active_agent_key": None, "assignee_user_id": assignee_user_id})
+# Plano 23 Fase B4: the per-conversation AI TRANSFER policy (toggle AND
+# (re)assign — ON re-binds the inbox's default agent + clears the human assignee;
+# OFF hands the chat to the operator + clears the agent) moved OUT of the repo into
+# ``conversation_service.set_ai`` (unified with the other ownership transitions via
+# ``_transfer``). The repo keeps only the pure-data ``set_ai_active`` /
+# ``set_assignee`` / ``assign_agent`` primitives the service composes.
 
 
 def set_custom_attributes(conv_id: int, attrs: dict) -> dict | None:

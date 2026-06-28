@@ -110,6 +110,10 @@ def register_routes(app, deps):
     # The AI gate isn't exercised by ``send_media`` but the context requires it;
     # mirror the webhook's master gate so the service is wired identically.
     from app.services.messaging_service import MessagingContext, MessagingService
+    # Conversation lifecycle/ownership service (plano 23 Fase B4): the per-contact
+    # AI toggle emits its events + system notice + P17 conversation mirror through
+    # ``conversation_service.toggle_contact_ai``. Deferred import (cycle avoidance).
+    from app.services import conversation_service as conv_svc
 
     def _channel_ai_enabled(channel_id: str) -> bool:
         if not settings.get("auto_reply", True):
@@ -1400,31 +1404,14 @@ def register_routes(app, deps):
             contact.set_ai_enabled(bool(enabled))
             return contact.id, contact.ai_enabled
         contact_id, result = await asyncio.to_thread(_toggle)
-        await ws_manager.broadcast("contact_ai_toggled", {
-            "phone": phone,
-            "ai_enabled": result,
-        })
-        await emit_with_filter("contact.ai_toggled", {
-            "phone": phone, "ai_enabled": result, "ts": time.time(),
-        })
-        # Chat notice (plano 12, grupo `ai`): gate nível-contato. Resolve a conversa
-        # aberta (fallback: a mais recente) do contato e emite o aviso nela (R20).
+        # The service emits contact.ai_toggled (WS + bus), writes the ai_on/ai_off
+        # system-notice card, and mirrors the flip onto the contact's conversation
+        # (P17: set_ai_active + WS conversation_ai_toggled — WS only, not the bus),
+        # each exactly once. The route keeps owning the contact-level flip above.
         actor = (current_user(request) or {}).get("name") or None
-        conv = await asyncio.to_thread(
-            system_notices.emit_for_contact,
-            event_type="ai_on" if result else "ai_off",
-            contact_id=contact_id, phone=phone, actor=actor)
-        if conv is not None:
-            # P17: the AI gate is per-conversation now — the contact flag above no
-            # longer silences the bot. Mirror the toggle onto the contact's conversation
-            # (low-level ai_active flip, no (un)assign) so the AI actually pauses/resumes
-            # and the chat notice stays truthful. Push conversation_ai_toggled so the
-            # sidebar badge flips live.
-            await asyncio.to_thread(
-                conversation_repo.set_ai_active, conv["id"], 1 if result else 0)
-            await ws_manager.broadcast("conversation_ai_toggled", {
-                "conversation_id": conv["id"], "contact_id": contact_id,
-                "ai_active": 1 if result else 0, "ts": time.time()})
+        await conv_svc.toggle_contact_ai(
+            deps, phone=phone, enabled=bool(result), contact_id=contact_id,
+            actor_name=actor)
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")
