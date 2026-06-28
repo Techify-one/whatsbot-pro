@@ -309,6 +309,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const displayedRef = useRef([]);   // currently-visible (filtered) rows — for "selecionar todas"
   const lastResolvedId = useRef(null);
   const lastResolvedConvId = useRef(null);
+  const searchRef = useRef('');                // current search term (for ref-based refetch)
+  const fetchContactsRef = useRef(null);       // stable handle to fetchContacts
+  const convListRefetchTimer = useRef(null);   // debounce for membership-change refetch
   const pageVisibleRef = useRef(!document.hidden);
 
   // Keep refs in sync — avoids stale closures
@@ -763,6 +766,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     });
   }, [sortContacts]);
 
+  // Stable handles so the []-dep WS callback can refetch with the current search.
+  useEffect(() => { searchRef.current = search; }, [search]);
+  useEffect(() => { fetchContactsRef.current = fetchContacts; }, [fetchContacts]);
+
   const handleStartConversation = useCallback(async (normalizedPhone) => {
     if (!normalizedPhone || checkingPhone) return;
 
@@ -928,6 +935,23 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       if (data.conversation_id != null && c.conversation_id == null) patch.conversation_id = data.conversation_id;
       return { ...c, ...patch };
     }));
+    // Membership safety net: a status change can move a conversation INTO the active
+    // (client-side) status filter. The patch above only touches rows already loaded —
+    // if the (re)opened conversation isn't in the list yet (e.g. it was closed and
+    // fell outside the initial fetch window), refetch so it materialises live instead
+    // of waiting for an F5. Mirrors the new_message + kanban fallbacks; debounced so a
+    // burst of events refetches once.
+    if (data.status !== undefined) {
+      const present = contactsRef.current.some(c =>
+        (convId != null && c.conversation_id === convId)
+        || (c.conversation_id == null && cid != null && c.id === cid));
+      if (!present) {
+        if (convListRefetchTimer.current) clearTimeout(convListRefetchTimer.current);
+        convListRefetchTimer.current = setTimeout(() => {
+          if (fetchContactsRef.current) fetchContactsRef.current(searchRef.current);
+        }, 400);
+      }
+    }
   }, []);
   useWebSocket({ onConversationChanged });
 
