@@ -216,3 +216,44 @@ def client(app):
 
     with TestClient(app, raise_server_exceptions=True) as test_client:
         yield test_client
+
+
+# ── Hermetic app builder (Phase G1-min) ─────────────────────────────────────
+
+@pytest.fixture
+def build_app(_engine_ready):
+    """Factory fixture wrapping :func:`tests.support.build_test_app`.
+
+    Boots a hermetic app with a CHOSEN set of bundled plugins (default
+    ``("gowa",)``) — see ``tests/support.py`` for the shared-engine contract.
+    Depends on ``_engine_ready`` so the process-global DB is initialized before
+    the first build. Every app created via the factory is torn down (TestClient
+    exited) at the end of the test.
+
+    Usage::
+
+        def test_x(build_app):
+            built = build_app(["gowa"])
+            r = built.client.post("/api/webhook/gowa/default", json=...)
+    """
+    from tests.support import build_test_app
+
+    built_apps = []
+
+    def _factory(plugins=("gowa",), **kwargs):
+        built = build_test_app(plugins, **kwargs)
+        built_apps.append(built)
+        return built
+
+    yield _factory
+
+    for built in built_apps:
+        try:
+            built.client.__exit__(None, None, None)
+        except Exception:
+            pass
+        try:
+            if built._tmp is not None:
+                built._tmp.cleanup()
+        except Exception:
+            pass
