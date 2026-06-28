@@ -67,6 +67,45 @@ class ConnectionManager:
                 self.active.remove(ws)
 
 
+# ── Messaging State ─────────────────────────────────────────────────────────
+
+class MessagingState:
+    """Per-conversation batch / orchestrator / echo state (Plano 23 · Fase B3).
+
+    Encapsulates the loose dicts the inbound→batch→reply pipeline mutates, all of
+    them keyed by ``(channel_id, phone)`` (or ``channel_id`` / wire-text for the
+    two cross-cutting ones). The semantics are IDENTICAL to the bare dicts that
+    lived on :class:`AppState` — this is a Branch-by-Abstraction grouping, not a
+    behavior change. ``AppState`` still exposes each dict as a direct attribute
+    (delegating here) so existing call sites — and the characterization suite,
+    which reads ``state.processing_tasks.get((channel_id, phone))`` — keep working
+    byte-for-byte.
+    """
+
+    def __init__(self):
+        # Idempotency: set of "<channel_id>:<external_msg_id>" already ingested.
+        self.processed_messages: set[str] = set()
+        # Message batching — accumulate messages per (channel_id, phone) before
+        # responding. Each item: {"text": str, "image_path": str|None,
+        # "audio_path": str|None, ...}.
+        self.pending_messages: dict[tuple, list[dict]] = {}
+        # Typing-aware orchestrator state, keyed by (channel_id, phone):
+        # {"active": bool, "media": "text"|"audio", "last_ts": float}.
+        self.typing_state: dict[tuple, dict] = {}
+        # Active orchestrator task per (channel_id, phone) (typing-aware flow).
+        self.processing_tasks: dict[tuple, asyncio.Task] = {}
+        # Per-channel AI serialization lock (plano 21 — modo sequencial): quando o
+        # canal tem ``ai_sequential`` ligado, a IA processa um contato por vez nesse
+        # canal (evita bloqueios da Meta por enviar a vários clientes em paralelo).
+        # Keyed by channel_id; criado sob demanda dentro do loop async.
+        self.channel_ai_locks: dict[str, asyncio.Lock] = {}
+        # True while a reply is mid-flight — webhook must NOT cancel during this phase.
+        self.sending: dict[tuple, bool] = {}
+        # Track recently sent replies to filter webhook echo-backs.
+        # "<channel_id>:<phone>:<wire_text[:120]>" -> timestamp.
+        self.recently_sent: dict[str, float] = {}
+
+
 # ── App State ─────────────────────────────────────────────────────────────
 
 class AppState:
@@ -80,33 +119,20 @@ class AppState:
         # Runtime task supervisor + subprocess service (plano 09); set in lifespan.
         self.task_supervisor: object | None = None
         self.subprocess_service: object | None = None
-        self.processed_messages: set[str] = set()
+        # Per-conversation messaging pipeline state (Plano 23 · Fase B3). The
+        # batch/lock/echo dicts below are owned by ``self.messaging`` and exposed
+        # as direct attributes for backward compatibility (existing call sites and
+        # the characterization suite read them straight off ``state``).
+        self.messaging = MessagingState()
         self.notification: str = "Iniciando..."
         # QR cache — avoid regenerating on every request
         self.qr_data: bytes | None = None
         self.qr_fetched_at: float = 0.0
         self.qr_version: int = 0  # bumped when QR changes
-        # Message batching — accumulate messages per contact before responding
-        # Each item: {"text": str, "image_path": str|None, "audio_path": str|None}
-        self.pending_messages: dict[str, list[dict]] = {}  # phone -> [msg_dict, ...]
-        # Typing-aware orchestrator state
-        # typing_state[phone] = {"active": bool, "media": "text"|"audio", "last_ts": float}
-        self.typing_state: dict[str, dict] = {}
         # Cache phone -> (conversation_id|None, expires_at) for the GOWA presence
         # broadcast, so the "digitando" indicator can target the exact conversation
         # without a DB hit on every (frequent) chat_presence event.
         self.presence_conv_cache: dict[str, tuple[int | None, float]] = {}
-        # Active orchestrator task per contact (typing-aware processing flow)
-        self.processing_tasks: dict[str, asyncio.Task] = {}
-        # Per-channel AI serialization lock (plano 21 — modo sequencial): quando o
-        # canal tem ``ai_sequential`` ligado, a IA processa um contato por vez nesse
-        # canal (evita bloqueios da Meta por enviar a vários clientes em paralelo).
-        # Keyed by channel_id; criado sob demanda dentro do loop async.
-        self.channel_ai_locks: dict[str, asyncio.Lock] = {}
-        # True while a reply is mid-flight to WhatsApp — webhook must NOT cancel during this phase
-        self.sending: dict[str, bool] = {}
-        # Track recently sent replies to filter GOWA webhook echo-backs
-        self.recently_sent: dict[str, float] = {}  # "phone:content_hash" -> timestamp
         # Bot's own identity for @mention detection in groups
         self.bot_phone: str = ""
         self.bot_name: str = ""
@@ -117,3 +143,39 @@ class AppState:
         self.webhook_payloads: deque[dict] = deque(maxlen=50)
         # Login attempts per IP for brute-force protection
         self.login_attempts: dict[str, deque[float]] = {}
+
+    # ── MessagingState delegation (Plano 23 · Fase B3) ──────────────────────
+    #
+    # The per-conversation batch/lock/echo dicts physically live on
+    # ``self.messaging`` now, but every existing reader/writer uses ``state.<dict>``
+    # — and so does the characterization suite. These properties forward to the
+    # single owning instance so the identity (and therefore mutation semantics) is
+    # preserved: ``state.processing_tasks`` IS ``state.messaging.processing_tasks``.
+
+    @property
+    def processed_messages(self) -> set:
+        return self.messaging.processed_messages
+
+    @property
+    def pending_messages(self) -> dict:
+        return self.messaging.pending_messages
+
+    @property
+    def typing_state(self) -> dict:
+        return self.messaging.typing_state
+
+    @property
+    def processing_tasks(self) -> dict:
+        return self.messaging.processing_tasks
+
+    @property
+    def channel_ai_locks(self) -> dict:
+        return self.messaging.channel_ai_locks
+
+    @property
+    def sending(self) -> dict:
+        return self.messaging.sending
+
+    @property
+    def recently_sent(self) -> dict:
+        return self.messaging.recently_sent

@@ -33,7 +33,15 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
 
     ``conv`` is the updated row; ``extra`` overrides/adds payload keys. Defensive:
     a broadcast failure never fails the HTTP action.
+
+    Plano 23 Fase B3 (R-bc): this projects the conversation payload (unchanged) and
+    delegates the WS-broadcast + bus-emit to the generalized
+    ``app.services.messaging_service.broadcast_and_emit`` (which other services
+    reuse for non-conversation events). B4 will move the rest of this module's
+    lifecycle logic into ``conversation_service``.
     """
+    from app.services.messaging_service import broadcast_and_emit
+
     payload = {
         "conversation_id": conv.get("id"),
         "display_id": conv.get("display_id"),
@@ -47,14 +55,7 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
         **extra,
         "ts": time.time(),
     }
-    try:
-        await deps.ws_manager.broadcast(ws_event, payload)
-    except Exception as e:
-        logger.debug("WS broadcast %s failed: %s", ws_event, e)
-    try:
-        await emit_with_filter(bus_event, payload)
-    except Exception as e:
-        logger.debug("bus emit %s failed: %s", bus_event, e)
+    await broadcast_and_emit(deps, ws_event, bus_event, payload)
 
 
 async def _emit_notice(request: Request, conv: dict, event_type: str, **ctx):
