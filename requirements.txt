@@ -1,10 +1,10 @@
 agno>=2.6,<3
 openai>=2,<3
-httpx
-fastapi
-python-multipart
-uvicorn[standard]
-pyyaml
+httpx>=0.28,<0.29
+fastapi>=0.137,<0.138
+python-multipart>=0.0.32,<0.1
+uvicorn[standard]>=0.49,<0.50
+pyyaml>=6.0,<7.0
 sqlalchemy>=2.0,<3.0
 alembic>=1.13,<2.0
 psycopg[binary]>=3.1

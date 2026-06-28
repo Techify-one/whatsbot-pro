@@ -89,7 +89,6 @@ class AppState:
         # Message batching — accumulate messages per contact before responding
         # Each item: {"text": str, "image_path": str|None, "audio_path": str|None}
         self.pending_messages: dict[str, list[dict]] = {}  # phone -> [msg_dict, ...]
-        self.batch_tasks: dict[str, asyncio.Task] = {}  # phone -> scheduled task (legacy)
         # Typing-aware orchestrator state
         # typing_state[phone] = {"active": bool, "media": "text"|"audio", "last_ts": float}
         self.typing_state: dict[str, dict] = {}
@@ -97,7 +96,7 @@ class AppState:
         # broadcast, so the "digitando" indicator can target the exact conversation
         # without a DB hit on every (frequent) chat_presence event.
         self.presence_conv_cache: dict[str, tuple[int | None, float]] = {}
-        # Active orchestrator task per contact (replaces batch_tasks for typing-aware flow)
+        # Active orchestrator task per contact (typing-aware processing flow)
         self.processing_tasks: dict[str, asyncio.Task] = {}
         # Per-channel AI serialization lock (plano 21 — modo sequencial): quando o
         # canal tem ``ai_sequential`` ligado, a IA processa um contato por vez nesse

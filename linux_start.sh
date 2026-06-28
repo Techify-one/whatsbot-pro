@@ -19,6 +19,10 @@ export WHATSBOT_GOWA_PORT="${WHATSBOT_GOWA_PORT:-64996}"
 
 cd "$(dirname "$0")"
 
+# Shared, OS-agnostic launcher values (GOWA_VERSION, reload-dir set) — single
+# source of truth also used by macos_start.command.
+. ./scripts/_common.sh
+
 # ===== Carrega variáveis do .env (se existir) =====
 # Loader próprio (NÃO usa `source`): o .env pode ter valores com espaço após o
 # '=' (ex.: "GIT_REPOSITORY_URL= git@..."), e `source` tentaria executar o valor
@@ -37,9 +41,6 @@ if [ -f ./.env ]; then
     unset _line _key _val
     echo "[linux_start] .env carregado (DATABASE_URL=${DATABASE_URL:+definido})"
 fi
-
-# Versão do GOWA que casa com o cliente em gowa/client.py e o Dockerfile.
-GOWA_VERSION="${GOWA_VERSION:-8.8.0}"
 
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -121,17 +122,11 @@ mkdir -p storages/plugins
 
 while true; do
     echo "[linux_start] $(date '+%H:%M:%S') starting uvicorn --reload (port $WHATSBOT_WEB_PORT)..."
+    # shellcheck disable=SC2046  # intentional word-split of the reload-dir flags
     ./venv/bin/python -m uvicorn server.dev:app \
         --host 0.0.0.0 --port "$WHATSBOT_WEB_PORT" \
         --reload \
-        --reload-dir server \
-        --reload-dir agent \
-        --reload-dir config \
-        --reload-dir gowa \
-        --reload-dir channels \
-        --reload-dir db \
-        --reload-dir plugins \
-        --reload-dir storages/plugins \
+        $(whatsbot_reload_flags) \
         --log-level warning
     rc=$?
     echo "[linux_start] $(date '+%H:%M:%S') uvicorn exited rc=$rc"
