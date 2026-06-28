@@ -15,6 +15,14 @@
       "msg_id": "<MSGID>",
       "role": "assistant",
       "status": "operator"
+    },
+    {
+      "content": "olá, gostaria de saber o preço",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "transcription",
+      "status": null
     }
   ],
   "sent": []

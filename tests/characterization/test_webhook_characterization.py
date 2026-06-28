@@ -194,23 +194,15 @@ def test_classify_group_no_mention(build_app):
 
 
 def test_classify_newsletter_discarded(build_app):
-    """classify_jid → newsletter (@newsletter): DISCARDED.
+    """classify_jid → newsletter (@newsletter): DISCARDED on the live path.
 
-    CHARACTERIZED BEHAVIOR: GOWA inbound only treats ``@g.us`` as a group; every
-    other suffix (newsletter/broadcast/lid) falls into the person branch where
-    ``phone = jid.split('@')[0]``. The ``allowed_jid_types`` filter lives in the
-    LEGACY ``/api/webhook`` handler, NOT in ``parse_gowa_inbound`` / the generic
-    ``/api/webhook/gowa/{channel_id}`` route this test drives. So a newsletter
-    post on the live (generic) path is NOT discarded by the JID filter — it is
-    materialized as a phantom contact keyed by the newsletter id.
-
-    # CHARACTERIZED BUG: the CLAUDE.md-documented allowed_jid_types discard
-    # (newsletter/broadcast dropped before materializing a contact) is NOT applied
-    # on the generic /api/webhook/gowa/{channel_id} path — only on the legacy
-    # /api/webhook handler (see classify in server/routes/webhook.py). The
-    # newsletter therefore persists as a phantom person here. Wave 2 must move the
-    # classify/discard into the shared ingest path.
-    """
+    PARITY (plano 23 Fase F2): the CLAUDE.md-documented ``allowed_jid_types``
+    discard (default = person/person_lid/group) now runs on the generic
+    ``/api/webhook/gowa/{channel_id}`` path too — in ``ingest_event`` BEFORE any
+    contact is materialized. A newsletter (``@newsletter``) post is therefore
+    dropped: no contact row, no persisted message, no bus events. This was
+    previously a CHARACTERIZED BUG (phantom contact); the golden now locks the
+    discard. ``unknown`` suffixes remain ungated (legacy behaviour preserved)."""
     nid = "120363222220002"
     built = build_app(["gowa"], settings_overrides={
         "auto_reply": False, "message_batch_delay": 0})
@@ -222,16 +214,22 @@ def test_classify_newsletter_discarded(build_app):
         assert r.status_code == 200, r.text
         _drain_orchestrator(built, "default", nid)
         rec.drain()
+
+    # Discarded: nothing materialized, no message bus events.
+    from db.repositories import contact_repo
+    assert contact_repo.get_by_phone(nid) is None, \
+        "newsletter must not materialize a phantom contact"
+    assert "message.received" not in rec.name_set
+    assert "message.saved" not in rec.name_set
     golden_assert("jid_newsletter", _capture(nid, rec, built.gowa_client))
 
 
 def test_classify_broadcast_discarded(build_app):
-    """classify_jid → broadcast (@broadcast): see newsletter note.
+    """classify_jid → broadcast (@broadcast): DISCARDED on the live path.
 
-    # CHARACTERIZED BUG: same as jid_newsletter — the generic gowa route does not
-    # apply the allowed_jid_types discard, so a Status/broadcast post materializes
-    # a phantom contact instead of being dropped.
-    """
+    PARITY (plano 23 Fase F2): same fix as jid_newsletter — a Status/broadcast
+    post is dropped by the ``allowed_jid_types`` discard in ``ingest_event``
+    before a contact is materialized, instead of becoming a phantom contact."""
     bid = "status"
     built = build_app(["gowa"], settings_overrides={
         "auto_reply": False, "message_batch_delay": 0})
@@ -243,6 +241,12 @@ def test_classify_broadcast_discarded(build_app):
         assert r.status_code == 200, r.text
         _drain_orchestrator(built, "default", bid)
         rec.drain()
+
+    from db.repositories import contact_repo
+    assert contact_repo.get_by_phone(bid) is None, \
+        "broadcast must not materialize a phantom contact"
+    assert "message.received" not in rec.name_set
+    assert "message.saved" not in rec.name_set
     golden_assert("jid_broadcast", _capture(bid, rec, built.gowa_client))
 
 
@@ -455,18 +459,19 @@ def test_echo_text(build_app):
 def test_echo_audio_transcription(build_app):
     """echo + audio transcription: an audio sent from the user's own device.
 
-    # CHARACTERIZED BUG: ``_ingest_echo`` (the live generic-path echo handler)
-    # saves the echo and emits message.sent source=echo, but does NOT transcribe
-    # outgoing audio — outgoing-audio transcription only exists in the LEGACY
-    # /api/webhook handler. So even with audio_transcription_mode=both and
-    # transcribe_audio stubbed, NO ``[Transcrição]`` content / transcription row is
-    # produced on the live path. Plano 23 Fase F2 step 2 ("transcrição de áudio de
-    # echo") must implement this on the live path before retiring the legacy one.
-    """
+    PARITY (plano 23 Fase F2): ``_ingest_echo`` (the live generic-path echo
+    handler) now transcribes outgoing audio when the configured mode includes
+    "sent" — parity with the legacy ``/api/webhook`` handler. With
+    audio_transcription_mode=both and transcribe_audio stubbed, the echo is saved
+    as an ``assistant`` (audio) row AND a private ``transcription`` panel card is
+    delivered (default target=private). This was previously a CHARACTERIZED BUG
+    (no transcription on the live path); the golden now locks the transcription
+    happening."""
     phone = "5511970003002"
     built = build_app(["gowa"], settings_overrides={
         "auto_reply": False, "message_batch_delay": 0,
-        "audio_transcription_mode": "both",   # would allow 'sent' if it were wired
+        "audio_transcription_mode": "both",   # enables 'sent' (echo) transcription
+        "audio_transcription_target": "private",
     })
     from unittest.mock import patch
     called = {"n": 0}
@@ -486,10 +491,13 @@ def test_echo_audio_transcription(build_app):
             _drain_orchestrator(built, "default", phone)
             rec.drain()
 
-    # Locks the bug: echo audio is NOT transcribed on the live path.
-    assert called["n"] == 0, \
-        "characterization expected echo-audio NOT transcribed on live path"
-    golden_assert("echo_audio_no_transcription",
+    # Parity: echo audio IS transcribed once on the live path now, and a private
+    # transcription panel row is delivered (target=private).
+    assert called["n"] == 1, \
+        "echo-audio must be transcribed once on the live path (parity)"
+    assert "message.sent" in rec.name_set
+    assert built.gowa_client.sent == [], "echo must not produce an outbound send"
+    golden_assert("echo_audio_transcription",
                   _capture(phone, rec, built.gowa_client))
 
 
@@ -566,3 +574,80 @@ def test_reply_plain_single(build_app):
         golden_assert("reply_plain_single", _capture(phone, rec, built.gowa_client))
     finally:
         built.settings.set("auto_reply", False)
+
+
+# ── parity: chat.archived emit (plano 23 Fase F2 gap 1) ──────────────────────
+
+def test_archive_status_change_emits(build_app):
+    """PARITY: when GOWA reports the chat is archived and the contact's flag flips,
+    the live ingest path emits ``chat.archived`` on the bus (mirror of the legacy
+    /api/webhook handler). The fake client returns ``archived=True`` so the first
+    inbound for this contact flips ``is_archived`` False→True → one emit; payload
+    is ``{phone, archived, ts}`` (matching legacy exactly)."""
+    phone = "5511970005001"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    built.gowa_client.archived = True   # GOWA reports this chat as archived
+    with EventRecorder() as rec:
+        r = built.client.post("/api/webhook/gowa/default",
+                              json=_text_payload(phone, "arch_1", "olá arquivado"))
+        assert r.status_code == 200, r.text
+        _drain_orchestrator(built, "default", phone)
+        rec.drain()
+
+    assert "chat.archived" in rec.name_set
+    arch = [p for n, p in rec.records if n == "chat.archived"]
+    assert len(arch) == 1, "archive emit should fire exactly once on a flip"
+    assert arch[0].get("phone") == phone
+    assert arch[0].get("archived") is True
+    # The contact's persisted archive flag is now True.
+    from db.repositories import contact_repo
+    contact = contact_repo.get_by_phone(phone)
+    assert contact is not None and bool(contact["is_archived"]) is True
+    golden_assert("archive_status_change", normalize({
+        "events": {"set": sort_events(list(rec.name_set))},
+        "archived": [normalize(p) for p in arch],
+    }))
+
+
+# ── parity: message.ack read receipt clears unread (plano 23 Fase F2 gap 4) ──
+
+def test_ack_read_clears_unread(build_app):
+    """PARITY: a ``message.ack`` ``read`` receipt for an INCOMING message that was
+    still unread clears the contact's unread state (mark_as_read) on the live
+    path, mirroring the legacy /api/webhook handler. Previously the live
+    ``_dispatch_events`` receipt branch updated only outgoing message status and
+    never touched unread tracking."""
+    phone = "5511970005002"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+
+    # 1) Deliver an inbound message → contact loaded + unread incremented.
+    r = built.client.post("/api/webhook/gowa/default",
+                          json=_text_payload(phone, "unread_msg_1", "mensagem não lida"))
+    assert r.status_code == 200, r.text
+    _drain_orchestrator(built, "default", phone)
+
+    from db.repositories import contact_repo
+    contact = contact_repo.get_by_phone(phone)
+    assert contact is not None
+    handler_contact = built.agent_handler._get_contact(phone, channel_id="default")
+    assert "unread_msg_1" in handler_contact.get_unread_msg_ids(), \
+        "precondition: the inbound message is tracked as unread"
+
+    # 2) A read receipt for that message id should clear the unread state.
+    with EventRecorder() as rec:
+        r = built.client.post("/api/webhook/gowa/default", json={
+            "event": "message.ack", "payload": {
+                "receipt_type": "read", "ids": ["unread_msg_1"],
+                "from": f"{phone}@s.whatsapp.net"}})
+        assert r.status_code == 200, r.text
+        rec.drain()
+
+    assert "receipt.changed" in rec.name_set
+    assert handler_contact.get_unread_msg_ids() == [], \
+        "read receipt must clear the contact's unread ids (parity)"
+    golden_assert("ack_read_clears_unread", normalize({
+        "events": {"set": sort_events(list(rec.name_set)),
+                   "sequence": rec.names},
+    }))

@@ -118,6 +118,7 @@ def reset_allowed_jid_cache() -> None:
     """Invalidate the cached allowed-JID-types (call after a channel config edit)."""
     _ALLOWED_JID_CACHE["types"] = None
     _ALLOWED_JID_CACHE["ts"] = 0.0
+    _ALLOWED_JID_BY_CHANNEL.clear()
 
 
 async def _gowa_allowed_jid_types() -> list[str]:
@@ -128,6 +129,38 @@ async def _gowa_allowed_jid_types() -> list[str]:
     types = await asyncio.to_thread(_read_gowa_allowed_jid_types)
     _ALLOWED_JID_CACHE["types"] = types
     _ALLOWED_JID_CACHE["ts"] = now
+    return types
+
+
+# Per-channel allowed-JID cache for the generic live path (a 2nd GOWA number
+# resolves to its own channel — plano 11). Keyed by channel_id; same TTL as the
+# legacy single-slot cache above.
+_ALLOWED_JID_BY_CHANNEL: dict = {}
+
+
+def _read_channel_allowed_jid_types(channel_id: str) -> list[str]:
+    """Read a specific channel's ``config.allowed_jid_types`` (live-path twin of
+    :func:`_read_gowa_allowed_jid_types`, which is hardcoded to ``default``)."""
+    try:
+        row = channel_repo.get(channel_id)
+        cfg = row.get("config") if row else None
+        if isinstance(cfg, str) and cfg:
+            cfg = json.loads(cfg)
+        if isinstance(cfg, dict) and "allowed_jid_types" in cfg:
+            return jid_classifier.normalize_allowed_types(cfg.get("allowed_jid_types"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[Webhook] allowed_jid_types read failed for %s: %s",
+                       channel_id, e)
+    return list(jid_classifier.DEFAULT_ALLOWED_JID_TYPES)
+
+
+async def _channel_allowed_jid_types(channel_id: str) -> list[str]:
+    now = time.time()
+    cached = _ALLOWED_JID_BY_CHANNEL.get(channel_id)
+    if cached is not None and (now - cached[1]) < _ALLOWED_JID_TTL:
+        return cached[0]
+    types = await asyncio.to_thread(_read_channel_allowed_jid_types, channel_id)
+    _ALLOWED_JID_BY_CHANNEL[channel_id] = (types, now)
     return types
 
 
@@ -978,13 +1011,17 @@ def register_routes(app, deps):
         audio_path = media_path if event.media_type == "audio" else None
         return media_path, image_path, audio_path
 
-    def _apply_contact_metadata(contact, event: InboundEvent) -> None:
+    def _apply_contact_metadata(contact, event: InboundEvent) -> bool:
         """Persist provider-resolved chat metadata onto the contact (plano 13 Fase 0).
 
         GOWA resolves a group's name / can-send / archive status from its client and
         carries them on the event; other providers leave them ``None`` (no-op).
-        Sync — call via ``asyncio.to_thread``."""
+        Sync — call via ``asyncio.to_thread``. Returns whether the archive status
+        actually changed so the caller can emit ``chat.archived`` on the bus
+        (parity with the legacy ``/api/webhook`` handler, which fires it when the
+        archive flag flips)."""
         changed = False
+        archive_changed = False
         if event.is_group:
             if event.group_name and getattr(contact, "group_name", None) != event.group_name:
                 contact.is_group = True
@@ -998,8 +1035,10 @@ def register_routes(app, deps):
                 and getattr(contact, "is_archived", None) != event.is_archived):
             contact.is_archived = event.is_archived
             changed = True
+            archive_changed = True
         if changed:
             contact.save()
+        return archive_changed
 
     async def _ingest_echo(event: InboundEvent, channel_id: str, phone: str):
         """Sync a message sent from the user's own device (``direction='out'``).
@@ -1015,7 +1054,7 @@ def register_routes(app, deps):
             state.processed_messages.add(dedup_key)
         text = (event.text or "").strip()
         media_type = event.media_type
-        media_path, _img, _aud = await _resolve_inbound_media(event)
+        media_path, _img, audio_path = await _resolve_inbound_media(event)
         media_extras = event.media_extras or None
         if not text and not media_type:
             return
@@ -1065,6 +1104,21 @@ def register_routes(app, deps):
             "source": "echo", "status": "operator", "ts": time.time(),
         })
 
+        # Transcribe outgoing (echo) audio when the configured mode includes
+        # "sent" (parity with the legacy GOWA handler — channel-aware here so the
+        # gate + delivery target resolve from THIS channel's overrides).
+        if audio_path:
+            out_transcription = await _maybe_transcribe(
+                "audio", audio_path,
+                phone=phone, source="echo",
+                is_group=contact.is_group,
+                group_jid=phone if contact.is_group else None,
+                channel_id=channel_id,
+            )
+            if out_transcription:
+                await _deliver_audio_transcription(
+                    phone, contact, out_transcription, channel_id=channel_id)
+
     async def ingest_event(event: InboundEvent):
         """Single ingress for ANY channel's inbound message (plano 11 / plano 13).
 
@@ -1082,6 +1136,26 @@ def register_routes(app, deps):
         phone = event.chat_id or event.sender_id
         if not phone:
             return
+
+        # JID-type discard (parity with the legacy GOWA handler — CLAUDE.md
+        # "Filtro de tipos de JID"): drop newsletter/broadcast/bot etc. BEFORE any
+        # contact is materialized, per the channel's ``config.allowed_jid_types``.
+        # GOWA-only (the suffix discriminator is a WhatsApp concept); other
+        # providers leave ``event.raw`` without a JID suffix → classified UNKNOWN,
+        # which is never gated, so this is a no-op for Cloud/Telegram. Applies to
+        # inbound AND the is_from_me echo branch below (same as legacy).
+        if getattr(event, "provider", "") == "gowa":
+            raw = event.raw or {}
+            chat_jid = (raw.get("chat_jid", "") or raw.get("chat_id", "")
+                        or raw.get("from", "") or raw.get("jid", ""))
+            jid_type = jid_classifier.classify_jid(chat_jid)
+            allowed = await _channel_allowed_jid_types(channel_id)
+            if not jid_classifier.is_allowed(jid_type, allowed):
+                logger.info(
+                    "[Ingest] Skipping %s message (jid=%s, type=%s not in allowed=%s)",
+                    "outgoing" if getattr(event, "direction", "in") == "out" else "incoming",
+                    chat_jid, jid_type, allowed)
+                return
 
         # Echo of a message sent from the user's own device (plano 13 Fase 0).
         if getattr(event, "direction", "in") == "out":
@@ -1120,7 +1194,14 @@ def register_routes(app, deps):
         if event.sender_name and not event.is_group and not contact.is_group:
             await asyncio.to_thread(contact.set_wa_name, event.sender_name)
         # Provider-resolved chat metadata (group name / can-send / archive).
-        await asyncio.to_thread(_apply_contact_metadata, contact, event)
+        archive_changed = await asyncio.to_thread(_apply_contact_metadata, contact, event)
+        # chat.archived bus event when the archive flag flipped (parity with the
+        # legacy GOWA handler, which emits {phone, archived, ts} on a change).
+        if archive_changed:
+            await emit_with_filter("chat.archived", {
+                "phone": phone, "archived": bool(event.is_archived),
+                "ts": time.time(),
+            })
         await asyncio.to_thread(contact.increment_unread, msg_id)
         if event.is_group and event.mentioned:
             await asyncio.to_thread(contact.mark_mention)
