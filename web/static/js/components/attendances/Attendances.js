@@ -6,11 +6,13 @@ import { h } from 'preact';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  filterConversations, setConversationStatus, assignConversation, assignAgent,
+  filterConversations, assignConversation, assignAgent,
   archiveConversation, updateConversationInfo, updateConversationLabels,
   getConversationLabels, getConversationLabelsFor, getAssignableAgents,
   getCustomAttributes, getMe,
 } from '../../services/api.js';
+import { resolveConversation } from '../../utils/resolveConversation.js';
+import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { buildGrouping } from './grouping.js';
@@ -134,7 +136,9 @@ export function Attendances() {
   // ── Ações de API (injetadas no grouping) ─────────────────────────
   const actions = useMemo(() => ({
     assignAgent: (id, opts) => assignAgent(id, opts),
-    setStatus: (id, status) => setConversationStatus(id, status),
+    // Receives the full conversation (not just id) so the beforeResolve filter
+    // gets context. grouping.js passes the conv object on drop.
+    setStatus: (conv, status) => resolveConversation(conv, status),
     replaceLabels: (id, names) => updateConversationLabels(id, names),
     // Mescla o atributo no JSON existente (o endpoint substitui o objeto inteiro).
     setStage: (conv, key, value) => {
@@ -197,7 +201,7 @@ export function Attendances() {
   const handleAction = useCallback(async (convo, kind, value) => {
     try {
       let res;
-      if (kind === 'status') res = await setConversationStatus(convo.id, value);
+      if (kind === 'status') res = await resolveConversation(convo, value);
       else if (kind === 'assign') res = await assignConversation(convo.id, value);
       else if (kind === 'archive') res = await archiveConversation(convo.id, value);
       if (res && res.ok === false) { setError(res.error || 'Falha na ação.'); return; }
@@ -282,6 +286,8 @@ export function Attendances() {
           </label>
           <button onClick=${fetchConversations}
             class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">Atualizar</button>
+          <!-- Extension point: plugins can inject toolbar controls here. -->
+          <${Slot} name="attendances.toolbar" ctx=${{ view, mode, onlyOpen }} />
         </div>
       </div>
 

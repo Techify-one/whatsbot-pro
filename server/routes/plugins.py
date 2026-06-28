@@ -82,6 +82,11 @@ def register_routes(app, deps):
                 "screens": [
                     {**s, "pluginId": loaded.id} for s in loaded.manifest.screens
                 ],
+                # Frontend extension module (camada de extensão de frontend): the app
+                # imports this ES module once at boot to register filters/slots/route
+                # overrides. Empty string = plugin contributes no frontend extension.
+                "frontend_extends": loaded.manifest.frontend_extends,
+                "frontend_api_version": loaded.manifest.frontend_api_version,
             })
         return _ok({"plugins": out})
 

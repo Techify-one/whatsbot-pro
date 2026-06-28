@@ -3,8 +3,10 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getConversation, getContactConversation, getCustomAttributes,
-  updateConversationInfo, setConversationStatus, getMe,
+  updateConversationInfo, getMe,
 } from '../../services/api.js';
+import { resolveConversation } from '../../utils/resolveConversation.js';
+import { Slot } from '../../plugins/Slot.js';
 import { CloseIcon } from './icons.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { AssigneePicker } from './AssigneePicker.js';
@@ -141,7 +143,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
         if (!(saveRes && saveRes.ok)) return;
         if (saveRes.data && saveRes.data.conversation) mergeConv(saveRes.data.conversation);
       }
-      const r = await setConversationStatus(conv.id, closing ? 'closed' : 'open');
+      const r = await resolveConversation(conv, closing ? 'closed' : 'open');
       if (r && r.ok && r.data && r.data.conversation) mergeConv(r.data.conversation);
     } finally {
       setBusy(false);
@@ -249,6 +251,11 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
                 </button>
               </div>
             ` : null}
+
+            <!-- Ponto de extensão: um plugin pode injetar uma seção dentro do painel
+                 da conversa (ex.: "Atendimento atual"). Renderiza nada quando vazio,
+                 então é inerte sem plugin (camada de extensão de frontend). -->
+            <${Slot} name="conversation.info.panel" ctx=${{ conv, contact: contactInfo, user }} />
 
             <!-- Metadados (somente leitura) -->
             <div class="px-6 py-4">

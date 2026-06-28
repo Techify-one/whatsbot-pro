@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { getContacts, getContact, getConversationMessages, listConversations, markAsRead, markAsUnread, setConversationAi, deleteConversation, getTags, deleteContact, archiveContact, pinContact, checkPhone, updateContactTags, createTag, getMe, getAssignableAgents, getUsers, getContactConversation, getConversation, assignConversation, assignMeConversation, setConversationStatus, listConnectedChannels, getChannelSessionState, listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter } from '../../services/api.js';
+import { resolveConversation } from '../../utils/resolveConversation.js';
 import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -553,7 +554,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [patchCtxConv]);
 
   const handleResolveConversation = useCallback(async (convId, status) => {
-    const res = await setConversationStatus(convId, status);
+    // Funnel through resolveConversation so the beforeResolve filter (plugins) runs
+    // here too. Pass an object so the filter gets the conversation id for context.
+    const res = await resolveConversation({ id: convId }, status);
     if (res && res.ok && res.data && res.data.conversation) {
       patchCtxConv({ status: res.data.conversation.status });
     } else {
