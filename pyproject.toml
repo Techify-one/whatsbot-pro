@@ -1,0 +1,21 @@
+# Repo-level tooling config. Today this only holds the pytest configuration
+# (Phase A0 of the refactor). It is intentionally minimal — the project is NOT
+# packaged via this file (no [build-system]); it ships as a PyInstaller EXE.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Default "test_*.py" plus the harness shim, whose self-tests prove the
+# Checker works. _harness.py is a transition utility, not a "test_*" file, so
+# it must be named explicitly for collection.
+python_files = ["test_*.py", "_harness.py"]
+addopts = "-q -ra"
+# Per-test wall-clock cap. The legacy-suite subprocess tests pass their own
+# generous timeout to subprocess.run; this is a backstop for the native tests.
+timeout = 900
+markers = [
+    "legacy: subprocess-run legacy script-style suites (run the file as __main__ and assert exit 0)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
