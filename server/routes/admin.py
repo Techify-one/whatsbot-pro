@@ -13,7 +13,7 @@ import logging
 import threading
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from db import engine as engine_module
 from db.migration_postgres import (
@@ -22,7 +22,7 @@ from db.migration_postgres import (
     repair_postgres_sequences,
 )
 from plugins.restart import schedule_restart
-from server.authz import permission_denied
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _err, _ok
 
 logger = logging.getLogger(__name__)
@@ -36,12 +36,14 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
     settings = deps.settings
 
-    @app.get("/api/admin/database")
-    async def database_info(request: Request):
+    # B1: render require_permission's PermissionDeniedError to the legacy
+    # _err(403) envelope (idempotent across route modules).
+    install_exception_handlers(app)
+
+    @app.get("/api/admin/database",
+             dependencies=[Depends(require_permission("settings.manage"))])
+    async def database_info():
         """Return the current DB URL (redacted) plus dialect."""
-        denied = permission_denied(request, "settings.manage")
-        if denied:
-            return denied
         url = engine_module.get_database_url()
         return _ok({
             "dialect": "postgres" if engine_module.is_postgres() else "sqlite",
@@ -50,16 +52,14 @@ def register_routes(app, deps):
             "config_file": str(settings.data_dir / "storages" / "database.json"),
         })
 
-    @app.post("/api/admin/migrate-to-postgres")
+    @app.post("/api/admin/migrate-to-postgres",
+              dependencies=[Depends(require_permission("settings.manage"))])
     async def migrate_to_postgres(request: Request):
         """Kick off a SQLite → Postgres migration. Idempotent re: concurrent calls.
 
         Body: ``{"postgres_url": "...", "force_drop": false}``.
         When ``force_drop`` is true the target schema is wiped before migrating.
         """
-        denied = permission_denied(request, "settings.manage")
-        if denied:
-            return denied
         body = await request.json()
         target_url = (body or {}).get("postgres_url", "").strip()
         force_drop = bool((body or {}).get("force_drop", False))
@@ -138,25 +138,21 @@ def register_routes(app, deps):
         threading.Thread(target=_runner, daemon=True).start()
         return _ok({"accepted": True})
 
-    @app.get("/api/admin/migrate-to-postgres/status")
-    async def migrate_status(request: Request):
+    @app.get("/api/admin/migrate-to-postgres/status",
+             dependencies=[Depends(require_permission("settings.manage"))])
+    async def migrate_status():
         """Polling fallback for clients that don't have a live WebSocket."""
-        denied = permission_denied(request, "settings.manage")
-        if denied:
-            return denied
         return _ok(_migration_state)
 
-    @app.post("/api/admin/repair-sequences")
-    async def repair_sequences(request: Request):
+    @app.post("/api/admin/repair-sequences",
+              dependencies=[Depends(require_permission("settings.manage"))])
+    async def repair_sequences():
         """Re-anchor every Postgres sequence to MAX(<pk>). No-op on SQLite.
 
         Useful when data was imported via tools that don't bump sequences
         (the migration helper already runs this, but it's exposed as a
         manual button for recovery scenarios).
         """
-        denied = permission_denied(request, "settings.manage")
-        if denied:
-            return denied
         if not engine_module.is_postgres():
             return _err("Banco atual não é Postgres — sequências são exclusivas dele.", status=400)
         fixed = await asyncio.to_thread(repair_postgres_sequences, engine_module.get_engine())

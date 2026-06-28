@@ -11,7 +11,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 
@@ -24,7 +24,7 @@ from plugins.manifest import (
 from plugins.restart import schedule_restart
 from plugins.lifecycle import manager as _lifecycle_manager
 from plugins.events import emit as emit_event
-from server.authz import permission_denied
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _err, _ok
 import time as _time
 
@@ -37,6 +37,10 @@ _PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 def register_routes(app, deps):
     plugins_dir: Path = deps.plugins_dir
     registry = deps.plugins_registry
+
+    # B1: render require_permission's PermissionDeniedError to the legacy
+    # _err(403) envelope (idempotent across route modules).
+    install_exception_handlers(app)
 
     @app.get("/api/plugins")
     async def list_plugins():
@@ -90,11 +94,9 @@ def register_routes(app, deps):
             })
         return _ok({"plugins": out})
 
-    @app.post("/api/plugins/{plugin_id}/enable")
-    async def enable_plugin(plugin_id: str, request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
+    @app.post("/api/plugins/{plugin_id}/enable",
+              dependencies=[Depends(require_permission("plugins.manage"))])
+    async def enable_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, True)
@@ -108,11 +110,9 @@ def register_routes(app, deps):
         schedule_restart(reason=f"plugin {plugin_id} enabled")
         return _ok({"id": plugin_id, "enabled": True, "restarting": True})
 
-    @app.post("/api/plugins/{plugin_id}/disable")
-    async def disable_plugin(plugin_id: str, request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
+    @app.post("/api/plugins/{plugin_id}/disable",
+              dependencies=[Depends(require_permission("plugins.manage"))])
+    async def disable_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, False)
@@ -129,11 +129,9 @@ def register_routes(app, deps):
         )
         return _ok({"id": plugin_id, "enabled": False, "restarting": True})
 
-    @app.delete("/api/plugins/{plugin_id}")
-    async def delete_plugin(plugin_id: str, request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
+    @app.delete("/api/plugins/{plugin_id}",
+                dependencies=[Depends(require_permission("plugins.manage"))])
+    async def delete_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
 
@@ -186,11 +184,9 @@ def register_routes(app, deps):
             values[field] = all_cfg.get(prefix + field, default_val)
         return _ok({"schema": schema, "values": values})
 
-    @app.put("/api/plugins/{plugin_id}/settings")
+    @app.put("/api/plugins/{plugin_id}/settings",
+             dependencies=[Depends(require_permission("plugins.manage"))])
     async def update_plugin_settings(plugin_id: str, request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
         loaded = registry.loaded.get(plugin_id) if registry else None
         if not loaded or not loaded.settings_cls:
             return _err("plugin sem settings declaradas", 404)
@@ -248,11 +244,9 @@ def register_routes(app, deps):
             },
         )
 
-    @app.post("/api/plugins/import")
-    async def import_plugin(file: UploadFile, request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
+    @app.post("/api/plugins/import",
+              dependencies=[Depends(require_permission("plugins.manage"))])
+    async def import_plugin(file: UploadFile):
         contents = await file.read()
         try:
             zf = zipfile.ZipFile(io.BytesIO(contents))
@@ -314,10 +308,8 @@ def register_routes(app, deps):
             await asyncio.to_thread(config_repo.set, "gowa_uninstalled", "0")
         return _ok({"id": pid, "version": version, "enabled": False})
 
-    @app.post("/api/plugins/restart")
-    async def restart_server(request: Request):
-        denied = permission_denied(request, "plugins.manage")
-        if denied:
-            return denied
+    @app.post("/api/plugins/restart",
+              dependencies=[Depends(require_permission("plugins.manage"))])
+    async def restart_server():
         schedule_restart(reason="manual restart from /api/plugins/restart")
         return _ok({"restarting": True})
