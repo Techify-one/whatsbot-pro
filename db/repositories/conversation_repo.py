@@ -12,9 +12,9 @@ import time
 from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
 
 from db.engine import get_engine
-from db.repositories._mapping import _PREVIEW_EXCLUDED, media_preview
-from db.tables import (conversations, contacts, conversation_counters, inboxes,
-                       channels, messages, unread_msg_ids, conversation_label_links)
+from db.repositories import conversation_query
+from db.tables import (conversations, contacts, conversation_counters,
+                       messages, unread_msg_ids, conversation_label_links)
 
 logger = logging.getLogger(__name__)
 
@@ -198,74 +198,11 @@ def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = F
     return conv
 
 
-def _last_msg_subq(col):
-    """Correlated scalar subquery: ``col`` of the latest visible msg of the conversation."""
-    return (
-        select(col)
-        .where(messages.c.conversation_id == conversations.c.id)
-        .where(messages.c.role.notin_(_PREVIEW_EXCLUDED))
-        .order_by(messages.c.ts.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-
-
-def _enriched_columns() -> list:
-    """Columns for a conversation-centric list: conv + contact + channel + preview
-    + per-CONVERSA unread (plano 11 D1).
-
-    Unread é DERIVADO de ``unread_msg_ids ⋈ messages.msg_id`` filtrando por
-    ``conversation_id`` — assim o mesmo número em 2 canais tem badges independentes
-    sem coluna denormalizada nova (os contadores por-contato seguem intactos).
-    """
-    unread_subq = (
-        select(func.count())
-        .select_from(unread_msg_ids.join(messages, messages.c.msg_id == unread_msg_ids.c.msg_id))
-        .where(messages.c.conversation_id == conversations.c.id)
-        .scalar_subquery()
-    )
-    return [
-        conversations,
-        contacts.c.name.label("contact_name"),
-        contacts.c.phone.label("contact_phone"),
-        contacts.c.is_group.label("contact_is_group"),
-        contacts.c.is_pinned.label("is_pinned"),
-        contacts.c.has_unread_mention.label("has_unread_mention"),
-        inboxes.c.channel_id.label("channel_id"),
-        channels.c.provider.label("channel_provider"),
-        channels.c.display_name.label("channel_name"),
-        _last_msg_subq(messages.c.content).label("last_msg_content"),
-        _last_msg_subq(messages.c.role).label("last_msg_role"),
-        _last_msg_subq(messages.c.ts).label("last_msg_ts"),
-        _last_msg_subq(messages.c.media_type).label("last_msg_media_type"),
-        _last_msg_subq(messages.c.status).label("last_msg_status"),
-        _last_msg_subq(messages.c.msg_id).label("last_msg_id"),
-        unread_subq.label("unread_count"),
-    ]
-
-
-def _enriched_from():
-    return (
-        conversations
-        .join(contacts, contacts.c.id == conversations.c.contact_id)
-        .outerjoin(inboxes, inboxes.c.id == conversations.c.inbox_id)
-        .outerjoin(channels, channels.c.id == inboxes.c.channel_id)
-    )
-
-
-def _finalize_conv(row) -> dict:
-    """Shape a raw enriched row into the dict the sidebar/list consumes."""
-    d = dict(row)
-    d["last_message"] = media_preview(d.get("last_msg_content"),
-                                      d.get("last_msg_media_type"))
-    d["last_message_role"] = d.get("last_msg_role") or ""
-    d["last_message_ts"] = d.get("last_msg_ts") or 0
-    d["last_message_status"] = d.get("last_msg_status") or ""
-    d["last_message_msg_id"] = d.get("last_msg_id") or ""
-    d["unread_count"] = int(d.get("unread_count") or 0)
-    d["is_pinned"] = bool(d.get("is_pinned"))
-    d["has_unread_mention"] = bool(d.get("has_unread_mention"))
-    return d
+# Enriched-conversation SELECT assembly lives in ``conversation_query`` (plano 23
+# Fase E2). Local aliases keep the existing call sites unchanged.
+_enriched_columns = conversation_query.enriched_columns
+_enriched_from = conversation_query.enriched_from
+_finalize_conv = conversation_query.finalize_conv
 
 
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
@@ -364,25 +301,12 @@ def mark_conversation_read(conv_id: int) -> list[str]:
     return msg_ids
 
 
-def unread_conversation_count() -> int:
-    """Non-archived conversations with at least one unread message (browser-tab badge).
-
-    Conversa-cêntrico: conta CONVERSAS (uma por canal), derivando unread de
-    ``unread_msg_ids ⋈ messages.conversation_id`` — o mesmo número em 2 canais com
-    não-lidas conta 2, não 1 (ao contrário do contador por-contato legado)."""
-    unread_subq = (
-        select(func.count())
-        .select_from(unread_msg_ids.join(messages, messages.c.msg_id == unread_msg_ids.c.msg_id))
-        .where(messages.c.conversation_id == conversations.c.id)
-        .scalar_subquery()
-    )
-    with get_engine().connect() as conn:
-        return conn.execute(
-            select(func.count()).select_from(conversations).where(
-                conversations.c.is_archived == 0,
-                unread_subq > 0,
-            )
-        ).scalar() or 0
+# NOTE (plano 23 Fase E2): the conversation-centric ``unread_conversation_count``
+# was removed here — it had ZERO callers. The browser-tab badge count is served by
+# the contact-centric ``contact_repo.unread_conversation_count`` (single source,
+# now in ``unread_repo``). The conversation-centric join variant was also
+# incompatible with the legacy suite, which increments unread with a phantom msg_id
+# the ``unread_msg_ids ⋈ messages`` join would not match.
 
 
 def count(*, status: str | None = None) -> int:
