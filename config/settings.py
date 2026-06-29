@@ -54,70 +54,135 @@ _ENV_OVERRIDES_BY_KEY: dict[str, tuple[str, Callable[[str], Any]]] = {
     cfg_key: (env_key, cast) for env_key, (cfg_key, cast) in _ENV_OVERRIDES.items()
 }
 
-DEFAULT_CONFIG = {
-    "openrouter_api_key": "",
-    "audio_model": "google/gemini-2.5-flash",
-    "image_model": "google/gemini-2.5-flash",
-    "document_model": "google/gemini-2.5-flash",
+# ── Config-key metadata (R17 — single source of truth) ─────────────────────────
+#
+# Previously the same keys were mirrored across THREE lists that drifted: the seed
+# ``DEFAULT_CONFIG`` here, the GET ``/api/config`` projection, and the PUT allowlist
+# (both in ``server/routes/config.py``). Consolidated to ONE per-key metadata
+# table; the three lists are now DERIVED from it (exact same keys/defaults/exposure
+# — this is a DRY refactor, not a behavior change).
+#
+# Each entry is ``ConfigKey``:
+#   * ``default``   — the seed value written to the DB by ``Settings.load`` (the
+#                     value used by ``DEFAULT_CONFIG``). ``_NO_SEED`` ⇒ the key is
+#                     NOT seeded into the DB (e.g. ``max_executions``, ``access_token``
+#                     stays write-only/derived).
+#   * ``exposed``   — returned by ``GET /api/config``.
+#   * ``get_default`` — the fallback the GET handler passes (``settings.get(key,
+#                     get_default)``). Defaults to ``default`` when not given;
+#                     given explicitly ONLY where the historical GET fallback
+#                     diverged from the seed default (``auto_reply``,
+#                     ``ai_tools_code_enabled``) or the key has no seed
+#                     (``max_executions``). These divergent fallbacks are inert in
+#                     practice (the key is always present in the DB once seeded /
+#                     once written) but are preserved byte-for-byte.
+#   * ``writable``  — accepted by ``PUT /api/config`` (the allowlist).
+#
+# Keys handled specially by the GET handler (masked / derived) are NOT exposed via
+# this metadata: ``openrouter_api_key`` (masked), ``has_password`` (derived from
+# ``web_password_hash``). They stay inline in the route.
+
+from dataclasses import dataclass
+
+
+_NO_SEED = object()
+
+
+@dataclass(frozen=True)
+class ConfigKey:
+    key: str
+    default: Any = _NO_SEED
+    exposed: bool = False
+    get_default: Any = _NO_SEED
+    writable: bool = False
+
+    @property
+    def effective_get_default(self):
+        return self.default if self.get_default is _NO_SEED else self.get_default
+
+
+# Order is preserved for the GET projection (matches the historical dict order so
+# the response shape is byte-for-byte identical).
+CONFIG_KEYS: tuple[ConfigKey, ...] = (
+    ConfigKey("openrouter_api_key", default="", writable=True),  # GET: masked, handled in route
+    ConfigKey("audio_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
+    ConfigKey("image_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
+    ConfigKey("document_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
     # Model for the one-shot "improvement analysis" of a flagged AI reply.
     # Empty → falls back to the chat ``model``. Override env WHATSBOT_IMPROVEMENT_MODEL.
-    "improvement_model": "",
-    "auto_reply": False,
-    "max_context_messages": 10,
-    "inactivity_timeout_min": 30,
-    "message_batch_delay": 3.0,
-    "response_delay_min": 1.0,
-    "response_delay_max": 3.0,
-    "gowa_port": 64996,
-    "web_port": 8090,
-    "usd_brl_rate": 5.50,
-    "split_messages": True,
-    "split_message_delay": 2.0,
-    "audio_transcription_mode": "received",
-    "audio_transcription_target": "private",
-    "audio_transcription_chat_prefix": "",
-    "image_transcription_enabled": True,
-    "document_transcription_enabled": True,
-    "transfer_alert_enabled": True,
-    "transfer_alert_duration": 5,
-    "group_reply_mode": "mention_only",
-    # --- Motor de agente dirigido pelo banco (config-in-DB + code-in-DB) -----
-    # Plano 22: o motor multi-agente (config-in-DB) é o ÚNICO motor de IA. Não há
-    # mais flag/caminho legado: prompt/modelo/tools vêm SEMPRE do agente default
-    # (semeado no boot a partir das constantes em agent.agent_factory) e dos
-    # agentes vinculados. A IA é controlada por auto_reply + config por canal +
-    # IA por conversa.
-    # ⚠️ KILL-SWITCH DE SEGURANÇA — code-in-DB. Tools ``ai_tools`` guardam código
-    # Python no banco que o instalador executa num SUBPROCESSO isolado no boot
-    # (RLIMIT_CPU/RLIMIT_AS/timeout — P62/P67). Default LIGADO para que tools
-    # criadas pelo usuário sejam instaladas/registradas automaticamente no boot
-    # sem precisar de env nem toggle manual. Para travar (host não confiável),
-    # setar a env ``WHATSBOT_AI_TOOLS_CODE=0``. Ver DECISOES.md P62.
-    "ai_tools_code_enabled": True,
-    "bot_phone": "",
-    "bot_name": "",
-    "default_ai_enabled": True,
-    "web_password_hash": "",
-    "web_password_salt": "",
-    "setup_completed": False,
-    # Techify account — returned by /request-apikey alongside the API key.
-    # account_url is the customer's account/recharge page; access_token is
-    # the credential for that account (kept server-side only).
-    "account_url": "",
-    "access_token": "",
-    # Low-balance notification — broadcast a "low_balance" WS event when the
-    # remaining OpenRouter credit drops below the threshold (USD). The frontend
-    # opens a modal pointing to ``account_url`` for the user to recharge.
-    "low_balance_enabled": True,
-    "low_balance_threshold": 0.50,
+    ConfigKey("improvement_model", default="", exposed=True, writable=True),
+    ConfigKey("group_reply_mode", default="mention_only", exposed=True, writable=True),
+    # Historical GET fallback was True (inert — the key is always seeded False).
+    ConfigKey("auto_reply", default=False, exposed=True, get_default=True, writable=True),
+    ConfigKey("max_context_messages", default=10, exposed=True, writable=True),
+    ConfigKey("message_batch_delay", default=3.0, exposed=True, writable=True),
+    ConfigKey("split_messages", default=True, exposed=True, writable=True),
+    ConfigKey("split_message_delay", default=2.0, exposed=True, writable=True),
+    ConfigKey("audio_transcription_mode", default="received", exposed=True, writable=True),
+    ConfigKey("audio_transcription_target", default="private", exposed=True, writable=True),
+    ConfigKey("audio_transcription_chat_prefix", default="", exposed=True, writable=True),
+    ConfigKey("image_transcription_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("document_transcription_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("transfer_alert_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("transfer_alert_duration", default=5, exposed=True, writable=True),
+    # max_executions is NOT seeded (no DEFAULT_CONFIG entry); GET falls back to 200.
+    ConfigKey("max_executions", exposed=True, get_default=200, writable=True),
+    ConfigKey("default_ai_enabled", default=True, exposed=True, writable=True),
+    # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
+    # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —
+    # P62/P67). Seeded ON so user tools register automatically; set env
+    # WHATSBOT_AI_TOOLS_CODE=0 to lock (untrusted host). Historical GET fallback
+    # was False (inert — the key is always seeded True). See DECISOES.md P62.
+    ConfigKey("ai_tools_code_enabled", default=True, exposed=True, get_default=False, writable=True),
+    ConfigKey("setup_completed", default=False, exposed=True, writable=True),
+    # Techify account — account_url is the customer's recharge page (exposed);
+    # access_token is the credential for that account (kept server-side only).
+    ConfigKey("account_url", default="", exposed=True),
+    ConfigKey("low_balance_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("low_balance_threshold", default=0.50, exposed=True, writable=True),
     # Avisos de sistema no chat (plano 12) — gate GLOBAL por grupo de evento.
     # Grupo desligado ⇒ o aviso não é gerado (nada grava/emite) para ninguém.
-    "system_notice_assignment": True,
-    "system_notice_tags": True,
-    "system_notice_conv_labels": True,
-    "system_notice_status": True,
-    "system_notice_ai": True,
-}
+    ConfigKey("system_notice_assignment", default=True, exposed=True, writable=True),
+    ConfigKey("system_notice_tags", default=True, exposed=True, writable=True),
+    ConfigKey("system_notice_conv_labels", default=True, exposed=True, writable=True),
+    ConfigKey("system_notice_status", default=True, exposed=True, writable=True),
+    ConfigKey("system_notice_ai", default=True, exposed=True, writable=True),
+    # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
+    ConfigKey("inactivity_timeout_min", default=30),
+    ConfigKey("response_delay_min", default=1.0),
+    ConfigKey("response_delay_max", default=3.0),
+    ConfigKey("gowa_port", default=64996),
+    ConfigKey("web_port", default=8090),
+    ConfigKey("usd_brl_rate", default=5.50),
+    ConfigKey("bot_phone", default=""),  # writable via the PUT special-case below
+    ConfigKey("bot_name", default=""),
+    ConfigKey("web_password_hash", default=""),
+    ConfigKey("web_password_salt", default=""),
+    ConfigKey("access_token", default=""),
+)
+
+# ``bot_phone`` is writable through the PUT allowlist (it triggers mention-detection
+# refresh in the route). Mark it without exposing it in GET.
+_BOT_PHONE_WRITABLE = "bot_phone"
+
+
+def _build_default_config() -> dict:
+    """Seed-defaults map (only keys that ARE seeded) — preserves the historical
+    ``DEFAULT_CONFIG`` exactly."""
+    return {ck.key: ck.default for ck in CONFIG_KEYS if ck.default is not _NO_SEED}
+
+
+def exposed_config_keys() -> list[ConfigKey]:
+    """Keys returned by ``GET /api/config`` (in declaration order)."""
+    return [ck for ck in CONFIG_KEYS if ck.exposed]
+
+
+def writable_config_keys() -> set[str]:
+    """The ``PUT /api/config`` allowlist (R17 single source)."""
+    return {ck.key for ck in CONFIG_KEYS if ck.writable} | {_BOT_PHONE_WRITABLE}
+
+
+DEFAULT_CONFIG = _build_default_config()
 
 
 _MISSING = object()

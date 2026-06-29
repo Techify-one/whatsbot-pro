@@ -48,6 +48,12 @@ KNOWN_EVENTS: set[str] = {
     "newsletter.event",
     # Chat-level
     "chat.archived",
+    # Channel lifecycle (plano 23 Fase B6 — minimal seam, C3 normalizes fully).
+    # ``channel.updated``: a channel config/credential edit (payload
+    #   ``{channel_id, keys_changed, ts}``) — cache invalidation is driven off it.
+    # ``channel.status_changed``: a live status read (payload
+    #   ``{channel_id, status, is_connected, is_logged_in, ts}``).
+    "channel.updated", "channel.status_changed",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",

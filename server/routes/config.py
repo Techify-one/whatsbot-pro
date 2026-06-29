@@ -8,7 +8,8 @@ from typing import Any
 import httpx
 from fastapi import Request
 
-from config.settings import LLM_API_BASE_URL
+from config.settings import (LLM_API_BASE_URL, exposed_config_keys,
+                             writable_config_keys)
 from server.auth import generate_salt, hash_password
 from server.authz import permission_denied
 from server.helpers import _ok, _err, _mask_key
@@ -37,63 +38,22 @@ def register_routes(app, deps):
 
     @app.get("/api/config")
     async def get_config():
-        return _ok({
-            "openrouter_api_key": _mask_key(settings.get("openrouter_api_key", "")),
-            "audio_model": settings.get("audio_model", "google/gemini-2.5-flash"),
-            "image_model": settings.get("image_model", "google/gemini-2.5-flash"),
-            "document_model": settings.get("document_model", "google/gemini-2.5-flash"),
-            "improvement_model": settings.get("improvement_model", ""),
-            "group_reply_mode": settings.get("group_reply_mode", "mention_only"),
-            "auto_reply": settings.get("auto_reply", True),
-            "max_context_messages": settings.get("max_context_messages", 10),
-            "message_batch_delay": settings.get("message_batch_delay", 3.0),
-            "split_messages": settings.get("split_messages", True),
-            "split_message_delay": settings.get("split_message_delay", 2.0),
-            "audio_transcription_mode": settings.get("audio_transcription_mode", "received"),
-            "audio_transcription_target": settings.get("audio_transcription_target", "private"),
-            "audio_transcription_chat_prefix": settings.get("audio_transcription_chat_prefix", ""),
-            "image_transcription_enabled": settings.get("image_transcription_enabled", True),
-            "document_transcription_enabled": settings.get("document_transcription_enabled", True),
-            "transfer_alert_enabled": settings.get("transfer_alert_enabled", True),
-            "transfer_alert_duration": settings.get("transfer_alert_duration", 5),
-            "max_executions": settings.get("max_executions", 200),
-            "default_ai_enabled": settings.get("default_ai_enabled", True),
-            "ai_tools_code_enabled": settings.get("ai_tools_code_enabled", False),
-            "has_password": bool(settings.get("web_password_hash", "")),
-            "setup_completed": settings.get("setup_completed", False),
-            "account_url": settings.get("account_url", ""),
-            "low_balance_enabled": settings.get("low_balance_enabled", True),
-            "low_balance_threshold": settings.get("low_balance_threshold", 0.50),
-            "system_notice_assignment": settings.get("system_notice_assignment", True),
-            "system_notice_tags": settings.get("system_notice_tags", True),
-            "system_notice_conv_labels": settings.get("system_notice_conv_labels", True),
-            "system_notice_status": settings.get("system_notice_status", True),
-            "system_notice_ai": settings.get("system_notice_ai", True),
-        })
+        # R17: the exposed keys + their GET fallbacks come from the single config-key
+        # metadata table (config.settings.CONFIG_KEYS). The two special keys —
+        # ``openrouter_api_key`` (masked) and ``has_password`` (derived) — stay inline.
+        out = {"openrouter_api_key": _mask_key(settings.get("openrouter_api_key", ""))}
+        for ck in exposed_config_keys():
+            out[ck.key] = settings.get(ck.key, ck.effective_get_default)
+        out["has_password"] = bool(settings.get("web_password_hash", ""))
+        return _ok(out)
 
     @app.put("/api/config")
     async def save_config(body: dict, request: Request):
         denied = permission_denied(request, "settings.manage")
         if denied:
             return denied
-        allowed_keys = {
-            "openrouter_api_key", "audio_model", "image_model",
-            "document_model", "improvement_model",
-            "audio_transcription_mode", "audio_transcription_target",
-            "audio_transcription_chat_prefix", "image_transcription_enabled",
-            "document_transcription_enabled",
-            "auto_reply",
-            "max_context_messages", "message_batch_delay",
-            "split_messages", "split_message_delay",
-            "transfer_alert_enabled", "transfer_alert_duration",
-            "group_reply_mode", "bot_phone",
-            "max_executions", "default_ai_enabled", "setup_completed",
-            "low_balance_enabled", "low_balance_threshold",
-            "ai_tools_code_enabled",
-            "system_notice_assignment", "system_notice_tags",
-            "system_notice_conv_labels",
-            "system_notice_status", "system_notice_ai",
-        }
+        # R17: the PUT allowlist is derived from the single config-key metadata table.
+        allowed_keys = writable_config_keys()
         keys_changed = []
         audit_before = {}   # {key: old_value} for the audit trail
         audit_after = {}    # {key: new_value} for the audit trail
