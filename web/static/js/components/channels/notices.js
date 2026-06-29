@@ -1,0 +1,159 @@
+// Channels — small shared presentational pieces (Plano 23 · D4), extracted
+// verbatim from ChannelsManager.js: the status Dot, the clipboard fallback, the
+// post-create webhook notices (WhatsApp Cloud + Telegram), and the hard-delete
+// confirmation modal. No behavior change.
+import { h } from 'preact';
+import { useState } from 'preact/hooks';
+import htm from 'htm';
+
+const html = htm.bind(h);
+
+export function Dot({ on }) {
+  return html`<span class="inline-block w-2 h-2 rounded-full ${on ? 'bg-green-500' : 'bg-gray-400'}"></span>`;
+}
+
+// Copy `text` via the legacy execCommand path (navigator.clipboard is unavailable
+// over plain HTTP / non-secure contexts, common when the panel is on a LAN IP).
+export function fallbackCopyText(text, onOk) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok && onOk) onOk();
+  } catch (e) { /* clipboard truly unavailable */ }
+}
+
+// ── Webhook-URL notice (shown after creating a whatsapp_cloud channel) ──
+export function WebhookNotice({ channelId, onDismiss }) {
+  const url = `${window.location.origin}/api/webhook/whatsapp_cloud/${channelId}`;
+  const [copied, setCopied] = useState(false);
+  function flagCopied() {
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+  function fallbackCopy() {
+    // navigator.clipboard is unavailable over plain HTTP (non-secure context),
+    // which is the common case here (panel served on a LAN IP). Fall back to
+    // the legacy execCommand approach via a temporary textarea.
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) flagCopied();
+    } catch (e) { /* clipboard truly unavailable */ }
+  }
+  function copy() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(flagCopied).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  }
+  return html`
+    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+      <div class="text-[14px] font-medium text-blue-700 mb-1">Canal criado</div>
+      <p class="text-[13px] text-wa-text mb-2">
+        Cole esta URL como <span class="font-medium">Callback URL</span> na configuração de webhook do seu app na Meta:
+      </p>
+      <div class="flex gap-2 items-center flex-wrap">
+        <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url}</code>
+        <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+          onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
+      </div>
+      <div class="flex justify-end mt-3">
+        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+          onClick=${onDismiss}>Fechar</button>
+      </div>
+    </div>
+  `;
+}
+
+// ── Telegram post-create notice ─────────────────────────────────────
+// Shown right after creating a Telegram inbox. The backend (autoconfigure)
+// already detected the domain and either registered the webhook or fell back to
+// long-poll; here we surface the webhook URL (copiable) + the resulting mode so
+// the user can confirm. ``result`` = {mode, webhook_url, registered, reason}.
+export function TelegramWebhookNotice({ result, onDismiss }) {
+  const url = (result && result.webhook_url) || '';
+  const isWebhook = result && result.mode === 'webhook';
+  const [copied, setCopied] = useState(false);
+  function flagCopied() { setCopied(true); setTimeout(() => setCopied(false), 2000); }
+  function fallbackCopy() {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) flagCopied();
+    } catch (e) { /* clipboard truly unavailable */ }
+  }
+  function copy() {
+    if (!url) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(flagCopied).catch(fallbackCopy);
+    } else { fallbackCopy(); }
+  }
+  const tint = isWebhook ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200';
+  const titleColor = isWebhook ? 'text-green-700' : 'text-amber-700';
+  return html`
+    <div class=${`${tint} border rounded-lg p-4 mb-4`}>
+      <div class=${`text-[14px] font-medium ${titleColor} mb-1`}>
+        ${isWebhook ? '✓ Inbox criada — webhook registrado automaticamente'
+                    : 'Inbox criada — usando long-poll'}
+      </div>
+      <p class="text-[13px] text-wa-text mb-2">
+        ${isWebhook
+          ? html`O Telegram já está entregando as mensagens neste endereço. Guarde a URL caso precise reconfigurar:`
+          : html`Não foi possível usar webhook${result && result.reason ? html` (${result.reason})` : ''} — a inbox recebe por <span class="font-medium">long-poll</span> e já está funcionando. Para usar webhook é necessário um domínio público (HTTPS).`}
+      </p>
+      ${isWebhook ? html`
+        <div class="flex gap-2 items-center flex-wrap">
+          <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url || '—'}</code>
+          <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+            onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
+        </div>` : null}
+      <div class="flex justify-end mt-3">
+        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+          onClick=${onDismiss}>Fechar</button>
+      </div>
+    </div>
+  `;
+}
+
+// Confirmation modal for a hard-delete (purge) of a channel. Hard-delete is
+// irreversible: it removes the channel and its entire inbox/history.
+export function PurgeChannelModal({ channel, onCancel, onConfirm }) {
+  const name = channel.display_name || channel.id;
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick=${onCancel}>
+      <div class="bg-wa-panel border border-wa-border rounded-lg shadow-xl max-w-md w-full p-5"
+        onClick=${(e) => e.stopPropagation()}>
+        <h3 class="text-[16px] font-medium text-wa-text mb-2">Excluir canal</h3>
+        <p class="text-[13px] text-wa-secondary mb-1">
+          Tem certeza que deseja excluir o canal
+          <span class="font-medium text-wa-text">"${name}"</span>?
+        </p>
+        <p class="text-[13px] text-red-600 mb-5">
+          Esta ação é permanente e não pode ser desfeita: o canal e todo o
+          histórico de conversas da inbox serão apagados.
+        </p>
+        <div class="flex justify-end gap-2">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onCancel}>Cancelar</button>
+          <button class="px-3 py-2 rounded-md text-[14px] text-white bg-red-600 hover:bg-red-700 transition-colors"
+            onClick=${onConfirm}>Excluir definitivamente</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
