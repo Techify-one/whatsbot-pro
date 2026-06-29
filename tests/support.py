@@ -182,3 +182,24 @@ def build_test_app(
         plugins=plugins,
         _tmp=tmp,
     )
+
+
+def build_test_app_with_plugin(plugin_id: str, **kwargs) -> BuiltApp:
+    """Boot the real app with a SINGLE plugin enabled (Phase G2 convenience).
+
+    Thin wrapper over :func:`build_test_app` for the common case of a plugin's
+    own test exercising its routes/filters against a live app: a plugin test can
+    do ::
+
+        built = build_test_app_with_plugin("telegram")
+        r = built.client.get("/api/plugins/telegram/channels")
+        assert r.json()["ok"] is True
+
+    ``plugin_id`` must exist under ``assets/plugin_examples/<id>/`` (the bundled
+    set). Extra keyword args (``settings_overrides``, ``gowa_client``) pass
+    straight through. Shares the process-global engine just like
+    ``build_test_app`` — see the module docstring. Remember to tear the returned
+    app down (exit ``built.client``; close ``built._tmp``); the ``plugin_app``
+    fixture in ``tests/conftest.py`` does that for you.
+    """
+    return build_test_app([plugin_id], **kwargs)
