@@ -83,32 +83,70 @@ KNOWN_EVENTS: set[str] = {
     "subprocess.crashed", "subprocess.restarted",
 }
 
-# Filter names the core applies (informational catalogue — there is no enforced
-# KNOWN_FILTERS registry yet; filters are tracked dynamically in ``_filters``).
-# Plano 23 Fase B4 added ``filter.conversation.before_assign`` and RELOCATED
-# ``filter.conversation.before_status`` from the route into
-# ``conversation_service``; both are recorded here so Fase C2 (filter-catalogue /
-# docs reconciliation) can promote this to a validated registry.
-_CORE_FILTER_NAMES: set[str] = {
+# ── Filter contract (plano 23 Fase C2) ───────────────────────────────────────
+#
+# ``KNOWN_FILTERS`` is the validated catalogue of every filter name the CORE
+# applies via ``apply_filter`` / ``apply_filter_sync`` (mirror of
+# ``KNOWN_EVENTS``). It exists to kill the silent typo (e.g. a plugin exporting
+# ``FILTERS = {"filter.replay.part": fn}`` would never fire and never warn).
+# When a plugin registers a filter whose name is NOT here, ``register_filter``
+# logs a WARNING — same severity ``register`` uses for an unknown EVENT name, and
+# informative ONLY, NEVER blocking: plugins MAY define their own filter names (a
+# plugin can publish a filter another plugin consumes), so an unknown name is
+# legal, just worth flagging.
+#
+# Versioning contract (``WHATSBOT_API_VERSION`` semver): adding a filter name is
+# ADDITIVE → a MINOR bump. Removing or renaming a filter, or changing the type of
+# its piped value / abort (``None``) semantics, is a breaking change → MAJOR.
+# Seams that are still in flux are marked ``experimental`` below and may move
+# without a MAJOR until they graduate; depend on them at your own risk.
+#
+# To document a NEW core filter: add its name here in the same commit that adds
+# the ``apply_filter(<name>, ...)`` call site (filters are seams — they are born
+# with their producer, not registered after the fact).
+KNOWN_FILTERS: set[str] = {
+    # Inbound webhook / message ingest
     "filter.webhook.payload",
     "filter.message.before_save", "filter.message.outgoing",
+    # Transcription / media (``filter.media.unknown`` is the last-resort hook for
+    # a plugin to claim an otherwise-unrecognised media type).
     "filter.transcription.should_run", "filter.transcription.result",
     "filter.media.unknown",
+    # Contact / tags
     "filter.contact.tags",
+    # Event bus self-interception
     "filter.event.before_emit",
+    # LLM turn (system prompt, history, tool schemas)
     "filter.system_prompt", "filter.llm.messages", "filter.llm.tools",
+    # Tool dispatch (args in, result out)
     "filter.tool.args", "filter.tool.result",
+    # Outbound reply (raw → parts → each part)
     "filter.reply.raw", "filter.reply.parts", "filter.reply.part",
+    # AuthZ ABAC seam
     "filter.authz.decision",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
+    # ``filter.conversation.before_status`` was RELOCATED from the route into
+    # ``conversation_service``; ``filter.conversation.before_assign`` is new.
     "filter.conversation.before_status", "filter.conversation.before_assign",
-    # Plano 23 Fase B5 — agent-turn seams (§4.2).
+    # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
+    # the attendance plugin firms up):
     # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn
     #   (None ⇒ keep default) — in ``agent_run_service``.
     # ``filter.conversation.assignment``: rewrite the round-robin destination of
     #   ``transfer_to_human`` (None ⇒ default assignment) — in the tool.
     "filter.agent.resolve", "filter.conversation.assignment",
 }
+
+# Filter seams that are still in flux (``experimental:true`` — see the semver note
+# above). Subset of KNOWN_FILTERS; not an enforcement gate, purely informative.
+EXPERIMENTAL_FILTERS: set[str] = {
+    "filter.agent.resolve", "filter.conversation.assignment",
+}
+
+# Backwards-compat alias for the pre-C2 informational catalogue name. ``KNOWN_FILTERS``
+# is the canonical registry now; keep the old name pointing at it so any importer
+# (or external tooling) still resolves.
+_CORE_FILTER_NAMES = KNOWN_FILTERS
 
 # Subscription keys that are dispatch targets, not emission sources.
 # ``message.any`` is re-dispatched automatically by :func:`emit` whenever
@@ -291,6 +329,17 @@ async def _run_one(
 def register_filter(
     plugin_id: str, filter_name: str, fn: FilterFn, priority: int = 100
 ) -> None:
+    if filter_name not in KNOWN_FILTERS:
+        # Mirror ``register`` for unknown EVENT names: informative warning, never
+        # blocking. A plugin MAY define its own filter name (e.g. one plugin
+        # publishes a seam another consumes), so an unknown name is legal — but it
+        # most often means a typo (``filter.replay.part``) that would silently
+        # never fire. Flag it so the author notices.
+        logger.warning(
+            "Plugin %s registered unknown filter %r — not a core filter name; "
+            "it will only fire if some code calls apply_filter(%r)",
+            plugin_id, filter_name, filter_name,
+        )
     bucket = _filters.setdefault(filter_name, [])
     bucket.append((int(priority), plugin_id, fn))
     bucket.sort(key=lambda t: t[0])

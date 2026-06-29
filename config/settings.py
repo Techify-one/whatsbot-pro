@@ -182,6 +182,22 @@ def writable_config_keys() -> set[str]:
     return {ck.key for ck in CONFIG_KEYS if ck.writable} | {_BOT_PHONE_WRITABLE}
 
 
+# Prefix of the per-group "system notice" gate keys (plano 12 / plano 23 Fase C3).
+# A notice GROUP auto-declares its config key as ``system_notice_<group>`` in
+# ``server.system_notices.register_notice_group``; these CONFIG_KEYS entries are
+# the backend single-source (DEFAULT_CONFIG/GET/PUT all derive from CONFIG_KEYS).
+# ``system_notices`` cross-checks this set at import so the two can't silently
+# drift — kept here (not derived FROM system_notices) to avoid inverting the
+# settings→server import direction. Frontend ConfigPanel toggles still mirror
+# these by name (deferred; see plano 23 Fase C3).
+_SYSTEM_NOTICE_KEY_PREFIX = "system_notice_"
+
+
+def system_notice_config_keys() -> set[str]:
+    """The ``system_notice_*`` group-gate keys declared in ``CONFIG_KEYS``."""
+    return {ck.key for ck in CONFIG_KEYS if ck.key.startswith(_SYSTEM_NOTICE_KEY_PREFIX)}
+
+
 DEFAULT_CONFIG = _build_default_config()
 
 

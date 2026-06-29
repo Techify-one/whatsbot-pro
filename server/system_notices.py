@@ -33,63 +33,20 @@ logger = logging.getLogger(__name__)
 ROLE = "conversation_event"
 
 
-# ── Registry de grupos (gate de config global) ───────────────────────────────
-# group -> {config_key, default, label}. Todas as chaves default True.
-EVENT_GROUPS: dict[str, dict] = {
-    "assignment": {
-        "config_key": "system_notice_assignment",
-        "default": True,
-        "label": "Atribuição",
-    },
-    "tags": {
-        "config_key": "system_notice_tags",
-        "default": True,
-        "label": "Tags",
-    },
-    "conv_labels": {
-        "config_key": "system_notice_conv_labels",
-        "default": True,
-        "label": "Etiquetas da conversa",
-    },
-    "status": {
-        "config_key": "system_notice_status",
-        "default": True,
-        "label": "Status e arquivo",
-    },
-    "ai": {
-        "config_key": "system_notice_ai",
-        "default": True,
-        "label": "IA e atributos",
-    },
-}
-
-# event_type -> grupo (decide qual toggle controla a geração).
-EVENT_GROUP_OF: dict[str, str] = {
-    # assignment
-    "assigned": "assignment",
-    "assigned_me": "assignment",
-    "unassigned": "assignment",
-    # tags (contato)
-    "tag_added": "tags",
-    "tag_removed": "tags",
-    # etiquetas (conversa)
-    "conv_label_added": "conv_labels",
-    "conv_label_removed": "conv_labels",
-    # status & arquivo
-    "status_closed": "status",
-    "status_open": "status",
-    "status_reopened_auto": "status",
-    "status_reopened_auto_agent": "status",
-    "archived": "status",
-    "unarchived": "status",
-    "created": "status",
-    # ai & atributos
-    "ai_on": "ai",
-    "ai_off": "ai",
-    "ai_takeover": "ai",
-    "agent_changed": "ai",
-    "attribute_set": "ai",
-}
+# ── Registry de grupos + tipos (gate de config global) ───────────────────────
+# Estes três dicts são as STORES do registry. Eram literais; agora são populados
+# por ``_seed_core_notices`` (mais abaixo) via ``register_notice_group`` /
+# ``register_notice`` — o MESMO mecanismo que um plugin usa para adicionar avisos
+# próprios. O conteúdo final é idêntico ao das tabelas antigas (as goldens travam
+# o texto). Permanecem públicos: outros módulos leem ``FORMATTERS`` etc.
+#
+#   EVENT_GROUPS:   group -> {config_key, default, label}  (config_key default
+#                   = ``system_notice_<group>``; todos default True)
+#   EVENT_GROUP_OF: event_type -> group (decide qual toggle controla a geração)
+#   FORMATTERS:     event_type -> fn(**ctx) -> str (texto PT-BR, com autor)
+EVENT_GROUPS: dict[str, dict] = {}
+EVENT_GROUP_OF: dict[str, str] = {}
+FORMATTERS: dict[str, callable] = {}
 
 
 # ── Formatters (PT-BR, com autor quando houver) ──────────────────────────────
@@ -101,59 +58,90 @@ def _q(value) -> str:
     return str(value if value is not None else "")
 
 
+def _with_actor(actor, with_actor: str, without_actor: str) -> str:
+    """Shared "<actor> did X" / fallback selector (plano 23 Fase C3 — DRY).
+
+    The 14 actor-aware formatters all repeat the same shape: a PT-BR string that
+    leads with the operator's name when ``actor`` is truthy, and an impersonal
+    fallback otherwise. This collapses that branch. The produced TEXT is the
+    SAME strings the inline ``if actor: ... return ...`` returned (the lifecycle
+    goldens lock it byte-for-byte), so callers build both variants and let this
+    pick. ``with_actor`` already has the actor interpolated by the caller.
+    """
+    return with_actor if actor else without_actor
+
+
 def _f_assigned(actor=None, target=None, **_) -> str:
     tgt = _q(target) or "alguém"
-    if actor:
-        return f"🧑‍💼 {actor} atribuiu a conversa para {tgt}."
-    return f"🧑‍💼 Conversa atribuída para {tgt}."
+    return _with_actor(
+        actor,
+        f"🧑‍💼 {actor} atribuiu a conversa para {tgt}.",
+        f"🧑‍💼 Conversa atribuída para {tgt}.",
+    )
 
 
 def _f_assigned_me(actor=None, **_) -> str:
-    if actor:
-        return f"🧑‍💼 {actor} assumiu a conversa."
-    return "🧑‍💼 Conversa assumida."
+    return _with_actor(
+        actor,
+        f"🧑‍💼 {actor} assumiu a conversa.",
+        "🧑‍💼 Conversa assumida.",
+    )
 
 
 def _f_unassigned(actor=None, **_) -> str:
-    if actor:
-        return f"🧑‍💼 {actor} removeu a atribuição da conversa."
-    return "🧑‍💼 Atribuição da conversa removida."
+    return _with_actor(
+        actor,
+        f"🧑‍💼 {actor} removeu a atribuição da conversa.",
+        "🧑‍💼 Atribuição da conversa removida.",
+    )
 
 
 def _f_tag_added(actor=None, tag=None, **_) -> str:
-    if actor:
-        return f'🏷️ {actor} adicionou a tag "{_q(tag)}".'
-    return f'🏷️ Tag "{_q(tag)}" adicionada.'
+    return _with_actor(
+        actor,
+        f'🏷️ {actor} adicionou a tag "{_q(tag)}".',
+        f'🏷️ Tag "{_q(tag)}" adicionada.',
+    )
 
 
 def _f_tag_removed(actor=None, tag=None, **_) -> str:
-    if actor:
-        return f'🏷️ {actor} removeu a tag "{_q(tag)}".'
-    return f'🏷️ Tag "{_q(tag)}" removida.'
+    return _with_actor(
+        actor,
+        f'🏷️ {actor} removeu a tag "{_q(tag)}".',
+        f'🏷️ Tag "{_q(tag)}" removida.',
+    )
 
 
 def _f_conv_label_added(actor=None, label=None, **_) -> str:
-    if actor:
-        return f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" à conversa.'
-    return f'🏷️ Etiqueta "{_q(label)}" adicionada à conversa.'
+    return _with_actor(
+        actor,
+        f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" à conversa.',
+        f'🏷️ Etiqueta "{_q(label)}" adicionada à conversa.',
+    )
 
 
 def _f_conv_label_removed(actor=None, label=None, **_) -> str:
-    if actor:
-        return f'🏷️ {actor} removeu a etiqueta "{_q(label)}" da conversa.'
-    return f'🏷️ Etiqueta "{_q(label)}" removida da conversa.'
+    return _with_actor(
+        actor,
+        f'🏷️ {actor} removeu a etiqueta "{_q(label)}" da conversa.',
+        f'🏷️ Etiqueta "{_q(label)}" removida da conversa.',
+    )
 
 
 def _f_status_closed(actor=None, **_) -> str:
-    if actor:
-        return f"✅ {actor} resolveu a conversa."
-    return "✅ Conversa resolvida."
+    return _with_actor(
+        actor,
+        f"✅ {actor} resolveu a conversa.",
+        "✅ Conversa resolvida.",
+    )
 
 
 def _f_status_open(actor=None, **_) -> str:
-    if actor:
-        return f"🔄 {actor} reabriu a conversa."
-    return "🔄 Conversa reaberta."
+    return _with_actor(
+        actor,
+        f"🔄 {actor} reabriu a conversa.",
+        "🔄 Conversa reaberta.",
+    )
 
 
 def _f_status_reopened_auto(**_) -> str:
@@ -165,15 +153,19 @@ def _f_status_reopened_auto_agent(**_) -> str:
 
 
 def _f_archived(actor=None, **_) -> str:
-    if actor:
-        return f"🗄️ {actor} arquivou a conversa."
-    return "🗄️ Conversa arquivada."
+    return _with_actor(
+        actor,
+        f"🗄️ {actor} arquivou a conversa.",
+        "🗄️ Conversa arquivada.",
+    )
 
 
 def _f_unarchived(actor=None, **_) -> str:
-    if actor:
-        return f"🗄️ {actor} desarquivou a conversa."
-    return "🗄️ Conversa desarquivada."
+    return _with_actor(
+        actor,
+        f"🗄️ {actor} desarquivou a conversa.",
+        "🗄️ Conversa desarquivada.",
+    )
 
 
 def _f_created(display_id=None, **_) -> str:
@@ -183,15 +175,19 @@ def _f_created(display_id=None, **_) -> str:
 
 
 def _f_ai_on(actor=None, **_) -> str:
-    if actor:
-        return f"🤖 {actor} reativou a IA."
-    return "🤖 IA reativada."
+    return _with_actor(
+        actor,
+        f"🤖 {actor} reativou a IA.",
+        "🤖 IA reativada.",
+    )
 
 
 def _f_ai_off(actor=None, **_) -> str:
-    if actor:
-        return f"🤖 {actor} pausou a IA."
-    return "🤖 IA pausada."
+    return _with_actor(
+        actor,
+        f"🤖 {actor} pausou a IA.",
+        "🤖 IA pausada.",
+    )
 
 
 def _f_ai_takeover(**_) -> str:
@@ -200,43 +196,132 @@ def _f_ai_takeover(**_) -> str:
 
 def _f_agent_changed(actor=None, agent=None, **_) -> str:
     name = _q(agent) or "padrão"
-    if actor:
-        return f'🤖 {actor} mudou o agente ativo para "{name}".'
-    return f'🤖 Agente ativo alterado para "{name}".'
+    return _with_actor(
+        actor,
+        f'🤖 {actor} mudou o agente ativo para "{name}".',
+        f'🤖 Agente ativo alterado para "{name}".',
+    )
 
 
 def _f_attribute_set(actor=None, attribute=None, value=None, count=None, **_) -> str:
     # Agregação simples (plano 12 §6): vários atributos numa requisição viram 1 card.
     if count and count > 1:
-        if actor:
-            return f"📋 {actor} atualizou {count} atributos da conversa."
-        return f"📋 {count} atributos da conversa atualizados."
-    if actor:
-        return f'📋 {actor} definiu "{_q(attribute)}" como "{_q(value)}".'
-    return f'📋 "{_q(attribute)}" definido como "{_q(value)}".'
+        return _with_actor(
+            actor,
+            f"📋 {actor} atualizou {count} atributos da conversa.",
+            f"📋 {count} atributos da conversa atualizados.",
+        )
+    return _with_actor(
+        actor,
+        f'📋 {actor} definiu "{_q(attribute)}" como "{_q(value)}".',
+        f'📋 "{_q(attribute)}" definido como "{_q(value)}".',
+    )
 
 
-FORMATTERS: dict[str, callable] = {
-    "assigned": _f_assigned,
-    "assigned_me": _f_assigned_me,
-    "unassigned": _f_unassigned,
-    "tag_added": _f_tag_added,
-    "tag_removed": _f_tag_removed,
-    "conv_label_added": _f_conv_label_added,
-    "conv_label_removed": _f_conv_label_removed,
-    "status_closed": _f_status_closed,
-    "status_open": _f_status_open,
-    "status_reopened_auto": _f_status_reopened_auto,
-    "status_reopened_auto_agent": _f_status_reopened_auto_agent,
-    "archived": _f_archived,
-    "unarchived": _f_unarchived,
-    "created": _f_created,
-    "ai_on": _f_ai_on,
-    "ai_off": _f_ai_off,
-    "ai_takeover": _f_ai_takeover,
-    "agent_changed": _f_agent_changed,
-    "attribute_set": _f_attribute_set,
-}
+# ── Registry de avisos (plano 23 Fase C3 — extensível por plugin) ─────────────
+#
+# ``register_notice_group`` / ``register_notice`` são o ÚNICO ponto de mutação de
+# ``EVENT_GROUPS`` / ``EVENT_GROUP_OF`` / ``FORMATTERS``. O core dogfooda os dois:
+# ``_seed_core_notices`` abaixo registra os 5 grupos e os 19 tipos por aqui (em
+# vez de literais de dict), e um plugin pode adicionar avisos próprios via
+# ``plugins.context.register_notice``/``register_notice_group`` SEM dar patch nos
+# dicts do core. O texto produzido permanece byte-idêntico (as goldens de
+# lifecycle travam) — isto é refactor de plumbing, não de comportamento.
+
+def register_notice_group(
+    key: str, label: str, *, config_key: str | None = None, default: bool = True,
+) -> None:
+    """Registra um GRUPO de avisos (gate global de config).
+
+    ``key`` é o identificador interno do grupo (ex: ``"assignment"``); ``label`` o
+    rótulo PT-BR exibido na UI. ``config_key`` é a chave de config que liga/desliga
+    o grupo — quando omitida, é auto-derivada como ``system_notice_<key>`` (mata o
+    espelhamento manual da chave). ``default`` é o valor quando a chave está ausente
+    no banco. Idempotente: registrar o mesmo grupo de novo sobrescreve.
+    """
+    EVENT_GROUPS[key] = {
+        "config_key": config_key or f"system_notice_{key}",
+        "default": bool(default),
+        "label": label,
+    }
+
+
+def register_notice(event_type: str, group: str, formatter) -> None:
+    """Registra um TIPO de aviso: liga ``event_type`` ao ``group`` + ``formatter``.
+
+    ``formatter`` é ``fn(**ctx) -> str`` (texto PT-BR; string vazia ⇒ no-op). O
+    ``group`` deve já ter sido registrado via :func:`register_notice_group`. Um
+    plugin chama isto (via ``plugins.context.register_notice``) para adicionar
+    avisos próprios sem tocar no core. Idempotente.
+    """
+    if group not in EVENT_GROUPS:
+        logger.warning(
+            "[SystemNotice] register_notice(%s): grupo %r desconhecido — "
+            "registre o grupo primeiro via register_notice_group()",
+            event_type, group,
+        )
+    EVENT_GROUP_OF[event_type] = group
+    FORMATTERS[event_type] = formatter
+
+
+def _seed_core_notices() -> None:
+    """Registra os grupos + tipos do core pelo MESMO mecanismo dos plugins."""
+    # Grupos (config_key auto-derivado = system_notice_<key>, exceto onde diverge).
+    register_notice_group("assignment", "Atribuição")
+    register_notice_group("tags", "Tags")
+    register_notice_group("conv_labels", "Etiquetas da conversa")
+    register_notice_group("status", "Status e arquivo")
+    register_notice_group("ai", "IA e atributos")
+    # Tipos -> (grupo, formatter).
+    register_notice("assigned", "assignment", _f_assigned)
+    register_notice("assigned_me", "assignment", _f_assigned_me)
+    register_notice("unassigned", "assignment", _f_unassigned)
+    register_notice("tag_added", "tags", _f_tag_added)
+    register_notice("tag_removed", "tags", _f_tag_removed)
+    register_notice("conv_label_added", "conv_labels", _f_conv_label_added)
+    register_notice("conv_label_removed", "conv_labels", _f_conv_label_removed)
+    register_notice("status_closed", "status", _f_status_closed)
+    register_notice("status_open", "status", _f_status_open)
+    register_notice("status_reopened_auto", "status", _f_status_reopened_auto)
+    register_notice("status_reopened_auto_agent", "status", _f_status_reopened_auto_agent)
+    register_notice("archived", "status", _f_archived)
+    register_notice("unarchived", "status", _f_unarchived)
+    register_notice("created", "status", _f_created)
+    register_notice("ai_on", "ai", _f_ai_on)
+    register_notice("ai_off", "ai", _f_ai_off)
+    register_notice("ai_takeover", "ai", _f_ai_takeover)
+    register_notice("agent_changed", "ai", _f_agent_changed)
+    register_notice("attribute_set", "ai", _f_attribute_set)
+
+
+_seed_core_notices()
+
+
+def _check_config_key_consistency() -> None:
+    """Warn if a CORE notice group's config key isn't declared in CONFIG_KEYS.
+
+    A notice group auto-declares its key as ``system_notice_<group>``. The backend
+    single-source for that key (seed/GET/PUT) is ``config.settings.CONFIG_KEYS``.
+    This guard makes the two impossible to silently drift: if a core group is added
+    here without a matching CONFIG_KEYS entry, the key would never seed/expose and
+    the toggle would be inert — flag it loudly at import. Plugin groups are exempt
+    (they manage their own ``plugin.<id>.*`` settings, not core CONFIG_KEYS)."""
+    try:
+        from config.settings import system_notice_config_keys
+        declared = system_notice_config_keys()
+        core_keys = {spec["config_key"] for spec in EVENT_GROUPS.values()
+                     if spec["config_key"].startswith("system_notice_")}
+        missing = core_keys - declared
+        if missing:
+            logger.warning(
+                "[SystemNotice] grupos sem chave em CONFIG_KEYS (toggle inerte): %s",
+                sorted(missing),
+            )
+    except Exception:
+        logger.debug("[SystemNotice] config-key consistency check skipped", exc_info=True)
+
+
+_check_config_key_consistency()
 
 
 # ── Gate + resolução de alvo + emissão ───────────────────────────────────────
