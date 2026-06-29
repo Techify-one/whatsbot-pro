@@ -186,6 +186,74 @@ def reset() -> None:
     _filters.clear()
 
 
+# ── Exported-dict validation (single source — plano 23 Fase C4) ────────────
+#
+# The shape/callable validation of a plugin's exported ``EVENT_HANDLERS`` /
+# ``FILTERS`` dicts lives here, NOT in ``plugins.loader``. The loader imports
+# these so it does not re-implement the same checks (the duplicate it used to
+# carry). ``register_plugin_events`` / ``register_plugin_filters`` reuse them too,
+# so a single function owns the rules + warning text.
+
+
+def validate_event_handlers(
+    plugin_id: str, raw: Any,
+) -> dict[str, EventHandler]:
+    """Return the valid ``{name: callable}`` subset of an exported EVENT_HANDLERS.
+
+    Non-dict input warns and yields ``{}``; non-callable entries warn and are
+    skipped. The single source of EVENT_HANDLERS validation.
+    """
+    if not raw:  # None / empty dict / falsy — nothing exported, no warning
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Plugin %s: EVENT_HANDLERS must be a dict, got %s",
+            plugin_id, type(raw).__name__,
+        )
+        return {}
+    out: dict[str, EventHandler] = {}
+    for name, fn in raw.items():
+        if callable(fn):
+            out[str(name)] = fn
+        else:
+            logger.warning(
+                "Plugin %s: EVENT_HANDLERS[%r] is not callable, skipped",
+                plugin_id, name,
+            )
+    return out
+
+
+def validate_filters(
+    plugin_id: str, raw: Any,
+) -> dict[str, Union[FilterFn, tuple]]:
+    """Return the valid subset of an exported FILTERS dict.
+
+    Each value may be a callable or a ``(callable, priority)`` tuple. Non-dict
+    input warns and yields ``{}``; malformed entries warn and are skipped. The
+    single source of FILTERS validation.
+    """
+    if not raw:  # None / empty dict / falsy — nothing exported, no warning
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Plugin %s: FILTERS must be a dict, got %s",
+            plugin_id, type(raw).__name__,
+        )
+        return {}
+    out: dict[str, Union[FilterFn, tuple]] = {}
+    for name, entry in raw.items():
+        if isinstance(entry, tuple) and len(entry) == 2 and callable(entry[0]):
+            out[str(name)] = entry
+        elif callable(entry):
+            out[str(name)] = entry
+        else:
+            logger.warning(
+                "Plugin %s: FILTERS[%r] must be callable or (callable, int), skipped",
+                plugin_id, name,
+            )
+    return out
+
+
 # ── Events ───────────────────────────────────────────────────────────────
 
 
@@ -199,14 +267,13 @@ def register(plugin_id: str, event_name: str, handler: EventHandler) -> None:
 
 
 def register_plugin_events(plugin_id: str, handlers: dict[str, EventHandler]) -> None:
-    """Bulk register the EVENT_HANDLERS dict exported by a plugin."""
-    for name, fn in (handlers or {}).items():
-        if not callable(fn):
-            logger.warning(
-                "Plugin %s: EVENT_HANDLERS[%r] is not callable, skipped", plugin_id, name,
-            )
-            continue
-        register(plugin_id, str(name), fn)
+    """Bulk register the EVENT_HANDLERS dict exported by a plugin.
+
+    Validation (dict shape + callable) is delegated to :func:`validate_event_handlers`
+    so the rules live in one place (the loader reuses it too).
+    """
+    for name, fn in validate_event_handlers(plugin_id, handlers).items():
+        register(plugin_id, name, fn)
 
 
 def emit(event_name: str, payload: dict) -> None:
@@ -351,20 +418,16 @@ def register_plugin_filters(
     """Bulk register the FILTERS dict exported by a plugin.
 
     Each value may be a callable or a ``(callable, priority)`` tuple. Lower
-    priority numbers run earlier in the chain.
+    priority numbers run earlier in the chain. Validation (dict shape + entry
+    shape) is delegated to :func:`validate_filters` (single source; the loader
+    reuses it too).
     """
-    for name, entry in (filters or {}).items():
-        if isinstance(entry, tuple) and len(entry) == 2 and callable(entry[0]):
+    for name, entry in validate_filters(plugin_id, filters).items():
+        if isinstance(entry, tuple):
             fn, priority = entry
-        elif callable(entry):
-            fn, priority = entry, 100
         else:
-            logger.warning(
-                "Plugin %s: FILTERS[%r] must be callable or (callable, int), skipped",
-                plugin_id, name,
-            )
-            continue
-        register_filter(plugin_id, str(name), fn, priority=priority)
+            fn, priority = entry, 100
+        register_filter(plugin_id, name, fn, priority=priority)
 
 
 async def apply_filter(
