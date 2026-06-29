@@ -66,24 +66,33 @@ async def error_bubble(ws_manager, phone: str, content: str) -> None:
 
 async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
                              *, execution_id: int | None = None) -> None:
-    """Push a change to the panel (WS) and the plugin bus, defensively.
+    """Emit a lifecycle change as ONE domain event; the WS broadcast is a LISTENER.
 
-    Generalizes ``server.routes.conversations._broadcast`` (R-bc): that helper was
-    conversation-specific (it built a fixed conversation payload from a ``conv``
-    row). This one takes the already-assembled ``payload`` so it serves ANY
-    WS-event + bus-event pair (conversation lifecycle, message, …). The
-    conversations helper now delegates here after projecting its ``conv`` row.
+    Plano 23 Fase C5 (Contract — single source). This used to do BOTH effects in
+    parallel: ``ws_manager.broadcast(ws_event, payload)`` AND
+    ``emit_with_filter(bus_event, payload)``. That was the Expand half of the
+    Parallel Change (the WS broadcast living next to the bus emit). C5 closes the
+    Contract: the domain event (``bus_event``) is now the SINGLE trigger, and the
+    panel WS broadcast (``ws_event``) is performed by the core listener in
+    ``app.services.ws_projections`` (a SYNCHRONOUS core subscriber that runs INSIDE
+    this very emit, so the broadcast is observable with identical timing — the
+    frontend gets the same ``ws_event`` + payload as before).
 
-    A broadcast / emit failure never propagates (mirrors the original): the HTTP
-    action or pipeline step must not fail because a websocket dropped or a plugin
-    raised.
+    ``ws_event`` is kept in the signature (and threaded into the payload-free
+    projection via the bus→WS table in ``ws_projections``) so the call sites in
+    ``conversation_service`` read unchanged; it is no longer broadcast HERE.
+
+    An emit failure never propagates (mirrors the original): the HTTP action or
+    pipeline step must not fail because a plugin raised. The WS broadcast inside the
+    projection is itself defensively wrapped there too.
 
     ``execution_id`` is threaded so a caller inside an execution can attribute the
-    broadcast to the right ``executions`` row (§1.4). Execution-step tracking keys
-    off the contextvar set by ``astart_execution`` (inherited by ``to_thread``), so
-    when ``execution_id`` is given we (re)assert it on the contextvar around the
-    emit — keeping ``execution_steps`` population correct even if the call happens
-    on a fresh task/thread that didn't inherit the contextvar.
+    emit (and the WS broadcast the projection performs synchronously within it) to
+    the right ``executions`` row (§1.4). Execution-step tracking keys off the
+    contextvar set by ``astart_execution`` (inherited by ``to_thread``), so when
+    ``execution_id`` is given we (re)assert it on the contextvar around the emit —
+    keeping ``execution_steps`` population correct even if the call happens on a
+    fresh task/thread that didn't inherit the contextvar.
     """
     from agent.execution import set_current_execution, get_current_execution_id
 
@@ -96,13 +105,11 @@ async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
             restore = True
     try:
         try:
-            await deps.ws_manager.broadcast(ws_event, payload)
-        except Exception as e:
-            logger.debug("WS broadcast %s failed: %s", ws_event, e)
-        try:
+            # The WS broadcast (ws_event) is now a LISTENER of this domain event,
+            # performed synchronously inside emit_with_filter by ws_projections.
             await emit_with_filter(bus_event, payload)
         except Exception as e:
-            logger.debug("bus emit %s failed: %s", bus_event, e)
+            logger.debug("bus emit %s (ws %s) failed: %s", bus_event, ws_event, e)
     finally:
         if restore:
             set_current_execution(prev)

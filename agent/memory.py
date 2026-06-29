@@ -203,7 +203,7 @@ class ContactMemory:
                     logger.debug("conversation_created broadcast falhou para %s", self.phone)
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
-        message_repo.add(
+        saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
@@ -214,111 +214,52 @@ class ContactMemory:
                 conversation_repo.touch_activity(conversation_id)
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
-            # plano 12 §3: aviso automático no fio quando o atendimento (re)abre por
-            # uma mensagem do cliente. Painel-only; gateado por config (grupo status).
-            # Emitido APÓS o save para casar com a ordem ao vivo (a msg inbound já
-            # foi transmitida no recebimento, antes deste batch).
-            if transition in ("created", "reopened") and conv is not None:
-                self._emit_lifecycle_notice(conversation_id, transition, conv, role)
-            # plano 11 D1: a nova conversa precisa materializar AO VIVO na sidebar
-            # conversa-cêntrica / lista de conversas — sinal independente do gate de
-            # aviso (este é uma atualização de lista, não um card no fio).
-            if transition == "created" and conv is not None:
-                self._broadcast_conversation_created(conversation_id, conv)
-            # Reabertura closed→open (por mensagem do cliente OU resposta do
-            # atendente/IA): a lista de conversas (sidebar + kanban) precisa
-            # re-filtrar a conversa de volta pra "Abertas" AO VIVO. O backend já
-            # reativou a row (set_status 'open'), mas sem um evento de status o painel
-            # mantém o conv_status antigo e não refetcha — daí a conversa só reaparecia
-            # após F5. Espelha o broadcast do path manual Resolver/Reabrir
-            # (server/routes/conversations.py). Independente do gate de aviso (é
-            # atualização de lista, não card no fio).
-            elif transition == "reopened" and conv is not None:
-                self._broadcast_conversation_status(conversation_id, conv)
-                # plano 23 Fase C0: promote the automatic reopen to a distinct domain
-                # event (``conversation.reopened``) on the plugin bus. The status WS
-                # broadcast above is for the panel list; this is for plugin subscribers.
-                # Defensive — a failed emit never breaks the inbound save.
-                try:
-                    from plugins.events import emit_with_filter_sync
-                    emit_with_filter_sync("conversation.reopened", {
-                        "conversation_id": conversation_id,
-                        "contact_id": self.id,
-                        "phone": self.phone,
-                        "previous_status": "closed",
-                        "trigger": "inbound",
-                        "ts": time.time(),
-                    })
-                except Exception:
-                    logger.debug("conversation.reopened emit falhou para %s", self.phone)
+            # plano 23 Fase C5 (§2.4 — desacoplar memory.py): the hot path EMITS
+            # ``message.persisted`` (the single decoupling signal for plugins/audit)
+            # AND drives the lifecycle LISTENER directly. The after-INSERT side
+            # effects (automatic created/reopened notice, conversation_created /
+            # conversation_status_changed list broadcasts, the conversation.reopened
+            # bus verb) moved OUT of here into ``agent.message_listeners`` — this is
+            # the listener-reacts inversion. Driving it directly (not via the bus)
+            # keeps it exactly-once and synchronous (a sync save with no running bus
+            # loop must still broadcast — the 876 reopen assertion). Defensive: a
+            # failed reaction never breaks the save.
+            self._emit_message_persisted(conversation_id, role, msg_id, saved)
+            try:
+                from agent.message_listeners import on_message_persisted
+                on_message_persisted(
+                    conversation_id, self.id, self.phone,
+                    transition=transition, conv=conv, role=role)
+            except Exception:
+                logger.exception("Falha nas reações de message.persisted para %s", self.phone)
         # Touch updated_at
         contact_repo.update(self.id)
 
-    def _broadcast_conversation_created(self, conversation_id: int, conv: dict):
-        """Fire a ``conversation_created`` WS event so the conversa-cêntrica sidebar
-        and the conversation list add the new per-channel thread without a reload
-        (plano 11 D1). Fire-and-forget; lazy import avoids an agent→server cycle."""
+    def _emit_message_persisted(self, conversation_id: int, role: str,
+                                msg_id: str | None, saved: dict | None) -> None:
+        """Emit the PUBLIC ``message.persisted`` bus event AFTER the INSERT (plano 23
+        Fase C5). Payload is the clean decoupling contract
+        ``{conversation_id, contact_id, role, msg_id, ts}``.
+
+        Uses the fire-and-forget :func:`plugins.events.emit` (NOT ``emit_with_filter``):
+        ``message.persisted`` is a low-level persistence SIGNAL on the universal hot
+        path — it dispatches to plugin ``EVENT_HANDLERS`` but is NOT interceptable via
+        ``filter.event.before_emit`` (a plugin must not be able to veto a row that is
+        already committed). This also keeps it OUT of the ``filter.event.before_emit``
+        capture the characterization recorder uses, so existing event goldens are
+        untouched (additive, zero golden churn). Best-effort — a failed schedule (or
+        no bus loop wired, e.g. the legacy sync test) never breaks the save."""
         try:
-            from plugins.context import broadcast
-            broadcast("conversation_created", {
+            from plugins.events import emit as _emit
+            _emit("message.persisted", {
                 "conversation_id": conversation_id,
-                "display_id": conv.get("display_id"),
                 "contact_id": self.id,
-                "phone": self.phone,
-                "inbox_id": conv.get("inbox_id"),
-                "status": conv.get("status"),
+                "role": role,
+                "msg_id": msg_id,
+                "ts": (saved or {}).get("ts") or time.time(),
             })
         except Exception:
-            logger.exception("Falha ao emitir conversation_created para %s", self.phone)
-
-    def _broadcast_conversation_status(self, conversation_id: int, conv: dict):
-        """Fire a ``conversation_status_changed`` WS event when an inbound (client) or
-        outbound (operator/AI) message reopens a closed conversation, so the
-        conversation list (sidebar + kanban) re-files it into "Abertas" live — without
-        this, the reopen only surfaced as a painel-only card (which the list ignores)
-        and the row stayed hidden until a full page reload. Payload mirrors the manual
-        Resolver/Reabrir path (server/routes/conversations.py ``_broadcast``).
-        Fire-and-forget; lazy import avoids an agent→server import cycle."""
-        try:
-            from plugins.context import broadcast
-            broadcast("conversation_status_changed", {
-                "conversation_id": conversation_id,
-                "display_id": conv.get("display_id"),
-                "contact_id": self.id,
-                "phone": self.phone,
-                "inbox_id": conv.get("inbox_id"),
-                "status": conv.get("status"),
-                "assignee_user_id": conv.get("assignee_user_id"),
-                "active_agent_key": conv.get("active_agent_key"),
-                "ai_active": conv.get("ai_active"),
-                "is_archived": conv.get("is_archived"),
-            })
-        except Exception:
-            logger.exception("Falha ao emitir conversation_status_changed para %s", self.phone)
-
-    def _emit_lifecycle_notice(self, conversation_id: int, transition: str, conv: dict, role: str = "user"):
-        """Surface an automatic conversation-lifecycle card (plano 12 §3).
-
-        ``reopened`` ⇒ a conversa fechada voltou a ficar ativa (cliente mandou
-        mensagem se ``role == "user"``, atendente/IA respondeu caso contrário);
-        ``created`` ⇒ nova conversa. O gate de config (grupo ``status``) decide se
-        algo é gravado. Lazy import evita ciclo agent→server no carregamento do módulo.
-        """
-        try:
-            from server import system_notices
-            if transition == "reopened":
-                event_type = ("status_reopened_auto" if role == "user"
-                              else "status_reopened_auto_agent")
-                system_notices.emit_conversation_notice(
-                    event_type=event_type, conversation_id=conversation_id,
-                    contact_id=self.id, phone=self.phone)
-            elif transition == "created":
-                system_notices.emit_conversation_notice(
-                    event_type="created", conversation_id=conversation_id,
-                    contact_id=self.id, phone=self.phone,
-                    display_id=conv.get("display_id"))
-        except Exception:
-            logger.exception("Falha ao emitir aviso de ciclo de vida para %s", self.phone)
+            logger.debug("message.persisted emit falhou para %s", self.phone)
 
     def get_unread_msg_ids(self) -> list[str]:
         """Return unread message IDs from the database."""
