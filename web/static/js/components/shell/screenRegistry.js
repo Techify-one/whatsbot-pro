@@ -6,17 +6,14 @@
 // redirect. Behavior is preserved EXACTLY.
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import {
-  CORE_ROUTES, CORE_TAB_PATHS, LEGACY_PATH_REDIRECTS, pluginTabId,
+  CORE_TAB_PATHS, pluginTabId,
   legacyRedirectTarget, tabFromPathPure, pathForTab,
   contactIdFromPathname, conversationIdFromPathname, scrollMsgFromSearchStr,
 } from './routing.js';
 
-// Re-export the pure surface so existing imports keep resolving against this file.
-export {
-  CORE_ROUTES, CORE_TAB_PATHS, LEGACY_PATH_REDIRECTS, pluginTabId,
-  legacyRedirectTarget, tabFromPathPure, pathForTab,
-  contactIdFromPathname, conversationIdFromPathname, scrollMsgFromSearchStr,
-};
+// Re-export the pure surface still consumed through this file (the rest of the
+// pure parsers are imported from routing.js directly by their call sites).
+export { CORE_TAB_PATHS, pluginTabId, pathForTab };
 
 // ── Thin window-reading wrappers (used by App.js; keep the old call sites) ──
 export function tabFromPath(pluginScreens) {

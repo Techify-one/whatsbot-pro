@@ -312,4 +312,3 @@ export function Attendances() {
   `;
 }
 
-export default Attendances;

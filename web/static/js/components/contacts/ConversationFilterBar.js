@@ -477,4 +477,3 @@ export function ConversationFilterBar({
   `;
 }
 
-export default ConversationFilterBar;

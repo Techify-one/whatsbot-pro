@@ -43,4 +43,3 @@ export function RequiredAttributesModal({ missing = [], onConfirm }) {
   `;
 }
 
-export default RequiredAttributesModal;

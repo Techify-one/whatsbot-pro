@@ -161,4 +161,3 @@ export function SearchableSelect({
   `;
 }
 
-export default SearchableSelect;

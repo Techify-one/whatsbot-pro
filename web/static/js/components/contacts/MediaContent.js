@@ -9,7 +9,7 @@ const html = htm.bind(h);
 // (e.g. the server lost the file under statics/ — wiped on a deploy without a
 // persistent volume), swaps to a neutral "indisponível" placeholder instead of
 // the broken-image icon. Local blobs (optimistic, just-sent) never fall back.
-export function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onClick }) {
+function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onClick }) {
   const [failed, setFailed] = useState(false);
   const url = isLocalBlob ? src : '/' + src;
   if (failed && !isLocalBlob) {

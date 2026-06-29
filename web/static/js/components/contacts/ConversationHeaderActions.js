@@ -242,4 +242,3 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   `;
 }
 
-export default ConversationHeaderActions;

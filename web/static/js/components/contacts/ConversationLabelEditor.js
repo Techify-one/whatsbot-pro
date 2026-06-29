@@ -202,4 +202,3 @@ export function ConversationLabelEditor({ conversationId }) {
   `;
 }
 
-export default ConversationLabelEditor;

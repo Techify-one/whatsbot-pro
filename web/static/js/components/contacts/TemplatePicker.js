@@ -594,4 +594,3 @@ function TrashIcon() {
   `;
 }
 
-export default TemplatePicker;

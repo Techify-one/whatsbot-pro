@@ -62,4 +62,3 @@ export function PluginScreen({ screen, currentUser }) {
   return html`<${Component} apiBase=${apiBase} screen=${screen} can=${can} currentUser=${currentUser} />`;
 }
 
-export default PluginScreen;

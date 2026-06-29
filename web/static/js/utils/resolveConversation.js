@@ -20,4 +20,3 @@ export async function resolveConversation(conv, status, ctx = {}) {
   return setConversationStatus(id, status);
 }
 
-export default resolveConversation;

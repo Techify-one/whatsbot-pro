@@ -145,4 +145,3 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
   `;
 }
 
-export default ConversationFilterDialog;

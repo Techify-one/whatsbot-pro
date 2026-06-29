@@ -29,4 +29,3 @@ export function GroupBySelector({ mode, onMode, stageAttrs, stageAttrKey, onStag
   `;
 }
 
-export default GroupBySelector;
