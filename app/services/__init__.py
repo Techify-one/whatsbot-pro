@@ -7,4 +7,10 @@
   (dedup, channel-aware contact resolution, echo suppression, the
   ``filter.message.before_save`` hook, the ``message.received``/``message.saved``
   emits).
+* :mod:`app.services.agent_run_service` (Fase B5) — ONE agent turn:
+  ``run_turn()`` (history → agent-spec resolve via ``filter.agent.resolve`` →
+  AGNO run → usage off ``RunMetrics`` → within-turn routing → save). The
+  ``AgentHandler`` facade delegates ``aprocess_message`` here.
+* :mod:`app.services.improvement_service` (Fase B5) — ``generate_improvement``,
+  the one-shot non-agentic reply-quality analysis (isolated SYNC client, Q1).
 """

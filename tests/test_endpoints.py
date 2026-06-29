@@ -2985,11 +2985,12 @@ check("GET /api/setup/key-status -> key saved to config",
 # ═══════════════════════════════════════════════════════════════════
 section("Sandbox")
 
-# sandbox/send requires a working LLM — mock it
-with patch.object(agent_handler, "process_message") as mock_process:
-    from agent.handler import ProcessResult
-    mock_process.return_value = ProcessResult(reply="Resposta de teste", tool_calls=[])
-
+# sandbox/send requires a working LLM — mock it. Fase B5/C-1: the sandbox now
+# awaits the async ``aprocess_message`` (sync ``process_message`` was removed).
+from agent.handler import ProcessResult
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=ProcessResult(
+                      reply="Resposta de teste", tool_calls=[]))):
     r = client.post("/api/sandbox/send", json={"phone": "sandbox_test", "message": "Oi"})
     check("POST /sandbox/send -> 200", r.status_code == 200)
     check("POST /sandbox/send -> has reply", "reply" in r.json().get("data", {}))

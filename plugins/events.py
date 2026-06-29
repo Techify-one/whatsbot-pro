@@ -96,6 +96,12 @@ _CORE_FILTER_NAMES: set[str] = {
     "filter.authz.decision",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
     "filter.conversation.before_status", "filter.conversation.before_assign",
+    # Plano 23 Fase B5 — agent-turn seams (§4.2).
+    # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn
+    #   (None ⇒ keep default) — in ``agent_run_service``.
+    # ``filter.conversation.assignment``: rewrite the round-robin destination of
+    #   ``transfer_to_human`` (None ⇒ default assignment) — in the tool.
+    "filter.agent.resolve", "filter.conversation.assignment",
 }
 
 # Subscription keys that are dispatch targets, not emission sources.

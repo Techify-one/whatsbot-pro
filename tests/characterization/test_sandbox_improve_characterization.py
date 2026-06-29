@@ -78,18 +78,20 @@ def _project_messages(phone: str) -> list[dict]:
 
 
 def _stub_process(reply: str, *, tool_calls=None, contact_info=None):
-    """Return a ``process_message`` replacement yielding a canned ProcessResult.
+    """Return an ``aprocess_message`` replacement yielding a canned ProcessResult.
 
-    Records each invocation in ``.calls`` so a test can assert the sync seam was
-    (or was not) reached. Mirrors ``tests.fakes.fake_agent_reply``'s sync side,
-    but lets us vary tool_calls/contact_info per cell."""
+    Fase B5/C-1: the sandbox migrated from the SYNC ``process_message`` to the
+    ASYNC ``aprocess_message`` (the sync entry point was removed). This stub is an
+    ASYNC coroutine function so it patches the new seam directly. Records each
+    invocation in ``.calls`` so a test can assert the seam was (or was not)
+    reached; lets us vary tool_calls/contact_info per cell."""
     from agent.handler import ProcessResult
 
     result = ProcessResult(reply=reply, tool_calls=list(tool_calls or []),
                            contact_info=contact_info)
     calls: list[tuple] = []
 
-    def _fake(sender: str, msg_text: str = "", *args, **kwargs):
+    async def _fake(sender: str, msg_text: str = "", *args, **kwargs):
         calls.append((sender, msg_text, kwargs))
         return result
 
@@ -136,13 +138,19 @@ class _FakeOpenAIClient:
 
 def _sandbox_case(build_app, *, golden, phone, reply, split=True,
                   tool_calls=None, contact_info=None, message="Oi sandbox"):
-    """Drive one ``/api/sandbox/send`` with ``process_message`` stubbed and
-    snapshot the endpoint response + persisted messages."""
+    """Drive one ``/api/sandbox/send`` with ``aprocess_message`` stubbed and
+    snapshot the endpoint response + persisted messages.
+
+    Fase B5/C-1: stubs the ASYNC ``aprocess_message`` (the sandbox's new seam);
+    the golden facet ``process_message_called`` is preserved as the name of the
+    "agent seam reached" flag so the BEFORE→AFTER goldens stay byte-identical —
+    the endpoint output (reply/replies/messages) is unchanged by the sync→async
+    migration."""
     built = build_app(["gowa"], settings_overrides={
         "split_messages": split,
     })
     fake = _stub_process(reply, tool_calls=tool_calls, contact_info=contact_info)
-    with patch.object(built.agent_handler, "process_message", new=fake):
+    with patch.object(built.agent_handler, "aprocess_message", new=fake):
         r = built.client.post("/api/sandbox/send",
                               json={"phone": phone, "message": message})
     assert r.status_code == 200, r.text
@@ -151,7 +159,7 @@ def _sandbox_case(build_app, *, golden, phone, reply, split=True,
         "status_code": r.status_code,
         "response": body,
         "messages": _project_messages(phone),
-        "process_message_called": bool(fake.calls),  # sync seam reached
+        "process_message_called": bool(fake.calls),  # agent seam reached
     }))
     return built, r
 
@@ -366,23 +374,43 @@ def test_improve_endpoint_invalid_message(build_app):
     assert r.status_code == 400
 
 
-# ── matrix completeness: structurally unreachable cells ──────────────────────
+# ── B5/C-1 migration: the sandbox caller is now ASYNC ────────────────────────
 
-def test_sandbox_send_async_path_skip():
-    """The sandbox endpoint has NO async-LLM variant today — it is precisely the
-    SYNC caller B5 will migrate. There is no second code path to characterize, so
-    this cell is structurally absent until the migration lands."""
-    pytest.skip(
-        "No async sandbox path exists pre-B5: /api/sandbox/send → "
-        "_sandbox_reply → process_message (sync) is the only path. The async "
-        "variant is what Fase A2b/B5 will INTRODUCE; nothing to lock yet.")
+def test_sandbox_send_uses_async_aprocess_message(build_app):
+    """AFTER Fase B5/C-1: the sandbox endpoint now drives the ASYNC
+    ``aprocess_message`` (the sync ``process_message`` was REMOVED). This locks
+    the migration end: ``/api/sandbox/send`` reaches ``aprocess_message`` and the
+    sync entry point no longer exists on the handler.
+
+    BEFORE (pre-B5): ``/api/sandbox/send`` → ``_sandbox_reply`` →
+    ``asyncio.to_thread(process_message, ...)`` (sync seam).
+    AFTER  (this):    ``/api/sandbox/send`` → ``_sandbox_reply`` →
+    ``await aprocess_message(...)`` (async seam). The ENDPOINT OUTPUT
+    (reply/replies/messages) is byte-identical — proven by the unchanged
+    ``sandbox_improve_send_*`` goldens above, which now patch ``aprocess_message``.
+    """
+    built = build_app(["gowa"])
+    # The sync seam is gone — the facade no longer exposes process_message.
+    assert not hasattr(built.agent_handler, "process_message")
+
+    fake = _stub_process("ok async!", tool_calls=None, contact_info=None)
+    with patch.object(built.agent_handler, "aprocess_message", new=fake):
+        r = built.client.post("/api/sandbox/send",
+                              json={"phone": "5511975900001", "message": "oi"})
+    assert r.status_code == 200, r.text
+    # The async agent seam was reached exactly once.
+    assert len(fake.calls) == 1
+    # Stubbed reply flows through unchanged.
+    assert r.json()["data"]["reply"] == "ok async!"
 
 
-def test_improve_async_path_skip():
-    """``generate_improvement`` is sync-only today (direct ``_get_client()`` →
-    ``chat.completions.create``). There is no ``agenerate_improvement`` / async
-    client seam to characterize before B5 adds one."""
-    pytest.skip(
-        "No async generate_improvement exists pre-B5: handler.generate_improvement "
-        "uses the SYNC OpenAI client (self._get_client()) directly. The async "
-        "seam is introduced by the migration, so there is nothing to lock yet.")
+def test_improve_stays_sync_isolated():
+    """AFTER Fase B5 (DECISION Q1): ``generate_improvement`` deliberately KEEPS
+    the ISOLATED SYNC client — it was NOT migrated to async. It lives in
+    ``app.services.improvement_service`` and calls ``handler._get_client()`` (the
+    sync OpenAI client). The unit/endpoint goldens above already lock its behavior;
+    this cell records the decision so a future async move is a deliberate change."""
+    import inspect
+    from app.services import improvement_service
+    # The service entry point is a plain (sync) function, not a coroutine.
+    assert not inspect.iscoroutinefunction(improvement_service.generate_improvement)

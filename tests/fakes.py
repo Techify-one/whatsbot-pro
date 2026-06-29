@@ -17,10 +17,9 @@ The two pieces:
   args against. Tests can override any canned return value.
 * :func:`fake_agent_reply` — a context manager that stubs the LLM/agent so a
   turn produces a deterministic reply (+ optional tool_calls / usage) WITHOUT a
-  network call. It patches the SAME seam the legacy suite uses,
-  ``AgentHandler.aprocess_message`` (and, for the few sync callers,
-  ``process_message``), returning a real ``ProcessResult``. The AGNO engine and
-  the OpenAI client are never reached.
+  network call. It patches the SAME (now single, async) seam the legacy suite
+  uses, ``AgentHandler.aprocess_message``, returning a real ``ProcessResult``.
+  The AGNO engine and the OpenAI client are never reached.
 """
 
 from __future__ import annotations
@@ -166,12 +165,14 @@ def fake_agent_reply(text: str = "resposta de teste", *,
     """Stub the agent so a turn yields a deterministic reply, no network call.
 
     Patches ``AgentHandler.aprocess_message`` (the async seam the live webhook /
-    ingest pipeline awaits) AND ``AgentHandler.process_message`` (the sync seam a
-    few callers like the sandbox use) to return a canned ``ProcessResult``. The
-    AGNO engine (``agno_engine.run_async`` / ``run_sync``) and the OpenAI client
-    are therefore never reached — same approach as ``test_endpoints.py``'s
-    ``patch.object(agent_handler, "aprocess_message", AsyncMock(...))``, but
-    reusable and covering both seams.
+    ingest pipeline awaits) to return a canned ``ProcessResult``. The AGNO engine
+    (``agno_engine.run_async``) and the OpenAI client are therefore never reached
+    — same approach as ``test_endpoints.py``'s ``patch.object(agent_handler,
+    "aprocess_message", AsyncMock(...))``, but reusable.
+
+    (Plano 23 · Fase B5 / C-1: the legacy SYNC ``process_message`` was removed —
+    every caller, including the sandbox, now goes through ``aprocess_message`` —
+    so there is a SINGLE async seam to patch.)
 
     Why this seam (and not ``agno_engine.run_async``): the handler owns usage
     accounting, system-prompt assembly, the ``ai_takeover`` dedupe and the reply
@@ -184,11 +185,11 @@ def fake_agent_reply(text: str = "resposta de teste", *,
             client.post("/api/webhook/gowa/default", json=...)
         assert rec.calls  # (sender, text, kwargs) per invocation
 
-    If ``handler`` is given, patches that instance's bound methods; otherwise
-    patches the class methods (applies to every ``AgentHandler``).
+    If ``handler`` is given, patches that instance's bound method; otherwise
+    patches the class method (applies to every ``AgentHandler``).
 
     The yielded recorder exposes ``.calls`` — a list of ``(sender, text, kwargs)``
-    for each invocation across either seam.
+    for each invocation.
     """
     result = _make_process_result(text, tool_calls, contact_info)
 
@@ -203,20 +204,14 @@ def fake_agent_reply(text: str = "resposta de teste", *,
         rec.calls.append((sender, msg_text, kwargs))
         return result
 
-    def _sfake(sender: str, msg_text: str = "", *args: Any, **kwargs: Any):
-        rec.calls.append((sender, msg_text, kwargs))
-        return result
-
     if handler is not None:
         patches = [
             patch.object(handler, "aprocess_message", new=AsyncMock(side_effect=_afake)),
-            patch.object(handler, "process_message", new=_sfake),
         ]
     else:
         from agent.handler import AgentHandler
         patches = [
             patch.object(AgentHandler, "aprocess_message", new=AsyncMock(side_effect=_afake)),
-            patch.object(AgentHandler, "process_message", new=_sfake),
         ]
 
     with contextlib.ExitStack() as stack:
