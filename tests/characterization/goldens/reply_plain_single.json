@@ -1,0 +1,47 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "message.sent",
+      "conversation.ai_takeover",
+      "execution.ended"
+    ],
+    "set": [
+      "conversation.ai_takeover",
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved",
+      "message.sent"
+    ]
+  },
+  "messages": [
+    {
+      "content": "oi, tudo bem?",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "claro, posso ajudar!",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": "<MSGID:1>",
+      "role": "assistant",
+      "status": "sent"
+    }
+  ],
+  "sent": [
+    {
+      "kind": "message",
+      "mentions": null,
+      "phone": "5511970004003",
+      "reply_message_id": null,
+      "text": "claro, posso ajudar!"
+    }
+  ]
+}

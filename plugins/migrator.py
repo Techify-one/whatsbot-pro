@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 
 _MIG_FILE_RE = re.compile(r"^(\d+)_.+\.sql$", re.IGNORECASE)
+# SQLite-only autoincrement PK idiom. It is *the* ubiquitous primary-key form
+# (the bundled example plugins use it), so translate it for Postgres instead of
+# forcing every plugin author to special-case the dialect. SQLite keeps it.
+_AUTOINC_PK_RE = re.compile(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.IGNORECASE)
+_AUTOINC_RE = re.compile(r"\s+AUTOINCREMENT\b", re.IGNORECASE)
 _TABLE_OP_RE = re.compile(
     r"\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE|ALTER\s+TABLE|DROP\s+TABLE|"
     r"CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+|IF\s+EXISTS\s+)?"
@@ -68,9 +73,11 @@ def run_pending_migrations(manifest: PluginManifest, plugin_dir: Path) -> list[i
 
     applied_now: list[int] = []
     engine = get_engine()
+    dialect = engine.dialect.name
     for version, path in pending:
         sql = path.read_text(encoding="utf-8")
         _validate_sql_prefix(sql, pid, table_prefix, path.name)
+        sql = _portable_sql(sql, dialect)
         try:
             with engine.begin() as conn:
                 for stmt in _split_statements(sql):
@@ -85,6 +92,23 @@ def run_pending_migrations(manifest: PluginManifest, plugin_dir: Path) -> list[i
         logger.info("Plugin %s: applied migration %s", pid, path.name)
 
     return applied_now
+
+
+def _portable_sql(sql: str, dialect: str) -> str:
+    """Translate SQLite-only DDL idioms so plugin migrations run on Postgres.
+
+    Today this only maps the autoincrement primary key
+    (``INTEGER PRIMARY KEY AUTOINCREMENT`` → ``SERIAL PRIMARY KEY``) and strips
+    any stray ``AUTOINCREMENT`` keyword Postgres would reject. SQLite migrations
+    are returned unchanged. Other non-portable idioms (``strftime``,
+    ``INSERT OR REPLACE``, ``RETURNING``) remain the plugin author's
+    responsibility, as documented.
+    """
+    if not dialect.startswith("postgres"):
+        return sql
+    sql = _AUTOINC_PK_RE.sub("SERIAL PRIMARY KEY", sql)
+    sql = _AUTOINC_RE.sub("", sql)
+    return sql
 
 
 def _split_statements(sql: str) -> list[str]:

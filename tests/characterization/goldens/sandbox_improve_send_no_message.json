@@ -1,0 +1,7 @@
+{
+  "response": {
+    "error": "Campo 'message' é obrigatório.",
+    "ok": false
+  },
+  "status_code": 400
+}

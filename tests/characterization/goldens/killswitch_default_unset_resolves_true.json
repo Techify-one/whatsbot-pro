@@ -1,0 +1,21 @@
+{
+  "code_tools_registered": {
+    "charz_ks_inert": true
+  },
+  "dangerous_code_ran": false,
+  "gate_resolved_value": true,
+  "plugin_ids": {
+    "charz_ks_inert": null,
+    "save_contact_info": null,
+    "set_custom_attribute": null,
+    "transfer_to_human": null,
+    "transferir_agente": null
+  },
+  "registered": [
+    "charz_ks_inert",
+    "save_contact_info",
+    "set_custom_attribute",
+    "transfer_to_human",
+    "transferir_agente"
+  ]
+}

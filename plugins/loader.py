@@ -14,7 +14,6 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import logging
-import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -23,6 +22,15 @@ from types import ModuleType
 from db.repositories import plugin_repo
 
 from plugins import pkg_deps
+# Bundled-plugin / GOWA bootstrap moved to plugins.bootstrap (plano 23 Fase C4).
+# Re-exported here so callers importing them from ``plugins.loader`` keep working
+# (server.app, tests/test_gowa_plugin).
+from plugins.bootstrap import (  # noqa: F401
+    bootstrap_gowa_upgrade,
+    bootstrap_initial_plugins,
+    _enable_bundled_gowa,
+    _gowa_is_tombstoned,
+)
 from plugins.manifest import PluginManifest, find_manifest_file, load_manifest
 from plugins.migrator import run_pending_migrations
 
@@ -76,32 +84,6 @@ class PluginRegistry:
         return self.loaded.get(plugin_id)
 
 
-def bootstrap_initial_plugins(plugins_dir: Path, source_dir: Path) -> list[str]:
-    """Copy bundled example plugins into ``plugins_dir`` on first run.
-
-    Runs only when ``plugins_dir`` is empty (no subdirectories) so user
-    deletions stick across restarts. Subsequent updates of ``source_dir`` from
-    the core never overwrite a user's installed plugins.
-    """
-    plugins_dir.mkdir(parents=True, exist_ok=True)
-    has_anything = any(c.is_dir() and not c.name.startswith(".") for c in plugins_dir.iterdir())
-    if has_anything:
-        return []
-    if not source_dir.is_dir():
-        return []
-    copied: list[str] = []
-    for child in source_dir.iterdir():
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        target = plugins_dir / child.name
-        if target.exists():
-            continue
-        shutil.copytree(child, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        copied.append(child.name)
-        logger.info("Bootstrapped initial plugin: %s -> %s", child.name, target)
-    return copied
-
-
 def discover_and_load(plugins_dir: Path) -> PluginRegistry:
     """Scan ``plugins_dir``, sync DB, run migrations and import enabled plugins."""
     registry = PluginRegistry()
@@ -151,6 +133,10 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         _ensure_plugin_deps(manifest, db_row)
         loaded = _load_plugin_module(manifest, plugin_dir)
         run_pending_migrations(manifest, plugin_dir)
+        # Register the plugin's declared RBAC permissions (plano "RBAC para
+        # Plugins"). Idempotent upsert; safe to run every boot.
+        from plugins.rbac import sync_plugin_permissions
+        sync_plugin_permissions(manifest)
         registry.loaded[manifest.id] = loaded
         plugin_repo.set_load_error(manifest.id, None)
         logger.info(
@@ -190,6 +176,94 @@ def _ensure_plugin_deps(manifest: PluginManifest, db_row: dict) -> None:
         plugin_repo.set_installed_deps(manifest.id, deps)
 
 
+# ── Entry-point handlers (plano 23 Fase C4) ──────────────────────────────────
+#
+# Each plugin capability ("entry kind") used to be a near-identical block in
+# ``_load_plugin_module``. They are now a data table ``_ENTRY_SPECS`` iterated
+# once: for every ``(entry_key, mod)`` the loader imports the declared submodule
+# (when present) and calls the kind's handler to collect into ``LoadedPlugin``.
+# The ORDER of ``_ENTRY_SPECS`` is the load order and must match the legacy
+# blocks (tools → prompts → events → filters → routes → settings → channels →
+# lifecycle); each handler keeps the exact same validation + warning text.
+
+
+def _entry_tools(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    tools_attr = getattr(mod, "CORE_TOOLS", None) or getattr(mod, "TOOLS", None)
+    if not tools_attr:
+        return
+    for entry in tools_attr:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            logger.warning(
+                "Plugin %s: tools entry must be (schema, executor) tuples, got %r",
+                manifest.id, entry,
+            )
+            continue
+        loaded.tools.append(entry)
+
+
+def _entry_prompts(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    frags = getattr(mod, "PROMPT_FRAGMENTS", None) or []
+    for fn in frags:
+        if callable(fn):
+            loaded.prompt_fragments.append(fn)
+
+
+def _entry_events(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    # Validation (dict shape + callable) lives in plugins.events — single source
+    # (plano 23 Fase C4). The loader no longer re-implements the same checks.
+    from plugins.events import validate_event_handlers
+    loaded.event_handlers.update(
+        validate_event_handlers(manifest.id, getattr(mod, "EVENT_HANDLERS", None)))
+
+
+def _entry_filters(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    from plugins.events import validate_filters
+    loaded.filters.update(
+        validate_filters(manifest.id, getattr(mod, "FILTERS", None)))
+
+
+def _entry_routes(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    loaded.router = getattr(mod, "router", None)
+
+
+def _entry_settings(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    loaded.settings_cls = getattr(mod, "Settings", None)
+
+
+def _entry_channels(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    providers = getattr(mod, "CHANNEL_PROVIDERS", None) or []
+    for cls in providers:
+        if isinstance(cls, type):
+            loaded.channel_providers.append(cls)
+        else:
+            logger.warning(
+                "Plugin %s: CHANNEL_PROVIDERS entry %r is not a class, skipped",
+                manifest.id, cls,
+            )
+
+
+def _entry_lifecycle(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    # Captured here but NOT called (no event loop at import time); the host
+    # lifespan calls and awaits them via plugins.lifecycle.manager.
+    setup_fn = getattr(mod, "setup", None)
+    teardown_fn = getattr(mod, "teardown", None)
+    loaded.setup_fn = setup_fn if callable(setup_fn) else None
+    loaded.teardown_fn = teardown_fn if callable(teardown_fn) else None
+
+
+# (entry_key, handler). ORDER = load order; do not reorder (matches legacy blocks).
+_ENTRY_SPECS: list[tuple[str, callable]] = [
+    ("tools", _entry_tools),          # CORE_TOOLS=[(schema, executor), ...]
+    ("prompts", _entry_prompts),      # PROMPT_FRAGMENTS=[callable, ...]
+    ("events", _entry_events),        # EVENT_HANDLERS={"name": callable, ...}
+    ("filters", _entry_filters),      # FILTERS={"filter.name": fn | (fn, priority)}
+    ("routes", _entry_routes),        # router=APIRouter()
+    ("settings", _entry_settings),    # Settings (Pydantic BaseModel) — phase 6
+    ("channels", _entry_channels),    # CHANNEL_PROVIDERS=[ChannelClass, ...] — plano 02
+    ("lifecycle", _entry_lifecycle),  # setup(ctx)/teardown(ctx) — plano 09 Fase 1
+]
+
+
 def _load_plugin_module(
     manifest: PluginManifest, plugin_dir: Path
 ) -> LoadedPlugin:
@@ -200,108 +274,12 @@ def _load_plugin_module(
         manifest=manifest, plugin_dir=plugin_dir, package_name=package_name
     )
 
-    # tools entry: module exporting CORE_TOOLS=[(schema, executor), ...]
-    tools_modname = manifest.entry.get("tools")
-    if tools_modname:
-        tools_mod = _import_submodule(package_name, tools_modname, plugin_dir)
-        tools_attr = getattr(tools_mod, "CORE_TOOLS", None) or getattr(tools_mod, "TOOLS", None)
-        if tools_attr:
-            for entry in tools_attr:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    logger.warning(
-                        "Plugin %s: tools entry must be (schema, executor) tuples, got %r",
-                        manifest.id, entry,
-                    )
-                    continue
-                loaded.tools.append(entry)
-
-    # prompts entry: module exporting PROMPT_FRAGMENTS=[callable, ...]
-    prompts_modname = manifest.entry.get("prompts")
-    if prompts_modname:
-        prompts_mod = _import_submodule(package_name, prompts_modname, plugin_dir)
-        frags = getattr(prompts_mod, "PROMPT_FRAGMENTS", None) or []
-        for fn in frags:
-            if callable(fn):
-                loaded.prompt_fragments.append(fn)
-
-    # events entry: module exporting EVENT_HANDLERS={"name": callable, ...}
-    events_modname = manifest.entry.get("events")
-    if events_modname:
-        events_mod = _import_submodule(package_name, events_modname, plugin_dir)
-        raw_events = getattr(events_mod, "EVENT_HANDLERS", None) or {}
-        if isinstance(raw_events, dict):
-            for name, fn in raw_events.items():
-                if callable(fn):
-                    loaded.event_handlers[str(name)] = fn
-                else:
-                    logger.warning(
-                        "Plugin %s: EVENT_HANDLERS[%r] is not callable, skipped",
-                        manifest.id, name,
-                    )
-        else:
-            logger.warning(
-                "Plugin %s: EVENT_HANDLERS must be a dict, got %s",
-                manifest.id, type(raw_events).__name__,
-            )
-
-    # filters entry: module exporting FILTERS={"filter.name": fn | (fn, priority)}
-    filters_modname = manifest.entry.get("filters")
-    if filters_modname:
-        filters_mod = _import_submodule(package_name, filters_modname, plugin_dir)
-        raw_filters = getattr(filters_mod, "FILTERS", None) or {}
-        if isinstance(raw_filters, dict):
-            for name, entry in raw_filters.items():
-                if isinstance(entry, tuple) and len(entry) == 2 and callable(entry[0]):
-                    loaded.filters[str(name)] = entry
-                elif callable(entry):
-                    loaded.filters[str(name)] = entry
-                else:
-                    logger.warning(
-                        "Plugin %s: FILTERS[%r] must be callable or (callable, int), skipped",
-                        manifest.id, name,
-                    )
-        else:
-            logger.warning(
-                "Plugin %s: FILTERS must be a dict, got %s",
-                manifest.id, type(raw_filters).__name__,
-            )
-
-    # routes entry: module exporting router=APIRouter()
-    routes_modname = manifest.entry.get("routes")
-    if routes_modname:
-        routes_mod = _import_submodule(package_name, routes_modname, plugin_dir)
-        loaded.router = getattr(routes_mod, "router", None)
-
-    # settings entry: module exporting Settings (Pydantic BaseModel) — phase 6
-    settings_modname = manifest.entry.get("settings")
-    if settings_modname:
-        settings_mod = _import_submodule(package_name, settings_modname, plugin_dir)
-        loaded.settings_cls = getattr(settings_mod, "Settings", None)
-
-    # channels entry: module exporting CHANNEL_PROVIDERS=[ChannelClass, ...] — plano 02.
-    channels_modname = manifest.entry.get("channels")
-    if channels_modname:
-        channels_mod = _import_submodule(package_name, channels_modname, plugin_dir)
-        providers = getattr(channels_mod, "CHANNEL_PROVIDERS", None) or []
-        for cls in providers:
-            if isinstance(cls, type):
-                loaded.channel_providers.append(cls)
-            else:
-                logger.warning(
-                    "Plugin %s: CHANNEL_PROVIDERS entry %r is not a class, skipped",
-                    manifest.id, cls,
-                )
-
-    # lifecycle entry: module exporting setup(ctx)/teardown(ctx) — plano 09 Fase 1.
-    # Captured here but NOT called (no event loop at import time); the host
-    # lifespan calls and awaits them via plugins.lifecycle.manager.
-    lifecycle_modname = manifest.entry.get("lifecycle")
-    if lifecycle_modname:
-        lifecycle_mod = _import_submodule(package_name, lifecycle_modname, plugin_dir)
-        setup_fn = getattr(lifecycle_mod, "setup", None)
-        teardown_fn = getattr(lifecycle_mod, "teardown", None)
-        loaded.setup_fn = setup_fn if callable(setup_fn) else None
-        loaded.teardown_fn = teardown_fn if callable(teardown_fn) else None
+    for entry_key, handler in _ENTRY_SPECS:
+        modname = manifest.entry.get(entry_key)
+        if not modname:
+            continue
+        submod = _import_submodule(package_name, modname, plugin_dir)
+        handler(loaded, manifest, submod)
 
     static_dir = plugin_dir / "static"
     if static_dir.is_dir():

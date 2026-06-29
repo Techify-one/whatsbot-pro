@@ -13,7 +13,7 @@ import logging
 import threading
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from db import engine as engine_module
 from db.migration_postgres import (
@@ -22,6 +22,7 @@ from db.migration_postgres import (
     repair_postgres_sequences,
 )
 from plugins.restart import schedule_restart
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _err, _ok
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,12 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
     settings = deps.settings
 
-    @app.get("/api/admin/database")
+    # B1: render require_permission's PermissionDeniedError to the legacy
+    # _err(403) envelope (idempotent across route modules).
+    install_exception_handlers(app)
+
+    @app.get("/api/admin/database",
+             dependencies=[Depends(require_permission("settings.manage"))])
     async def database_info():
         """Return the current DB URL (redacted) plus dialect."""
         url = engine_module.get_database_url()
@@ -46,7 +52,8 @@ def register_routes(app, deps):
             "config_file": str(settings.data_dir / "storages" / "database.json"),
         })
 
-    @app.post("/api/admin/migrate-to-postgres")
+    @app.post("/api/admin/migrate-to-postgres",
+              dependencies=[Depends(require_permission("settings.manage"))])
     async def migrate_to_postgres(request: Request):
         """Kick off a SQLite → Postgres migration. Idempotent re: concurrent calls.
 
@@ -131,12 +138,14 @@ def register_routes(app, deps):
         threading.Thread(target=_runner, daemon=True).start()
         return _ok({"accepted": True})
 
-    @app.get("/api/admin/migrate-to-postgres/status")
+    @app.get("/api/admin/migrate-to-postgres/status",
+             dependencies=[Depends(require_permission("settings.manage"))])
     async def migrate_status():
         """Polling fallback for clients that don't have a live WebSocket."""
         return _ok(_migration_state)
 
-    @app.post("/api/admin/repair-sequences")
+    @app.post("/api/admin/repair-sequences",
+              dependencies=[Depends(require_permission("settings.manage"))])
     async def repair_sequences():
         """Re-anchor every Postgres sequence to MAX(<pk>). No-op on SQLite.
 

@@ -29,7 +29,7 @@ def register_routes(app, deps):
     ws_manager = deps.ws_manager
     state = deps.state
     settings = deps.settings
-    statics_senditems_dir = deps.statics_senditems_dir
+    statics_outbox_dir = deps.statics_outbox_dir
 
     async def _broadcast_user_message(phone: str, content: str, *,
                                       media_type: str | None = None,
@@ -53,8 +53,11 @@ def register_routes(app, deps):
         except Exception as e:
             logger.warning("[Sandbox] could not flag %s as sandbox: %s", phone, e)
 
-        result = await asyncio.to_thread(
-            agent_handler.process_message, phone, "",
+        # B5 (C-1): the sync ``process_message`` was removed; the sandbox now
+        # awaits the async ``aprocess_message`` directly (it already runs on the
+        # event loop). Same ProcessResult contract — reply/tool_calls/usage.
+        result = await agent_handler.aprocess_message(
+            phone, "",
             save_user_message=False, save_response=False,
         )
 
@@ -114,11 +117,11 @@ def register_routes(app, deps):
             pass
 
     def _save_upload(upload: UploadFile, content: bytes, default_name: str) -> str:
-        """Persist an uploaded file under statics/senditems and return its rel path."""
+        """Persist an uploaded file under statics/outbox and return its rel path."""
         suffix = Path(upload.filename or default_name).suffix or Path(default_name).suffix
-        dest = statics_senditems_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         dest.write_bytes(content)
-        return f"statics/senditems/{dest.name}"
+        return f"statics/outbox/{dest.name}"
 
     @app.post("/api/sandbox/send")
     async def sandbox_send(body: dict):
@@ -170,7 +173,7 @@ def register_routes(app, deps):
         if not phone:
             return _err("Campo 'phone' é obrigatório.")
         rel_path = _save_upload(image, await image.read(), "img.png")
-        abs_path = str(statics_senditems_dir / Path(rel_path).name)
+        abs_path = str(statics_outbox_dir / Path(rel_path).name)
         caption = caption or ""
 
         logger.info("[Sandbox] Image from %s", phone)
@@ -230,7 +233,7 @@ def register_routes(app, deps):
         if not phone:
             return _err("Campo 'phone' é obrigatório.")
         rel_path = _save_upload(audio, await audio.read(), "voice.ogg")
-        abs_path = str(statics_senditems_dir / Path(rel_path).name)
+        abs_path = str(statics_outbox_dir / Path(rel_path).name)
 
         logger.info("[Sandbox] Audio from %s", phone)
         exec_id = await astart_execution(phone, "sandbox")
@@ -301,7 +304,7 @@ def register_routes(app, deps):
             await _broadcast_user_message(phone, content,
                                           media_type="document", media_path=rel_path)
 
-            abs_path = str(statics_senditems_dir / Path(rel_path).name)
+            abs_path = str(statics_outbox_dir / Path(rel_path).name)
             transcription = ""
             if settings.get("document_transcription_enabled", True):
                 try:

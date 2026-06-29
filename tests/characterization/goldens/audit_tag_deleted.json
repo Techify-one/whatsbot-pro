@@ -1,0 +1,21 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "tag.delete",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "name": "AudTagDel",
+        "ts": "<TS>"
+      },
+      "before": {
+        "color": "#404040",
+        "name": "AudTagDel"
+      },
+      "resource_id": "AudTagDel",
+      "resource_id_resolved": true,
+      "resource_type": "tag"
+    }
+  ]
+}

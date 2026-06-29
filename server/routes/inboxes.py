@@ -21,7 +21,9 @@ def register_routes(app, deps):
         denied = permission_denied(request, "inbox.manage")
         if denied:
             return denied
-        rows = await asyncio.to_thread(inbox_repo.list_all)
+        # Só caixas vivas (canal existente, não arquivado), nomeadas pelo
+        # display_name atual do canal (plano inboxes/canais §4.6).
+        rows = await asyncio.to_thread(inbox_repo.list_with_channel)
         return _ok(rows)
 
     @app.put("/api/inboxes/{inbox_id}/default-agent")

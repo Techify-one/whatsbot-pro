@@ -1,0 +1,18 @@
+{
+  "archived": [
+    {
+      "archived": true,
+      "phone": "5511970005001",
+      "ts": "<TS>"
+    }
+  ],
+  "events": {
+    "set": [
+      "chat.archived",
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  }
+}

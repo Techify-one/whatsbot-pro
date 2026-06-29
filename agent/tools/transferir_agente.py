@@ -5,10 +5,8 @@ Handoff PERSISTENTE (estilo "assign" do Chatwoot, mas para agentes de IA): grava
 passam a ser atendidas pelo agente de destino — :func:`agent_factory.build_for_contact`
 resolve a precedência conversa→inbox→default a cada requisição.
 
-Self-gated: só age quando ``ai_engine_enabled`` está ligado (multiagente). Em modo
-legado devolve um erro claro em vez de fazer uma escrita inócua. Valida que o destino
-existe e está ativo; se o agente atual for um roteador (``is_router``) com
-``routing_targets``, exige que o destino esteja na allowlist.
+Valida que o destino existe e está ativo; se o agente atual for um roteador
+(``is_router``) com ``routing_targets``, exige que o destino esteja na allowlist.
 """
 
 import logging
@@ -50,9 +48,6 @@ TRANSFERIR_AGENTE_TOOL = {
 
 def execute(ctx, args: dict) -> str | None:
     """Persist the handoff on the open conversation. Returns feedback for the LLM."""
-    if not getattr(ctx.handler, "ai_engine_enabled", False):
-        return "Erro: o roteamento entre agentes está desativado (ai_engine_enabled)."
-
     target = (args.get("agente") or args.get("target") or "").strip()
     if not target:
         return "Erro: informe a chave do agente de destino em 'agente'."
@@ -84,6 +79,21 @@ def execute(ctx, args: dict) -> str | None:
         conversation_repo.set_agent(conv["id"], target)
         logger.info("Handoff: conversa %s -> agente '%s' (motivo=%s)",
                     conv["id"], target, args.get("motivo") or "-")
+        # plano 23 Fase C1: handoff between AI agents is a TYPED domain event
+        # (``conversation.agent_changed``), emitted via ``emit_domain``.
+        # ``current_key`` is the agent that was answering before this hop (None if
+        # the conversation had no bound agent). Best-effort — same name + keys.
+        try:
+            from domain.events import emit_domain_sync, ConversationAgentChanged
+            emit_domain_sync(ConversationAgentChanged(
+                conversation_id=conv["id"],
+                from_agent=current_key,
+                to_agent=target,
+                reason=args.get("motivo"),
+            ))
+        except Exception:
+            logger.debug("conversation.agent_changed emit falhou para conversa %s",
+                         conv["id"])
     except Exception as e:
         logger.warning("transferir_agente failed for %s: %s",
                        getattr(ctx.contact, "phone", "?"), e)

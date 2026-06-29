@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   whatsbot:
     build: .
@@ -7,10 +5,14 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
+    # Bind-mount real folders inside the install dir (Chatwoot-style) so the
+    # database, uploaded media (statics/senditems) and logs live in visible host
+    # folders that SURVIVE any container recreation / redeploy. `docker_start.sh`
+    # pre-creates these dirs. Nothing shared, nothing opaque.
     volumes:
-      - whatsbot-storages:/app/storages
-      - whatsbot-statics:/app/statics
-      - whatsbot-logs:/app/logs
+      - ./data/storages:/app/storages
+      - ./data/statics:/app/statics
+      - ./data/logs:/app/logs
     environment:
       - WHATSBOT_DOCKER=1
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
@@ -18,14 +20,6 @@ services:
       # Optional Postgres backend — unset = SQLite default in storages/whatsbot.db.
       # Example: postgresql+psycopg://whatsbot:secret@db:5432/whatsbot
       - DATABASE_URL=${DATABASE_URL:-}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
-      retries: 5
-
-volumes:
-  whatsbot-storages:
-  whatsbot-statics:
-  whatsbot-logs:
+    # No healthcheck here on purpose — the image already defines it in the
+    # Dockerfile (HEALTHCHECK ...), and Compose inherits it. Duplicating the
+    # block kept two copies of the same params drifting out of sync.

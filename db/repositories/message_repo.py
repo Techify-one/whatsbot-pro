@@ -8,6 +8,7 @@ import time
 from sqlalchemy import and_, delete as sa_delete, insert as sa_insert, select, update as sa_update
 
 from db.engine import get_engine
+from db.repositories._mapping import coerce_json
 from db.tables import messages
 
 
@@ -62,9 +63,25 @@ def get_all(contact_id: int) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def get_by_conversation(conversation_id: int) -> list[dict]:
+    """Return all messages for ONE conversation ordered by ts (plano 11 D1).
+
+    Conversa-cêntrico: filtra por ``conversation_id`` (uma thread por canal),
+    ao contrário de :func:`get_all` que casa por ``contact_id`` e funde todos os
+    canais do mesmo número. Usa ``idx_msg_conversation_ts`` (db/tables.py).
+    """
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages)
+            .where(messages.c.conversation_id == conversation_id)
+            .order_by(messages.c.ts)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in rows]
+
+
 def get_context(contact_id: int, limit: int) -> list[dict]:
     """Return the last N eligible messages for LLM context."""
-    excluded = ("transcription", "tool_call", "system_notice")
+    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
@@ -89,6 +106,34 @@ def get_last(contact_id: int) -> dict | None:
             .limit(1)
         ).mappings().first()
     return _row_to_dict(row) if row else None
+
+
+def last_inbound_ts(*, conversation_id: int | None = None,
+                    contact_id: int | None = None) -> float | None:
+    """Timestamp of the most recent INBOUND (role='user') message.
+
+    Scoped to a conversation when ``conversation_id`` is given (conversa-cêntrico —
+    one 24h window per channel), else to the whole contact. Drives the WhatsApp
+    Cloud 24h free-text window (``channels.outbound.session_open``). Returns None
+    when there is no inbound yet (windowed channels then treat the window as closed).
+
+    NOTE: counts only role='user' rows. An inbound *reaction* doesn't create such a
+    row (it mutates the target message's ``reactions`` column), so a reaction alone
+    won't reopen the window here — the operator falls back to a template, which is
+    the safe failure. Acceptable: a reaction is normally preceded by a real message.
+    """
+    if conversation_id is not None:
+        cond = (messages.c.role == "user") & (messages.c.conversation_id == conversation_id)
+    elif contact_id is not None:
+        cond = (messages.c.role == "user") & (messages.c.contact_id == contact_id)
+    else:
+        return None
+    with get_engine().connect() as conn:
+        ts = conn.execute(
+            select(messages.c.ts).where(cond)
+            .order_by(messages.c.ts.desc()).limit(1)
+        ).scalar_one_or_none()
+    return float(ts) if ts is not None else None
 
 
 def get_last_user_message(contact_id: int) -> dict | None:
@@ -272,9 +317,8 @@ def set_reaction(msg_id: str, emoji: str, reactor: str) -> dict | None:
         ).mappings().first()
         if row is None:
             return None
-        try:
-            data = json.loads(row["reactions"]) if row["reactions"] else {}
-        except (ValueError, TypeError):
+        data = coerce_json(row["reactions"], {})
+        if not isinstance(data, dict):
             data = {}
         # Drop the reactor from every emoji (one reaction per person).
         for em in list(data.keys()):
@@ -311,14 +355,15 @@ def _row_to_dict(row) -> dict:
         d["revoked"] = True
         d["revoke_scope"] = "me" if row["revoked"] == 2 else "all"
     if row.get("reactions"):
-        try:
-            parsed = json.loads(row["reactions"])
-            if parsed:
-                d["reactions"] = parsed
-        except (ValueError, TypeError):
-            pass
+        parsed = coerce_json(row["reactions"], None)
+        if parsed:
+            d["reactions"] = parsed
     # `reply_to_msg_id` may be absent on old rows read before the column existed.
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]
     d["_id"] = row["id"]
+    # conversa-cêntrico (plano 11): expõe a thread de pertencimento ao frontend,
+    # para montar permalink de mensagem (/conversations/<id>?message=<_id>) mesmo
+    # na visão contato-cêntrica/mesclada. nullable em linhas pré-plano-11.
+    d["conversation_id"] = row["conversation_id"]
     return d

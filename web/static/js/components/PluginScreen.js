@@ -5,12 +5,13 @@
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
 const _moduleCache = new Map();
 
-export function PluginScreen({ screen }) {
+export function PluginScreen({ screen, currentUser }) {
   const [Component, setComponent] = useState(null);
   const [error, setError] = useState(null);
 
@@ -54,7 +55,11 @@ export function PluginScreen({ screen }) {
   }
 
   const apiBase = `/api/plugins/${screen.pluginId}`;
-  return html`<${Component} apiBase=${apiBase} screen=${screen} />`;
+  // RBAC helper handed to the plugin component: can('delete') →
+  // hasPermission(user, 'plugin.<id>.delete'). Default-allow for legacy/open
+  // installs (no user) so screens keep working (plano "RBAC para Plugins").
+  const can = (key) => hasPermission(currentUser, `plugin.${screen.pluginId}.${key}`);
+  return html`<${Component} apiBase=${apiBase} screen=${screen} can=${can} currentUser=${currentUser} />`;
 }
 
 export default PluginScreen;

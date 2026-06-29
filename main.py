@@ -53,21 +53,23 @@ def main():
     port = settings.get("gowa_port", 3000)
     web_port = settings.get("web_port", 8080)
 
-    webhook_url = f"http://127.0.0.1:{web_port}/api/webhook"
+    # GOWA ingresses through the generic per-channel route (plano 13 Fase 0):
+    # POST → registry.get("default").parse_inbound → _dispatch_events → ingest_event,
+    # the SAME funnel as Cloud/Telegram. The legacy exact /api/webhook fallback was
+    # retired in plano 23 Fase F2 — this generic path is the only GOWA ingress.
+    webhook_url = f"http://127.0.0.1:{web_port}/api/webhook/gowa/default"
     gowa_manager = GOWAManager(port=port, data_dir=settings.data_dir, webhook_url=webhook_url)
     gowa_client = GOWAClient(port=port)
 
     agent_handler = AgentHandler(
         api_key=settings.get("openrouter_api_key", ""),
-        system_prompt=settings.get("system_prompt", "Você é um assistente útil."),
         max_context_messages=settings.get("max_context_messages", 10),
         inactivity_timeout_min=settings.get("inactivity_timeout_min", 30),
-        model=settings.get("model", "deepseek/deepseek-v4-pro"),
         audio_model=settings.get("audio_model", "google/gemini-3-flash-preview"),
         image_model=settings.get("image_model", "google/gemini-3-flash-preview"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
+        improvement_model=settings.get("improvement_model", ""),
         default_ai_enabled=settings.get("default_ai_enabled", True),
-        ai_engine_enabled=settings.get("ai_engine_enabled", False),
     )
 
     app = create_app(

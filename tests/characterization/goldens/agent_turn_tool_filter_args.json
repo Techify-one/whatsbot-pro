@@ -1,0 +1,65 @@
+{
+  "events": {
+    "sequence": [
+      "llm.before",
+      "tool.before",
+      "tool.after",
+      "llm.after"
+    ],
+    "set": [
+      "llm.after",
+      "llm.before",
+      "tool.after",
+      "tool.before"
+    ]
+  },
+  "messages": [
+    {
+      "content": "me chamo Eva",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "dados atualizados!",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": null
+    }
+  ],
+  "result": {
+    "contact_info": {
+      "address": "",
+      "company": "FiltradoCo",
+      "email": "",
+      "name": "Eva Reis",
+      "observations": [],
+      "profession": ""
+    },
+    "reply": "dados atualizados!",
+    "tool_calls": [
+      {
+        "args": {
+          "company": "FiltradoCo",
+          "name": "Eva Reis"
+        },
+        "result": null,
+        "tool": "save_contact_info"
+      }
+    ]
+  },
+  "usage": [
+    {
+      "call_type": "text",
+      "completion_tokens": 30,
+      "cost_usd": 0.0,
+      "model": "deepseek/deepseek-v4-pro",
+      "prompt_tokens": 120,
+      "total_tokens": 150
+    }
+  ]
+}

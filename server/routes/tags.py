@@ -6,8 +6,10 @@ import time
 
 from fastapi import Request
 
-from db.repositories import contact_repo
+from db.repositories import contact_repo, conversation_repo
 from plugins.events import emit as emit_event, emit_with_filter, apply_filter
+from server import system_notices
+from server.authz import current_user
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,7 @@ def register_routes(app, deps):
             return _err("Nome da tag deve ter no máximo 30 caracteres.")
         if new_name and new_name != name and agent_handler.tag_registry.get(new_name):
             return _err(f"Tag '{new_name}' já existe.")
+        old_tag = agent_handler.tag_registry.get(name)   # snapshot for the audit "before"
         if not agent_handler.tag_registry.update(name, new_name=new_name, color=color):
             return _err(f"Tag '{name}' não encontrada.", 404)
         # Tag rename in contact_tags is handled automatically by tag_repo.update()
@@ -67,12 +70,14 @@ def register_routes(app, deps):
             "old_name": name, "name": final_name,
             "color": tag_data["color"] if tag_data else color,
             "ts": time.time(),
+            "_audit_before": {"name": name, "color": (old_tag or {}).get("color")},
         })
         return _ok({"name": final_name, "color": tag_data["color"] if tag_data else color})
 
     @app.delete("/api/tags/{name}")
     async def delete_tag(name: str):
         """Delete a global tag and remove it from all contacts."""
+        old_tag = agent_handler.tag_registry.get(name)   # snapshot for the audit "before"
         if not agent_handler.tag_registry.delete(name):
             return _err(f"Tag '{name}' não encontrada.", 404)
         # tag_repo.delete() already handles DELETE FROM contact_tags
@@ -81,7 +86,10 @@ def register_routes(app, deps):
             if name in contact.tags:
                 contact.tags.remove(name)
         await ws_manager.broadcast("tags_changed", agent_handler.tag_registry.all())
-        await emit_with_filter("tag.deleted", {"name": name, "ts": time.time()})
+        await emit_with_filter("tag.deleted", {
+            "name": name, "ts": time.time(),
+            "_audit_before": {"name": name, "color": (old_tag or {}).get("color")},
+        })
         return _ok({"deleted": name})
 
     @app.put("/api/contacts/{phone}/tags")
@@ -129,4 +137,31 @@ def register_routes(app, deps):
             await emit_with_filter("contact.untagged", {
                 "phone": phone, "tag": removed, "ts": time.time(),
             })
+
+        # Chat notice (plano 12, grupo `tags`): one card per added/removed tag,
+        # attached to the contact's active conversation thread. Tags são por
+        # contato (plano 01), então resolvemos a conversa aberta (fallback: a mais
+        # recente) só para ancorar o aviso no fio.
+        added = set(result) - set(previous)
+        removed_tags = set(previous) - set(result)
+        if added or removed_tags:
+            actor = (current_user(request) or {}).get("name") or None
+            conv = await asyncio.to_thread(
+                conversation_repo.get_open_for_contact, existing_contact["id"])
+            if conv is None:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_latest_for_contact, existing_contact["id"])
+            if conv is not None:
+                for tag in added:
+                    await asyncio.to_thread(
+                        system_notices.emit_conversation_notice,
+                        event_type="tag_added", conversation_id=conv["id"],
+                        contact_id=existing_contact["id"], phone=phone,
+                        actor=actor, tag=tag)
+                for tag in removed_tags:
+                    await asyncio.to_thread(
+                        system_notices.emit_conversation_notice,
+                        event_type="tag_removed", conversation_id=conv["id"],
+                        contact_id=existing_contact["id"], phone=phone,
+                        actor=actor, tag=tag)
         return _ok({"phone": phone, "tags": result})

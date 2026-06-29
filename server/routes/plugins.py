@@ -11,11 +11,11 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 
-from db.repositories import config_repo, plugin_repo, tool_override_repo
+from db.repositories import config_repo, plugin_repo, rbac_repo, tool_override_repo
 from plugins.manifest import (
     WHATSBOT_API_VERSION,
     find_manifest_file,
@@ -24,6 +24,7 @@ from plugins.manifest import (
 from plugins.restart import schedule_restart
 from plugins.lifecycle import manager as _lifecycle_manager
 from plugins.events import emit as emit_event
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _err, _ok
 import time as _time
 
@@ -36,6 +37,10 @@ _PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 def register_routes(app, deps):
     plugins_dir: Path = deps.plugins_dir
     registry = deps.plugins_registry
+
+    # B1: render require_permission's PermissionDeniedError to the legacy
+    # _err(403) envelope (idempotent across route modules).
+    install_exception_handlers(app)
 
     @app.get("/api/plugins")
     async def list_plugins():
@@ -81,10 +86,16 @@ def register_routes(app, deps):
                 "screens": [
                     {**s, "pluginId": loaded.id} for s in loaded.manifest.screens
                 ],
+                # Frontend extension module (camada de extensão de frontend): the app
+                # imports this ES module once at boot to register filters/slots/route
+                # overrides. Empty string = plugin contributes no frontend extension.
+                "frontend_extends": loaded.manifest.frontend_extends,
+                "frontend_api_version": loaded.manifest.frontend_api_version,
             })
         return _ok({"plugins": out})
 
-    @app.post("/api/plugins/{plugin_id}/enable")
+    @app.post("/api/plugins/{plugin_id}/enable",
+              dependencies=[Depends(require_permission("plugins.manage"))])
     async def enable_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
@@ -92,18 +103,25 @@ def register_routes(app, deps):
         if not ok:
             return _err("plugin não encontrado", 404)
         # Emit BEFORE schedule_restart — after the os._exit the bus is gone.
-        emit_event("plugin.enabled", {"plugin_id": plugin_id, "ts": _time.time()})
+        emit_event("plugin.enabled", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "_audit_before": {"enabled": False}, "_audit_after": {"enabled": True},
+        })
         schedule_restart(reason=f"plugin {plugin_id} enabled")
         return _ok({"id": plugin_id, "enabled": True, "restarting": True})
 
-    @app.post("/api/plugins/{plugin_id}/disable")
+    @app.post("/api/plugins/{plugin_id}/disable",
+              dependencies=[Depends(require_permission("plugins.manage"))])
     async def disable_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
         ok = await asyncio.to_thread(plugin_repo.set_enabled, plugin_id, False)
         if not ok:
             return _err("plugin não encontrado", 404)
-        emit_event("plugin.disabled", {"plugin_id": plugin_id, "ts": _time.time()})
+        emit_event("plugin.disabled", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "_audit_before": {"enabled": True}, "_audit_after": {"enabled": False},
+        })
         # plano 09 Fase 2: run the plugin's teardown BEFORE the hard exit.
         schedule_restart(
             reason=f"plugin {plugin_id} disabled",
@@ -111,7 +129,8 @@ def register_routes(app, deps):
         )
         return _ok({"id": plugin_id, "enabled": False, "restarting": True})
 
-    @app.delete("/api/plugins/{plugin_id}")
+    @app.delete("/api/plugins/{plugin_id}",
+                dependencies=[Depends(require_permission("plugins.manage"))])
     async def delete_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")
@@ -124,11 +143,20 @@ def register_routes(app, deps):
             dropped = plugin_repo.drop_plugin_tables(plugin_id)
             plugin_repo.delete(plugin_id)
             config_repo.delete_prefix(f"plugin.{plugin_id}.")
+            # Tombstone the bundled gowa plugin so the boot-time bootstrap does NOT
+            # resurrect it (the 'default' gowa channel row persists — plano 13 goal
+            # #2). Key lives OUTSIDE the 'plugin.gowa.' prefix just wiped above.
+            if plugin_id == "gowa":
+                config_repo.set("gowa_uninstalled", "1")
             overrides_removed = tool_override_repo.delete_for_plugin(plugin_id)
+            # RBAC perms declared by the plugin (plano "RBAC para Plugins"):
+            # role_permissions/user_permissions grants cascade via FK.
+            perms_removed = rbac_repo.delete_plugin_permissions(plugin_id)
             return {
                 "folder_removed": had_dir,
                 "tables_dropped": dropped,
                 "tool_overrides_removed": overrides_removed,
+                "permissions_removed": perms_removed,
             }
 
         result = await asyncio.to_thread(_do_delete)
@@ -156,7 +184,8 @@ def register_routes(app, deps):
             values[field] = all_cfg.get(prefix + field, default_val)
         return _ok({"schema": schema, "values": values})
 
-    @app.put("/api/plugins/{plugin_id}/settings")
+    @app.put("/api/plugins/{plugin_id}/settings",
+             dependencies=[Depends(require_permission("plugins.manage"))])
     async def update_plugin_settings(plugin_id: str, request: Request):
         loaded = registry.loaded.get(plugin_id) if registry else None
         if not loaded or not loaded.settings_cls:
@@ -167,12 +196,19 @@ def register_routes(app, deps):
         except Exception as e:
             return _err(f"valores inválidos: {e}")
         prefix = f"plugin.{plugin_id}."
-        kv = {prefix + k: v for k, v in validated.model_dump().items()}
+        new_values = validated.model_dump()
+        kv = {prefix + k: v for k, v in new_values.items()}
+        # Snapshot the prior values (namespaced config, falling back to defaults)
+        # BEFORE the write, for the audit "before".
+        all_cfg = await asyncio.to_thread(config_repo.get_all)
+        defaults = loaded.settings_cls().model_dump()
+        before_values = {k: all_cfg.get(prefix + k, defaults.get(k)) for k in new_values}
         await asyncio.to_thread(config_repo.set_many, kv)
         emit_event("plugin.settings.changed", {
             "plugin_id": plugin_id,
-            "values": validated.model_dump(),
+            "values": new_values,
             "ts": _time.time(),
+            "_audit_before": before_values,
         })
         return _ok({"id": plugin_id, "values": validated.model_dump()})
 
@@ -208,7 +244,8 @@ def register_routes(app, deps):
             },
         )
 
-    @app.post("/api/plugins/import")
+    @app.post("/api/plugins/import",
+              dependencies=[Depends(require_permission("plugins.manage"))])
     async def import_plugin(file: UploadFile):
         contents = await file.read()
         try:
@@ -265,9 +302,14 @@ def register_routes(app, deps):
 
         version = str(meta.get("version") or "0.0.0") if isinstance(meta, dict) else "0.0.0"
         await asyncio.to_thread(plugin_repo.upsert, pid, version, enabled=False)
+        # Reinstalling gowa is a deliberate "I want it back" — clear the uninstall
+        # tombstone so the boot-time bootstrap can manage it again (plano 13).
+        if pid == "gowa":
+            await asyncio.to_thread(config_repo.set, "gowa_uninstalled", "0")
         return _ok({"id": pid, "version": version, "enabled": False})
 
-    @app.post("/api/plugins/restart")
+    @app.post("/api/plugins/restart",
+              dependencies=[Depends(require_permission("plugins.manage"))])
     async def restart_server():
         schedule_restart(reason="manual restart from /api/plugins/restart")
         return _ok({"restarting": True})

@@ -66,8 +66,13 @@ def definition_exists(attribute_key: str, applies_to: str, exclude_id: int | Non
 def create_definition(*, attribute_key: str, display_name: str, type: str = "text",
                        applies_to: str = "contact", options=None, required: int = 0,
                        description: str = "", regex_pattern=None, regex_cue=None,
-                       position: int = 0, filterable: int = 0, created_by=None) -> dict | None:
-    """Create a definition. Returns the row, or None on (key, applies_to) collision."""
+                       position: int = 0, filterable: int = 0, is_system: int = 0,
+                       created_by=None) -> dict | None:
+    """Create a definition. Returns the row, or None on (key, applies_to) collision.
+
+    ``is_system`` marks a built-in (plano 19) — only the boot seeder sets it; the
+    public create route always passes 0.
+    """
     if definition_exists(attribute_key, applies_to):
         return None
     now = time.time()
@@ -76,11 +81,34 @@ def create_definition(*, attribute_key: str, display_name: str, type: str = "tex
             attribute_key=attribute_key, display_name=display_name, type=type,
             applies_to=applies_to, options=options, required=required,
             description=description, regex_pattern=regex_pattern, regex_cue=regex_cue,
-            position=position, filterable=filterable, created_by=created_by,
-            created_at=now, deleted_at=None,
+            position=position, filterable=filterable, is_system=is_system,
+            created_by=created_by, created_at=now, deleted_at=None,
         ))
         new_id = result.inserted_primary_key[0]
     return get_definition(new_id)
+
+
+def ensure_system_definition(*, attribute_key: str, display_name: str, type: str = "text",
+                             applies_to: str = "contact", description: str = "",
+                             position: int = 0, **_) -> dict | None:
+    """Idempotently seed a built-in system attribute (``is_system=1``) — plano 19.
+
+    No-op when a definition with this ``(attribute_key, applies_to)`` already exists,
+    whether ACTIVE or soft-deleted, so user edits and deletions are respected across
+    boots (and the ``UniqueConstraint(attribute_key, applies_to)`` is never violated).
+    Returns the created row, or ``None`` when it already existed.
+    """
+    with get_engine().connect() as conn:
+        existing = conn.execute(
+            select(cad.c.id).where(cad.c.attribute_key == attribute_key,
+                                   cad.c.applies_to == applies_to)
+        ).first()
+    if existing is not None:
+        return None
+    return create_definition(
+        attribute_key=attribute_key, display_name=display_name, type=type,
+        applies_to=applies_to, description=description, position=position,
+        is_system=1)
 
 
 def list_filterable(applies_to: str) -> list[dict]:

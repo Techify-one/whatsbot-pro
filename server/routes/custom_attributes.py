@@ -18,6 +18,7 @@ from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories.custom_attribute_validate import VALID_TYPES
 from db.tables import contacts
 from plugins.events import emit_with_filter
+from server.authz import permission_denied
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ def register_routes(app, deps):
 
     @app.post("/api/custom-attributes")
     async def create_custom_attribute(request: Request):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         body = await request.json()
         key = (body.get("attribute_key") or "").strip().lower()
         display_name = (body.get("display_name") or "").strip()
@@ -76,10 +80,20 @@ def register_routes(app, deps):
 
     @app.put("/api/custom-attributes/{def_id}")
     async def update_custom_attribute(def_id: int, request: Request):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         body = await request.json()
         existing = await asyncio.to_thread(ca_repo.get_definition, def_id)
         if existing is None or existing.get("deleted_at") is not None:
             return _err("Atributo não encontrado.", 404)
+        # System attributes (plano 19 §1.3/§5): identity is immutable — reject any
+        # attempt to rename the key/scope of a system attribute with 400 (the update
+        # path never writes these fields anyway, so this is the explicit guard).
+        if existing.get("is_system"):
+            for ident in ("attribute_key", "applies_to"):
+                if ident in body and (body.get(ident) or "") != existing.get(ident):
+                    return _err("Atributos de sistema não podem ser renomeados.", 400)
         fields: dict = {}
         if "display_name" in body:
             dn = (body.get("display_name") or "").strip()
@@ -108,7 +122,16 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.delete("/api/custom-attributes/{def_id}")
-    async def delete_custom_attribute(def_id: int):
+    async def delete_custom_attribute(def_id: int, request: Request):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
+        existing = await asyncio.to_thread(ca_repo.get_definition, def_id)
+        if existing is None or existing.get("deleted_at") is not None:
+            return _err("Atributo não encontrado.", 404)
+        # System attributes (plano 19) ship with the app — protect from deletion.
+        if existing.get("is_system"):
+            return _err("Atributos de sistema não podem ser apagados.", 400)
         ok = await asyncio.to_thread(ca_repo.delete_definition, def_id)
         if not ok:
             return _err("Atributo não encontrado.", 404)
@@ -116,7 +139,10 @@ def register_routes(app, deps):
         return _ok({"deleted": def_id})
 
     @app.post("/api/custom-attributes/purge-orphans")
-    async def purge_orphans(applies_to: str = "contact"):
+    async def purge_orphans(request: Request, applies_to: str = "contact"):
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         if applies_to not in _ENTITY_TABLES:
             return _err("applies_to deve ser 'contact' (conversation chega com o plano 01).")
         table = _ENTITY_TABLES[applies_to]

@@ -1,0 +1,27 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended"
+    ],
+    "set": [
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Documento recebido: contrato.pdf]\nsegue o contrato",
+      "media_path": "statics/media/doc.pdf",
+      "media_type": "document",
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    }
+  ],
+  "sent": []
+}

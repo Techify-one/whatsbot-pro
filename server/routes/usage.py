@@ -6,8 +6,11 @@ import time
 
 import httpx
 
+from fastapi import Request
+
 from config.settings import LLM_API_BASE_URL
 from db.repositories import usage_repo, contact_repo
+from server.authz import permission_denied
 from server.helpers import _ok
 from server.routes.config import get_models_cache
 
@@ -72,7 +75,10 @@ def register_routes(app, deps):
     agent_handler.pricing_fn = pricing_fn
 
     @app.get("/api/usage/summary")
-    async def usage_summary_endpoint(period: str | None = None, start: float | None = None, end: float | None = None):
+    async def usage_summary_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
+        denied = permission_denied(request, "billing.manage")
+        if denied:
+            return denied
         start_ts, end_ts = _parse_period(period, start, end)
         totals = await asyncio.to_thread(usage_repo.global_summary, start_ts, end_ts)
         totals["period_start"] = start_ts
@@ -80,13 +86,19 @@ def register_routes(app, deps):
         return _ok(totals)
 
     @app.get("/api/usage/by-contact")
-    async def usage_by_contact_endpoint(period: str | None = None, start: float | None = None, end: float | None = None):
+    async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
+        denied = permission_denied(request, "billing.manage")
+        if denied:
+            return denied
         start_ts, end_ts = _parse_period(period, start, end)
         rows = await asyncio.to_thread(usage_repo.by_contact, start_ts, end_ts)
         return _ok(rows)
 
     @app.get("/api/usage/contact/{phone}")
-    async def usage_contact_detail(phone: str, period: str | None = None, start: float | None = None, end: float | None = None):
+    async def usage_contact_detail(phone: str, request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
+        denied = permission_denied(request, "billing.manage")
+        if denied:
+            return denied
         start_ts, end_ts = _parse_period(period, start, end)
         contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if contact is None:

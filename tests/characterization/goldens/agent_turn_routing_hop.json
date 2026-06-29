@@ -1,0 +1,76 @@
+{
+  "events": {
+    "sequence": [
+      "llm.before",
+      "tool.before",
+      "conversation.agent_changed",
+      "tool.after",
+      "tool.before",
+      "tool.after",
+      "llm.after"
+    ],
+    "set": [
+      "conversation.agent_changed",
+      "llm.after",
+      "llm.before",
+      "tool.after",
+      "tool.before"
+    ]
+  },
+  "messages": [
+    {
+      "content": "quero comprar",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "aqui é o Vendas, posso ajudar com seu pedido!",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": null
+    }
+  ],
+  "result": {
+    "contact_info": null,
+    "reply": "aqui é o Vendas, posso ajudar com seu pedido!",
+    "tool_calls": [
+      {
+        "args": {
+          "agente": "vendas"
+        },
+        "result": "Transferência registrada: as próximas mensagens desta conversa serão atendidas por 'Vendas'.",
+        "tool": "transferir_agente"
+      },
+      {
+        "args": {
+          "agente": "vendas"
+        },
+        "result": "O agente 'vendas' já está atendendo esta conversa.",
+        "tool": "transferir_agente"
+      }
+    ]
+  },
+  "usage": [
+    {
+      "call_type": "text",
+      "completion_tokens": 20,
+      "cost_usd": 0.0,
+      "model": "deepseek/deepseek-v4-pro",
+      "prompt_tokens": 100,
+      "total_tokens": 120
+    },
+    {
+      "call_type": "text",
+      "completion_tokens": 25,
+      "cost_usd": 0.0,
+      "model": "test/vendas-model",
+      "prompt_tokens": 80,
+      "total_tokens": 105
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended"
+    ],
+    "set": [
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Transcrição do áudio]: olá, gostaria de saber o preço",
+      "media_path": "statics/media/voice.ogg",
+      "media_type": "audio",
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "olá, gostaria de saber o preço",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "transcription",
+      "status": null
+    }
+  ],
+  "sent": []
+}

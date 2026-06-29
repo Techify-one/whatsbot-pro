@@ -1,0 +1,11 @@
+{
+  "extracted_reply": "[\"primeira parte\", \"segunda parte\", \"terceira parte\"]",
+  "parse_split_reply_if_called": [
+    "primeira parte",
+    "segunda parte",
+    "terceira parte"
+  ],
+  "route_sends_split_off": [
+    "[\"primeira parte\", \"segunda parte\", \"terceira parte\"]"
+  ]
+}

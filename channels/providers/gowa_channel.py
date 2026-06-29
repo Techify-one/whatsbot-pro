@@ -16,6 +16,7 @@ import logging
 
 from channels.base import Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
+from gowa.client import extract_msg_id
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,13 @@ class GOWAChannel(Channel):
     def start(self) -> None:
         if self._manager is not None:
             self._manager.start()
+        # Register this channel's device in the (shared) GOWA process so it can
+        # hold its own WhatsApp session — multi-device on a single GOWA process.
+        if self._client is not None:
+            try:
+                self._client.ensure_device()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("GOWAChannel.start: ensure_device failed: %s", e)
 
     def stop(self) -> None:
         if self._manager is not None:
@@ -43,20 +51,61 @@ class GOWAChannel(Channel):
     def status(self) -> dict:
         connected = bool(self._manager and self._manager.is_running)
         logged_in = False
+        own_phone = ""
         try:
             logged_in = bool(self._client and self._client.is_connected())
+            if logged_in:
+                own_phone = self._client.get_own_number() or ""
         except Exception:
             pass
         return {"connected": connected, "logged_in": logged_in,
-                "needs_qr": connected and not logged_in, "error": None}
+                "needs_qr": connected and not logged_in,
+                "own_phone": own_phone, "error": None}
+
+    def get_qr(self) -> bytes | None:
+        """PNG bytes of this device's login QR (None if logged in / unavailable).
+
+        Re-verifies the GOWA device exists before requesting a QR. A device that
+        was never paired can vanish from GOWA (dropped on a GOWA restart, or
+        removed by a prior logout), while this client still has it cached as
+        ready — which makes ``/app/login`` fail with DEVICE_NOT_FOUND. Clearing
+        the cache forces ``ensure_device`` to recreate it, so connecting an
+        existing channel behaves like connecting a freshly-created one.
+
+        This is the canonical name (matches ``Channel.get_qr``). The legacy
+        :meth:`qr` is a deprecated alias kept one wave for compatibility
+        (plano 23 Fase C4 — Expand-Contract).
+        """
+        if self._client is None:
+            return None
+        try:
+            self._client._device_ready = False
+            self._client.ensure_device()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("GOWAChannel.get_qr: ensure_device failed: %s", e)
+        return self._client.get_qr_code()
+
+    # Deprecated alias (plano 23 Fase C4). ``get_qr`` is canonical; ``qr`` stays
+    # for one wave so any caller still on the old name (and any third-party
+    # provider mirroring it) keeps working. Logs a one-time deprecation note.
+    _qr_deprecation_warned = False
+
+    def qr(self) -> bytes | None:
+        """Deprecated alias for :meth:`get_qr`. Use ``get_qr`` instead."""
+        if not GOWAChannel._qr_deprecation_warned:
+            GOWAChannel._qr_deprecation_warned = True
+            logger.warning(
+                "GOWAChannel.qr() is deprecated; use get_qr() — the alias will "
+                "be removed in a future release.")
+        return self.get_qr()
 
     # ── Outbound (delegates to the existing client) ──────────────────
     def send_text(self, chat_id: str, text: str, *, reply_to=None,
                   mentions=None) -> SendResult:
         try:
-            self._client.send_message(chat_id, text, mentions=mentions,
-                                      reply_message_id=reply_to)
-            return SendResult(ok=True)
+            res = self._client.send_message(chat_id, text, mentions=mentions,
+                                            reply_message_id=reply_to)
+            return SendResult(ok=True, external_msg_id=extract_msg_id(res) or "")
         except Exception as e:  # noqa: BLE001
             return SendResult(ok=False, error=str(e))
 
@@ -64,18 +113,88 @@ class GOWAChannel(Channel):
                    caption: str = "", filename=None) -> SendResult:
         try:
             if kind == "image":
-                self._client.send_image(chat_id, path_or_url, caption=caption)
+                res = self._client.send_image(chat_id, path_or_url, caption=caption)
             elif kind == "audio":
-                self._client.send_audio(chat_id, path_or_url)
+                res = self._client.send_audio(chat_id, path_or_url)
             else:
-                self._client.send_file(chat_id, path_or_url, caption=caption)
-            return SendResult(ok=True)
+                res = self._client.send_file(chat_id, path_or_url, caption=caption,
+                                             filename=filename)
+            return SendResult(ok=True, external_msg_id=extract_msg_id(res) or "")
         except Exception as e:  # noqa: BLE001
             return SendResult(ok=False, error=str(e))
 
+    # ── Optional capabilities (delegate to the existing client) ──────
+    def mark_read(self, chat_id: str, msg_id: str) -> None:
+        try:
+            self._client.mark_as_read(msg_id, chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("gowa mark_read failed", exc_info=True)
+
+    def send_presence(self, chat_id: str, state: str) -> None:
+        try:
+            if state in ("paused", "stop", "available"):
+                self._client.stop_chat_presence(chat_id)
+            else:  # composing / recording / start
+                self._client.send_chat_presence(chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("gowa send_presence failed", exc_info=True)
+
+    def react(self, chat_id: str, msg_id: str, emoji: str) -> None:
+        try:
+            self._client.react_to_message(msg_id, chat_id, emoji)
+        except Exception:  # noqa: BLE001
+            logger.debug("gowa react failed", exc_info=True)
+
+    def revoke(self, chat_id: str, msg_id: str) -> None:
+        try:
+            self._client.revoke_message(msg_id, chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("gowa revoke failed", exc_info=True)
+
+    def check_phone(self, phone: str) -> dict:
+        """Verify the number on WhatsApp via GOWA ``/user/check`` (resolves the BR
+        canonical phone too). Propagates ``GOWASendError`` so the caller can surface
+        a real connection problem (e.g. HTTP 401 when this device isn't logged in)."""
+        if self._client is None:
+            return {"registered": True, "canonical_phone": phone, "name": ""}
+        return self._client.check_phone(phone)
+
     # ── Inbound ──────────────────────────────────────────────────────
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
-        # Placeholder: the live webhook still parses inline. When the GOWA
-        # parsing is extracted to a pure function (plano 02 §0.5) it is reused
-        # here. Returning [] keeps the contract valid without duplicating logic.
-        return []
+        """Translate a raw GOWA webhook body into InboundEvents (plano 13 Fase 0).
+
+        Delegates to ``gowa.inbound.parse_gowa_inbound`` (the extracted pure-ish
+        parser), passing this channel's client + the configured group_reply_mode.
+        Bot identity defaults to what ``group_mentions`` holds (set by the status
+        poll). Blocking client/DB lookups happen inside — callers run it via
+        ``asyncio.to_thread``.
+        """
+        from gowa.inbound import parse_gowa_inbound
+        group_mode = "mention_only"
+        try:
+            from db.repositories import config_repo
+            group_mode = config_repo.get("group_reply_mode", "mention_only") or "mention_only"
+        except Exception:  # noqa: BLE001
+            pass
+        return parse_gowa_inbound(raw, channel_id=self.channel_id,
+                                  client=self._client, group_mode=group_mode)
+
+
+def build_gowa_channel(channel_id: str, row: dict | None, *,
+                       gowa_client, gowa_manager) -> "GOWAChannel":
+    """Build a live ``GOWAChannel`` for a channel row.
+
+    The ``default`` channel reuses the singleton client (device ``whatsbot``)
+    that drives the legacy message pipeline. Every other GOWA channel gets its
+    own ``GOWAClient`` bound to its ``gowa_device_id`` but pointing at the same
+    (shared) GOWA process — i.e. N WhatsApp numbers as N devices on one GOWA.
+    """
+    if channel_id == "default":
+        return GOWAChannel(channel_id, gowa_client, gowa_manager)
+    device_id = ((row or {}).get("gowa_device_id") or channel_id)
+    # Import here to avoid a circular import at module load time.
+    from gowa.client import GOWAClient
+    client = GOWAClient(port=getattr(gowa_client, "port", 3000))
+    client.device_id = device_id
+    client.strict_device = True  # bind to its own device, never adopt another's
+    return GOWAChannel(channel_id, client, gowa_manager)

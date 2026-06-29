@@ -22,7 +22,13 @@ monitor, etc.) — no extra dependency.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -51,11 +57,20 @@ class WhatsAppCloudChannel(Channel):
                 reactions=True,
                 media=True,
                 inbound_route="path",
+                session_window_hours=24,  # free text only within 24h of last inbound
+                # No QR / connect step: a channel missing these can never connect,
+                # send or receive (status() pings phone_number_id+access_token; the
+                # core webhook handshake needs verify_token). The core rejects
+                # creating one without them — see channels.base.required_credentials.
+                required_credentials=("access_token", "phone_number_id", "verify_token"),
             ),
         )
         self.registry = registry
         # In-memory fallback for tests / registry-less usage.
         self._credentials = dict(credentials or {})
+        # Short cache for list_templates (avoid hitting the Graph API on every
+        # picker open): (fetched_at, [templates]).
+        self._templates_cache: Optional[tuple] = None
 
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
@@ -168,35 +183,151 @@ class WhatsAppCloudChannel(Channel):
             payload["context"] = {"message_id": reply_to}
         return self._post_message(payload)
 
+    def upload_media(self, path: str, *, mime_type: Optional[str] = None) -> Optional[str]:
+        """Upload a LOCAL file to the Graph API and return its media id.
+
+        ``POST /{phone_number_id}/media`` (multipart) with ``messaging_product=whatsapp``
+        and the file's mime ``type``. The returned id is consumed immediately by
+        :meth:`send_media`; Cloud media ids are single-use-ish and expire, so we do
+        NOT cache them. The header carries ONLY ``Authorization`` — httpx sets the
+        multipart ``Content-Type`` (with boundary) itself; forcing
+        ``application/json`` (as :meth:`_headers` does) would corrupt the upload.
+        Returns ``None`` on any failure (caller maps it to a clean SendResult error).
+        """
+        phone_id = self._phone_number_id
+        if not phone_id or not self._access_token or not path:
+            return None
+        mime = mime_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
+        url = f"{self._base_url()}/{phone_id}/media"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client, open(path, "rb") as fh:
+                resp = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    data={"messaging_product": "whatsapp", "type": mime},
+                    files={"file": (Path(path).name, fh, mime)},
+                )
+            if resp.status_code in (200, 201):
+                return (resp.json() or {}).get("id")
+            logger.warning("whatsapp_cloud upload_media -> %s: %s",
+                           resp.status_code, resp.text[:300])
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud upload_media failed", exc_info=True)
+        return None
+
+    @staticmethod
+    def _is_local_file(path_or_url: str) -> bool:
+        """True when the input is a local filesystem path (needs upload), not a
+        public URL (sent as ``link``)."""
+        if not path_or_url:
+            return False
+        low = path_or_url.lower()
+        if low.startswith("http://") or low.startswith("https://"):
+            return False
+        try:
+            return os.path.isfile(path_or_url)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _gif_to_mp4(path: str) -> Optional[str]:
+        """Best-effort convert an animated GIF to a looping, silent MP4 so it plays
+        inline on WhatsApp (the Cloud API has no native GIF type — a raw GIF can't
+        be sent as ``image``/``video``). Requires ffmpeg on PATH; returns the temp
+        mp4 path, or ``None`` when ffmpeg is absent/fails (caller then falls back to
+        sending the GIF as a document)."""
+        if not shutil.which("ffmpeg"):
+            return None
+        try:
+            out = os.path.join(
+                tempfile.gettempdir(),
+                f"wac_gif_{Path(path).stem}_{int(time.time() * 1000)}.mp4")
+            # yuv420p + even dimensions + faststart = broad WhatsApp compatibility;
+            # -an drops audio (GIFs have none, and silent video autoplays like a GIF).
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", path,
+                 "-movflags", "faststart", "-pix_fmt", "yuv420p",
+                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-an", out],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            if proc.returncode == 0 and os.path.isfile(out):
+                return out
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud gif->mp4 conversion failed", exc_info=True)
+        return None
+
     def send_media(self, chat_id: str, kind: str, path_or_url: str, *,
                    caption: str = "", filename=None) -> SendResult:
-        # Cloud API accepts either an uploaded media id or a public link. We use
-        # ``link`` here; uploading local files to /media (to get a media id) is
-        # a later concern — see media-cache TODO in parse_inbound (P16).
+        """Send media via the Cloud API.
+
+        Accepts EITHER a public URL (sent as ``link``) OR a LOCAL file path — the
+        core hands the provider a local ``statics/...`` path (the same contract GOWA
+        gets), so a local file is uploaded to ``/media`` first and sent by its
+        ``id``. Sending a local path as ``link`` is what produced the
+        ``(#100) ... is not a valid URI`` error.
+
+        GIF (decision: animate as video): a local ``.gif`` is converted to MP4 and
+        sent as ``video`` when ffmpeg is available; otherwise it degrades to a
+        document (delivered, not animated).
+        """
         kind = (kind or "").lower()
+        is_local = self._is_local_file(path_or_url)
+
+        # GIF → video (animated) when we can convert; else send as a document.
+        # Only auto-animate on the IMAGE path: if the operator explicitly attached
+        # the .gif as a DOCUMENT, respect that and send the file as-is.
+        is_gif = kind in ("image", "gif") and (
+            kind == "gif"
+            or (path_or_url or "").lower().endswith(".gif")
+            or (mimetypes.guess_type(path_or_url)[0] or "") == "image/gif"
+        )
+        upload_path = path_or_url
+        cleanup_path: Optional[str] = None
+        if is_gif:
+            mp4 = self._gif_to_mp4(path_or_url) if is_local else None
+            if mp4:
+                kind, upload_path, cleanup_path = "video", mp4, mp4
+            else:
+                kind = "document"  # cannot animate without conversion → deliver as file
+
+        # Resolve a local path to a media id (upload); keep public URLs as a link.
+        if is_local:
+            media_id = self.upload_media(upload_path)
+            if cleanup_path:
+                try:
+                    os.remove(cleanup_path)
+                except OSError:
+                    pass
+            if not media_id:
+                return SendResult(ok=False, error="media_upload_failed")
+            media_ref = {"id": media_id}
+        else:
+            media_ref = {"link": path_or_url}
+
         if kind == "image":
             mtype = "image"
-            media_obj: dict = {"link": path_or_url}
+            media_obj: dict = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
         elif kind in ("audio", "voice"):
             mtype = "audio"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
         elif kind == "video":
             mtype = "video"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
         elif kind == "sticker":
             mtype = "sticker"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
         else:
             mtype = "document"
-            media_obj = {"link": path_or_url}
+            media_obj = dict(media_ref)
             if caption:
                 media_obj["caption"] = caption
-            if filename:
-                media_obj["filename"] = filename
+            # Documents keep a human filename; fall back to the local file's name.
+            doc_name = filename or (os.path.basename(path_or_url) if is_local else None)
+            if doc_name:
+                media_obj["filename"] = doc_name
         payload = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
@@ -252,6 +383,222 @@ class WhatsAppCloudChannel(Channel):
         }
         return self._post_message(payload)
 
+    # ── Templates (HSM) listing ──────────────────────────────────────
+    def list_templates(self) -> list[dict]:
+        """List message templates for the WABA (Graph API), ANY status.
+
+        ``GET /{waba_id}/message_templates`` — note this uses ``waba_id`` (NOT
+        ``phone_number_id``, which send_template uses). Returns templates of every
+        status (APPROVED/PENDING/REJECTED/…) normalized for the UI — the picker
+        shows the status badge and only lets approved ones be sent. Follows
+        ``paging.next``. Cached for ~5 min so reopening the picker doesn't re-hit
+        Meta (invalidated by create/delete). Returns ``[]`` on any failure or
+        missing ``waba_id`` (the UI then shows a "configure o WABA ID" hint).
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return []
+        if self._templates_cache is not None:
+            fetched_at, cached = self._templates_cache
+            if (time.time() - fetched_at) < 300:
+                return cached
+
+        results: list[dict] = []
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        params: Optional[dict] = {
+            "fields": "name,language,status,category,components",
+            "limit": 100,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                # Cap pagination defensively (a WABA shouldn't have thousands).
+                for _ in range(20):
+                    resp = client.get(url, headers=headers, params=params)
+                    if resp.status_code != 200:
+                        logger.warning("whatsapp_cloud list_templates %s -> %s: %s",
+                                       waba_id, resp.status_code, resp.text[:200])
+                        break
+                    data = resp.json()
+                    for tpl in data.get("data") or []:
+                        results.append(self._normalize_template(tpl))
+                    nxt = ((data.get("paging") or {}).get("next")) or ""
+                    if not nxt:
+                        break
+                    url, params = nxt, None  # next is a full URL; don't re-send params
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud list_templates failed", exc_info=True)
+            # Serve a stale cache if we have one rather than nothing.
+            return self._templates_cache[1] if self._templates_cache else []
+
+        self._templates_cache = (time.time(), results)
+        return results
+
+    def _invalidate_templates_cache(self) -> None:
+        self._templates_cache = None
+
+    def create_template(self, name: str, *, category: str, language: str,
+                        body_text: str, header_text: Optional[str] = None,
+                        footer_text: Optional[str] = None,
+                        body_examples: Optional[list] = None,
+                        header_examples: Optional[list] = None) -> dict:
+        """Create a template via ``POST /{waba_id}/message_templates`` (Graph API).
+
+        Assembles the Graph ``components`` from a simple normalized definition so the
+        Graph-specific shape (UPPERCASE types, the nested ``example`` arrays Meta
+        requires for ``{{n}}`` placeholders) stays inside the provider. The created
+        template starts ``PENDING`` until Meta reviews it. Invalidates the list
+        cache on success. Returns ``{ok, id?, status?, category?, error?}``.
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not (name or "").strip() or not (body_text or "").strip():
+            return {"ok": False, "error": "name e body_text são obrigatórios"}
+
+        components: list[dict] = []
+        if header_text and header_text.strip():
+            header_comp: dict = {"type": "HEADER", "format": "TEXT",
+                                 "text": header_text.strip()}
+            if header_examples:
+                header_comp["example"] = {"header_text": list(header_examples)}
+            components.append(header_comp)
+        body_comp: dict = {"type": "BODY", "text": body_text.strip()}
+        if body_examples:
+            # Meta expects body_text as a list-of-lists (one inner list per example set).
+            body_comp["example"] = {"body_text": [list(body_examples)]}
+        components.append(body_comp)
+        if footer_text and footer_text.strip():
+            components.append({"type": "FOOTER", "text": footer_text.strip()})
+
+        payload = {
+            "name": name.strip(),
+            "language": (language or "pt_BR").strip(),
+            "category": (category or "UTILITY").strip().upper(),
+            "components": components,
+        }
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.post(url, headers=self._headers(), json=payload)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                self._invalidate_templates_cache()
+                return {
+                    "ok": True,
+                    "id": data.get("id"),
+                    "status": data.get("status"),
+                    "category": data.get("category"),
+                }
+            return {"ok": False, "error": _graph_error(resp)}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud create_template failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    def delete_template(self, name: str) -> dict:
+        """Delete a template (every language version) by name.
+
+        ``DELETE /{waba_id}/message_templates?name={name}`` removes ALL languages of
+        that template name. Invalidates the list cache on success. Returns
+        ``{ok, error?}``.
+        """
+        waba_id = self._cred("waba_id")
+        token = self._access_token
+        if not waba_id or not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not (name or "").strip():
+            return {"ok": False, "error": "name é obrigatório"}
+        url = f"{self._base_url()}/{waba_id}/message_templates"
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                resp = client.delete(url, headers={"Authorization": f"Bearer {token}"},
+                                     params={"name": name.strip()})
+            if resp.status_code in (200, 201):
+                data = resp.json() if resp.content else {}
+                if data.get("success") is False:
+                    return {"ok": False, "error": _graph_error(resp)}
+                self._invalidate_templates_cache()
+                return {"ok": True}
+            return {"ok": False, "error": _graph_error(resp)}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud delete_template failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _normalize_template(tpl: dict) -> dict:
+        """Normalize a Graph template into the UI shape (lower-cased type/format)."""
+        components = []
+        for c in tpl.get("components") or []:
+            nc: dict = {"type": (c.get("type") or "").lower()}
+            if c.get("format"):
+                nc["format"] = (c.get("format") or "").lower()
+            if c.get("text") is not None:
+                nc["text"] = c.get("text")
+            if c.get("example") is not None:
+                nc["example"] = c.get("example")
+            if c.get("buttons") is not None:
+                nc["buttons"] = c.get("buttons")
+            components.append(nc)
+        return {
+            "name": tpl.get("name"),
+            "language": tpl.get("language"),
+            "category": tpl.get("category"),
+            "status": tpl.get("status"),
+            "components": components,
+        }
+
+    # ── Inbound media download (plano 11 Fase 5 / P16) ───────────────
+    def download_media(self, media_id: str, dest_dir, *,
+                       mime_type: Optional[str] = None) -> Optional[str]:
+        """Resolve a Cloud media id → a cached local file in ``dest_dir``.
+
+        Two Graph calls: ``GET /{media_id}`` returns a short-lived ``url`` +
+        ``mime_type``; the bytes are then fetched from that url WITH the bearer
+        token. Writes ``cloud_<media_id>.<ext>`` into ``dest_dir`` and returns the
+        filename (the core composes the ``statics/media/<filename>`` media_path),
+        or ``None`` on any failure (caller falls back to a media placeholder).
+        """
+        if not media_id or not self._access_token:
+            return None
+        try:
+            meta_url = f"{self._base_url()}/{media_id}"
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                meta = client.get(meta_url, headers=self._headers())
+                if meta.status_code != 200:
+                    logger.warning("whatsapp_cloud media meta %s -> %s",
+                                   media_id, meta.status_code)
+                    return None
+                info = meta.json()
+                url = info.get("url")
+                mime = info.get("mime_type") or mime_type or ""
+                if not url:
+                    return None
+                # The CDN url requires the bearer token too (no Content-Type).
+                blob = client.get(url, headers={"Authorization": f"Bearer {self._access_token}"})
+                if blob.status_code != 200:
+                    logger.warning("whatsapp_cloud media blob %s -> %s",
+                                   media_id, blob.status_code)
+                    return None
+                data = blob.content
+            ext = mimetypes.guess_extension((mime or "").split(";")[0].strip() or "") or ""
+            # Normalise the two WhatsApp voice/ogg variants stdlib gets wrong.
+            if not ext and "ogg" in mime:
+                ext = ".ogg"
+            if not ext:
+                ext = ".bin"
+            dest = Path(dest_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            safe_id = "".join(c for c in str(media_id) if c.isalnum() or c in "-_")[:64]
+            filename = f"cloud_{safe_id}{ext}"
+            (dest / filename).write_bytes(data)
+            return filename
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_cloud download_media failed for %s", media_id,
+                           exc_info=True)
+            return None
+
     # ── Inbound ──────────────────────────────────────────────────────
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a Meta webhook payload into ``InboundEvent`` objects.
@@ -261,8 +608,8 @@ class WhatsAppCloudChannel(Channel):
           * one ``kind="receipt"`` event per ``statuses[]`` item
 
         Media (image/audio/document/video/sticker) is recorded with its Cloud
-        API ``media id`` in ``media_extras`` — the actual download + cache to
-        ``statics/media/`` is P16 and intentionally NOT done here (see TODO).
+        API ``media id`` in ``media_extras``; the core's inbound resolver then
+        downloads + caches it to ``statics/media/`` via :meth:`download_media`.
         """
         events: list[InboundEvent] = []
         if not isinstance(raw, dict):
@@ -338,16 +685,16 @@ class WhatsAppCloudChannel(Channel):
         elif msg_type in ("image", "audio", "video", "document", "sticker", "voice"):
             media_type = "audio" if msg_type == "voice" else msg_type
             obj = msg.get(msg_type) or {}
-            # Record the Cloud API media id so a later phase (P16) can download
-            # it via GET /{media_id} + the returned URL and cache to
-            # statics/media/. TODO(P16): resolve media_id → bytes → media_path.
+            # Record the Cloud API media id; the core's inbound media resolver
+            # (server/routes/webhook.py _resolve_inbound_media) calls
+            # :meth:`download_media` to fetch + cache it into statics/media/ and
+            # fills media_path. We only carry the id/metadata here.
             media_extras = {
                 "media_id": obj.get("id"),
                 "mime_type": obj.get("mime_type"),
                 "sha256": obj.get("sha256"),
                 "filename": obj.get("filename"),
                 "voice": obj.get("voice"),
-                "_todo": "download media via Graph /{media_id} and cache (P16)",
             }
             caption = obj.get("caption")
             if caption:
@@ -401,7 +748,7 @@ class WhatsAppCloudChannel(Channel):
             is_group=False,            # Cloud API is 1:1 only
             text=text,
             media_type=media_type,
-            media_path=None,           # filled by the media-cache phase (P16)
+            media_path=None,           # filled by the core inbound media resolver
             media_extras=media_extras,
             ts=ts,
             raw=msg,
@@ -413,6 +760,21 @@ def _to_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _graph_error(resp) -> str:
+    """Best-effort human-readable error from a Graph API error response.
+
+    Meta returns ``{"error": {"message": ..., "error_user_msg": ...}}``; prefer the
+    user-facing message when present, falling back to the raw body."""
+    try:
+        err = (resp.json() or {}).get("error") or {}
+        msg = err.get("error_user_msg") or err.get("message")
+        if msg:
+            return f"{msg}" + (f" ({err['error_user_title']})" if err.get("error_user_title") else "")
+    except Exception:  # noqa: BLE001
+        pass
+    return f"http_{resp.status_code}: {resp.text[:300]}"
 
 
 # Exported for the plugin loader (entry.channels → CHANNEL_PROVIDERS).

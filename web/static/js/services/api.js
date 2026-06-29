@@ -1,41 +1,38 @@
 /**
  * REST API client for WhatsBot backend.
+ *
+ * FACADE over `services/httpClient.js` (Plano 23 · R2): the JSON `request` and
+ * multipart `uploadRequest` transports — incl. the single shared 401 branch —
+ * live there now. This module keeps every public function and its signature, so
+ * existing imports (`import { sendImage } from '.../api.js'`, `authHeaders`,
+ * `handleUnauthorized`, …) keep resolving unchanged.
  */
+
+import {
+  request,
+  uploadRequest,
+  authHeaders as _authHeadersBase,
+  handleUnauthorized,
+} from './httpClient.js';
 
 const BASE = '';
 
-function _getToken() {
-  return localStorage.getItem('whatsbot_token') || '';
-}
+// Re-exported so the historical `import { handleUnauthorized } from '.../api.js'`
+// keeps working (e.g. websocket.js, app.js).
+export { handleUnauthorized };
 
-function _authHeaders(headers = {}) {
-  const token = _getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return headers;
-}
-
+/**
+ * Auth headers for callers that build their own fetch (returns a fresh object
+ * so the caller can safely mutate). Mirrors the legacy `api.authHeaders`.
+ */
 export function authHeaders(extra = {}) {
-  return _authHeaders({ ...extra });
+  return _authHeadersBase({ ...extra });
 }
 
-export function handleUnauthorized() {
-  localStorage.removeItem('whatsbot_token');
-  window.dispatchEvent(new Event('whatsbot:unauthorized'));
-}
-
-async function request(method, path, body) {
-  const opts = {
-    method,
-    headers: _authHeaders({ 'Content-Type': 'application/json' }),
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${BASE}${path}`, opts);
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+// Internal alias kept for the handful of functions below that build their own
+// `fetch` (blob downloads / QR image) and therefore can't use `request`.
+function _authHeaders(headers = {}) {
+  return _authHeadersBase(headers);
 }
 
 export async function getConfig() {
@@ -68,8 +65,9 @@ export async function deleteQuickReply(id) {
 }
 
 // ── Custom attributes (plano 05) ──────────────────────────────────
-export async function getCustomAttributes(appliesTo = 'contact') {
-  return request('GET', `/api/custom-attributes?applies_to=${encodeURIComponent(appliesTo)}`);
+export async function getCustomAttributes(appliesTo = null) {
+  const qs = appliesTo ? `?applies_to=${encodeURIComponent(appliesTo)}` : '';
+  return request('GET', `/api/custom-attributes${qs}`);
 }
 
 export async function createCustomAttribute(def) {
@@ -138,36 +136,17 @@ export async function sandboxClear(phone) {
   return request('POST', '/api/sandbox/clear', { phone: phone || '' });
 }
 
-async function _sandboxUpload(path, fields) {
-  const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) {
-    if (value instanceof Blob) form.append(key, value, value.name || 'file');
-    else form.append(key, value ?? '');
-  }
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
-}
-
 export async function sandboxSendImage(phone, file, caption = '') {
-  return _sandboxUpload('/api/sandbox/send-image', { phone, caption, image: file });
+  return uploadRequest('/api/sandbox/send-image', { phone, caption, image: file });
 }
 
 export async function sandboxSendAudio(phone, blob, filename = 'voice.ogg') {
   const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
-  return _sandboxUpload('/api/sandbox/send-audio', { phone, audio: named });
+  return uploadRequest('/api/sandbox/send-audio', { phone, audio: named });
 }
 
 export async function sandboxSendDocument(phone, file, caption = '') {
-  return _sandboxUpload('/api/sandbox/send-document', { phone, caption, document: file });
+  return uploadRequest('/api/sandbox/send-document', { phone, caption, document: file });
 }
 
 // ── Contacts ──────────────────────────────────────────────────────
@@ -180,14 +159,45 @@ export async function getContacts(q = '', archived = false) {
   return request('GET', `/api/contacts${query}`);
 }
 
+// Exporta todos os contatos como CSV (download). Retorna o Blob ou null.
+export async function exportContacts() {
+  const res = await fetch(`${BASE}/api/contacts/export`, {
+    method: 'GET',
+    headers: _authHeaders(),
+  });
+  if (res.status === 401) { handleUnauthorized(); return null; }
+  if (!res.ok) return null;
+  return res.blob();
+}
+
+// Importa contatos de um CSV. `file` é um File do input. Retorna {ok, data, error}.
+export async function importContacts(file) {
+  return uploadRequest('/api/contacts/import', { file });
+}
+
 // Number of conversations with unread messages (for the browser-tab badge).
 export async function getUnreadCount() {
   return request('GET', '/api/contacts/unread-count');
 }
 
-export async function getContact(phone, markRead = true) {
-  const qs = markRead ? '' : '?mark_read=false';
+// `channelId` escopa o thread ao canal escolhido (multicanal): ao abrir uma
+// conversa NOVA pela caixa de entrada selecionada, antes de existir uma conversa
+// nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
+// nunca cai na conversa de outro canal do mesmo número.
+export async function getContact(phone, markRead = true, channelId = null) {
+  const params = [];
+  if (!markRead) params.push('mark_read=false');
+  if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
+}
+
+// Conversa-cêntrico (plano 11 D1): carrega a thread de UMA conversa (um canal),
+// sem fundir os canais do mesmo número. Retorna {conversation, contact, messages,
+// channel_id, avatar_v}. markRead=false não zera o badge daquela conversa.
+export async function getConversationMessages(convId, markRead = true) {
+  const qs = markRead ? '' : '?mark_read=false';
+  return request('GET', `/api/conversations/${convId}/messages${qs}`);
 }
 
 export async function deleteContact(phone) {
@@ -202,35 +212,52 @@ export async function pinContact(phone, pinned) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/pin`, { pinned });
 }
 
-export async function sendMessage(phone, message, replyTo = null) {
+// conversationId (plano 11 D1) roteia o envio pelo CANAL daquela conversa via
+// OutboundRouter; ausente cai no 'default' (GOWA), preservando o legado.
+// channelId roteia o envio quando a conversa AINDA não existe (1ª mensagem de uma
+// conversa nova iniciada pelo picker de caixa de entrada). Quando há conversationId,
+// o backend ignora channelId e usa o canal da conversa.
+export async function sendMessage(phone, message, replyTo = null, conversationId = null, channelId = null) {
   const body = { message };
   if (replyTo) body.reply_to = replyTo;
+  if (conversationId != null) body.conversation_id = conversationId;
+  if (channelId != null) body.channel_id = channelId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/send`, body);
 }
 
-export async function retrySend(phone, message) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, { message });
+export async function retrySend(phone, message, conversationId = null, channelId = null) {
+  const body = { message };
+  if (conversationId != null) body.conversation_id = conversationId;
+  if (channelId != null) body.channel_id = channelId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/retry-send`, body);
 }
 
 // Delete a message. scope='me' (local) or scope='all' (revoke for everyone).
 // Pass msgId (GOWA id) and/or dbId (DB row id, for local messages without a msg_id).
-export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 'me' } = {}) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, {
-    msg_id: msgId, db_id: dbId, scope,
-  });
+export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 'me', conversationId = null } = {}) {
+  const body = { msg_id: msgId, db_id: dbId, scope };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, body);
 }
 
 // React to a message with an emoji. Empty emoji removes the operator's reaction.
-export async function reactToMessage(phone, msgId, emoji) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, {
-    msg_id: msgId, emoji,
-  });
+export async function reactToMessage(phone, msgId, emoji, conversationId = null) {
+  const body = { msg_id: msgId, emoji };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, body);
+}
+
+// Generate an AI-quality improvement analysis for a flagged AI reply.
+export async function generateImprovement(phone, { message, feedback = '' }) {
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/improve`,
+    { message, feedback });
 }
 
 export async function sendPrivateMessage(phone, text, opts = {}) {
   const body = { text };
   if (opts.aiRead !== undefined) body.ai_read = !!opts.aiRead;
   if (opts.aiReply !== undefined) body.ai_reply = !!opts.aiReply;
+  if (opts.conversationId != null) body.conversation_id = opts.conversationId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/private-message`, body);
 }
 
@@ -263,62 +290,47 @@ export async function getGroupMembers(groupJid, force = false) {
   return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
-export async function sendImage(phone, file, caption = '') {
-  const form = new FormData();
-  form.append('image', file);
-  form.append('caption', caption);
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-image`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+// Only append conversation_id/channel_id when present (the backend distinguishes
+// absent from empty), so build the fields conditionally before uploadRequest.
+function _scopeFields(conversationId, channelId) {
+  const f = {};
+  if (conversationId != null) f.conversation_id = String(conversationId);
+  if (channelId != null) f.channel_id = String(channelId);
+  return f;
 }
 
-export async function sendAudio(phone, blob, filename = 'voice.ogg') {
-  const form = new FormData();
-  form.append('audio', blob, filename);
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-audio`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+export async function sendImage(phone, file, caption = '', conversationId = null, channelId = null) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-image`,
+    { image: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
-export async function sendDocument(phone, file, caption = '') {
-  const form = new FormData();
-  form.append('document', file);
-  form.append('caption', caption);
-  const res = await fetch(`${BASE}/api/contacts/${encodeURIComponent(phone)}/send-document`, {
-    method: 'POST',
-    headers: _authHeaders(),
-    body: form,
-  });
-  if (res.status === 401) {
-    localStorage.removeItem('whatsbot_token');
-    window.dispatchEvent(new Event('whatsbot:unauthorized'));
-    return { ok: false, error: 'Não autenticado.' };
-  }
-  return res.json();
+export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null, channelId = null) {
+  // Preserve the filename: uploadRequest names Blob parts by `.name` (default
+  // 'file'), so wrap a bare Blob in a File carrying `filename`.
+  const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-audio`,
+    { audio: named, ..._scopeFields(conversationId, channelId) });
 }
 
-export async function sendPresence(phone, action = 'start') {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, { action });
+export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-document`,
+    { document: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
-export async function checkPhone(phone) {
-  return request('POST', '/api/contacts/check-phone', { phone });
+export async function sendPresence(phone, action = 'start', conversationId = null) {
+  const body = { action };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, body);
+}
+
+// create=false apenas valida o número sem materializar o contato (usado pela
+// verificação ao vivo do modal "Nova conversa" — o contato só nasce no envio).
+// channelId roteia a verificação pelo canal escolhido: só o GOWA consulta o
+// WhatsApp; Cloud API/Telegram não verificam antes de enviar (assumem válido).
+export async function checkPhone(phone, create = true, channelId = null) {
+  const body = { phone, create };
+  if (channelId) body.channel_id = channelId;
+  return request('POST', '/api/contacts/check-phone', body);
 }
 
 // ── Tags ─────────────────────────────────────────────────────────────
@@ -361,10 +373,25 @@ export async function getConversation(id) {
   return request('GET', `/api/conversations/${id}`);
 }
 
-// Filter engine (plano 08). The schema describes which dimensions exist so the
-// UI can render only the controls that apply to this install.
-export async function getConversationFilterSchema() {
-  return request('GET', '/api/conversations/filter-schema');
+// ── Saved conversation filters (presets nomeados, por usuário) ──────
+// Each operator can name and persist one or more inbox filter presets. `spec`
+// is the full filter snapshot ({statusFilter, assignmentTab, sortBy, tagFilter,
+// advFilters}). Scoped server-side to the logged-in user (shared in legacy mode).
+
+export async function listSavedFilters() {
+  return request('GET', '/api/me/conversation-filters');
+}
+
+export async function createSavedFilter(name, spec) {
+  return request('POST', '/api/me/conversation-filters', { name, spec });
+}
+
+export async function updateSavedFilter(id, patch) {
+  return request('PUT', `/api/me/conversation-filters/${id}`, patch);
+}
+
+export async function deleteSavedFilter(id) {
+  return request('DELETE', `/api/me/conversation-filters/${id}`);
 }
 
 // Filter conversations via the flat-param GET endpoint. Builds the querystring
@@ -400,6 +427,12 @@ export async function archiveConversation(id, archived) {
   return request('POST', `/api/conversations/${id}/archive`, { archived });
 }
 
+// Hard-delete a single conversation/thread (plano 16). Keeps the contact and its
+// other conversations; only this thread + its messages are removed.
+export async function deleteConversation(id) {
+  return request('DELETE', `/api/conversations/${id}`);
+}
+
 // Assume the conversation for the current user (plano 10 Onda 0). No body — the
 // server resolves "me" from the authenticated session.
 export async function assignMeConversation(id) {
@@ -412,15 +445,119 @@ export async function setConversationAi(id, active) {
   return request('POST', `/api/conversations/${id}/ai`, { active });
 }
 
-// Resolve the open conversation for a contact by phone (feeds the chat header).
-export async function getContactConversation(phone) {
-  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation`);
+// Resolve the conversation for a contact by phone (feeds the chat header and the
+// sidebar right-click menu). With { includeClosed: true } the server returns the
+// latest conversation regardless of status, so a resolved thread still resolves
+// (lets the menu show its assignee and a "reopen" action).
+export async function getContactConversation(phone, { includeClosed = false } = {}) {
+  const qs = includeClosed ? '?include_closed=true' : '';
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation${qs}`);
+}
+
+// Agents that can take a conversation (plano 10): {users:[...], ai_agents:[...]}.
+// Gated by conversation.read so attendants (not only admins) can transfer.
+export async function getAssignableAgents() {
+  return request('GET', '/api/conversations/assignable-agents');
+}
+
+// Unified assignment (plano 10): route a conversation to a human or an AI agent.
+// kind: 'user' (needs userId), 'ai' (needs agentKey) or 'none' (unassign).
+export async function assignAgent(id, { kind, userId = null, agentKey = null } = {}) {
+  const body = { kind };
+  if (kind === 'user') body.user_id = userId;
+  if (kind === 'ai') body.agent_key = agentKey;
+  return request('POST', `/api/conversations/${id}/assign-agent`, body);
 }
 
 // Update a conversation's custom_attributes (FF5). Server validates keys against
 // the conversation attribute definitions.
 export async function updateConversationInfo(id, body) {
   return request('PUT', `/api/conversations/${id}/info`, body);
+}
+
+// ── Conversation labels (Onda 3) ──────────────────────────────────
+// Etiquetas próprias da conversa (registro global + atribuição por conversa),
+// separadas das tags de contato.
+
+export async function getConversationLabels() {
+  return request('GET', '/api/conversation-labels');
+}
+
+export async function createConversationLabel(name, color) {
+  return request('POST', '/api/conversation-labels', { name, color });
+}
+
+export async function updateConversationLabel(id, data) {
+  return request('PUT', `/api/conversation-labels/${id}`, data);
+}
+
+export async function deleteConversationLabel(id) {
+  return request('DELETE', `/api/conversation-labels/${id}`);
+}
+
+// Labels currently attached to ONE conversation: {conversation_id, labels:[...]}.
+export async function getConversationLabelsFor(convId) {
+  return request('GET', `/api/conversations/${convId}/labels`);
+}
+
+// Replace a conversation's labels (snapshot of names).
+export async function updateConversationLabels(convId, labels) {
+  return request('PUT', `/api/conversations/${convId}/labels`, { labels });
+}
+
+// ── Templates (Cloud API, Frente C) ───────────────────────────────
+// Channel-aware: returns {supported, templates}. Only channels with the
+// `templates` capability (WhatsApp Cloud) return supported=true.
+export async function getConversationTemplates(convId) {
+  return request('GET', `/api/conversations/${convId}/templates`);
+}
+
+// body: {template_name, language?, components?, preview_text?}
+export async function sendConversationTemplate(convId, payload) {
+  return request('POST', `/api/conversations/${convId}/send-template`, payload);
+}
+
+// Create a template (WhatsApp Cloud) — gated by template.create.
+// body: {name, category?, language?, body_text, header_text?, footer_text?,
+//        body_examples?, header_examples?}
+export async function createConversationTemplate(convId, payload) {
+  return request('POST', `/api/conversations/${convId}/templates`, payload);
+}
+
+// Delete a template (all languages) by name — gated by template.delete.
+export async function deleteConversationTemplate(convId, name) {
+  return request('DELETE', `/api/conversations/${convId}/templates/${encodeURIComponent(name)}`);
+}
+
+// ── Templates / janela 24h ao iniciar conversa (plano 21) ─────────────
+// Versões CHANNEL-scoped (sem conversa ainda): a "Nova conversa" precisa saber a
+// janela e listar/enviar templates antes que a conversa exista.
+
+// Estado da janela de 24h para iniciar uma conversa em `channelId` com `phone`.
+// Retorna {templates_supported, session_open, has_conversation, conversation_id, last_inbound_ts}.
+export async function getChannelSessionState(channelId, phone) {
+  return request('GET', `/api/channels/${encodeURIComponent(channelId)}/session-state?phone=${encodeURIComponent(phone)}`);
+}
+
+// Lista os templates de um canal (mesmo shape de getConversationTemplates).
+export async function getChannelTemplates(channelId) {
+  return request('GET', `/api/channels/${encodeURIComponent(channelId)}/templates`);
+}
+
+// Envia um template aprovado para `phone` via `channelId` (cria a conversa).
+// body: {phone, template_name, language?, components?, preview_text?}
+export async function sendChannelTemplate(channelId, payload) {
+  return request('POST', `/api/channels/${encodeURIComponent(channelId)}/send-template`, payload);
+}
+
+// Cria um template no canal — gated por template.create.
+export async function createChannelTemplate(channelId, payload) {
+  return request('POST', `/api/channels/${encodeURIComponent(channelId)}/templates`, payload);
+}
+
+// Apaga um template (todas as línguas) no canal — gated por template.delete.
+export async function deleteChannelTemplate(channelId, name) {
+  return request('DELETE', `/api/channels/${encodeURIComponent(channelId)}/templates/${encodeURIComponent(name)}`);
 }
 
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
@@ -432,6 +569,23 @@ export async function listChannels() {
   return request('GET', '/api/channels');
 }
 
+// Canais arquivados (soft-delete) — para a seção de restauração.
+export async function listArchivedChannels() {
+  return request('GET', '/api/channels?archived=true');
+}
+
+// Desarquiva um canal arquivado (volta para a lista; fica desativado até reativar).
+export async function restoreChannel(id) {
+  return request('POST', `/api/channels/${encodeURIComponent(id)}/restore`);
+}
+
+// Canais conectados (connected + logged_in + enabled) que um operador pode usar
+// para iniciar uma conversa nova. Mais leve e com menos privilégio que listChannels
+// (gated por conversation.reply, sem credenciais). Itens: {id, provider, display_name, own_phone}.
+export async function listConnectedChannels() {
+  return request('GET', '/api/channels/connected');
+}
+
 export async function getChannel(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}`);
 }
@@ -440,19 +594,73 @@ export async function getChannel(id) {
 export async function createChannel(payload) {
   return request('POST', '/api/channels', payload);
 }
+// Telegram plugin: ao criar uma inbox, detecta domínio público e registra o
+// webhook automaticamente (ou cai em long-poll). Retorna {mode, webhook_url, ...}.
+export async function telegramAutoconfigure(channelId) {
+  return request('POST', '/api/plugins/telegram/autoconfigure', { channel_id: channelId });
+}
+// Telegram plugin: estado do canal (modo por-canal + getMe + getWebhookInfo).
+// Retorna {configured, mode, me, webhook:{url,...}}.
+export async function telegramChannelStatus(channelId) {
+  return request('GET', `/api/plugins/telegram/status?channel_id=${encodeURIComponent(channelId)}`);
+}
 
 // body: {display_name?, enabled?, config?, credentials?:{key:value}}
 export async function updateChannel(id, payload) {
   return request('PUT', `/api/channels/${encodeURIComponent(id)}`, payload);
 }
 
-export async function deleteChannel(id) {
-  return request('DELETE', `/api/channels/${encodeURIComponent(id)}`);
+// Soft-delete (arquivar) por padrão; `{ purge: true }` faz hard-delete:
+// apaga o canal e a inbox de vez (não é restaurável).
+export async function deleteChannel(id, { purge = false } = {}) {
+  const qs = purge ? '?purge=true' : '';
+  return request('DELETE', `/api/channels/${encodeURIComponent(id)}${qs}`);
 }
 
-// {connected, logged_in, needs_qr, error}
+// Usuários do painel atribuíveis como agentes de um canal (criação + edição).
+// → {users:[{id,name,email,is_admin}]}
+export async function listChannelAssignableUsers() {
+  return request('GET', '/api/channels/assignable-users');
+}
+
+// Providers disponíveis para CRIAR um canal — só os cujos plugins estão ativos
+// (GOWA é core e sempre presente). → {providers:["gowa", ...]}
+export async function listChannelProviders() {
+  return request('GET', '/api/channels/providers');
+}
+
+// Agentes (usuários do painel) que veem/recebem a inbox deste canal.
+// → {inbox_id, member_ids:[...], users:[{id,name,email,is_admin}]}
+export async function getChannelMembers(id) {
+  return request('GET', `/api/channels/${encodeURIComponent(id)}/members`);
+}
+
+// body: {user_ids:[...]} → substitui o conjunto de membros da inbox do canal.
+export async function setChannelMembers(id, userIds) {
+  return request('PUT', `/api/channels/${encodeURIComponent(id)}/members`, { user_ids: userIds });
+}
+
+// {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
+// GOWA login QR for a channel's device. Returns an object-URL string for the
+// PNG, or null when there's no QR (already logged in / not ready → 204). The
+// caller must URL.revokeObjectURL() the returned url when done.
+export async function getChannelQR(id) {
+  try {
+    const res = await fetch(`${BASE}/api/channels/${encodeURIComponent(id)}/qr`, {
+      headers: _authHeaders(),
+    });
+    if (res.status === 401) { handleUnauthorized(); return null; }
+    if (!res.ok || res.status === 204) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size < 100) return null;
+    return URL.createObjectURL(blob);
+  } catch (e) {
+    return null;
+  }
 }
 
 // ── Models ──────────────────────────────────────────────────────────
@@ -524,6 +732,20 @@ export async function getAgentHistory(key) {
 
 export async function rollbackAgent(key, version) {
   return request('POST', `/api/ai/agents/${encodeURIComponent(key)}/rollback/${version}`);
+}
+
+export async function deleteAgent(key) {
+  return request('DELETE', `/api/ai/agents/${encodeURIComponent(key)}`);
+}
+
+// Full registry of tools registered in the handler (core + plugin + installed
+// code-in-DB), used by the agent editor's per-agent tool selection. The agent's
+// `tool_names` filter applies over THIS set, not just code-in-DB tools, so the
+// picker must read from here. Normalised to {ok, data: array} like the others.
+export async function listRegisteredTools() {
+  const res = await request('GET', '/api/tools');
+  if (res && res.ok) return { ok: true, data: (res.data && res.data.tools) || [] };
+  return res;
 }
 
 export async function listPrompts() {
@@ -644,16 +866,6 @@ export async function downloadAuditExport(params = {}, format = 'csv') {
   return { ok: true };
 }
 
-// ── Update ────────────────────────────────────────────────────────
-
-export async function checkForUpdates() {
-  return request('GET', '/api/update/check');
-}
-
-export async function performUpdate() {
-  return request('POST', '/api/update');
-}
-
 // ── Auth ──────────────────────────────────────────────────────────
 
 // Login. With an email, performs an RBAC user login ({email, password});
@@ -711,4 +923,21 @@ export async function resetUserPassword(id, password) {
 
 export async function deleteUser(id) {
   return request('DELETE', `/api/users/${id}`);
+}
+
+// Role editor (RBAC) — create/edit/delete custom roles + edit system roles.
+export async function createRole(data) {
+  return request('POST', '/api/roles', data);
+}
+
+export async function updateRole(id, data) {
+  return request('PUT', `/api/roles/${id}`, data);
+}
+
+export async function deleteRole(id) {
+  return request('DELETE', `/api/roles/${id}`);
+}
+
+export async function resetRole(id) {
+  return request('POST', `/api/roles/${id}/reset`);
 }

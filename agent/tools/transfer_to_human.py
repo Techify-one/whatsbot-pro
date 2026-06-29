@@ -2,6 +2,8 @@
 
 import logging
 
+from db.repositories import conversation_repo
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +54,51 @@ def execute(ctx, args: dict) -> str | None:
         ctx.tag_registry.create("transferido_atendente", "#ef4444")
         ctx.contact.add_tag("transferido_atendente")
         ctx.contact.save()
+        # Unassign the conversation so it lands in the "Não atribuídas" inbox:
+        # clear both the human assignee and the bound AI agent, and pause the
+        # conversation-level AI gate (a human takes over from here).
+        try:
+            conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+            if conv:
+                # plano 23 Fase B5 (§4.2): the round-robin DESTINATION of a
+                # human handoff is a plugin seam. Default = unassigned
+                # ("Não atribuídas" inbox). A plugin returning a dict with
+                # ``assignee_user_id`` rewrites the destination; ``None`` keeps
+                # the default. No-op (value passes through) when unregistered.
+                assignment = {"assignee_user_id": None,
+                              "reason": args.get("reason")}
+                try:
+                    from plugins.events import apply_filter_sync
+                    rewritten = apply_filter_sync(
+                        "filter.conversation.assignment", assignment,
+                        {"conversation_id": conv["id"],
+                         "contact_id": ctx.contact.id,
+                         "phone": ctx.contact.phone})
+                    if isinstance(rewritten, dict):
+                        assignment = rewritten
+                except Exception:
+                    logger.debug("filter.conversation.assignment falhou para %s",
+                                 ctx.contact.phone)
+                conversation_repo.assign_agent(
+                    conv["id"], assignee_user_id=assignment.get("assignee_user_id"),
+                    active_agent_key=None, ai_active=0)
+                # plano 23 Fase C1: surface the handoff to a human as a TYPED domain
+                # event (``conversation.transferred_to_human``) on the plugin bus,
+                # via ``emit_domain``. Best-effort — same name + payload keys.
+                try:
+                    from domain.events import (emit_domain_sync,
+                                               ConversationTransferredToHuman)
+                    emit_domain_sync(ConversationTransferredToHuman(
+                        conversation_id=conv["id"],
+                        contact_id=ctx.contact.id,
+                        reason=args.get("reason"),
+                    ))
+                except Exception:
+                    logger.debug("conversation.transferred_to_human emit falhou para %s",
+                                 ctx.contact.phone)
+        except Exception as e:
+            logger.warning("transfer_to_human: falha ao desatribuir conversa de %s: %s",
+                           ctx.contact.phone, e)
         logger.info("Transfer to human for %s: %s", ctx.contact.phone, args.get("reason", ""))
     except Exception as e:
         logger.warning("transfer_to_human failed for %s: %s", ctx.contact.phone, e)

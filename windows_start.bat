@@ -214,5 +214,8 @@ call venv\Scripts\activate.bat
 set NO_COLOR=1
 :: uvicorn valida cada --reload-dir antes de subir; storages\plugins e criada
 :: em runtime, entao precisa existir antes (senao o uvicorn aborta).
+:: A lista de --reload-dir abaixo deve casar com WHATSBOT_RELOAD_DIRS em
+:: scripts/_common.sh (fonte de verdade dos launchers POSIX). .bat nao consegue
+:: dar source num .sh, entao mantenha as duas listas em sincronia manualmente.
 if not exist "storages\plugins" mkdir "storages\plugins"
-uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --reload-dir gowa --reload-dir db --reload-dir plugins --reload-dir storages\plugins --log-level warning
+uvicorn server.dev:app --host 0.0.0.0 --port 8080 --reload --reload-dir server --reload-dir agent --reload-dir config --reload-dir gowa --reload-dir channels --reload-dir db --reload-dir plugins --reload-dir storages\plugins --log-level warning

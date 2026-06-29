@@ -1,0 +1,48 @@
+[
+  {
+    "agent_key": null,
+    "error": null,
+    "phone": "5511975500003",
+    "routing_steps": null,
+    "status": "completed",
+    "step_count": 2,
+    "step_types": [
+      "webhook_received",
+      "batch_accumulated"
+    ],
+    "steps": [
+      {
+        "agent_key": null,
+        "data": {
+          "items": [
+            {
+              "image_path": null,
+              "media_extras": null,
+              "media_path": null,
+              "media_type": null,
+              "msg_id": "<MSGID>",
+              "reply_to_msg_id": null,
+              "text": "oi"
+            }
+          ],
+          "phone": "5511975500003"
+        },
+        "status": "ok",
+        "step_type": "webhook_received"
+      },
+      {
+        "agent_key": null,
+        "data": {
+          "combined_preview": "oi",
+          "media_count": 0,
+          "text_count": 1
+        },
+        "status": "ok",
+        "step_type": "batch_accumulated"
+      }
+    ],
+    "total_cost_usd": 0.0,
+    "total_tokens": 0,
+    "trigger_type": "webhook"
+  }
+]

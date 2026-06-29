@@ -4,9 +4,33 @@ import mimetypes
 import time
 from pathlib import Path
 
-from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo
+from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHANNEL_ID = "default"
+
+# channel_id -> inbox_id cache. Inboxes are created at migration/boot and only
+# change on a restart (same model as channels), so a process-lifetime cache is
+# safe and keeps ContactMemory construction off the DB on the hot path.
+_INBOX_BY_CHANNEL: dict[str, int] = {}
+
+
+def resolve_inbox_id(channel_id: str) -> int:
+    """Inbox id that owns ``channel_id`` (plano 11). Cached; falls back to the
+    default inbox (id=1) if resolution fails so a save never blows up."""
+    cid = channel_id or DEFAULT_CHANNEL_ID
+    cached = _INBOX_BY_CHANNEL.get(cid)
+    if cached is not None:
+        return cached
+    try:
+        inbox = inbox_repo.get_or_create_for_channel(cid)
+        inbox_id = int(inbox["id"])
+    except Exception:
+        logger.exception("Falha ao resolver inbox do canal %s; usando default", cid)
+        inbox_id = conversation_repo.DEFAULT_INBOX_ID
+    _INBOX_BY_CHANNEL[cid] = inbox_id
+    return inbox_id
 
 
 class TagRegistry:
@@ -63,9 +87,14 @@ class ContactMemory:
     Messages and usage are stored directly in SQLite (not cached in memory).
     """
 
-    def __init__(self, phone: str, default_ai_enabled: bool = True):
+    def __init__(self, phone: str, default_ai_enabled: bool = True, *,
+                 channel_id: str = DEFAULT_CHANNEL_ID, inbox_id: int | None = None):
         self.phone = phone
         self._default_ai_enabled = default_ai_enabled
+        # Channel/inbox this memory belongs to (plano 11). The contact row stays
+        # unified by phone (D2); the CONVERSATION is per-channel via inbox_id.
+        self.channel_id = channel_id or DEFAULT_CHANNEL_ID
+        self.inbox_id = inbox_id if inbox_id is not None else resolve_inbox_id(self.channel_id)
         self.id: int | None = None
         self.info: dict = {"name": "", "email": "", "profession": "", "company": "", "address": "", "observations": []}
         self.tags: list[str] = []
@@ -146,13 +175,35 @@ class ContactMemory:
         # save site (inbound batch/media/group + outbound) links conversation_id sem
         # tocar webhook.py. Inbound user message reabre uma conversa closed.
         conversation_id = None
+        conv = None
+        transition = None  # "created" | "reopened" | None (plano 12 §3)
         try:
-            conv = conversation_repo.resolve_for_contact(
-                self.id, self._jid(), reopen_if_closed=(role == "user"))
+            # Uma conversa closed é reaberta tanto por mensagem do cliente ("user")
+            # quanto por resposta do atendente/IA ("assistant") — qualquer um dos dois
+            # lados voltando a falar reativa o atendimento (comportamento Chatwoot).
+            # Roles painel-only (private_note, system, tool_call, …) NÃO reabrem.
+            conv, transition = conversation_repo.resolve_for_contact_ex(
+                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
+                inbox_id=self.inbox_id)
             conversation_id = conv["id"]
+            # New thread → tell the panel so the inbox row shows its assignee
+            # (e.g. "IA padrão") live, without waiting for a full refetch.
+            if conv.get("created"):
+                try:
+                    from plugins.context import broadcast
+                    broadcast("conversation_created", {
+                        "conversation_id": conv["id"],
+                        "contact_id": self.id,
+                        "status": conv.get("status"),
+                        "assignee_user_id": conv.get("assignee_user_id"),
+                        "active_agent_key": conv.get("active_agent_key"),
+                        "ai_active": conv.get("ai_active"),
+                    })
+                except Exception:
+                    logger.debug("conversation_created broadcast falhou para %s", self.phone)
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
-        message_repo.add(
+        saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
@@ -163,8 +214,52 @@ class ContactMemory:
                 conversation_repo.touch_activity(conversation_id)
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
+            # plano 23 Fase C5 (§2.4 — desacoplar memory.py): the hot path EMITS
+            # ``message.persisted`` (the single decoupling signal for plugins/audit)
+            # AND drives the lifecycle LISTENER directly. The after-INSERT side
+            # effects (automatic created/reopened notice, conversation_created /
+            # conversation_status_changed list broadcasts, the conversation.reopened
+            # bus verb) moved OUT of here into ``agent.message_listeners`` — this is
+            # the listener-reacts inversion. Driving it directly (not via the bus)
+            # keeps it exactly-once and synchronous (a sync save with no running bus
+            # loop must still broadcast — the 876 reopen assertion). Defensive: a
+            # failed reaction never breaks the save.
+            self._emit_message_persisted(conversation_id, role, msg_id, saved)
+            try:
+                from agent.message_listeners import on_message_persisted
+                on_message_persisted(
+                    conversation_id, self.id, self.phone,
+                    transition=transition, conv=conv, role=role)
+            except Exception:
+                logger.exception("Falha nas reações de message.persisted para %s", self.phone)
         # Touch updated_at
         contact_repo.update(self.id)
+
+    def _emit_message_persisted(self, conversation_id: int, role: str,
+                                msg_id: str | None, saved: dict | None) -> None:
+        """Emit the PUBLIC ``message.persisted`` bus event AFTER the INSERT (plano 23
+        Fase C5). Payload is the clean decoupling contract
+        ``{conversation_id, contact_id, role, msg_id, ts}``.
+
+        Uses the fire-and-forget :func:`plugins.events.emit` (NOT ``emit_with_filter``):
+        ``message.persisted`` is a low-level persistence SIGNAL on the universal hot
+        path — it dispatches to plugin ``EVENT_HANDLERS`` but is NOT interceptable via
+        ``filter.event.before_emit`` (a plugin must not be able to veto a row that is
+        already committed). This also keeps it OUT of the ``filter.event.before_emit``
+        capture the characterization recorder uses, so existing event goldens are
+        untouched (additive, zero golden churn). Best-effort — a failed schedule (or
+        no bus loop wired, e.g. the legacy sync test) never breaks the save."""
+        try:
+            from plugins.events import emit as _emit
+            _emit("message.persisted", {
+                "conversation_id": conversation_id,
+                "contact_id": self.id,
+                "role": role,
+                "msg_id": msg_id,
+                "ts": (saved or {}).get("ts") or time.time(),
+            })
+        except Exception:
+            logger.debug("message.persisted emit falhou para %s", self.phone)
 
     def get_unread_msg_ids(self) -> list[str]:
         """Return unread message IDs from the database."""
@@ -293,6 +388,26 @@ class ContactMemory:
             self.info.setdefault("observations", []).append(observation)
             contact_repo.add_observation(self.id, observation)
 
+    def set_info_fields(self, fields: dict) -> None:
+        """Replace scalar contact fields from an explicit human edit (panel).
+
+        Unlike ``update_info`` (LLM auto-fill, which only overwrites non-empty
+        values), this writes every provided key UNCONDITIONALLY — an empty
+        string is treated as an intentional clear. Only known scalar columns
+        are accepted; keys absent from ``fields`` are left untouched.
+        """
+        allowed = ("name", "email", "profession", "company", "address")
+        # These columns are NOT NULL (server_default ""), so coerce a JSON null
+        # to the empty-string clear — matching the custom_attributes None path
+        # and avoiding an IntegrityError from a non-panel caller sending null.
+        to_write = {k: ("" if fields[k] is None else fields[k])
+                    for k in allowed if k in fields}
+        if not to_write:
+            return
+        for key, val in to_write.items():
+            self.info[key] = val
+        contact_repo.update(self.id, **to_write)
+
     def add_usage(self, call_type: str, model: str,
                   prompt_tokens: int, completion_tokens: int,
                   total_tokens: int, cost_usd: float) -> None:
@@ -320,32 +435,59 @@ class ContactMemory:
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
         # Custom attributes (plano 05): tell the AI which attributes it may fill
-        # (via set_custom_attribute) and the values already set.
+        # (via set_custom_attribute) and the values already set. Both scopes:
+        # contact-level and the currently-open conversation (plano 54).
+        parts.extend(self._custom_attr_lines("contact"))
+        parts.extend(self._custom_attr_lines("conversation"))
+        return "\n".join(parts)
+
+    def _custom_attr_lines(self, applies_to: str) -> list[str]:
+        """Prompt lines for custom attributes the AI may fill in the given scope.
+
+        Lists each defined attribute with type hints + the current value so the
+        AI can fill it via set_custom_attribute. Conversation-scoped attributes
+        are read from the contact's currently-open conversation; if there is no
+        open conversation, the section is omitted.
+        """
         try:
             from db.repositories import custom_attribute_repo as _ca_repo
-            from db.tables import contacts as _contacts_tbl
-            defs = _ca_repo.list_definitions("contact")
-            if defs and self.id:
-                values = _ca_repo.get_values(_contacts_tbl, self.id)
-                lines = []
-                for d in defs:
-                    key = d["attribute_key"]
-                    hint = ""
-                    if d.get("type") == "list" and d.get("options"):
-                        hint = f" (opções: {', '.join(map(str, d['options']))})"
-                    elif d.get("type") == "checkbox":
-                        hint = " (true/false)"
-                    cur = values.get(key)
-                    cur_str = f" = {cur}" if cur not in (None, "") else ""
-                    lines.append(f"- {key}{hint}{cur_str}")
-                if lines:
-                    parts.append(
-                        "Atributos personalizados que você pode preencher (use set_custom_attribute):"
-                    )
-                    parts.extend(lines)
+            defs = _ca_repo.list_definitions(applies_to)
+            if not defs or not self.id:
+                return []
+            if applies_to == "conversation":
+                from db.tables import conversations as _entity_tbl
+                conv = conversation_repo.get_open_for_contact(self.id)
+                if not conv:
+                    return []
+                entity_id = conv["id"]
+                label = (
+                    "Atributos personalizados DESTA CONVERSA que você pode preencher "
+                    "(use set_custom_attribute com scope='conversation'):"
+                )
+            else:
+                from db.tables import contacts as _entity_tbl
+                entity_id = self.id
+                label = (
+                    "Atributos personalizados do contato que você pode preencher "
+                    "(use set_custom_attribute):"
+                )
+            values = _ca_repo.get_values(_entity_tbl, entity_id)
+            lines = []
+            for d in defs:
+                key = d["attribute_key"]
+                hint = ""
+                if d.get("type") == "list" and d.get("options"):
+                    hint = f" (opções: {', '.join(map(str, d['options']))})"
+                elif d.get("type") == "checkbox":
+                    hint = " (true/false)"
+                cur = values.get(key)
+                cur_str = f" = {cur}" if cur not in (None, "") else ""
+                lines.append(f"- {key}{hint}{cur_str}")
+            if not lines:
+                return []
+            return [label, *lines]
         except Exception:
-            pass
-        return "\n".join(parts)
+            return []
 
     def get_tags_summary(self) -> str:
         """Return comma-separated list of tag names for prompt injection."""

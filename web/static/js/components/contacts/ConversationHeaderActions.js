@@ -2,8 +2,7 @@
 //
 // Self-contained: resolves the OPEN conversation for the current phone, shows its
 // status + assignee, and offers the per-conversation actions — Resolver/Reabrir,
-// Atribuir a mim, Transferir (when the user may list users) and the IA toggle
-// (conversation-level ai_active, distinct from the contact-level switch). Every
+// Atribuir a mim and Transferir (when the user may list users). Every
 // action is permission-gated (P48: hide, don't disable). Live-updates via the WS
 // conversation_* events for this conversation. Renders nothing in sandbox or when
 // the contact has no open conversation.
@@ -12,10 +11,14 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  getContactConversation, getMe, getUsers,
+  getContactConversation, getConversation, getMe, getUsers, getCustomAttributes,
   setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
+import { RequiredAttributesModal } from './RequiredAttributesModal.js';
+import { resolveConversation } from '../../utils/resolveConversation.js';
+import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
@@ -26,15 +29,21 @@ function patchFromEvent(data) {
   if (data.assignee_user_id !== undefined) p.assignee_user_id = data.assignee_user_id;
   if (data.is_archived !== undefined) p.is_archived = data.is_archived;
   if (data.ai_active !== undefined) p.ai_active = data.ai_active;
+  // Saving conversation attributes (PUT /info) broadcasts them under `fields`;
+  // keep them fresh so the Resolver guard sees the latest filled values.
+  if (data.fields && data.fields.custom_attributes !== undefined) p.custom_attributes = data.fields.custom_attributes;
   return p;
 }
 
-export function ConversationHeaderActions({ phone, sandbox = false }) {
+export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false, onOpenConversationInfo = null, onOpenContactInfo = null, contactInfo = null }) {
   const [conv, setConv] = useState(null);
   const [user, setUser] = useState(null);
   const [users, setUsers] = useState([]);   // for "Transferir" — degrades on 403
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [convDefs, setConvDefs] = useState([]);   // conversation-scoped attribute defs
+  const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
+  const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
   const menuRef = useRef(null);
 
   // Identity (permission gating + assign-me).
@@ -55,13 +64,39 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
     return () => { alive = false; };
   }, []);
 
-  // Resolve the open conversation for this phone.
+  // Attribute definitions (conversation + contact scope) — to gate "Resolver" on
+  // required ("Obrigatório preencher") attributes. Reload when the admin edits them.
+  useEffect(() => {
+    let alive = true;
+    function load() {
+      getCustomAttributes('conversation')
+        .then(r => { if (alive && r && r.ok) setConvDefs(r.data || []); })
+        .catch(() => {});
+      getCustomAttributes('contact')
+        .then(r => { if (alive && r && r.ok) setContactDefs(r.data || []); })
+        .catch(() => {});
+    }
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
+  }, []);
+
+  // Resolve the open conversation. Conversa-cêntrico (plano 11 D1): quando o chat
+  // sabe a conversa aberta (um canal), carrega ELA por id — getContactConversation
+  // resolveria só uma das conversas do número e mostraria ações do canal errado.
   const load = useCallback(() => {
-    if (!phone || sandbox) { setConv(null); return; }
+    if (sandbox) { setConv(null); return; }
+    if (conversationId != null) {
+      getConversation(conversationId)
+        .then(r => { if (r && r.ok) setConv((r.data && r.data.conversation) || null); })
+        .catch(() => {});
+      return;
+    }
+    if (!phone) { setConv(null); return; }
     getContactConversation(phone)
       .then(r => { if (r && r.ok) setConv((r.data && r.data.conversation) || null); })
       .catch(() => {});
-  }, [phone, sandbox]);
+  }, [phone, conversationId, sandbox]);
   useEffect(() => { load(); }, [load]);
 
   // Live updates for THIS conversation (and pick up a freshly-created one).
@@ -88,7 +123,6 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
   if (!conv) return null;
 
   const isOpen = conv.status === 'open';
-  const aiOn = conv.ai_active === 1 || conv.ai_active === true;
   const assignedToMe = user && conv.assignee_user_id != null && conv.assignee_user_id === user.id;
   const can = (p) => hasPermission(user, p);
   const userLabel = (id) => {
@@ -107,16 +141,42 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
     }
   }
 
+  // Resolver guard: an open conversation can only be closed once every required
+  // ("Obrigatório preencher") attribute has a value — both conversation- and
+  // contact-scoped. Conversation attributes take priority; once they're filled,
+  // a second attempt surfaces any pending contact attributes. Missing ones open a
+  // modal targeting the right panel; reopening (closed → open) is never blocked.
+  function onStatusClick() {
+    if (busy) return;
+    if (!isOpen) { run(() => setConversationStatus(conv.id, 'open')); return; }
+    const convMissing = missingRequiredAttributes(convDefs, conv.custom_attributes);
+    if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+    const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
+    if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
+    // Plugin filter (filter.conversation.beforeResolve) runs after the native guard;
+    // a plugin can show a popup / fill fields, or abort the close by returning null.
+    run(() => resolveConversation(conv, 'closed'));
+  }
+
+  // Modal "OK": close it and open the panel that holds the pending attributes so
+  // the operator can fill them right away.
+  function onMissingConfirm() {
+    const target = missingAttrs && missingAttrs.target;
+    setMissingAttrs(null);
+    if (target === 'contact') { if (onOpenContactInfo) onOpenContactInfo(); }
+    else if (onOpenConversationInfo) onOpenConversationInfo();
+  }
+
   const btn = 'px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 whitespace-nowrap';
-  const canTransfer = can('conversation.assign') && users.length > 0;
+  const canTransfer = isOpen && can('conversation.assign') && users.length > 0;
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
-      <!-- Status / Resolver -->
+      <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
         <button
           disabled=${busy}
-          onClick=${() => run(() => setConversationStatus(conv.id, isOpen ? 'closed' : 'open'))}
+          onClick=${onStatusClick}
           class=${btn}
           title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
         >
@@ -128,8 +188,8 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
         </span>
       `}
 
-      <!-- Atribuir a mim / responsável -->
-      ${can('conversation.assign') ? html`
+      <!-- Atribuir a mim / responsável (somente em conversas abertas) -->
+      ${isOpen && can('conversation.assign') ? html`
         ${assignedToMe
           ? html`
             <button disabled=${busy} onClick=${() => run(() => assignConversation(conv.id, null))} class=${btn} title="Remover atribuição">
@@ -172,18 +232,11 @@ export function ConversationHeaderActions({ phone, sandbox = false }) {
         </div>
       ` : null}
 
-      <!-- IA (conversation-level) -->
-      ${can('conversation.reply') ? html`
-        <button
-          disabled=${busy}
-          onClick=${() => run(() => setConversationAi(conv.id, !aiOn))}
-          class="px-2.5 py-1 rounded-md text-[12px] border transition-colors disabled:opacity-50 whitespace-nowrap ${aiOn
-            ? 'border-wa-teal/40 bg-wa-teal/15 text-wa-teal'
-            : 'border-wa-border text-wa-secondary hover:bg-wa-hover'}"
-          title=${aiOn ? 'IA ativa nesta conversa — clique para desativar' : 'IA desativada nesta conversa — clique para ativar'}
-        >
-          ${aiOn ? 'IA ✓' : 'IA'}
-        </button>
+      <!-- Extension point: plugins can inject extra conversation actions here. -->
+      <${Slot} name="conversation.header.actions" ctx=${{ conv, user }} />
+
+      ${missingAttrs ? html`
+        <${RequiredAttributesModal} missing=${missingAttrs.list} onConfirm=${onMissingConfirm} />
       ` : null}
     </div>
   `;

@@ -4,7 +4,7 @@
 // e rollback por versão. Salvar com um prompt_key novo cria o prompt.
 
 import { h } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listPrompts,
@@ -12,6 +12,7 @@ import {
   getPromptHistory,
   rollbackPrompt,
 } from '../../services/api.js';
+import { useDeepLink } from '../../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -133,7 +134,7 @@ function PromptForm({ editing, onSave, onCancel, busy }) {
   `;
 }
 
-export default function PromptsEditor() {
+export default function PromptsEditor({ initialEntity }) {
   const [prompts, setPrompts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -154,6 +155,24 @@ export default function PromptsEditor() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /ai/prompts/<prompt_key>: reabre o prompt da URL e reflete o aberto.
+  const pushUrl = useDeepLink({
+    tab: 'ai',
+    resolve: initialEntity && initialEntity.sub === 'prompts'
+      ? { sub: 'prompts', id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      const p = prompts.find(x => x.prompt_key === sel.id);
+      if (p) { setEditing(p); setCreating(false); }
+    },
+  });
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing ? { sub: 'prompts', id: editing.prompt_key } : { sub: 'prompts' });
+  }, [editing]);
 
   async function handleSave(key, body) {
     setBusy(true); setError('');

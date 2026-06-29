@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { updateContactInfo, updateContactTags, createTag, getCustomAttributes, getContactConversation, updateConversationInfo } from '../../services/api.js';
+import { updateContactInfo, updateContactTags, createTag, getCustomAttributes } from '../../services/api.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
@@ -14,22 +14,22 @@ const TAG_COLORS = [
 ];
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
+// Contact-scoped only (plano conversa Onda 2): identity, contact tags, contact
+// custom attributes, observations. Conversation status/assignment/labels/
+// attributes live in ConversationInfoPanel.
 
-export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave }) {
+export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
   const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
   const [newObs, setNewObs] = useState('');
+  // Inline 2-click confirmation for the destructive "Apagar contato" action (plano 16).
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
   const [customDefs, setCustomDefs] = useState([]);
   const [customValues, setCustomValues] = useState({});
-
-  // Conversation custom attributes (FF5): the open conversation for this contact
-  // + its conversation-scoped definitions/values ("Dados desta conversa").
-  const [convo, setConvo] = useState(null);
-  const [convDefs, setConvDefs] = useState([]);
-  const [convValues, setConvValues] = useState({});
 
   // Tag editor state
   const [tagSearch, setTagSearch] = useState('');
@@ -55,6 +55,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     setTags([...(contactTags || [])]);
   }, [phone, info, contactTags]);
 
+  // Reset the delete confirmation when switching contacts (don't carry a primed
+  // "Confirmar?" over to the wrong contact).
+  useEffect(() => { setConfirmDelete(false); }, [phone]);
+
   // Load custom attribute definitions once; reload when the admin screen edits them.
   useEffect(() => {
     let cancelled = false;
@@ -69,36 +73,6 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
       window.removeEventListener('whatsbot:custom-attributes-changed', load);
     };
   }, []);
-
-  // Conversation-scoped attribute definitions (FF5) — same lifecycle as above.
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      const res = await getCustomAttributes('conversation');
-      if (!cancelled && res.ok) setConvDefs(res.data || []);
-    }
-    load();
-    window.addEventListener('whatsbot:custom-attributes-changed', load);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('whatsbot:custom-attributes-changed', load);
-    };
-  }, []);
-
-  // Resolve the open conversation for this contact + seed its attribute values.
-  useEffect(() => {
-    let cancelled = false;
-    if (!phone) { setConvo(null); setConvValues({}); return; }
-    getContactConversation(phone)
-      .then((res) => {
-        if (cancelled) return;
-        const c = (res && res.ok && res.data) ? res.data.conversation : null;
-        setConvo(c || null);
-        setConvValues({ ...((c && c.custom_attributes) || {}) });
-      })
-      .catch(() => { if (!cancelled) { setConvo(null); setConvValues({}); } });
-    return () => { cancelled = true; };
-  }, [phone]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -164,26 +138,62 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
 
   async function handleSave() {
     setSaving(true);
+    setError(null);
     try {
-      const ops = [
-        updateContactInfo(phone, { ...form, custom_attributes: customValues }),
-        updateContactTags(phone, tags),
-      ];
-      // Persist conversation attributes too, when there's an open conversation
-      // and conversation-scoped definitions exist (FF5). Best-effort.
-      if (convo && convDefs.length > 0) {
-        ops.push(
-          updateConversationInfo(convo.id, { custom_attributes: convValues })
-            .then((res) => { if (res && res.ok && res.data) setConvo(res.data.conversation); })
-            .catch((err) => console.error('Failed to save conversation attributes:', err))
+      // Flush observation text the user typed but didn't commit (Enter / +).
+      const pendingObs = newObs.trim();
+      const observations = pendingObs && !form.observations.includes(pendingObs)
+        ? [...form.observations, pendingObs]
+        : form.observations;
+
+      // Flush pending tag text. If it matches an existing global tag, add it;
+      // if it's a new name, create the global tag first — otherwise the backend
+      // silently drops names that don't exist in the tags table.
+      let finalTags = tags;
+      const pendingTag = tagSearch.trim();
+      if (pendingTag) {
+        const existing = Object.keys(globalTags || {}).find(
+          n => n.toLowerCase() === pendingTag.toLowerCase()
         );
+        if (existing) {
+          if (!finalTags.includes(existing)) finalTags = [...finalTags, existing];
+        } else {
+          const created = await createTag(pendingTag, TAG_COLORS[0]);
+          if (created.ok) {
+            onGlobalTagsChange(prev => ({ ...prev, [pendingTag]: { color: TAG_COLORS[0] } }));
+          }
+          // A failed create is almost always "tag already exists" (stale
+          // globalTags map) — link it anyway instead of aborting the whole
+          // save. set_contact_tags only links names that exist, so a genuinely
+          // unknown name is dropped without losing the rest of the edits.
+          if (!finalTags.includes(pendingTag)) finalTags = [...finalTags, pendingTag];
+        }
       }
-      const [infoRes, tagsRes] = await Promise.all(ops);
-      if (infoRes.ok) {
-        onSave(infoRes.data, tagsRes.ok ? tagsRes.data.tags : tags);
+
+      const [infoRes, tagsRes] = await Promise.all([
+        updateContactInfo(phone, { ...form, observations, custom_attributes: customValues }),
+        updateContactTags(phone, finalTags),
+      ]);
+
+      if (infoRes.ok && tagsRes.ok) {
+        // Reflect the flushed pending input and clear the editors. Use the
+        // server-authoritative tag list so local state matches what persisted.
+        const savedTags = tagsRes.data.tags;
+        setForm(prev => ({ ...prev, observations }));
+        setTags(savedTags);
+        setNewObs('');
+        setTagSearch('');
+        onSave(infoRes.data, savedTags);
+      } else {
+        setError(
+          (!infoRes.ok && infoRes.error) ||
+          (!tagsRes.ok && tagsRes.error) ||
+          'Falha ao salvar. Tente novamente.'
+        );
       }
     } catch (err) {
       console.error('Failed to save contact info:', err);
+      setError('Falha ao salvar. Tente novamente.');
     }
     setSaving(false);
   }
@@ -380,32 +390,10 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                       value=${customValues[def.attribute_key]}
                       onChange=${(v) => setCustomValues(prev => {
                         const next = { ...prev };
-                        if (v === null || v === undefined || v === '') delete next[def.attribute_key];
-                        else next[def.attribute_key] = v;
-                        return next;
-                      })}
-                    />
-                  `)}
-                </div>
-              </div>
-            ` : null}
-
-            <!-- Conversation attributes (FF5) — "Dados desta conversa". Shown only
-                 with an open conversation and conversation-scoped definitions. -->
-            ${(convo && convDefs.length > 0) ? html`
-              <div class="pt-1">
-                <div class="text-wa-iconActive text-[13px] font-medium mb-2">
-                  Dados desta conversa${convo.display_id != null ? html` <span class="text-wa-secondary font-normal">#${convo.display_id}</span>` : null}
-                </div>
-                <div class="space-y-4">
-                  ${convDefs.map(def => html`
-                    <${CustomAttributeField}
-                      key=${def.id}
-                      def=${def}
-                      value=${convValues[def.attribute_key]}
-                      onChange=${(v) => setConvValues(prev => {
-                        const next = { ...prev };
-                        if (v === null || v === undefined || v === '') delete next[def.attribute_key];
+                        // Send an explicit null on clear so the backend removes
+                        // the key (set_values pops on None); deleting it here
+                        // would leave the stored value untouched (merge).
+                        if (v === null || v === undefined || v === '') next[def.attribute_key] = null;
                         else next[def.attribute_key] = v;
                         return next;
                       })}
@@ -458,6 +446,11 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
 
         <!-- Save button -->
         <div class="px-6 py-4 bg-wa-panel border-t border-wa-border shrink-0">
+          ${error ? html`
+            <div class="mb-2 text-[13px] text-red-600 bg-red-50 border border-red-200 rounded-[8px] px-3 py-2">
+              ${error}
+            </div>
+          ` : null}
           <button
             onClick=${handleSave}
             disabled=${saving}
@@ -465,6 +458,18 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
           >
             ${saving ? 'Salvando...' : 'Salvar'}
           </button>
+          ${onDeleteContact ? html`
+            <button
+              type="button"
+              onClick=${() => {
+                if (!confirmDelete) { setConfirmDelete(true); return; }
+                onDeleteContact();
+              }}
+              class="w-full mt-2 text-[14px] font-medium py-2.5 rounded-[8px] ${confirmDelete ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors"
+            >
+              ${confirmDelete ? 'Confirmar exclusão? Apaga TODAS as conversas' : 'Apagar contato'}
+            </button>
+          ` : null}
         </div>
       </div>
     </div>

@@ -15,10 +15,10 @@ import asyncio
 import logging
 import time
 
-from fastapi import Request
+from fastapi import Depends
 
 from server.helpers import _ok, _err
-from server.authz import permission_denied
+from server.deps import require_permission, install_exception_handlers
 from db.repositories import agent_repo, prompt_repo, variable_repo, tool_repo
 from plugins.events import emit as emit_event
 from plugins.restart import schedule_restart
@@ -42,6 +42,10 @@ def _emit_changed(kind: str, key: str) -> None:
 
 def register_routes(app, deps):
 
+    # B1: render require_permission's PermissionDeniedError to the legacy
+    # _err(403) envelope (idempotent across route modules).
+    install_exception_handlers(app)
+
     # ── Agents ──────────────────────────────────────────────────────────
     @app.get("/api/ai/agents")
     async def list_agents():
@@ -55,11 +59,9 @@ def register_routes(app, deps):
             return _err("Agente não encontrado.", status=404)
         return _ok(row)
 
-    @app.put("/api/ai/agents/{agent_key}")
-    async def save_agent(agent_key: str, body: dict, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.put("/api/ai/agents/{agent_key}",
+             dependencies=[Depends(require_permission("agent.manage"))])
+    async def save_agent(agent_key: str, body: dict):
         model_config = body.get("model_config", {})
         if not isinstance(model_config, dict):
             return _err("model_config deve ser um objeto.")
@@ -72,6 +74,10 @@ def register_routes(app, deps):
         hooks_config = body.get("hooks_config", {})
         if hooks_config is not None and not isinstance(hooks_config, dict):
             return _err("hooks_config deve ser um objeto.")
+        # Plano 22: the default agent is the engine's fallback (build_for_contact
+        # cascade always lands on it) — it must never be disabled.
+        if agent_key == agent_repo.DEFAULT_AGENT_KEY and not bool(body.get("enabled", True)):
+            return _err("O agente padrão não pode ser desativado.", status=400)
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
             display_name=body.get("display_name", ""),
@@ -88,16 +94,42 @@ def register_routes(app, deps):
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
         return _ok(row)
 
+    @app.delete("/api/ai/agents/{agent_key}",
+                dependencies=[Depends(require_permission("agent.manage"))])
+    async def delete_agent(agent_key: str):
+        if agent_key == agent_repo.DEFAULT_AGENT_KEY:
+            return _err("O agente padrão não pode ser excluído.", status=400)
+        # Refuse while the agent is still a routing target of some router, so a
+        # router never points at a vanished agent. The user removes it there first.
+        try:
+            agents = await asyncio.to_thread(agent_repo.list_all)
+            routers = [
+                a["agent_key"] for a in agents
+                if a.get("is_router") and agent_key in (a.get("routing_targets") or [])
+            ]
+            if routers:
+                return _err(
+                    "Agente é destino de roteamento de: " + ", ".join(routers)
+                    + ". Remova-o desses roteadores antes de excluir.",
+                    status=409,
+                )
+        except Exception:
+            pass
+        deleted = await asyncio.to_thread(agent_repo.delete, agent_key)
+        if not deleted:
+            return _err("Agente não encontrado.", status=404)
+        _emit_changed("agent", agent_key)
+        logger.info("AI agent deleted: %s", agent_key)
+        return _ok({"deleted": True})
+
     # ── History / rollback (plano 06) ───────────────────────────────────
     @app.get("/api/ai/agents/{agent_key}/history")
     async def agent_history(agent_key: str):
         return _ok(await asyncio.to_thread(agent_repo.list_history, agent_key))
 
-    @app.post("/api/ai/agents/{agent_key}/rollback/{version}")
-    async def agent_rollback(agent_key: str, version: int, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.post("/api/ai/agents/{agent_key}/rollback/{version}",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def agent_rollback(agent_key: str, version: int):
         row = await asyncio.to_thread(agent_repo.rollback, agent_key, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -110,11 +142,9 @@ def register_routes(app, deps):
     async def prompt_history(prompt_key: str):
         return _ok(await asyncio.to_thread(prompt_repo.list_history, prompt_key))
 
-    @app.post("/api/ai/prompts/{prompt_key}/rollback/{version}")
-    async def prompt_rollback(prompt_key: str, version: int, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.post("/api/ai/prompts/{prompt_key}/rollback/{version}",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def prompt_rollback(prompt_key: str, version: int):
         row = await asyncio.to_thread(prompt_repo.rollback, prompt_key, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -125,11 +155,9 @@ def register_routes(app, deps):
     async def tool_history(name: str):
         return _ok(await asyncio.to_thread(tool_repo.list_history, name))
 
-    @app.post("/api/ai/tools/{name}/rollback/{version}")
-    async def tool_rollback(name: str, version: int, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.post("/api/ai/tools/{name}/rollback/{version}",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def tool_rollback(name: str, version: int):
         row = await asyncio.to_thread(tool_repo.rollback, name, version)
         if not row:
             return _err("Versão não encontrada.", status=404)
@@ -149,11 +177,9 @@ def register_routes(app, deps):
             return _err("Prompt não encontrado.", status=404)
         return _ok(row)
 
-    @app.put("/api/ai/prompts/{prompt_key}")
-    async def save_prompt(prompt_key: str, body: dict, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.put("/api/ai/prompts/{prompt_key}",
+             dependencies=[Depends(require_permission("agent.manage"))])
+    async def save_prompt(prompt_key: str, body: dict):
         row = await asyncio.to_thread(prompt_repo.save, prompt_key, body.get("body", ""))
         _emit_changed("prompt", prompt_key)
         logger.info("AI prompt saved: %s (v%s)", prompt_key, row.get("version"))
@@ -165,22 +191,18 @@ def register_routes(app, deps):
         rows = await asyncio.to_thread(variable_repo.list_all)
         return _ok(rows)
 
-    @app.put("/api/ai/variables/{name}")
-    async def save_variable(name: str, body: dict, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.put("/api/ai/variables/{name}",
+             dependencies=[Depends(require_permission("agent.manage"))])
+    async def save_variable(name: str, body: dict):
         row = await asyncio.to_thread(
             variable_repo.save, name, body.get("value", ""), body.get("category", "")
         )
         _emit_changed("variable", name)
         return _ok(row)
 
-    @app.delete("/api/ai/variables/{name}")
-    async def delete_variable(name: str, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.delete("/api/ai/variables/{name}",
+                dependencies=[Depends(require_permission("agent.manage"))])
+    async def delete_variable(name: str):
         deleted = await asyncio.to_thread(variable_repo.delete, name)
         if not deleted:
             return _err("Variável não encontrada.", status=404)
@@ -200,23 +222,25 @@ def register_routes(app, deps):
             return _err("Tool não encontrada.", status=404)
         return _ok(row)
 
-    @app.put("/api/ai/tools/{name}")
-    async def save_ai_tool(name: str, body: dict, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.put("/api/ai/tools/{name}",
+             dependencies=[Depends(require_permission("agent.manage"))])
+    async def save_ai_tool(name: str, body: dict):
         dependencies = body.get("dependencies", [])
         if dependencies is not None and not isinstance(dependencies, list):
             return _err("dependencies deve ser uma lista.")
+        existing = await asyncio.to_thread(tool_repo.get, name)
+        is_builtin = bool(existing and existing.get("kind") == "builtin")
         # Gate P63: code-in-DB tools are born DISABLED. A human must explicitly
         # flip ``enabled`` (and the operator must set ai_tools_code_enabled) before
         # arbitrary Python from the DB ever executes. Default False, not True.
+        # Built-in (core) tools are core functionality → default enabled True.
+        enabled = bool(body.get("enabled", True if is_builtin else False))
         row = await asyncio.to_thread(
             tool_repo.save, name,
             description=body.get("description", ""),
             code=body.get("code", ""),
             dependencies=dependencies or [],
-            enabled=bool(body.get("enabled", False)),
+            enabled=enabled,
         )
         _emit_changed("tool", name)
         # Code-in-DB needs a process restart so the installer re-materialises,
@@ -226,11 +250,12 @@ def register_routes(app, deps):
         logger.info("AI tool saved: %s (v%s)", name, row.get("version"))
         return _ok(row)
 
-    @app.delete("/api/ai/tools/{name}")
-    async def delete_ai_tool(name: str, request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.delete("/api/ai/tools/{name}",
+                dependencies=[Depends(require_permission("agent.manage"))])
+    async def delete_ai_tool(name: str):
+        existing = await asyncio.to_thread(tool_repo.get, name)
+        if existing and existing.get("kind") == "builtin":
+            return _err("Tools core não podem ser excluídas (apenas editadas ou desativadas).", status=400)
         deleted = await asyncio.to_thread(tool_repo.delete, name)
         if not deleted:
             return _err("Tool não encontrada.", status=404)
@@ -238,12 +263,10 @@ def register_routes(app, deps):
         schedule_restart(f"ai_tool deleted: {name}")
         return _ok({"deleted": True})
 
-    @app.post("/api/ai/tools/{name}/reinstall")
-    async def reinstall_ai_tool(name: str, request: Request):
+    @app.post("/api/ai/tools/{name}/reinstall",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def reinstall_ai_tool(name: str):
         """Re-run the installer for one tool (status->pending + restart)."""
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
         row = await asyncio.to_thread(tool_repo.get, name)
         if not row:
             return _err("Tool não encontrada.", status=404)
@@ -252,11 +275,9 @@ def register_routes(app, deps):
         schedule_restart(f"ai_tool reinstall: {name}")
         return _ok({"reinstalling": name})
 
-    @app.post("/api/ai/restart")
-    async def restart_engine(request: Request):
-        denied = permission_denied(request, "agent.manage")
-        if denied:
-            return denied
+    @app.post("/api/ai/restart",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def restart_engine():
         """Restart the server so code-in-DB tool changes take effect."""
         schedule_restart("ai engine manual restart")
         return _ok({"restarting": True})

@@ -2,9 +2,10 @@
 // Refresh imediato no backend (sem restart), atualiza via WebSocket.
 
 import { h } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders, handleUnauthorized } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -18,7 +19,7 @@ function PencilIcon() {
 }
 
 
-function EditModal({ tool, onClose, onSave, busy }) {
+export function EditModal({ tool, onClose, onSave, busy }) {
   const [description, setDescription] = useState(tool.current_description || '');
   const [label, setLabel] = useState(tool.current_label || '');
 
@@ -129,7 +130,7 @@ function EditModal({ tool, onClose, onSave, busy }) {
 }
 
 
-export function ToolsManager() {
+export function ToolsManager({ initialEntity }) {
   const [tools, setTools] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -154,6 +155,23 @@ export function ToolsManager() {
   }
 
   useEffect(() => { load(); }, []);
+
+  // Deep-link /ai/tools/<name>: reabre o modal de edição da tool da URL.
+  const pushUrl = useDeepLink({
+    tab: 'ai',
+    resolve: initialEntity && initialEntity.sub === 'tools'
+      ? { sub: 'tools', id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel || sel.id == null) { setEditing(null); return; }
+      if (tools.find(x => x.name === sel.id)) setEditing(sel.id);
+    },
+  });
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+    pushUrl(editing ? { sub: 'tools', id: editing } : { sub: 'tools' });
+  }, [editing]);
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

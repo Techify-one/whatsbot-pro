@@ -189,6 +189,9 @@ custom_attribute_definitions = Table(
     Column("position", Integer, nullable=False, server_default="0"),
     # plano 05 Fase 6: marca defs que entram no filter-schema e ganham índice (plano 08).
     Column("filterable", Integer, nullable=False, server_default="0"),
+    # plano 19: atributos PADRÃO do contato (built-in) — semeados no boot, protegidos
+    # contra delete/rename. Mesma estrutura dos personalizados; 1 = atributo de sistema.
+    Column("is_system", Integer, nullable=False, server_default="0"),
     Column("created_by", Integer, nullable=True),             # FK -> users (plano 03), nullable por ora
     Column("created_at", Float, nullable=False),              # epoch float (P56)
     Column("deleted_at", Float, nullable=True),               # soft-delete (P49): NULL = ativa
@@ -214,6 +217,10 @@ channels = Table(
     Column("logged_in", Integer, nullable=False, server_default="0"),
     Column("own_phone", Text, nullable=True),
     Column("last_error", Text, nullable=True),
+    # Soft-delete (plano inboxes/canais §4.3-c): "excluir" um canal o arquiva
+    # (esconde da UI) em vez de apagar, preservando o histórico de conversas da
+    # sua inbox. Hard-delete continua disponível via ?purge=true.
+    Column("archived", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
@@ -241,6 +248,10 @@ users = Table(
     Column("name", Text, nullable=False, server_default=""),
     Column("password_hash", Text, nullable=False),       # Argon2id PHC string
     Column("is_active", Integer, nullable=False, server_default="1"),
+    # custom_permissions=1 ⇒ this user's effective permission set is the explicit
+    # grants in user_permissions, REPLACING roles entirely (no role, no admin
+    # short-circuit). custom_permissions=0 ⇒ permissions come from roles.
+    Column("custom_permissions", Integer, nullable=False, server_default="0"),
     Column("last_login_at", Float),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
@@ -263,7 +274,12 @@ permissions = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("key", Text, nullable=False, unique=True),     # conversation.reply etc.
     Column("description", Text, nullable=False, server_default=""),
+    # Plugin RBAC (plano "RBAC para Plugins" §3.1): NULL for core perms; the
+    # plugin id + group label for perms declared in a plugin's ``rbac:`` block.
+    Column("plugin_id", Text, nullable=True),
+    Column("group_label", Text, nullable=True),
 )
+Index("idx_permissions_plugin", permissions.c.plugin_id)
 
 role_permissions = Table(
     "role_permissions",
@@ -280,6 +296,18 @@ user_roles = Table(
     Column("role_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False),
     PrimaryKeyConstraint("user_id", "role_id"),
 )
+
+# Per-user explicit permission grants — only consulted when the user's
+# users.custom_permissions flag is set. Lets an admin give a single user a set of
+# permissions outside of any role ("completely customizable").
+user_permissions = Table(
+    "user_permissions",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("permission_id", Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False),
+    PrimaryKeyConstraint("user_id", "permission_id"),
+)
+Index("idx_user_permissions_user", user_permissions.c.user_id)
 
 user_sessions = Table(
     "user_sessions",
@@ -309,7 +337,11 @@ inboxes = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False, server_default="WhatsApp"),
     Column("channel_type", Text, nullable=False, server_default="whatsapp"),
-    Column("channel_id", Text),                                  # → channels.id (sem FK no MVP)
+    # → channels.id. FK com ON DELETE CASCADE (plano inboxes/canais §4.5):
+    # garante o invariante 1:1 e a limpeza automática num purge. Nullable: inboxes
+    # cujo canal foi removido ficam com channel_id NULL (órfãs preservadas, escondidas
+    # da UI pelo JOIN de list_with_channel) em vez de violar a FK.
+    Column("channel_id", Text, ForeignKey("channels.id", ondelete="CASCADE")),
     Column("agent_bot_enabled", Integer, nullable=False, server_default="1"),  # gate IA nível 2
     Column("default_agent_key", Text),                          # plano 06: agente default da inbox
     Column("created_at", Float, nullable=False),
@@ -331,6 +363,20 @@ contact_inboxes = Table(
 )
 Index("idx_contact_inbox_contact", contact_inboxes.c.contact_id)
 Index("idx_contact_inbox_lid", contact_inboxes.c.inbox_id, contact_inboxes.c.source_lid)
+
+# Which panel users (agents) belong to an inbox. A non-admin user without
+# ``conversation.read_all`` only sees conversations of the inboxes they are a
+# member of. Managed from the channel editor (one inbox per channel). admin and
+# anyone holding ``conversation.read_all`` bypass membership and see everything.
+inbox_members = Table(
+    "inbox_members",
+    metadata,
+    Column("inbox_id", Integer, ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", Float, nullable=False),
+    PrimaryKeyConstraint("inbox_id", "user_id"),
+)
+Index("idx_inbox_members_user", inbox_members.c.user_id)
 
 conversations = Table(
     "conversations",
@@ -371,6 +417,30 @@ conversation_counters = Table(
     Column("name", Text, primary_key=True),
     Column("next_value", Integer, nullable=False, server_default="1"),
 )
+
+
+# Etiquetas de conversa (estilo Chatwoot labels) — registro GLOBAL próprio, SEPARADO
+# das tags de contato (tags/contact_tags). Decisão Thiago: etiquetas pertencem à
+# conversa, não ao contato. Atribuição N:N via conversation_label_links.
+conversation_labels = Table(
+    "conversation_labels",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("color", Text, nullable=False, server_default="#6b7280"),
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+)
+
+conversation_label_links = Table(
+    "conversation_label_links",
+    metadata,
+    Column("conversation_id", Integer,
+           ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+    Column("label_id", Integer,
+           ForeignKey("conversation_labels.id", ondelete="CASCADE"), primary_key=True),
+)
+Index("idx_conv_label_links_label", conversation_label_links.c.label_id)
 
 
 unread_msg_ids = Table(
@@ -513,6 +583,10 @@ ai_tools = Table(
     metadata,
     # ``name`` is identity (== schema function name; == usage.call_type).
     Column("name", Text, primary_key=True),
+    # 'code' = user-authored, runs ISOLATED in a subprocess (gated by
+    # ai_tools_code_enabled). 'builtin' = a seeded core tool, runs IN-PROCESS
+    # with the live ToolContext (handler/DB), always available, can't be deleted.
+    Column("kind", Text, nullable=False, server_default="code"),
     Column("description", Text, nullable=False, server_default=""),
     # Python source materialised to storages/ai_tools/<name>.py and imported.
     Column("code", Text, nullable=False, server_default=""),
@@ -592,6 +666,25 @@ Index("idx_audit_created", audit_log.c.created_at)
 Index("idx_audit_actor", audit_log.c.actor_user_id, audit_log.c.created_at)
 Index("idx_audit_resource", audit_log.c.resource_type, audit_log.c.resource_id)
 Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
+
+
+# Saved conversation filters (Chatwoot-style): each user can name and persist one
+# or more inbox filter presets. ``user_id`` is NULL for legacy single-password
+# sessions (no user identity) → those presets are shared on that install. ``spec``
+# is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
+saved_conversation_filters = Table(
+    "saved_conversation_filters",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
+    Column("name", Text, nullable=False),
+    Column("spec", _json_type(), nullable=False),              # {statusFilter, assignmentTab, sortBy, tagFilter, advFilters}
+    Column("position", Integer, nullable=False, server_default="0"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+Index("idx_saved_filters_user", saved_conversation_filters.c.user_id,
+      saved_conversation_filters.c.position)
 
 
 # Set of core table names — used by the SQLite → Postgres migration helper to

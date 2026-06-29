@@ -1,0 +1,33 @@
+{
+  "// doc": [
+    "Plano 23 · D0 — editor/type-check config for the no-build-step ESM frontend.",
+    "Global type-checking is OFF (`checkJs: false`): the runtime is raw HTM + an",
+    "import-map (web/index.html), with no bundler/transpile pass, so we never want",
+    "tsc to fail the whole tree. Type-checking is OPT-IN PER FILE via a `// @ts-check`",
+    "comment at the top of the module (today: utils/phone.js,",
+    "services/{httpClient,messages,conversationPatch}.js — the new pure modules,",
+    "annotated with JSDoc typedefs on their exports). Verify with:",
+    "    npx tsc -p jsconfig.json --noEmit",
+    "Only files carrying `// @ts-check` are actually checked; everything else is",
+    "parsed for editor IntelliSense only."
+  ],
+  "compilerOptions": {
+    "checkJs": false,
+    "allowJs": true,
+    "module": "esnext",
+    "target": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "web/static/js/**/*.js"
+  ],
+  "exclude": [
+    "web/static/vendor/**",
+    "node_modules"
+  ]
+}

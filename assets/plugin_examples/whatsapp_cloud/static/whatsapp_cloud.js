@@ -140,6 +140,10 @@ export default function WhatsAppCloudConfig({ apiBase = '/api/plugins/whatsapp_c
             value=${form.waba_id || ''}
             onInput=${(e) => update('waba_id', e.target.value)}
           />
+          <div class=${HINT}>
+            Habilita templates (HSM). Cadastre-o de fato nas credenciais do canal
+            pela tela <strong>Canais</strong> — aqui é só rascunho.
+          </div>
         </div>
 
         <div>
@@ -171,17 +175,6 @@ export default function WhatsAppCloudConfig({ apiBase = '/api/plugins/whatsapp_c
         </div>
 
         <div>
-          <label class=${LABEL}>App Secret <span class="text-wa-secondary">(opcional)</span></label>
-          <input
-            type="password"
-            class=${FIELD}
-            placeholder="para validar a assinatura X-Hub"
-            value=${form.app_secret || ''}
-            onInput=${(e) => update('app_secret', e.target.value)}
-          />
-        </div>
-
-        <div>
           <label class=${LABEL}>URL de webhook (cole na Meta)</label>
           <div class="flex gap-2">
             <input class=${FIELD + ' font-mono'} readonly value=${webhookUrl} />
@@ -199,8 +192,8 @@ export default function WhatsAppCloudConfig({ apiBase = '/api/plugins/whatsapp_c
 
       <div class="mt-5 px-3 py-2 rounded bg-wa-bg border border-wa-border text-xs text-wa-secondary">
         Dica: anote estes valores e cadastre as credenciais
-        (<code>phone_number_id</code>, <code>access_token</code>,
-        <code>verify_token</code>, <code>app_secret</code>) no canal pela tela
+        (<code>phone_number_id</code>, <code>waba_id</code>,
+        <code>access_token</code>, <code>verify_token</code>) no canal pela tela
         <strong>Canais</strong>. Os campos acima ficam só neste navegador como
         rascunho.
       </div>

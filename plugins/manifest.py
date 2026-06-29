@@ -15,11 +15,22 @@ import re
 from pathlib import Path
 from typing import Any
 
+# Semver parsing/matching lives in plugins.semver (plano 23 Fase C4 — single
+# source). Re-exported here so existing import paths (``manifest.check_api_compat``,
+# ``manifest._is_semver``, ``manifest._parse_simple_semver``) keep working.
+from plugins.semver import (
+    WHATSBOT_API_VERSION,
+    check_api_compat,
+    is_semver as _is_semver,
+    parse_simple_semver as _parse_simple_semver,
+)
+
 logger = logging.getLogger(__name__)
 
-WHATSBOT_API_VERSION = "1.0.0"
-
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# RBAC permission keys (plano "RBAC para Plugins" §3.2): allow ``view``,
+# ``orders.export``, etc. The plugin id is prefixed at registration time.
+_RBAC_KEY_RE = re.compile(r"^[a-z][a-z0-9_.]{0,48}$")
 
 
 @dataclasses.dataclass
@@ -46,6 +57,17 @@ class PluginManifest:
     # touches.
     events: list[str] = dataclasses.field(default_factory=list)
     filters: list[str] = dataclasses.field(default_factory=list)
+    # User-facing RBAC permissions (plano "RBAC para Plugins"). Distinct from the
+    # capability ``permissions`` field above. Shape after parsing:
+    # ``{"group": str | None, "permissions": [{"key": str, "label": str}, ...]}``.
+    rbac: dict = dataclasses.field(default_factory=dict)
+    # Frontend extension layer (camada de extensão de frontend). ``frontend_extends``
+    # is the URL of an ES module the app imports ONCE at boot (separate from screens)
+    # to register filters / UI slots / route-overrides via the client-side registry.
+    # ``frontend_api_version`` is the semver range that module targets; the client
+    # checks it against FRONTEND_API_VERSION at load time (informational on the server).
+    frontend_extends: str = ""
+    frontend_api_version: str = "*"
     raw: dict = dataclasses.field(default_factory=dict)
 
     def to_public_dict(self) -> dict:
@@ -62,6 +84,9 @@ class PluginManifest:
             "dependencies": self.dependencies,
             "events": self.events,
             "filters": self.filters,
+            "rbac": self.rbac,
+            "frontend_extends": self.frontend_extends,
+            "frontend_api_version": self.frontend_api_version,
         }
 
 
@@ -142,12 +167,20 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
             # When true, the screen is the plugin's configuration UI: shown in the
             # Plugins tab "Configurar" modal instead of as a standalone gear-menu page.
             "config": bool(s.get("config", False)),
+            # Optional RBAC gate (plano "RBAC para Plugins"): when set, the screen
+            # is hidden in the gear menu unless the user holds plugin.<id>.<requires>.
+            "requires": str(s["requires"]).strip() if s.get("requires") else None,
         })
 
     permissions = [str(p) for p in (data.get("permissions") or []) if isinstance(p, str)]
     deps = [str(d) for d in (data.get("dependencies") or []) if isinstance(d, str)]
     events_declared = [str(e) for e in (data.get("events") or []) if isinstance(e, str)]
     filters_declared = [str(f) for f in (data.get("filters") or []) if isinstance(f, str)]
+    rbac = _parse_rbac(data.get("rbac"), pid)
+
+    # Frontend extension module (optional). Normalized to a string; empty = none.
+    frontend_extends = str(data.get("frontend_extends") or "")
+    frontend_api_version = str(data.get("frontend_api_version") or "*")
 
     return PluginManifest(
         id=pid,
@@ -163,57 +196,49 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         dependencies=deps,
         events=events_declared,
         filters=filters_declared,
+        rbac=rbac,
+        frontend_extends=frontend_extends,
+        frontend_api_version=frontend_api_version,
         raw=data,
     )
 
 
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
+def _parse_rbac(raw: Any, pid: str) -> dict:
+    """Parse + validate the optional ``rbac:`` manifest block.
 
-
-def _is_semver(value: str) -> bool:
-    return bool(_SEMVER_RE.match(value))
-
-
-def _parse_simple_semver(value: str) -> tuple[int, int, int]:
-    """Parse ``MAJOR.MINOR.PATCH`` ignoring prerelease/build."""
-    core = re.split(r"[-+]", value, maxsplit=1)[0]
-    parts = core.split(".")
-    if len(parts) < 3:
-        parts += ["0"] * (3 - len(parts))
-    try:
-        return int(parts[0]), int(parts[1]), int(parts[2])
-    except ValueError:
-        return 0, 0, 0
-
-
-def check_api_compat(spec: str, current: str = WHATSBOT_API_VERSION) -> bool:
-    """Check whether ``current`` satisfies the constraint expression ``spec``.
-
-    Supports ``*``, plain version (``1.0.0``), and comma-separated comparators
-    ``>=, <=, >, <, ==, !=`` such as ``">=1.0,<2.0"``.
+    Returns ``{}`` when absent. Otherwise ``{"group": str | None,
+    "permissions": [{"key", "label"}, ...]}``. Invalid keys are dropped with a
+    warning (a bad permission key never blocks the whole plugin from loading).
     """
-    spec = (spec or "*").strip()
-    if spec in ("", "*"):
-        return True
-    cur = _parse_simple_semver(current)
-    # plain version → exact match on MAJOR.MINOR.PATCH
-    if _is_semver(spec):
-        return cur == _parse_simple_semver(spec)
-    parts = [p.strip() for p in spec.split(",")]
-    for part in parts:
-        m = re.match(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$", part)
-        if not m:
-            logger.warning("Unrecognized version constraint: %r", part)
-            return False
-        op, ver = m.group(1), m.group(2)
-        target = _parse_simple_semver(ver)
-        if op == ">=" and not cur >= target: return False
-        if op == "<=" and not cur <= target: return False
-        if op == ">"  and not cur >  target: return False
-        if op == "<"  and not cur <  target: return False
-        if op == "==" and not cur == target: return False
-        if op == "!=" and not cur != target: return False
-    return True
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("plugin %s: 'rbac' must be a mapping, ignored", pid)
+        return {}
+    group = raw.get("group")
+    group_str = str(group).strip() if isinstance(group, str) and group.strip() else None
+    perms_in = raw.get("permissions") or []
+    if not isinstance(perms_in, list):
+        logger.warning("plugin %s: 'rbac.permissions' must be a list, ignored", pid)
+        return {"group": group_str, "permissions": []}
+    perms: list[dict] = []
+    seen: set[str] = set()
+    for item in perms_in:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not _RBAC_KEY_RE.match(key):
+            logger.warning(
+                "plugin %s: invalid rbac permission key %r (expect %s), skipped",
+                pid, key, _RBAC_KEY_RE.pattern,
+            )
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        label = str(item.get("label") or key).strip()
+        perms.append({"key": key, "label": label})
+    return {"group": group_str, "permissions": perms}
 
 
 # ---------------------------------------------------------------------------

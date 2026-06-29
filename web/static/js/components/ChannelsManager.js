@@ -5,271 +5,42 @@
 // pick a provider, an id (snake_case), a display name, and the provider's
 // credential fields. After creating a whatsapp_cloud channel the modal shows
 // the webhook URL to paste into the Meta App configuration.
+//
+// Plano 23 · D4 — decomposed: this file is now the thin container (data fetching
+// + CRUD orchestration + layout). The presentational pieces live in
+// components/channels/* (ChannelForm, ChannelEditForm, ChannelCard, QRConnect,
+// JidTypePicker, AiSettingsFields, AgentPicker, notices) and the pure helpers in
+// components/channels/constants.js. The provider list {gowa, whatsapp_cloud,
+// telegram, test} and every route call (telegramAutoconfigure/status, …) are
+// preserved exactly.
 
 import { h } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
 import {
   listChannels,
+  listArchivedChannels,
+  restoreChannel,
   createChannel,
   updateChannel,
   deleteChannel,
   getChannelStatus,
+  setChannelMembers,
+  listChannelProviders,
+  telegramAutoconfigure,
+  getConfig,
 } from '../services/api.js';
+import { useDeepLink } from '../hooks/useDeepLink.js';
+import { PROVIDERS, aiDefaultsFrom } from './channels/constants.js';
+import { ChannelForm } from './channels/ChannelForm.js';
+import { ChannelEditForm } from './channels/ChannelEditForm.js';
+import { ChannelCard } from './channels/ChannelCard.js';
+import { QRConnect } from './channels/QRConnect.js';
+import { WebhookNotice, TelegramWebhookNotice, PurgeChannelModal } from './channels/notices.js';
 
 const html = htm.bind(h);
 
-const ID_RE = /^[a-z][a-z0-9_]*$/;
-
-// Provider catalogue: label + accent tint (only classes covered by custom.css
-// dark overrides — green/blue/gray/purple at -50/-700). `gowa` is the local
-// WhatsApp bridge; `whatsapp_cloud` is Meta's Cloud API; `test` is a no-op.
-const PROVIDERS = {
-  gowa: { label: 'GOWA', tint: 'bg-green-50 text-green-700' },
-  whatsapp_cloud: { label: 'WhatsApp Cloud', tint: 'bg-blue-50 text-blue-700' },
-  telegram: { label: 'Telegram', tint: 'bg-purple-50 text-purple-700' },
-  test: { label: 'Teste', tint: 'bg-gray-100 text-wa-secondary' },
-};
-
-function providerMeta(provider) {
-  return PROVIDERS[provider] || { label: provider || '—', tint: 'bg-gray-100 text-wa-secondary' };
-}
-
-// Random URL-safe token, used for the "sugerir" verify-token button.
-function randomToken(len = 32) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  try {
-    const arr = new Uint32Array(len);
-    crypto.getRandomValues(arr);
-    for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length];
-  } catch (e) {
-    for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return out;
-}
-
-function Dot({ on }) {
-  return html`<span class="inline-block w-2 h-2 rounded-full ${on ? 'bg-green-500' : 'bg-gray-400'}"></span>`;
-}
-
-// ── Create-channel modal ────────────────────────────────────────────
-function ChannelForm({ onCreated, onCancel, busy, error }) {
-  const [provider, setProvider] = useState('gowa');
-  const [id, setId] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  // Provider-specific credential/config fields.
-  const [gowaDeviceId, setGowaDeviceId] = useState('');
-  const [accessToken, setAccessToken] = useState('');
-  const [phoneNumberId, setPhoneNumberId] = useState('');
-  const [verifyToken, setVerifyToken] = useState('');
-  const [appSecret, setAppSecret] = useState('');
-
-  const idErr = id && !ID_RE.test(id)
-    ? 'Use apenas letras minúsculas, números e _ (começando por letra).'
-    : '';
-
-  const canSave = !busy && id.trim() && !idErr && displayName.trim();
-
-  function buildPayload() {
-    const payload = {
-      id: id.trim(),
-      provider,
-      display_name: displayName.trim(),
-    };
-    if (provider === 'gowa') {
-      if (gowaDeviceId.trim()) payload.config = { gowa_device_id: gowaDeviceId.trim() };
-    } else if (provider === 'whatsapp_cloud') {
-      const credentials = {};
-      if (accessToken.trim()) credentials.access_token = accessToken.trim();
-      if (phoneNumberId.trim()) credentials.phone_number_id = phoneNumberId.trim();
-      if (verifyToken.trim()) credentials.verify_token = verifyToken.trim();
-      if (appSecret.trim()) credentials.app_secret = appSecret.trim();
-      if (Object.keys(credentials).length) payload.credentials = credentials;
-    }
-    return payload;
-  }
-
-  function submit() {
-    if (!canSave) return;
-    onCreated(buildPayload());
-  }
-
-  return html`
-    <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
-      <div class="text-[14px] font-medium text-wa-text mb-3">Novo canal</div>
-      <div class="flex flex-col gap-3">
-        <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Provider</label>
-          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            value=${provider} onChange=${(e) => setProvider(e.target.value)} disabled=${busy}>
-            ${Object.entries(PROVIDERS).map(([key, meta]) => html`
-              <option key=${key} value=${key}>${meta.label}</option>
-            `)}
-          </select>
-        </div>
-
-        <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">ID</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" placeholder="ex: whatsapp_principal" value=${id}
-            onInput=${(e) => setId(e.target.value)} />
-          ${idErr ? html`<div class="text-[12px] text-red-500 mt-1">${idErr}</div>` : null}
-        </div>
-
-        <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" placeholder="ex: Atendimento WhatsApp" value=${displayName}
-            onInput=${(e) => setDisplayName(e.target.value)} />
-        </div>
-
-        ${provider === 'gowa' ? html`
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">GOWA Device ID <span class="text-wa-secondary">(opcional)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" placeholder="device id do GOWA" value=${gowaDeviceId}
-              onInput=${(e) => setGowaDeviceId(e.target.value)} />
-          </div>
-        ` : null}
-
-        ${provider === 'whatsapp_cloud' ? html`
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Access Token</label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="password" placeholder="EAAB..." value=${accessToken}
-              onInput=${(e) => setAccessToken(e.target.value)} />
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Phone Number ID</label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" placeholder="ID do número (Meta)" value=${phoneNumberId}
-              onInput=${(e) => setPhoneNumberId(e.target.value)} />
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Verify Token</label>
-            <div class="flex gap-2">
-              <input class="wa-field flex-1 px-3 py-2 rounded-md text-[14px]"
-                type="text" placeholder="token de verificação do webhook" value=${verifyToken}
-                onInput=${(e) => setVerifyToken(e.target.value)} />
-              <button type="button"
-                class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
-                onClick=${() => setVerifyToken(randomToken())}>Sugerir</button>
-            </div>
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">App Secret <span class="text-wa-secondary">(opcional)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="password" placeholder="App Secret do app Meta" value=${appSecret}
-              onInput=${(e) => setAppSecret(e.target.value)} />
-          </div>
-        ` : null}
-
-        ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
-
-        <div class="flex gap-2 justify-end">
-          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
-            onClick=${onCancel} disabled=${busy}>Cancelar</button>
-          <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick=${submit} disabled=${!canSave}>${busy ? 'Criando…' : 'Criar canal'}</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// ── Webhook-URL notice (shown after creating a whatsapp_cloud channel) ──
-function WebhookNotice({ channelId, onDismiss }) {
-  const url = `${window.location.origin}/api/webhook/whatsapp_cloud/${channelId}`;
-  const [copied, setCopied] = useState(false);
-  function copy() {
-    try {
-      navigator.clipboard.writeText(url).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      });
-    } catch (e) { /* clipboard may be unavailable */ }
-  }
-  return html`
-    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-      <div class="text-[14px] font-medium text-blue-700 mb-1">Canal criado</div>
-      <p class="text-[13px] text-wa-text mb-2">
-        Cole esta URL como <span class="font-medium">Callback URL</span> na configuração de webhook do seu app na Meta:
-      </p>
-      <div class="flex gap-2 items-center flex-wrap">
-        <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url}</code>
-        <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
-          onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
-      </div>
-      <div class="flex justify-end mt-3">
-        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-          onClick=${onDismiss}>Fechar</button>
-      </div>
-    </div>
-  `;
-}
-
-// ── Single channel card ─────────────────────────────────────────────
-function ChannelCard({ channel, onToggle, onDelete, onRefresh, busyId }) {
-  const meta = providerMeta(channel.provider);
-  const cred = channel.credentials || {};
-  const credEntries = Object.entries(cred);
-  const busy = busyId === channel.id;
-
-  return html`
-    <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex items-start gap-3 flex-wrap">
-      <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-[14px] text-wa-text font-medium truncate">${channel.display_name || channel.id}</span>
-          <span class="px-2 py-0.5 rounded-full text-[11px] ${meta.tint}">${meta.label}</span>
-          ${channel.enabled
-            ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-50 text-green-700">Ativo</span>`
-            : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>`}
-        </div>
-        <div class="text-[12px] text-wa-secondary mt-0.5 font-mono break-words">${channel.id}</div>
-
-        <div class="flex items-center gap-4 mt-2 flex-wrap">
-          <span class="flex items-center gap-1.5 text-[12px] text-wa-secondary">
-            <${Dot} on=${channel.connected} /> ${channel.connected ? 'Conectado' : 'Desconectado'}
-          </span>
-          <span class="flex items-center gap-1.5 text-[12px] text-wa-secondary">
-            <${Dot} on=${channel.logged_in} /> ${channel.logged_in ? 'Autenticado' : 'Não autenticado'}
-          </span>
-          ${channel.own_phone ? html`
-            <span class="text-[12px] text-wa-secondary">📱 ${channel.own_phone}</span>
-          ` : null}
-        </div>
-
-        ${credEntries.length ? html`
-          <div class="text-[12px] text-wa-secondary mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
-            ${credEntries.map(([k, v]) => html`
-              <span key=${k}><span class="text-wa-text">${k}:</span> <span class="font-mono">${v}</span></span>
-            `)}
-          </div>
-        ` : null}
-
-        ${channel.last_error ? html`
-          <div class="text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-md px-2 py-1 mt-2 break-words">
-            ${channel.last_error}
-          </div>
-        ` : null}
-      </div>
-
-      <div class="flex gap-1 shrink-0 flex-wrap justify-end">
-        <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
-          onClick=${() => onRefresh(channel)} disabled=${busy}>
-          ${busy ? '…' : 'Atualizar'}</button>
-        <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
-          onClick=${() => onToggle(channel)} disabled=${busy}>
-          ${channel.enabled ? 'Desativar' : 'Ativar'}</button>
-        <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
-          onClick=${() => onDelete(channel)} disabled=${busy}>Excluir</button>
-      </div>
-    </div>
-  `;
-}
-
-export default function ChannelsManager() {
+export default function ChannelsManager({ initialEntity }) {
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -277,8 +48,62 @@ export default function ChannelsManager() {
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
   const [busyId, setBusyId] = useState('');
+  // Canais arquivados (soft-delete) + visibilidade da seção de restauração.
+  const [archived, setArchived] = useState([]);
+  const [showArchived, setShowArchived] = useState(false);
   // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
   const [webhookFor, setWebhookFor] = useState(null);
+  const [telegramNotice, setTelegramNotice] = useState(null);
+  // {id, display_name} of the GOWA channel whose QR-connect panel is open.
+  const [connectFor, setConnectFor] = useState(null);
+  // The channel object being edited (display info + inbox agents), or null.
+  const [editingChannel, setEditingChannel] = useState(null);
+  // The channel pending hard-delete confirmation, or null.
+  const [purgeTarget, setPurgeTarget] = useState(null);
+  // Per-channel AI defaults, derived from the global config (plano 21): a new
+  // channel inherits the values that used to be global.
+  const [aiDefaults, setAiDefaults] = useState(() => aiDefaultsFrom({}));
+  // Providers offered in the "Novo canal" picker — only those whose plugin is
+  // enabled (null while loading → ChannelForm shows the full catalogue).
+  const [providers, setProviders] = useState(null);
+  // Required credentials per provider (capability-driven, from the providers
+  // fetch) — gates the create form and flags zombie channels on the cards.
+  const [requiredCreds, setRequiredCreds] = useState({});
+  const channelsRef = useRef([]);
+  channelsRef.current = channels;
+
+  // Deep-link /channels/<id>: a URL reflete o canal aberto no editor.
+  const pushUrl = useDeepLink({
+    tab: 'channels',
+    resolve: initialEntity ? { id: initialEntity.id } : null,
+    ready: !loading,
+    open: (sel) => {
+      if (!sel) { setEditingChannel(null); return; }
+      const c = channels.find(ch => ch.id === sel.id);
+      if (c) setEditingChannel(c);
+    },
+  });
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await getConfig();
+      if (alive && res && res.ok) setAiDefaults(aiDefaultsFrom(res.data));
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await listChannelProviders();
+      if (alive && res && res.ok) {
+        setProviders(res.data.providers || []);
+        setRequiredCreds(res.data.required_credentials || {});
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -286,22 +111,96 @@ export default function ChannelsManager() {
     const res = await listChannels();
     if (res && res.ok) setChannels((res.data && res.data.channels) || res.data || []);
     else setError((res && res.error) || 'Falha ao carregar canais.');
+    const arc = await listArchivedChannels();
+    if (arc && arc.ok) setArchived((arc.data && arc.data.channels) || arc.data || []);
     setLoading(false);
+    refreshStatuses();
+  }
+
+  async function handleRestore(channel) {
+    setBusyId(channel.id); setError('');
+    const res = await restoreChannel(channel.id);
+    setBusyId('');
+    if (res && res.ok) load();
+    else setError((res && res.error) || 'Falha ao restaurar o canal.');
+  }
+
+  // Pull live connected/logged-in status for every channel and merge into the
+  // cards (so they reflect the real GOWA session, not just the stored flags).
+  async function refreshStatuses() {
+    const list = channelsRef.current;
+    if (!list || !list.length) return;
+    const results = await Promise.all(
+      list.map(c => getChannelStatus(c.id).then(r => [c.id, r]).catch(() => [c.id, null]))
+    );
+    const byId = {};
+    for (const [id, r] of results) {
+      if (r && r.ok && r.data) byId[id] = r.data;
+    }
+    setChannels(prev => prev.map(c => byId[c.id]
+      ? { ...c, connected: !!byId[c.id].connected, logged_in: !!byId[c.id].logged_in,
+          own_phone: byId[c.id].own_phone || c.own_phone, last_error: byId[c.id].error || null }
+      : c));
   }
 
   useEffect(() => { load(); }, []);
 
-  async function handleCreate(payload) {
+  // Keep card statuses live while the screen is open.
+  useEffect(() => {
+    const t = setInterval(refreshStatuses, 8000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function handleCreate(payload, agentIds) {
     setCreateBusy(true); setCreateError('');
     const res = await createChannel(payload);
-    setCreateBusy(false);
     if (res && res.ok) {
+      // O id é gerado pelo backend — usar o canal retornado, não o payload.
+      const created = res.data || {};
+      const newId = created.id;
+      // Assign the picked agents to the new channel's inbox (best-effort: a
+      // failure here never blocks creation, which already succeeded).
+      if (agentIds && agentIds.length && newId) {
+        await setChannelMembers(newId, agentIds);
+      }
+      setCreateBusy(false);
       setCreating(false);
-      if (payload.provider === 'whatsapp_cloud') setWebhookFor(payload.id);
+      if (payload.provider === 'whatsapp_cloud') setWebhookFor(newId);
+      // GOWA: open the QR-connect panel immediately so the user can scan it.
+      if (payload.provider === 'gowa') {
+        setConnectFor({ id: newId, display_name: created.display_name || payload.display_name });
+      }
+      // Telegram: auto-detect a public domain and register the webhook (or fall
+      // back to long-poll), then show the resulting webhook URL so the operator
+      // can copy it / confirm — no need to open the plugin config.
+      if (payload.provider === 'telegram' && newId) {
+        const auto = await telegramAutoconfigure(newId);
+        if (auto && auto.ok && auto.data) {
+          setTelegramNotice(auto.data);
+        } else {
+          // Autoconfigure failed (plugin off?): still show the webhook URL with a
+          // long-poll fallback so the inbox isn't left in limbo.
+          setTelegramNotice({
+            mode: 'poll', registered: false,
+            reason: (auto && auto.error) || 'plugin Telegram indisponível',
+            webhook_url: `${window.location.origin}/api/webhook/telegram/${newId}`,
+          });
+        }
+      }
       load();
     } else {
+      setCreateBusy(false);
       setCreateError((res && res.error) || 'Falha ao criar o canal.');
     }
+  }
+
+  function handleConnect(channel) {
+    setConnectFor({ id: channel.id, display_name: channel.display_name || channel.id });
+  }
+
+  function handleEdit(channel) {
+    setEditingChannel(channel);
+    pushUrl({ id: channel.id });
   }
 
   async function handleToggle(channel) {
@@ -313,9 +212,26 @@ export default function ChannelsManager() {
   }
 
   async function handleDelete(channel) {
-    if (!confirm(`Excluir o canal "${channel.display_name || channel.id}"? Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de conversas é preservado e pode ser restaurado depois.`)) return;
     setBusyId(channel.id); setError('');
     const res = await deleteChannel(channel.id);
+    setBusyId('');
+    if (res && res.ok) load();
+    else setError((res && res.error) || 'Falha ao arquivar o canal.');
+  }
+
+  // Hard-delete (purge): abre o modal de confirmação.
+  function handlePurge(channel) {
+    setError('');
+    setPurgeTarget(channel);
+  }
+
+  async function confirmPurge() {
+    const channel = purgeTarget;
+    if (!channel) return;
+    setPurgeTarget(null);
+    setBusyId(channel.id); setError('');
+    const res = await deleteChannel(channel.id, { purge: true });
     setBusyId('');
     if (res && res.ok) load();
     else setError((res && res.error) || 'Falha ao excluir o canal.');
@@ -352,12 +268,21 @@ export default function ChannelsManager() {
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
       ${webhookFor ? html`<${WebhookNotice} channelId=${webhookFor} onDismiss=${() => setWebhookFor(null)} />` : null}
+      ${telegramNotice ? html`<${TelegramWebhookNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
+
+      ${connectFor ? html`<${QRConnect}
+        channelId=${connectFor.id}
+        displayName=${connectFor.display_name}
+        onClose=${() => { setConnectFor(null); refreshStatuses(); }} />` : null}
 
       ${creating ? html`<${ChannelForm}
         onCreated=${handleCreate}
         onCancel=${() => setCreating(false)}
         busy=${createBusy}
-        error=${createError} />` : null}
+        error=${createError}
+        aiDefaults=${aiDefaults}
+        availableProviders=${providers}
+        requiredCreds=${requiredCreds} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -374,10 +299,52 @@ export default function ChannelsManager() {
             channel=${channel}
             onToggle=${handleToggle}
             onDelete=${handleDelete}
+            onPurge=${handlePurge}
             onRefresh=${handleRefresh}
-            busyId=${busyId} />
+            onConnect=${handleConnect}
+            onEdit=${handleEdit}
+            busyId=${busyId}
+            requiredCreds=${requiredCreds} />
         `)}
       </div>
+
+      ${archived.length ? html`
+        <div class="mt-6 border-t border-wa-border pt-3">
+          <button class="text-[13px] text-wa-secondary hover:text-wa-text transition-colors"
+            onClick=${() => setShowArchived(v => !v)}>
+            ${showArchived ? '▾' : '▸'} Canais arquivados (${archived.length})
+          </button>
+          ${showArchived ? html`
+            <div class="flex flex-col gap-2 mt-2">
+              ${archived.map(channel => html`
+                <div key=${channel.id}
+                  class="flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-wa-panel border border-wa-border">
+                  <div class="min-w-0">
+                    <div class="text-[14px] text-wa-text truncate">${channel.display_name || channel.id}</div>
+                    <div class="text-[12px] text-wa-secondary truncate">
+                      ${(PROVIDERS[channel.provider] || {}).label || channel.provider} · arquivado
+                    </div>
+                  </div>
+                  <button class="px-2 py-1 rounded-md text-[13px] text-wa-teal hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
+                    onClick=${() => handleRestore(channel)} disabled=${busyId === channel.id}>
+                    ${busyId === channel.id ? '…' : 'Restaurar'}</button>
+                </div>
+              `)}
+            </div>
+          ` : null}
+        </div>
+      ` : null}
+
+      ${editingChannel ? html`<${ChannelEditForm}
+        channel=${editingChannel}
+        aiDefaults=${aiDefaults}
+        onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
+        onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
+
+      ${purgeTarget ? html`<${PurgeChannelModal}
+        channel=${purgeTarget}
+        onCancel=${() => setPurgeTarget(null)}
+        onConfirm=${confirmPurge} />` : null}
     </div>
   `;
 }

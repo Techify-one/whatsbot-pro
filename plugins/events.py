@@ -39,6 +39,11 @@ FilterFn = Callable[..., Any]
 KNOWN_EVENTS: set[str] = {
     # GOWA inbound / outbound message lifecycle
     "message.received", "message.sent", "message.saved",
+    # ``message.persisted`` (plano 23 Fase C5): emitted by ``agent.memory.add_message``
+    # AFTER the DB INSERT — the single decoupling signal the lifecycle WS/notice
+    # effects (created/reopened) listen on. Public payload:
+    # ``{conversation_id, contact_id, role, msg_id, ts}``.
+    "message.persisted",
     "message.reaction", "message.edited", "message.revoked", "message.deleted",
     # Presence / receipts
     "presence.changed", "receipt.changed",
@@ -48,6 +53,12 @@ KNOWN_EVENTS: set[str] = {
     "newsletter.event",
     # Chat-level
     "chat.archived",
+    # Channel lifecycle (plano 23 Fase B6 — minimal seam, C3 normalizes fully).
+    # ``channel.updated``: a channel config/credential edit (payload
+    #   ``{channel_id, keys_changed, ts}``) — cache invalidation is driven off it.
+    # ``channel.status_changed``: a live status read (payload
+    #   ``{channel_id, status, is_connected, is_logged_in, ts}``).
+    "channel.updated", "channel.status_changed",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",
@@ -63,6 +74,11 @@ KNOWN_EVENTS: set[str] = {
     # Conversations (plano 01 / plano 10 RT)
     "conversation.created", "conversation.status_changed", "conversation.assigned",
     "conversation.archived", "conversation.ai_toggled", "conversation.updated",
+    "conversation.deleted",
+    # Conversation lifecycle verbs (plano 23 Fase C0 — Expand antecipado)
+    "conversation.reopened", "conversation.unassigned",
+    "conversation.transferred_to_human", "conversation.agent_changed",
+    "conversation.attribute_set", "conversation.ai_takeover",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",
@@ -71,6 +87,71 @@ KNOWN_EVENTS: set[str] = {
     # Managed subprocess service (plano 09 Fase 4)
     "subprocess.crashed", "subprocess.restarted",
 }
+
+# ── Filter contract (plano 23 Fase C2) ───────────────────────────────────────
+#
+# ``KNOWN_FILTERS`` is the validated catalogue of every filter name the CORE
+# applies via ``apply_filter`` / ``apply_filter_sync`` (mirror of
+# ``KNOWN_EVENTS``). It exists to kill the silent typo (e.g. a plugin exporting
+# ``FILTERS = {"filter.replay.part": fn}`` would never fire and never warn).
+# When a plugin registers a filter whose name is NOT here, ``register_filter``
+# logs a WARNING — same severity ``register`` uses for an unknown EVENT name, and
+# informative ONLY, NEVER blocking: plugins MAY define their own filter names (a
+# plugin can publish a filter another plugin consumes), so an unknown name is
+# legal, just worth flagging.
+#
+# Versioning contract (``WHATSBOT_API_VERSION`` semver): adding a filter name is
+# ADDITIVE → a MINOR bump. Removing or renaming a filter, or changing the type of
+# its piped value / abort (``None``) semantics, is a breaking change → MAJOR.
+# Seams that are still in flux are marked ``experimental`` below and may move
+# without a MAJOR until they graduate; depend on them at your own risk.
+#
+# To document a NEW core filter: add its name here in the same commit that adds
+# the ``apply_filter(<name>, ...)`` call site (filters are seams — they are born
+# with their producer, not registered after the fact).
+KNOWN_FILTERS: set[str] = {
+    # Inbound webhook / message ingest
+    "filter.webhook.payload",
+    "filter.message.before_save", "filter.message.outgoing",
+    # Transcription / media (``filter.media.unknown`` is the last-resort hook for
+    # a plugin to claim an otherwise-unrecognised media type).
+    "filter.transcription.should_run", "filter.transcription.result",
+    "filter.media.unknown",
+    # Contact / tags
+    "filter.contact.tags",
+    # Event bus self-interception
+    "filter.event.before_emit",
+    # LLM turn (system prompt, history, tool schemas)
+    "filter.system_prompt", "filter.llm.messages", "filter.llm.tools",
+    # Tool dispatch (args in, result out)
+    "filter.tool.args", "filter.tool.result",
+    # Outbound reply (raw → parts → each part)
+    "filter.reply.raw", "filter.reply.parts", "filter.reply.part",
+    # AuthZ ABAC seam
+    "filter.authz.decision",
+    # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
+    # ``filter.conversation.before_status`` was RELOCATED from the route into
+    # ``conversation_service``; ``filter.conversation.before_assign`` is new.
+    "filter.conversation.before_status", "filter.conversation.before_assign",
+    # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
+    # the attendance plugin firms up):
+    # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn
+    #   (None ⇒ keep default) — in ``agent_run_service``.
+    # ``filter.conversation.assignment``: rewrite the round-robin destination of
+    #   ``transfer_to_human`` (None ⇒ default assignment) — in the tool.
+    "filter.agent.resolve", "filter.conversation.assignment",
+}
+
+# Filter seams that are still in flux (``experimental:true`` — see the semver note
+# above). Subset of KNOWN_FILTERS; not an enforcement gate, purely informative.
+EXPERIMENTAL_FILTERS: set[str] = {
+    "filter.agent.resolve", "filter.conversation.assignment",
+}
+
+# Backwards-compat alias for the pre-C2 informational catalogue name. ``KNOWN_FILTERS``
+# is the canonical registry now; keep the old name pointing at it so any importer
+# (or external tooling) still resolves.
+_CORE_FILTER_NAMES = KNOWN_FILTERS
 
 # Subscription keys that are dispatch targets, not emission sources.
 # ``message.any`` is re-dispatched automatically by :func:`emit` whenever
@@ -96,6 +177,74 @@ _filters: dict[str, list[tuple[int, str, FilterFn]]] = {}
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _agent_handler: Optional[Any] = None
 
+# ── Synchronous CORE subscribers (plano 23 Fase C5) ──────────────────────────
+#
+# A core WS-projection listener (``app.services.ws_projections``) must turn each
+# lifecycle DOMAIN event into the WS broadcast the panel expects (the Contract
+# step of the Parallel Change: the broadcast becomes a LISTENER of the event, so
+# the event is the SINGLE trigger). The plugin fan-out (:func:`emit`) schedules
+# handlers as ``create_task`` — deferred — which would RACE the characterization /
+# 876 suites that perform an action then immediately assert ``ws_manager.broadcast``
+# was called. So the WS projection is registered HERE, as a SYNCHRONOUS in-process
+# core subscriber that runs INSIDE the emit (``await``-ed in the async path, called
+# directly in the sync path), BEFORE the deferred plugin fan-out — giving identical
+# observable timing to the old inline ``ws_manager.broadcast`` call.
+#
+# These are core-only (registered at server startup, cleared by ``reset()``), run
+# after ``filter.event.before_emit`` (they see the same payload subscribers/audit
+# see), and are isolated: an exception in one never reaches the producer or the
+# other subscribers. They are NOT the plugin bus — plugins still use
+# ``EVENT_HANDLERS``.
+_core_sync_listeners: list[Callable[[str, dict], Any]] = []
+
+
+def register_core_sync_listener(fn: Callable[[str, dict], Any]) -> None:
+    """Register a CORE listener invoked synchronously inside every (filtered) emit.
+
+    ``fn(event_name, payload)`` runs in-line within ``emit_with_filter`` /
+    ``emit_with_filter_sync`` (awaited if it returns a coroutine in the async path),
+    so any side effect it performs (the WS broadcast in ``ws_projections``) is
+    observable with the SAME timing the old inline broadcast had. Lifecycle events
+    (which bypass ``filter.event.before_emit``) also reach core listeners. Idempotent
+    against the same callable object.
+    """
+    if fn not in _core_sync_listeners:
+        _core_sync_listeners.append(fn)
+
+
+async def _run_core_sync_listeners(event_name: str, payload: dict) -> None:
+    """Invoke every core sync listener for ``event_name`` (async emit path).
+
+    Each listener is isolated — a raising listener logs and never blocks the others
+    or the producer. Coroutine results are awaited so the WS broadcast completes
+    before the emit returns (preserving the old inline-await timing)."""
+    for fn in list(_core_sync_listeners):
+        try:
+            result = fn(event_name, payload)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.debug("core sync listener for %s failed: %s", event_name, e)
+
+
+def _run_core_sync_listeners_sync(event_name: str, payload: dict) -> None:
+    """Invoke every core sync listener for ``event_name`` (sync emit path).
+
+    Mirrors :func:`_run_core_sync_listeners` for ``emit_with_filter_sync``. If a
+    listener returns a coroutine it is scheduled on the bus loop (best-effort) so a
+    sync call site (a tool / memory thread) still drives the WS broadcast; when no
+    loop is wired (legacy script tests) it is run to completion inline."""
+    for fn in list(_core_sync_listeners):
+        try:
+            result = fn(event_name, payload)
+            if inspect.isawaitable(result):
+                if _loop is not None and _loop.is_running():
+                    asyncio.run_coroutine_threadsafe(result, _loop)
+                else:
+                    asyncio.get_event_loop().run_until_complete(result)
+        except Exception as e:
+            logger.debug("core sync listener for %s failed: %s", event_name, e)
+
 
 def set_runtime(loop: asyncio.AbstractEventLoop, agent_handler: Any) -> None:
     """Wire the bus at server lifespan start. Idempotent."""
@@ -108,6 +257,75 @@ def reset() -> None:
     """Clear all handlers and filters. For tests only."""
     _handlers.clear()
     _filters.clear()
+    _core_sync_listeners.clear()
+
+
+# ── Exported-dict validation (single source — plano 23 Fase C4) ────────────
+#
+# The shape/callable validation of a plugin's exported ``EVENT_HANDLERS`` /
+# ``FILTERS`` dicts lives here, NOT in ``plugins.loader``. The loader imports
+# these so it does not re-implement the same checks (the duplicate it used to
+# carry). ``register_plugin_events`` / ``register_plugin_filters`` reuse them too,
+# so a single function owns the rules + warning text.
+
+
+def validate_event_handlers(
+    plugin_id: str, raw: Any,
+) -> dict[str, EventHandler]:
+    """Return the valid ``{name: callable}`` subset of an exported EVENT_HANDLERS.
+
+    Non-dict input warns and yields ``{}``; non-callable entries warn and are
+    skipped. The single source of EVENT_HANDLERS validation.
+    """
+    if not raw:  # None / empty dict / falsy — nothing exported, no warning
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Plugin %s: EVENT_HANDLERS must be a dict, got %s",
+            plugin_id, type(raw).__name__,
+        )
+        return {}
+    out: dict[str, EventHandler] = {}
+    for name, fn in raw.items():
+        if callable(fn):
+            out[str(name)] = fn
+        else:
+            logger.warning(
+                "Plugin %s: EVENT_HANDLERS[%r] is not callable, skipped",
+                plugin_id, name,
+            )
+    return out
+
+
+def validate_filters(
+    plugin_id: str, raw: Any,
+) -> dict[str, Union[FilterFn, tuple]]:
+    """Return the valid subset of an exported FILTERS dict.
+
+    Each value may be a callable or a ``(callable, priority)`` tuple. Non-dict
+    input warns and yields ``{}``; malformed entries warn and are skipped. The
+    single source of FILTERS validation.
+    """
+    if not raw:  # None / empty dict / falsy — nothing exported, no warning
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Plugin %s: FILTERS must be a dict, got %s",
+            plugin_id, type(raw).__name__,
+        )
+        return {}
+    out: dict[str, Union[FilterFn, tuple]] = {}
+    for name, entry in raw.items():
+        if isinstance(entry, tuple) and len(entry) == 2 and callable(entry[0]):
+            out[str(name)] = entry
+        elif callable(entry):
+            out[str(name)] = entry
+        else:
+            logger.warning(
+                "Plugin %s: FILTERS[%r] must be callable or (callable, int), skipped",
+                plugin_id, name,
+            )
+    return out
 
 
 # ── Events ───────────────────────────────────────────────────────────────
@@ -123,14 +341,13 @@ def register(plugin_id: str, event_name: str, handler: EventHandler) -> None:
 
 
 def register_plugin_events(plugin_id: str, handlers: dict[str, EventHandler]) -> None:
-    """Bulk register the EVENT_HANDLERS dict exported by a plugin."""
-    for name, fn in (handlers or {}).items():
-        if not callable(fn):
-            logger.warning(
-                "Plugin %s: EVENT_HANDLERS[%r] is not callable, skipped", plugin_id, name,
-            )
-            continue
-        register(plugin_id, str(name), fn)
+    """Bulk register the EVENT_HANDLERS dict exported by a plugin.
+
+    Validation (dict shape + callable) is delegated to :func:`validate_event_handlers`
+    so the rules live in one place (the loader reuses it too).
+    """
+    for name, fn in validate_event_handlers(plugin_id, handlers).items():
+        register(plugin_id, name, fn)
 
 
 def emit(event_name: str, payload: dict) -> None:
@@ -195,6 +412,7 @@ async def emit_with_filter(event_name: str, payload: dict) -> None:
     directly for lifecycle / perf-sensitive sync paths.
     """
     if event_name in _LIFECYCLE_EVENTS:
+        await _run_core_sync_listeners(event_name, payload)
         emit(event_name, payload)
         return
     filtered = await apply_filter(
@@ -202,7 +420,10 @@ async def emit_with_filter(event_name: str, payload: dict) -> None:
     )
     if filtered is None:
         return
-    emit(event_name, filtered if isinstance(filtered, dict) else payload)
+    out = filtered if isinstance(filtered, dict) else payload
+    # Core projection FIRST (synchronous, observable timing), then plugin fan-out.
+    await _run_core_sync_listeners(event_name, out)
+    emit(event_name, out)
 
 
 def emit_with_filter_sync(event_name: str, payload: dict) -> None:
@@ -214,6 +435,7 @@ def emit_with_filter_sync(event_name: str, payload: dict) -> None:
     semantics as :func:`apply_filter_sync`.
     """
     if event_name in _LIFECYCLE_EVENTS:
+        _run_core_sync_listeners_sync(event_name, payload)
         emit(event_name, payload)
         return
     filtered = apply_filter_sync(
@@ -221,7 +443,9 @@ def emit_with_filter_sync(event_name: str, payload: dict) -> None:
     )
     if filtered is None:
         return
-    emit(event_name, filtered if isinstance(filtered, dict) else payload)
+    out = filtered if isinstance(filtered, dict) else payload
+    _run_core_sync_listeners_sync(event_name, out)
+    emit(event_name, out)
 
 
 async def _run_one(
@@ -253,6 +477,17 @@ async def _run_one(
 def register_filter(
     plugin_id: str, filter_name: str, fn: FilterFn, priority: int = 100
 ) -> None:
+    if filter_name not in KNOWN_FILTERS:
+        # Mirror ``register`` for unknown EVENT names: informative warning, never
+        # blocking. A plugin MAY define its own filter name (e.g. one plugin
+        # publishes a seam another consumes), so an unknown name is legal — but it
+        # most often means a typo (``filter.replay.part``) that would silently
+        # never fire. Flag it so the author notices.
+        logger.warning(
+            "Plugin %s registered unknown filter %r — not a core filter name; "
+            "it will only fire if some code calls apply_filter(%r)",
+            plugin_id, filter_name, filter_name,
+        )
     bucket = _filters.setdefault(filter_name, [])
     bucket.append((int(priority), plugin_id, fn))
     bucket.sort(key=lambda t: t[0])
@@ -264,20 +499,16 @@ def register_plugin_filters(
     """Bulk register the FILTERS dict exported by a plugin.
 
     Each value may be a callable or a ``(callable, priority)`` tuple. Lower
-    priority numbers run earlier in the chain.
+    priority numbers run earlier in the chain. Validation (dict shape + entry
+    shape) is delegated to :func:`validate_filters` (single source; the loader
+    reuses it too).
     """
-    for name, entry in (filters or {}).items():
-        if isinstance(entry, tuple) and len(entry) == 2 and callable(entry[0]):
+    for name, entry in validate_filters(plugin_id, filters).items():
+        if isinstance(entry, tuple):
             fn, priority = entry
-        elif callable(entry):
-            fn, priority = entry, 100
         else:
-            logger.warning(
-                "Plugin %s: FILTERS[%r] must be callable or (callable, int), skipped",
-                plugin_id, name,
-            )
-            continue
-        register_filter(plugin_id, str(name), fn, priority=priority)
+            fn, priority = entry, 100
+        register_filter(plugin_id, name, fn, priority=priority)
 
 
 async def apply_filter(

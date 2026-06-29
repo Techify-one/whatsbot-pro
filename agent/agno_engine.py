@@ -54,6 +54,9 @@ _RESERVED_TOOL_KWARGS = {
 }
 
 _DEFAULT_MAX_TOKENS = 1024
+# Last-resort model when an AgentSpec carries no model (config-in-DB only path,
+# plano 22). The AgentHandler no longer has an in-code ``model`` attribute.
+from agent.agent_factory import DEFAULT_MODEL as _FALLBACK_MODEL
 
 
 @dataclass
@@ -91,7 +94,7 @@ def build_model(handler, model_id: str | None = None,
             variables = None
     kwargs = model_factory.build_kwargs(
         model_config,
-        fallback_model=model_id or handler.model,
+        fallback_model=model_id or _FALLBACK_MODEL,
         default_max_tokens=_DEFAULT_MAX_TOKENS,
         variables=variables,
     )
@@ -168,7 +171,7 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args})
+        executed.append({"tool": name, "args": args, "result": feedback})
         track_step("tool_executed", {"tool": name, "args": args})
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
@@ -212,7 +215,7 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args})
+        executed.append({"tool": name, "args": args, "result": feedback})
         track_step("tool_executed", {"tool": name, "args": args})
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
@@ -297,6 +300,16 @@ def _extract_usage(run_output) -> dict | None:
     return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}
 
 
+def _merge_usage(base: dict | None, extra: dict | None) -> dict | None:
+    """Add the forced follow-up's tokens to the primary run's usage."""
+    if not extra:
+        return base
+    if not base:
+        return extra
+    return {k: (base.get(k, 0) or 0) + (extra.get(k, 0) or 0)
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+
+
 def _extract_reply(run_output) -> str:
     """Return the agent's final user-facing reply.
 
@@ -326,6 +339,71 @@ def _extract_reply(run_output) -> str:
     return content.strip()
 
 
+def _msg_text(m) -> str:
+    content = getattr(m, "content", None)
+    if not content:
+        return ""
+    return content.strip() if isinstance(content, str) else str(content).strip()
+
+
+def _clean_final_reply(run_output) -> str | None:
+    """Return the post-tool final assistant text, or ``None`` if there isn't one.
+
+    Walks the messages backwards: the first assistant turn that still carries
+    ``tool_calls`` is the *pre-tool preamble* ("vou criar... um minuto..."), so we
+    stop and report ``None`` — there is no genuine final answer after the tool
+    ran. A reasoning model that returns an empty ``content`` on the follow-up turn
+    lands here, which is exactly the case ``run_sync``/``run_async`` repair with a
+    forced tools-less follow-up instead of surfacing the dangling preamble.
+    """
+    messages = getattr(run_output, "messages", None) or []
+    for m in reversed(messages):
+        if getattr(m, "role", None) != "assistant":
+            continue
+        if getattr(m, "tool_calls", None):
+            return None
+        text = _msg_text(m)
+        if text:
+            return text
+    return None
+
+
+def _followup_input(run_output) -> list[Message]:
+    """Rebuild the conversation (sans system) to re-ask for a final answer.
+
+    Reuses AGNO's own ``Message`` objects from the completed run — including the
+    assistant turn that carries the ``tool_calls`` and the ``tool`` result rows —
+    so the model sees the tool outcome and produces the confirmation. The trailing
+    empty assistant turn (the failed follow-up) is dropped so the model is the one
+    completing the conversation.
+    """
+    src = getattr(run_output, "messages", None) or []
+    convo: list[Message] = []
+    for m in src:
+        role = getattr(m, "role", None)
+        if role == "system":
+            continue
+        if role == "assistant" and not getattr(m, "tool_calls", None) and not _msg_text(m):
+            continue  # drop the empty/failed final assistant turn
+        convo.append(m)
+    return convo
+
+
+def _needs_forced_followup(run_output, executed) -> bool:
+    """A tool ran but no genuine post-tool answer came back."""
+    return bool(executed) and _clean_final_reply(run_output) is None
+
+
+def _build_followup_agent(handler, system_prompt, model_config):
+    """A tools-less agent that only writes the final reply (no further tool loop)."""
+    return Agent(
+        model=build_model(handler, model_config=model_config),
+        system_message=system_prompt,
+        tools=None,
+        **_AGENT_CONTEXT_OFF,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
@@ -338,7 +416,7 @@ async def run_async(handler, contact, sender, messages, active_tools,
     functions = build_functions(handler, contact, sender, active_tools, executed,
                                 is_async=True, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
-    model_id = (model_config or {}).get("model") or handler.model
+    model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
     track_step("llm_request", {
         "model": model_id,
@@ -350,6 +428,27 @@ async def run_async(handler, contact, sender, messages, active_tools,
 
     reply = _extract_reply(run_output)
     usage = _extract_usage(run_output)
+
+    # The model may answer with a pre-tool preamble ("vou criar... um minuto...")
+    # alongside the tool call and then return an *empty* follow-up turn (common
+    # with reasoning models). In that case ``_extract_reply`` would surface the
+    # dangling preamble as the final reply — the client sees the bot "stop
+    # replying" after the action ran. Force one tools-less follow-up so the model
+    # actually writes the confirmation based on the tool result.
+    if _needs_forced_followup(run_output, executed):
+        try:
+            track_step("llm_request", {"model": model_id, "engine": "agno", "type": "followup"})
+            fu_agent = _build_followup_agent(handler, system_prompt, model_config)
+            fu_output = await fu_agent.arun(input=_followup_input(run_output))
+            fu_reply = _extract_reply(fu_output)
+            fu_usage = _extract_usage(fu_output)
+            track_step("llm_response", {"model": model_id, "engine": "agno",
+                                        "type": "followup", "has_reply": bool(fu_reply)})
+            if fu_reply:
+                reply = fu_reply
+                usage = _merge_usage(usage, fu_usage)
+        except Exception:
+            logger.exception("Forced follow-up after tool call failed for %s", sender)
     track_step("llm_response", {
         "model": model_id, "engine": "agno",
         "prompt_tokens": (usage or {}).get("prompt_tokens", 0),
@@ -368,7 +467,7 @@ def run_sync(handler, contact, sender, messages, active_tools,
     functions = build_functions(handler, contact, sender, active_tools, executed,
                                 is_async=False, hooks_config=hooks_config)
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
-    model_id = (model_config or {}).get("model") or handler.model
+    model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
     track_step("llm_request", {
         "model": model_id,
@@ -380,6 +479,23 @@ def run_sync(handler, contact, sender, messages, active_tools,
 
     reply = _extract_reply(run_output)
     usage = _extract_usage(run_output)
+
+    # See run_async: repair the "dangling preamble" case where the post-tool
+    # follow-up came back empty by forcing one tools-less follow-up.
+    if _needs_forced_followup(run_output, executed):
+        try:
+            track_step("llm_request", {"model": model_id, "engine": "agno", "type": "followup"})
+            fu_agent = _build_followup_agent(handler, system_prompt, model_config)
+            fu_output = fu_agent.run(input=_followup_input(run_output))
+            fu_reply = _extract_reply(fu_output)
+            fu_usage = _extract_usage(fu_output)
+            track_step("llm_response", {"model": model_id, "engine": "agno",
+                                        "type": "followup", "has_reply": bool(fu_reply)})
+            if fu_reply:
+                reply = fu_reply
+                usage = _merge_usage(usage, fu_usage)
+        except Exception:
+            logger.exception("Forced follow-up after tool call failed for %s", sender)
     track_step("llm_response", {
         "model": model_id, "engine": "agno",
         "prompt_tokens": (usage or {}).get("prompt_tokens", 0),

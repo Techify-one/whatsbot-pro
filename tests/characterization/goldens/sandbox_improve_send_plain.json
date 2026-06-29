@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "content": "Oi sandbox",
+      "media_type": null,
+      "msg_id": null,
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "claro, posso ajudar!",
+      "media_type": null,
+      "msg_id": null,
+      "role": "assistant",
+      "status": "sent"
+    }
+  ],
+  "process_message_called": true,
+  "response": {
+    "data": {
+      "phone": "5511975000001",
+      "replies": [
+        "claro, posso ajudar!"
+      ],
+      "reply": "claro, posso ajudar!"
+    },
+    "ok": true
+  },
+  "status_code": 200
+}

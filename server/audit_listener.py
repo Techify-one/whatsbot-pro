@@ -31,21 +31,36 @@ def _resource_id(payload: dict):
 
 
 def audit_event_handler(ctx, payload: dict) -> None:
-    """Persist an auditable bus event. No-op for events not in the allowlist."""
+    """Persist an auditable bus event. No-op for events not in the allowlist.
+
+    Emit sites may attach two reserved keys to opt into before/after auditing:
+      - ``_audit_before``: the prior state → stored in ``before_json``.
+      - ``_audit_after``:  the explicit new state → stored in ``after_json``;
+        when absent, the (reserved-key-stripped) payload is used as the "after".
+    Both are sanitised (secret-masked) inside ``audit_repo.add``. Events that don't
+    set them keep the legacy behaviour (after = payload, before = NULL).
+    """
     try:
         spec = audit_actions.AUDITABLE_EVENTS.get(ctx.event_name)
         if not spec:
             return
         action, rtype = spec
         actor = get_current_actor()
+        data = payload or {}
+        before = data.get("_audit_before")
+        if "_audit_after" in data:
+            after = data["_audit_after"]
+        else:
+            after = {k: v for k, v in data.items() if not k.startswith("_audit_")}
         audit_repo.add(
             actor_user_id=actor.id,
             actor_type=actor.type,
             actor_label=actor.label,
             action=action,
             resource_type=rtype,
-            resource_id=_resource_id(payload or {}),
-            after=payload,                 # sanitised inside add()
+            resource_id=_resource_id(data),
+            before=before,                 # sanitised inside add()
+            after=after,                   # sanitised inside add()
             ip_address=actor.ip,
             request_id=actor.request_id,
         )

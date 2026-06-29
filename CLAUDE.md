@@ -113,7 +113,7 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
 | `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo) e `has_unread_mention` (@menção não lida em grupo) |
 | `observations` | Notas/observações por contato (texto livre) |
-| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
 | `usage` | Registros de uso da API (tokens, custo, modelo) |
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
@@ -178,6 +178,21 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 **NÃO usa polling** — o auto-reply por polling foi removido. Toda recepção de mensagens é via webhook.
 
+### Filtro de tipos de JID (canal GOWA)
+
+O tipo de um chat do WhatsApp é definido pelo **sufixo do JID** (depois do `@`), não pelo número — o prefixo `120363…` é compartilhado por grupo, canal e comunidade. [channels/jid.py](channels/jid.py) (`classify_jid`) mapeia o sufixo para um tipo lógico: `person` (`@s.whatsapp.net`), `person_lid` (`@lid`), `group` (`@g.us`), `newsletter` (Canal, `@newsletter`), `broadcast` (Status/transmissão, `@broadcast`), `bot` (`@bot`), `unknown`.
+
+No webhook GOWA ([server/routes/webhook.py](server/routes/webhook.py)), logo após resolver o `chat_jid`, a mensagem é classificada e **descartada antes de materializar qualquer contato** se o tipo não estiver na lista permitida — corrige o bug em que tudo que não era `@g.us` caía no ramo "pessoa" (um post de Canal virava "contato fantasma"). A lista permitida vem de `config.allowed_jid_types` do canal GOWA (lida do canal `default`, que é single-channel no inbound; cache de 30s, invalidado ao editar a config do canal). **Default**: `person`, `person_lid`, `group` (descarta canal/status/bot). Tipos `unknown` nunca são bloqueados (preserva comportamento legado). A UI fica na criação/edição do canal GOWA em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`JidTypePicker`) — o usuário escolhe pelos rótulos amigáveis, sem ver o JID. Vale **apenas para canais GOWA**.
+
+## Configuração de IA por canal (plano 21)
+
+O comportamento da IA é configurado **por canal**, não globalmente. Cada canal guarda seus overrides em `channels.config["ai"]` (sub-objeto JSON), editáveis na criação/edição do canal em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`AiSettingsFields`, vale para todos os providers). As chaves por canal (`PER_CHANNEL_AI_KEYS` em [channels/ai_settings.py](channels/ai_settings.py)): `ai_enabled` (master do canal, channel-only), `default_ai_enabled`, `group_reply_mode`, `image_transcription_enabled`, `document_transcription_enabled`, `audio_transcription_mode`/`_target`/`_chat_prefix`, `max_context_messages`, `message_batch_delay`, `split_messages`/`split_message_delay`, `transfer_alert_enabled`/`_duration`.
+
+- **Resolução**: [channels/ai_settings.py](channels/ai_settings.py) `value(channel_id, key, default)` lê o override do canal (cache de 30s, invalidado no PUT do canal) e cai no `default` (o valor global de `config`, que vira o fallback herdado). `view(channel_id, settings)` devolve um shim `.get()` que sobrepõe os overrides do canal sobre o `settings` global (usado no helper de transcrição). O handler resolve `split_messages`/`max_context_messages`/`default_ai_enabled` por canal; o webhook resolve os demais nos call sites (cada um tem `channel_id`).
+- **Gate global → canal → conversa**: a IA só responde se (1) o **interruptor GLOBAL** `auto_reply` estiver ligado — checado PRIMEIRO, é o "botão global" no painel da IA; (2) o canal tiver `ai_enabled`; (3) a conversa tiver `ai_active`. `_channel_ai_enabled(channel_id)` no webhook cobre (1)+(2); `_conversation_ai_active` cobre (3).
+- **Painel da IA** (aba Configurações, [web/static/js/components/ai/GeneralSettings.js](web/static/js/components/ai/GeneralSettings.js)): mantém **apenas** o interruptor global (`auto_reply`), a chave de API e o aviso de saldo. O resto migrou para a tela Canais. Os valores globais legados em `config` continuam existindo só como fallback de canais que ainda não overridaram (canais novos "herdam" os valores globais atuais ao serem criados).
+- **Alerta de transferência** é per-canal: o broadcast `human_transfer_alert` carrega `{enabled, duration}` resolvidos pelo canal, e o frontend ([web/static/js/app.js](web/static/js/app.js)) respeita o payload (fallback no config global para payloads antigos).
+
 ## Memória por contato
 
 Cada contato é armazenado na tabela `contacts` com campos normalizados:
@@ -191,6 +206,15 @@ Cada contato é armazenado na tabela `contacts` com campos normalizados:
 `ContactMemory` em `agent/memory.py` é o wrapper que encapsula o acesso via repos. Mensagens são lazy-loaded do DB (não mantidas em memória). Apenas as últimas N (configurável) são enviadas ao LLM.
 
 Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
+
+## Avisos de sistema no chat (plano 12)
+
+Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** como um card centralizado painel-only — role **`conversation_event`** — igual aos `tool_call`/`system_notice`. Cobre: atribuir/assumir/remover atribuição, adicionar/remover tag, resolver/reabrir/arquivar, ligar/desligar IA (conversa **e** contato), trocar agente ativo, definir atributo — e as transições **automáticas** (cliente reabre conversa fechada ao mandar mensagem → `status_reopened_auto`; conversa nova → `created`; 1ª resposta da IA numa conversa → `ai_takeover`, 1×/conversa via dedupe).
+
+- **Módulo central**: [server/system_notices.py](server/system_notices.py) — `EVENT_GROUPS` (registry dos 4 grupos + chave de config), `EVENT_GROUP_OF` (event_type → grupo), `FORMATTERS` (texto PT-BR com autor), `emit_conversation_notice(*, event_type, conversation_id, contact_id=None, phone=None, **ctx)` (gate → formata → `message_repo.add(role="conversation_event", conversation_id=…)` → `broadcast("new_message")`). Defensivo: um aviso que falha nunca quebra a ação. Extensível: novo tipo = entrada em `FORMATTERS` + `EVENT_GROUP_OF`; grupo novo = + chave em `DEFAULT_CONFIG`/`allowed_keys`/`GET config` + toggle no `ConfigPanel`.
+- **Gate GLOBAL por grupo** (config, default ON): `system_notice_assignment`, `system_notice_tags`, `system_notice_status`, `system_notice_ai`. Grupo desligado ⇒ o aviso **não é gerado** (nada grava, nada emite). Toggles na seção "Avisos de sistema no chat" em Configurações.
+- **Call sites**: rotas de conversa via `_emit_notice` em [server/routes/conversations.py](server/routes/conversations.py) (resolve o autor do `current_user`); tags em [server/routes/tags.py](server/routes/tags.py); toggle-ai por contato em [server/routes/contacts.py](server/routes/contacts.py); automáticos no `add_message` ([agent/memory.py](agent/memory.py), via `conversation_repo.resolve_for_contact_ex` que sinaliza `created`/`reopened`) e no envio da resposta da IA ([server/routes/webhook.py](server/routes/webhook.py), `_maybe_emit_ai_takeover`).
+- **Painel-only**: `conversation_event` é excluído do contexto do LLM ([message_repo.py](db/repositories/message_repo.py)), do preview/última-mensagem da sidebar ([contact_repo.py](db/repositories/contact_repo.py) e [conversation_repo.py](db/repositories/conversation_repo.py) `_PREVIEW_EXCLUDED`) e não conta como não-lida (não entra em `unread_msg_ids`). Render como chip centralizado em [ContactDetail.js](web/static/js/components/contacts/ContactDetail.js); skip de preview em [Contacts.js](web/static/js/components/contacts/Contacts.js).
 
 ## Provider de LLM e onboarding (Techify)
 
@@ -280,7 +304,7 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
-Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga).
+Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga), `ai_typing` (`{phone, channel_id, active}` — a IA está processando uma resposta para a conversa; o painel mostra "IA respondendo…" no header para o operador não responder por cima).
 
 ## GOWA REST API (endpoints reais — v8.8.0 multi-device)
 
@@ -419,6 +443,29 @@ Referências (na Loja de Plugins, ver "Plugins de exemplo"): `auto_signature` (s
 - **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
 - **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
 
+### RBAC de plugins
+
+Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo automaticamente no `PermissionPicker` agrupada por "Plugin: \<label\>" (`rbac.group`, default = nome do plugin). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
+
+```yaml
+rbac:
+  group: "Lembretes"          # opcional; default = name do plugin
+  permissions:
+    - { key: view,   label: "Ver lembretes" }
+    - { key: delete, label: "Excluir lembretes" }
+```
+
+- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando legado/open (sem identidade de usuário) ou RBAC desligado — não quebra single-password. Nunca cheque permissão na mão; use a dependency.
+  ```python
+  from plugins.context import plugin_permission
+  @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])
+  async def delete_item(id: int): ...
+  ```
+- **Esconda a screen** sem permissão com `requires: <key>` no manifest da screen (`screens[].requires`) — o GearMenu filtra (padrão "hide, don't disable"). O componente da screen recebe a prop `can(key)` (= `hasPermission(user, 'plugin.<id>.<key>')`).
+- **Decisão central**: [server/authz.py](server/authz.py) `check()`/`acheck()` resolvem RBAC e então aplicam o seam ABAC `filter.authz.decision` (`{user, permission_key, allow}` → pode rebaixar allow→deny). **Nenhum avaliador é embarcado no core (v1)** — regras por atributo (ex: horário) viram um plugin de filtro depois, sem tocar nos call sites.
+- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático) + linhas com `plugin_id IS NOT NULL`. `/api/roles` e a validação de criação de role/usuário usam o catálogo efetivo.
+- **Disable** mantém as linhas (atribuições sobrevivem ao toggle); **delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
+
 ### Events e Filters (bus do plugin)
 
 Plugins podem reagir a tudo que acontece no WhatsBot e modificar dados em trânsito sem editar o core. Dois mecanismos complementares (padrão WordPress: actions + filters; referências validadas em Baileys / WAHA / Home Assistant):
@@ -488,6 +535,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.reply.raw` | `_send_reply` antes do split | `str` | Nada é enviado | `phone` |
 | `filter.reply.parts` | depois do split | `list[str]` | Nada é enviado | `phone` |
 | `filter.reply.part` | cada parte antes do GOWA (vale pra send manual também) | `str` | Aquela parte é pulada | `phone` |
+| `filter.authz.decision` | `authz.check`/`acheck` DEPOIS do RBAC | `dict {user, permission_key, allow}` | trata como `allow=False` (nega) | `permission_key` |
 
 **Lifecycle events bypassam `filter.event.before_emit`** — `plugin.loaded/enabled/disabled/settings.changed` e `app.startup/shutdown` chamam `emit()` direto. Plugin não pode bloquear seu próprio carregamento.
 
@@ -533,7 +581,7 @@ FILTERS = {
 - `payload["raw"]` carrega o payload bruto do GOWA (potencialmente grande, com base64 de áudio). Plugins que logam tudo devem cortar `raw` antes de serializar.
 - Restart obrigatório no toggle do plugin: `plugin.enabled`/`plugin.disabled` emitem ANTES do `os._exit`; o novo processo emite `plugin.loaded` no boot.
 
-Plugin de exemplo bundled em `assets/plugin_examples/` (copiado na 1ª execução): apenas `lembretes` (tools + routes + migrations + screen — anota lembretes pedidos pelo contato e mostra na tela com update via WebSocket).
+Plugins bundled em `assets/plugin_examples/` (copiados na 1ª execução): apenas os **providers de canal nativos da UI** — `gowa` (canal WhatsApp via GOWA), `telegram` (canal completo via Bot API — channels + lifecycle long-poll + routes + screen `config:true`; recebe por long-poll ou webhook, com `/autoconfigure` que detecta domínio público HTTPS ao criar o canal) e `whatsapp_cloud` (canal via WhatsApp Cloud API da Meta). Os três são bundled porque o frontend do core depende deles: [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) os oferece como providers e chama suas rotas (ex: `/api/plugins/telegram/autoconfigure` e `/status`), e `server/routes/channels.py` lista `{gowa, whatsapp_cloud, telegram, test}` como providers válidos montados a partir da classe do plugin — mantê-los no repo evita que plugin e core saiam de sincronia. Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o repositório de versionamento `whatsbot-pro-plugins` (`/home/luisa/opt/whatsbot-pro-plugins`), onde cada um vive em `plugins/<id>/` com um `.zip` importável + um `.json` de metadados, e são instalados sob demanda via `Importar (.zip)` na tela Gerenciar Plugins.
 
 Os demais plugins de exemplo foram movidos para a **Loja de Plugins** (repositório [Techify-one/whatsbot-plugins](https://github.com/Techify-one/whatsbot-plugins), publicado em https://whatsbot.techify.one/plugins) e são instalados via `Importar (.zip)` na tela Gerenciar Plugins: `event_logger` (assina `*`), `auto_signature` (`filter.reply.part`), `blacklist` (`filter.message.before_save` → `None`), `transcricao_grupos` (`filter.transcription.should_run` — controle de transcrição por grupo via UI + DB), `horario_funcionamento` (settings declarativas + `filter.system_prompt`/`filter.llm.tools`/`filter.llm.messages` + migrations — horário de funcionamento por dia da semana, com mensagem de ausência fora do expediente e cooldown por contato), `custom_sounds` (screen `config: true` + routes/migrations — biblioteca de sons), `notifications` (screen `config: true` somente-UI — preferências de notificação per-device em `localStorage`).
 
@@ -654,7 +702,8 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **Mensagens HSM via Cloud API (linked device limitation)**: contas Business via WhatsApp Cloud API enviam mensagens template (`<hsm tag="..."/>`, ex: Mercado Livre, OTP, notificações). Por design do WhatsApp, esses templates **não são entregues com conteúdo para linked devices** — só para o device primário. O GOWA recebe um `placeholderMessage` com `type: MASK_LINKED_DEVICES` (sem body/media), e o webhook chega só com metadata (`chat_id`, `from`, `id`, `timestamp`). Não é bug — é limitação estrutural. Para confirmar, ativar `WHATSBOT_GOWA_DEBUG=1` e procurar `placeholderMessage` ou `<hsm tag=` em `/api/gowa-logs`
 - **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
 - **Auto-criação do banco**: na inicialização, `init_db()` resolve a URL (env > `storages/database.json` > sqlite default), cria o engine e roda `alembic upgrade head`. SQLite vazio é criado do zero; DBs SQLite legados (sem `alembic_version`) são automaticamente stampados no baseline antes do upgrade — não há recriação destrutiva
-- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: apenas `lembretes`. Os outros plugins de exemplo vivem na Loja de Plugins (repositório `whatsbot-plugins`) e são instalados via `Importar (.zip)`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
+- **`statics/` precisa de pasta persistente no deploy (estilo Chatwoot)**: `statics/` está no `.gitignore` E `.dockerignore`, e é criada vazia em runtime dentro do container. A mídia enviada pelo operador (`statics/senditems/`) e o cache de avatares (`statics/avatars/`) vivem no **disco local da instância** — não no banco. Por isso o [Dockerfile](Dockerfile) **NÃO** declara `VOLUME` (um `VOLUME` no Dockerfile cria volume **anônimo**, que o Coolify/`docker run` sem `-v` **descarta ao recriar o container num redeploy** — daria 404 `{"detail":"Not Found"}` nas imagens já enviadas, e a leitura "parece persistente" engana). A persistência é feita por **bind mount de pasta real da instalação**: `docker-compose.yaml` mapeia `./data/{storages,statics,logs}` → `/app/...` (pastas visíveis no host, pré-criadas pelo `docker_start.sh`); no **Coolify**, configurar **Persistent Storage** mapeando `/app/storages` e `/app/statics` (ou ao menos `/app/statics/senditems`) para host path/volume. Em dev (`linux_start.sh`, processo direto, sem container) os arquivos já ficam em `statics/` da raiz do checkout. Avatares são cache auto-recuperável (re-baixados do GOWA), então o painel cai num placeholder 200 em vez de 404 (rota `GET /statics/avatars/{name}` em [server/app.py](server/app.py)); imagem perdida no chat renderiza placeholder "indisponível". **Atenção (DB compartilhado + disco local):** se duas instâncias dividem o MESMO banco (ex.: Postgres remoto) mas têm `statics/` separados, a mídia enviada por uma não aparece na outra (o `media_path` está no banco compartilhado, mas o arquivo só existe no disco de quem enviou) → "Imagem indisponível". Storage de mídia é **per-instância** por design; multi-réplica com mídia compartilhada exigiria storage de rede de verdade (volume por-nó não basta)
+- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: `gowa`, `telegram` e `whatsapp_cloud` (os três providers de canal nativos da UI — seus frontends são parte do core e não podem divergir). Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o repositório de versionamento `whatsbot-pro-plugins` (cada um em `plugins/<id>/` com `.zip` + `.json`) e são instalados via `Importar (.zip)`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
 - **Restart de plugin requer supervisor**: `enable`/`disable` chama `os._exit(0)` após um delay curto. Em Docker, `restart: unless-stopped` (compose) faz o container relançar; em dev, `restart.py` toca `server/_reload_trigger.py` (`.py` dentro de um `--reload-dir`, casa com o include default `*.py` do uvicorn) — o watchfiles reinicia o worker antes do `os._exit` rodar. O arquivo é regenerado em runtime e está no `.gitignore`. Em EXE Windows, o `update.py` relança. Sem supervisor, o servidor cai e não volta sozinho.
 - **Prefixo de tabela enforced**: o migrator usa regex em `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX`/`DROP TABLE`/`DROP INDEX` e RECUSA migration que tente criar objeto fora do prefixo `plugin_<id>_`. Erro mostra qual nome violou. Usar comentários SQL `--` ou `/* */` é OK; o migrator os strip-a antes da validação.
 - **Tool name é global**: se um plugin registra uma tool com nome já existente (core ou outro plugin), o registry loga warning e ignora a duplicata. Convenção: nomes específicos como `<id>_<verbo>` (ex: `orders_create`).

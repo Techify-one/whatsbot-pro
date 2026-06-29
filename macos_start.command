@@ -15,14 +15,16 @@ set -u
 # ===== Porta web (frontend + REST + WS). Sobrescrevível externamente. =====
 WEB_PORT="${WHATSBOT_WEB_PORT:-8080}"
 
-# Versão do GOWA que casa com o cliente em gowa/client.py e o Dockerfile.
-GOWA_VERSION="${GOWA_VERSION:-8.8.0}"
 # Versão do Python instalada automaticamente quando nenhuma 3.11+ é encontrada.
 PY_VERSION="${PY_VERSION:-3.12.8}"
 
 # Garante que o diretório de trabalho é o do script (idem ``cd /d %~dp0``).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
+
+# Shared, OS-agnostic launcher values (GOWA_VERSION, reload-dir set) — single
+# source of truth also used by linux_start.sh.
+. ./scripts/_common.sh
 
 echo ""
 echo "========================================"
@@ -225,16 +227,11 @@ export NO_COLOR=1
 # Loop externo: cobre quando o uvicorn parent morre ou um plugin chama
 # os._exit (enable/disable via UI dispara schedule_restart).
 while true; do
+    # shellcheck disable=SC2046  # intentional word-split of the reload-dir flags
     ./venv/bin/python -m uvicorn server.dev:app \
         --host 0.0.0.0 --port "$WEB_PORT" \
         --reload \
-        --reload-dir server \
-        --reload-dir agent \
-        --reload-dir config \
-        --reload-dir gowa \
-        --reload-dir db \
-        --reload-dir plugins \
-        --reload-dir storages/plugins \
+        $(whatsbot_reload_flags) \
         --log-level warning
     rc=$?
     echo "[macos_start] uvicorn encerrou (rc=$rc)"

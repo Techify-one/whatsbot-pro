@@ -130,6 +130,10 @@ def install_and_register(handler, data_dir) -> None:
     except Exception as e:
         logger.warning("AI tools: cannot list enabled rows (%s)", e)
         return
+    # Built-in (core) tools are NOT isolated — they run in-process with the live
+    # ToolContext and are registered by ``agent.ai_builtin_tools`` instead. Only
+    # user code-in-DB tools (kind='code') go through the isolated installer.
+    rows = [r for r in rows if r.get("kind", "code") != "builtin"]
     if not rows:
         return
 
