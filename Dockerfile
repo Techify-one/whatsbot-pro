@@ -5,6 +5,10 @@ ARG TARGETARCH=amd64
 
 ENV WHATSBOT_DOCKER=1
 ENV PYTHONUNBUFFERED=1
+# Pin the web port to match EXPOSE/HEALTHCHECK below. Coolify deploys from this
+# Dockerfile (not docker-compose.yaml), so without this the app falls back to the
+# ConfigKey default (8090) while the healthcheck probes 8080 → "unhealthy".
+ENV WHATSBOT_WEB_PORT=8080
 
 # Install curl and unzip for downloading GOWA
 RUN apt-get update && \
