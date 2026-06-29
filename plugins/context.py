@@ -139,6 +139,32 @@ def make_plugin_db():
     return get_engine().begin()
 
 
+# ── System-notice registry for plugins (plano 23 Fase C3) ─────────────────
+#
+# A plugin can add its OWN conversation-event notice types/groups without
+# patching ``server.system_notices`` core dicts. These are thin re-exports that
+# delegate to the registry there (late import — ``system_notices`` imports
+# ``broadcast`` from this module, so importing it at module top would cycle).
+#
+#     from plugins.context import register_notice_group, register_notice
+#     register_notice_group("my_plugin", "Meu plugin")
+#     register_notice("my_event", "my_plugin", lambda **ctx: f"... {ctx['x']}")
+
+
+def register_notice_group(key: str, label: str, *, config_key: str | None = None,
+                          default: bool = True) -> None:
+    """Register a system-notice GROUP (config gate). See system_notices.register_notice_group."""
+    from server import system_notices
+    system_notices.register_notice_group(
+        key, label, config_key=config_key, default=default)
+
+
+def register_notice(event_type: str, group: str, formatter: Callable[..., str]) -> None:
+    """Register a system-notice TYPE → group + formatter. See system_notices.register_notice."""
+    from server import system_notices
+    system_notices.register_notice(event_type, group, formatter)
+
+
 # ── RBAC dependency for plugin routes (plano "RBAC para Plugins" §3.5) ─────
 import re as _re
 
