@@ -75,6 +75,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Import-graph integrity (relative imports resolve)
+        run: node tests/frontend/check_imports.mjs
+
       - name: Run node --test (pure ESM modules)
         run: node --test "web/static/js/**/*.test.js"
 
