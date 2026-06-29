@@ -691,11 +691,11 @@ class MessagingService:
         try:
             fired = await asyncio.to_thread(_emit)
             if fired is not None:
-                await emit_with_filter("conversation.ai_takeover", {
-                    "conversation_id": fired["conversation_id"],
-                    "agent_key": fired["agent_key"],
-                    "ts": time.time(),
-                })
+                from domain.events import emit_domain, ConversationAiTakeover
+                await emit_domain(ConversationAiTakeover(
+                    conversation_id=fired["conversation_id"],
+                    agent_key=fired["agent_key"],
+                ))
         except Exception:
             logger.debug("[Webhook] ai_takeover notice failed for %s", phone)
 

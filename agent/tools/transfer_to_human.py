@@ -1,7 +1,6 @@
 """Tool: transfer_to_human — transfers the conversation to a human agent."""
 
 import logging
-import time
 
 from db.repositories import conversation_repo
 
@@ -83,16 +82,17 @@ def execute(ctx, args: dict) -> str | None:
                 conversation_repo.assign_agent(
                     conv["id"], assignee_user_id=assignment.get("assignee_user_id"),
                     active_agent_key=None, ai_active=0)
-                # plano 23 Fase C0: surface the handoff to a human as a domain event
-                # (``conversation.transferred_to_human``) on the plugin bus. Best-effort.
+                # plano 23 Fase C1: surface the handoff to a human as a TYPED domain
+                # event (``conversation.transferred_to_human``) on the plugin bus,
+                # via ``emit_domain``. Best-effort — same name + payload keys.
                 try:
-                    from plugins.events import emit_with_filter_sync
-                    emit_with_filter_sync("conversation.transferred_to_human", {
-                        "conversation_id": conv["id"],
-                        "contact_id": ctx.contact.id,
-                        "reason": args.get("reason"),
-                        "ts": time.time(),
-                    })
+                    from domain.events import (emit_domain_sync,
+                                               ConversationTransferredToHuman)
+                    emit_domain_sync(ConversationTransferredToHuman(
+                        conversation_id=conv["id"],
+                        contact_id=ctx.contact.id,
+                        reason=args.get("reason"),
+                    ))
                 except Exception:
                     logger.debug("conversation.transferred_to_human emit falhou para %s",
                                  ctx.contact.phone)
