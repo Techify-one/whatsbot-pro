@@ -11,11 +11,14 @@ import htm from 'htm';
 import { DefaultAvatar, GroupAvatar, SearchIcon, PlusIcon } from './contacts/icons.js';
 import { avatarUrl } from './contacts/utils.js';
 import { ContactInfoPanel } from './contacts/ContactInfoPanel.js';
+import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
+  getCustomAttributes,
 } from '../services/api.js';
+import { matchesAdvFilters } from '../services/conversationRows.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 
 const html = htm.bind(h);
@@ -26,6 +29,28 @@ const PAGE_SIZE = 15;
 // independente de acento/caixa.
 function foldStr(s) {
   return (s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+// Funnel/tune icon for the "Filtros" toolbar button.
+function FilterIcon() {
+  return html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>`;
+}
+
+// R\u00f3tulo amig\u00e1vel de uma cl\u00e1usula de filtro ativa (chip). `tag` \u00e9 multi-select;
+// `cattr:contact:<key>` usa o display_name da defini\u00e7\u00e3o carregada.
+function clauseChipLabel(cl, contactAttrDefs) {
+  const OP_SEP = { ne: ' \u2260 ', contains: ' cont\u00e9m ', not_contains: ' n\u00e3o cont\u00e9m ', gt: ' > ', lt: ' < ' };
+  const sep = OP_SEP[cl.op] || ': ';
+  const list = Array.isArray(cl.value) ? cl.value : [cl.value];
+  const m = String(cl.dim).match(/^cattr:contact:(.+)$/);
+  if (m) {
+    const def = (contactAttrDefs || []).find(d => d.attribute_key === m[1]);
+    const name = def ? (def.display_name || m[1]) : m[1];
+    return `${name}${sep}${list.join(', ')}`;
+  }
+  if (cl.dim === 'tag') return `Etiqueta${sep}${list.join(', ')}`;
+  return `${cl.dim}${sep}${list.join(', ')}`;
 }
 
 
@@ -199,6 +224,11 @@ export default function ContactsListScreen({ initialEntity = null }) {
   const [showImport, setShowImport] = useState(false); // modal de importação
   const [importError, setImportError] = useState(null); // erro dentro do modal
   const fileInputRef = useRef(null);
+  // Filtros (espelham o "Filtrar conversas", mas só refletem nos contatos).
+  const [advFilters, setAdvFilters] = useState([]); // [{ id, dim, op, value }]
+  const [showFilters, setShowFilters] = useState(false); // dropdown do construtor
+  const [contactAttrDefs, setContactAttrDefs] = useState([]); // atributos de contato (dinâmicos)
+  const filterRef = useRef(null);
 
   function reload() {
     setLoading(true);
@@ -233,6 +263,31 @@ export default function ContactsListScreen({ initialEntity = null }) {
     const t = setTimeout(() => setToast(null), 6000);
     return () => clearTimeout(t);
   }, [toast]);
+
+  // Definições de atributos personalizados de CONTATO (plano 05) — viram dimensões
+  // de filtro dinâmicas. Recarrega ao ouvir o evento global de mudança (criar/editar
+  // um atributo em Configurações reflete aqui sem reload).
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      getCustomAttributes('contact')
+        .then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setContactAttrDefs(r.data); })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
+  }, []);
+
+  // Fecha o dropdown do construtor de filtros em clique-fora / Escape.
+  useEffect(() => {
+    if (!showFilters) return undefined;
+    const onDoc = (e) => { if (filterRef.current && !filterRef.current.contains(e.target)) setShowFilters(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setShowFilters(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [showFilters]);
 
   async function handleExport() {
     try {
@@ -327,22 +382,26 @@ export default function ContactsListScreen({ initialEntity = null }) {
     return arr;
   }, [contacts]);
 
-  // Busca client-side (nome, telefone, tags).
+  // Busca client-side (nome, telefone, tags) + filtros avançados (etiqueta/atributos
+  // personalizados do contato). A avaliação reusa matchesAdvFilters: cada contato
+  // carrega `tags` e `custom_attributes`, então `tag`/`cattr:contact:*` casam direto.
   const filtered = useMemo(() => {
     const q = foldStr(search.trim());
     const digits = search.replace(/\D/g, '');
-    if (!q && !digits) return sorted;
-    return sorted.filter((c) => {
+    const now = Math.floor(Date.now() / 1000);
+    const bySearch = (!q && !digits) ? sorted : sorted.filter((c) => {
       if (q && foldStr(c.name).includes(q)) return true;
       if (digits && (c.phone || '').includes(digits)) return true;
       if (q && foldStr(c.email).includes(q)) return true;
       if (q && (c.tags || []).some((t) => foldStr(t).includes(q))) return true;
       return false;
     });
-  }, [sorted, search]);
+    if (!advFilters.length) return bySearch;
+    return bySearch.filter((c) => matchesAdvFilters(c, advFilters, now));
+  }, [sorted, search, advFilters]);
 
-  // Reseta a página quando a busca muda o conjunto.
-  useEffect(() => { setPage(1); }, [search]);
+  // Reseta a página quando a busca ou os filtros mudam o conjunto.
+  useEffect(() => { setPage(1); }, [search, advFilters]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -416,8 +475,8 @@ export default function ContactsListScreen({ initialEntity = null }) {
         </div>
       ` : null}
 
-      <!-- Busca + Novo contato -->
-      <div class="mb-4 flex items-center gap-3">
+      <!-- Busca + Filtros + Novo contato -->
+      <div class="mb-3 flex items-center gap-3">
         <div class="flex-1 flex items-center bg-wa-bg rounded-lg h-[42px] px-[12px] gap-[10px] border border-wa-border">
           <${SearchIcon} />
           <input
@@ -428,6 +487,30 @@ export default function ContactsListScreen({ initialEntity = null }) {
             class="bg-transparent border-none outline-none text-wa-text text-[14px] w-full placeholder-wa-secondary"
           />
         </div>
+        <div ref=${filterRef} class="relative shrink-0">
+          <button
+            onClick=${() => setShowFilters((o) => !o)}
+            class="flex items-center gap-2 h-[42px] px-4 rounded-lg border text-[14px] font-medium transition-colors ${advFilters.length
+              ? 'bg-wa-teal/15 border-wa-teal/40 text-wa-teal'
+              : 'border-wa-border text-wa-text hover:bg-wa-hover'}"
+            title="Filtrar contatos"
+          >
+            <${FilterIcon} />
+            <span class="hidden sm:inline">Filtros</span>
+            ${advFilters.length ? html`<span class="min-w-[18px] h-[18px] px-1 rounded-full bg-wa-teal text-white text-[11px] font-semibold flex items-center justify-center">${advFilters.length}</span>` : null}
+          </button>
+          ${showFilters ? html`
+            <div class="absolute z-[70] mt-1 right-0 w-[600px] max-w-[90vw] bg-wa-panel rounded-xl shadow-2xl border border-wa-border p-4">
+              <${ContactFilterDialog}
+                filters=${advFilters}
+                tagNames=${Object.keys(globalTags || {})}
+                contactAttrDefs=${contactAttrDefs}
+                onApply=${setAdvFilters}
+                onClose=${() => setShowFilters(false)}
+              />
+            </div>
+          ` : null}
+        </div>
         <button
           onClick=${() => setShowCreate(true)}
           class="flex items-center gap-2 bg-wa-teal text-white text-[14px] font-medium px-4 h-[42px] rounded-lg hover:opacity-90 transition-opacity shrink-0"
@@ -437,13 +520,30 @@ export default function ContactsListScreen({ initialEntity = null }) {
         </button>
       </div>
 
+      ${advFilters.length ? html`
+        <div class="mb-4 flex flex-wrap items-center gap-1.5">
+          ${advFilters.map((cl) => html`
+            <span key=${cl.id}
+              class="inline-flex items-center gap-1 max-w-full text-[12px] bg-wa-hover text-wa-text rounded-full pl-2.5 pr-1 py-0.5 border border-wa-border">
+              <span class="truncate max-w-[220px]" title=${clauseChipLabel(cl, contactAttrDefs)}>${clauseChipLabel(cl, contactAttrDefs)}</span>
+              <button onClick=${() => setAdvFilters((fs) => fs.filter((x) => x.id !== cl.id))} title="Remover este filtro"
+                class="shrink-0 w-[16px] h-[16px] flex items-center justify-center rounded-full text-wa-secondary hover:bg-wa-border hover:text-red-400 transition-colors">
+                <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </span>
+          `)}
+          <button onClick=${() => setAdvFilters([])}
+            class="text-[12px] text-wa-secondary hover:text-red-400 hover:underline ml-1">Limpar filtros</button>
+        </div>
+      ` : null}
+
       ${error ? html`
         <div class="text-center text-red-400 py-8 text-[14px]">${error}</div>
       ` : loading ? html`
         <div class="text-center text-wa-secondary py-12 animate-pulse-slow text-[14px]">Carregando contatos...</div>
       ` : filtered.length === 0 ? html`
         <div class="text-center text-wa-secondary py-12 text-[14px]">
-          ${search ? 'Nenhum contato encontrado.' : 'Nenhum contato ainda.'}
+          ${(search || advFilters.length) ? 'Nenhum contato encontrado.' : 'Nenhum contato ainda.'}
         </div>
       ` : html`
         <!-- Lista -->
