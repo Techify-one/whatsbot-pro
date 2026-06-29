@@ -27,11 +27,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code only
 COPY agent/ agent/
+COPY ai_engine/ ai_engine/
+COPY app/ app/
 COPY assets/ assets/
+COPY channels/ channels/
 COPY config/ config/
+COPY domain/ domain/
 COPY gowa/ gowa/
 COPY db/ db/
 COPY plugins/ plugins/
+COPY runtime/ runtime/
 COPY server/ server/
 COPY web/ web/
 COPY main.py alembic.ini ./
