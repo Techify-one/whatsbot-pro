@@ -14,6 +14,7 @@ import { ContextMenu } from './ContextMenu.js';
 import { ChannelPickerModal } from './ChannelPickerModal.js';
 import { NewConversationModal } from './NewConversationModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
+import { emit as emitClientEvent } from '../../plugins/registry.js';
 
 // ── Sidebar resize (barra lateral arrastável) ───────────────────────
 // Largura da lista de conversas: arrastável no desktop e persistida em
@@ -721,6 +722,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       setSelectedConvId(null);
       setSelectedChannelId('default');
       history.pushState(null, '', '/');
+      // Client-side plugin event (plano 23 §3.4) — conversation deselected.
+      // Fire-and-forget; emit() isolates throwing subscribers, never blocks the UI.
+      emitClientEvent('ui.conversation.selected', { conversationId: null, phone: null, channelId: null });
       return;
     }
     let row = rowOrPhone;
@@ -731,6 +735,13 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setSelected(row.phone);
     setSelectedConvId(row.conversation_id ?? null);
     setSelectedChannelId(row.channel_id || 'default');
+    // Client-side plugin event (plano 23 §3.4): a conversation/row was selected.
+    // Minimal + stable payload; fire-and-forget (emit() swallows subscriber errors).
+    emitClientEvent('ui.conversation.selected', {
+      conversationId: row.conversation_id ?? null,
+      phone: row.phone ?? null,
+      channelId: row.channel_id || 'default',
+    });
     if (row.conversation_id != null) {
       history.pushState(null, '', `/conversations/${row.conversation_id}`);
     } else {

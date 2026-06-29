@@ -11,6 +11,8 @@ import { EmojiPicker } from './EmojiPicker.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { TemplateIcon } from './icons.js';
+import { Slot } from '../../plugins/Slot.js';
+import { emit as emitClientEvent } from '../../plugins/registry.js';
 
 const html = htm.bind(h);
 
@@ -156,6 +158,17 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     setReplyingTo(null);
     setEmojiOpen(false);
   }, [phone]);
+
+  // Client-side plugin lifecycle (plano 23 §3.4): emit `ui.conversation.opened`
+  // when this chat view mounts/changes and `ui.conversation.closed` on teardown.
+  // Minimal + stable payload; fire-and-forget (emit() isolates throwing handlers,
+  // never blocks render). Empty phone (welcome screen) emits nothing.
+  useEffect(() => {
+    if (!phone) return;
+    const payload = { conversationId: conversationId ?? null, phone, channelId: channelId || 'default' };
+    emitClientEvent('ui.conversation.opened', payload);
+    return () => emitClientEvent('ui.conversation.closed', payload);
+  }, [phone, conversationId, channelId]);
 
   // Insert an emoji at the caret position in the message input (keeps the
   // picker open for multiple picks, WhatsApp-style).
@@ -1011,6 +1024,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           </button>
         ` : null}
       </div>
+
+      <!-- Plugin extension point: banner abaixo do header / acima das mensagens
+           (faixa "atendimento atual" — SLA, aviso, etc.). Empty by default. -->
+      <${Slot} name="chat.header.banner" ctx=${{ conv: { conversationId, phone, channelId }, conversationId, phone, channelId, contact }} />
 
       <!-- Chat area with doodle pattern -->
       <div ref=${chatRef} class="flex-1 min-h-0 overflow-y-auto overscroll-contain wa-scrollbar wa-chat-pattern py-2 px-[4%] lg:px-[7%]">

@@ -31,8 +31,9 @@ export const FRONTEND_API_VERSION = '1.0';
 //   • REMOVING a name, or moving one into PLUGIN_SERVICES_DENY, is a MAJOR bump.
 //   • A function in PLUGIN_SERVICES_DENY must NEVER appear in PLUGIN_SERVICES.
 //
-// D0 SCOPE: this only DEFINES + DOCUMENTS the allowlist. Enforcement (replacing
-// the `...coreApi` spread in buildPluginApi with a curated pick) is Fase D1.
+// D0 DEFINED + DOCUMENTED the allowlist; D1 ENFORCES it — `buildPluginApi` now
+// builds `api.services` via `buildAllowedServices()` (curated pick) instead of the
+// `...coreApi` spread, so deny-listed members are unreachable from a plugin screen.
 // The list below is the current FULL non-sensitive `coreApi` surface
 // (grandfathering everything except the deny-list), validated against the
 // `atendimentos` plugin, which imports: authHeaders, hasPermission,
@@ -90,10 +91,10 @@ export const PLUGIN_SERVICES = Object.freeze(
 );
 
 /**
- * Build the curated `services` object for D1 enforcement: only the allowlisted
- * core functions, plus the non-`api.js` extras. Defined now (unused by the
- * grandfathered spread below) so D1 is a one-line swap and tests can assert the
- * surface today.
+ * Build the curated `services` object (D1 enforcement): only the allowlisted core
+ * functions, plus the non-`api.js` extras. `buildPluginApi` calls this to populate
+ * `api.services`, replacing the old `...coreApi` spread — deny-listed members are
+ * never reachable.
  *
  * @param {Record<string, any>} extras - non-api.js additions (useWebSocket, …).
  * @returns {Record<string, any>}
@@ -132,15 +133,19 @@ export function buildPluginApi(pluginId) {
     ui: { openModal },
 
     // ── curated core utilities (so plugins don't depend on internal paths) ──
-    // D0: the frozen plugin-facing contract is PLUGIN_SERVICES (+ deny-list)
-    // above. Enforcement (swap `...coreApi` → `buildAllowedServices({...})`) is
-    // deferred to Fase D1 so this stays ADDITIVE and grandfathers what the
-    // `atendimentos` plugin already imports. DO NOT remove `...coreApi` here yet.
-    services: {
-      ...coreApi,            // setConversationStatus, filterConversations, updateConversationInfo, authHeaders, …
+    // D1 ENFORCEMENT: the plugin-facing surface is the FROZEN PLUGIN_SERVICES
+    // allowlist (D0) + the non-`api.js` extras below. We project ONLY allowlisted
+    // members instead of spreading `...coreApi` (which leaked ~120 fns incl.
+    // createUser/deleteRole). Behavior-preserving: the allowlist was grandfathered
+    // from the full NON-sensitive coreApi surface, so every name a known plugin
+    // already imports (atendimentos → authHeaders, getAssignableAgents) is present;
+    // only deny-listed operator surface (RBAC/auth/config/AI-engine/channel admin)
+    // is now withheld. To re-expose a name, add it to PLUGIN_SERVICES (MINOR bump),
+    // never re-introduce the spread.
+    services: buildAllowedServices({
       useWebSocket,
       hasPermission,
       hasAnyPermission,
-    },
+    }),
   };
 }

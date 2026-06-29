@@ -6,6 +6,7 @@ import { formatTime, avatarUrl } from './utils.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
+import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
 
@@ -526,6 +527,8 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           ` : null}
                         </div>
                       ` : null}
+                      <!-- Plugin extension point: per-row badges (SLA/prioridade/…). Empty by default. -->
+                      <${Slot} name="sidebar.row.badges" ctx=${{ row: c }} />
                     </div>
                   </div>
                 </div>
