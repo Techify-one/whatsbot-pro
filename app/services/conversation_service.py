@@ -49,6 +49,8 @@ from db.repositories import (conversation_repo, contact_repo, user_repo,
                              agent_repo)
 from server import system_notices
 from plugins.events import apply_filter, emit_with_filter
+from domain.events import (emit_domain, ConversationReopened,
+                           ConversationAttributeSet)
 
 logger = logging.getLogger(__name__)
 
@@ -172,15 +174,14 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
     # conversation is reactivated by an explicit (manual) status change. Kept
     # alongside ``conversation.status_changed`` — the reopened verb is additive.
     if status == "open" and previous_status == "closed":
-        await emit_with_filter("conversation.reopened", {
-            "conversation_id": updated.get("id"),
-            "contact_id": updated.get("contact_id"),
-            "phone": updated.get("contact_phone"),
-            "previous_status": previous_status,
-            "trigger": "manual",
-            "actor": actor_id,
-            "ts": time.time(),
-        })
+        await emit_domain(ConversationReopened(
+            conversation_id=updated.get("id"),
+            contact_id=updated.get("contact_id"),
+            phone=updated.get("contact_phone"),
+            previous_status=previous_status,
+            trigger="manual",
+            actor=actor_id,
+        ))
     await _emit_notice(updated,
                        "status_closed" if status == "closed" else "status_open",
                        actor_name=actor_name)
@@ -239,13 +240,12 @@ async def set_attributes(deps, conv: dict, merged: dict | None, changed: dict,
         # key (the card above is aggregated; the bus event is granular so a
         # subscriber gets each key/value pair).
         for key, value in changed.items():
-            await emit_with_filter("conversation.attribute_set", {
-                "conversation_id": updated.get("id"),
-                "key": key,
-                "value": value,
-                "actor": actor_id,
-                "ts": time.time(),
-            })
+            await emit_domain(ConversationAttributeSet(
+                conversation_id=updated.get("id"),
+                key=key,
+                value=value,
+                actor=actor_id,
+            ))
     return updated
 
 
