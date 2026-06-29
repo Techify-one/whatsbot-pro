@@ -1,6 +1,12 @@
 import { useEffect } from 'preact/hooks';
-import { createWebSocket } from '../services/websocket.js';
+import { subscribe } from '../services/wsBus.js';
 
+// Subscribe a consumer to the SINGLETON WebSocket bus (Plano 23 · D4). Previously
+// this opened a dedicated socket per mount via `createWebSocket`; now it builds
+// the SAME handler map and registers it with the shared bus (services/wsBus.js),
+// which owns one connection and fans every event out to every subscriber. The
+// handler map shape is unchanged, so every event each consumer reacted to still
+// reaches the same callback with the same payload.
 export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onAiTyping, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
   useEffect(() => {
     // The 6 conversation lifecycle events (plano 10 FF2) all route to a single
@@ -8,7 +14,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
     const conv = onConversationChanged
       ? (name) => (d) => onConversationChanged(name, d)
       : null;
-    const ws = createWebSocket({
+    const unsubscribe = subscribe({
       onConnect: onWsConnect,
       onDisconnect: onWsDisconnect,
       status: onStatus,
@@ -40,6 +46,6 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       conversation_deleted: conv ? conv('conversation_deleted') : undefined,
       conversation_labels_changed: conv ? conv('conversation_labels_changed') : undefined,
     });
-    return () => ws.close();
+    return unsubscribe;
   }, []);
 }
