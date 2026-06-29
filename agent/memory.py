@@ -424,16 +424,11 @@ class ContactMemory:
         parts = []
         if self.info.get("name"):
             parts.append(f"Nome: {self.info['name']}")
-        if self.info.get("email"):
-            parts.append(f"Email: {self.info['email']}")
-        if self.info.get("profession"):
-            parts.append(f"Profissão: {self.info['profession']}")
-        if self.info.get("company"):
-            parts.append(f"Empresa: {self.info['company']}")
-        if self.info.get("address"):
-            parts.append(f"Endereço: {self.info['address']}")
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
+        # Email/Profissão/Empresa/Endereço are now custom attributes (seeded as
+        # default contact attributes) — listed by `_custom_attr_lines` below, so
+        # they're NOT repeated here.
         # Custom attributes (plano 05): tell the AI which attributes it may fill
         # (via set_custom_attribute) and the values already set. Both scopes:
         # contact-level and the currently-open conversation (plano 54).

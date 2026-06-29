@@ -1806,21 +1806,38 @@ check("P16 DELETE -> contato preservado", _contact_left == _cmdel.id)
 r = client.delete("/api/conversations/999999")
 check("P16 DELETE conversa inexistente -> 404", r.status_code == 404)
 
-# ── P19: atributo de sistema (CPF) semeado, idempotente e protegido ──
+# ── P19: atributos padrão semeados (CPF/Email/Profissão/Empresa/Endereço) ──
+# Agora são seeds EDITÁVEIS e DELETÁVEIS (is_system=0): vêm por padrão mas o
+# usuário pode renomear/apagar. A trava is_system=1 ainda existe no código e é
+# coberta logo abaixo com um atributo sintético.
 from db.system_attributes import seed_system_attributes as _seed_sys
 from db.repositories import custom_attribute_repo as _cad_repo
 _seed_sys()
-_cpf = _cad_repo.get_definitions_map("contact").get("cpf")
-check("P19 seed -> CPF criado is_system=1", _cpf is not None and _cpf.get("is_system") == 1)
+_dmap = _cad_repo.get_definitions_map("contact")
+check("P19 seed -> CPF criado is_system=0 (editável/deletável)",
+      _dmap.get("cpf") is not None and _dmap["cpf"].get("is_system") == 0)
+check("P19 seed -> defaults Email/Profissão/Empresa/Endereço presentes",
+      {"email", "profession", "company", "address"} <= set(_dmap.keys()))
+_cpf = _dmap.get("cpf")
 _seed_sys()  # 2ª chamada deve ser no-op
 _cpf2 = _cad_repo.get_definitions_map("contact").get("cpf")
 check("P19 seed idempotente (mesmo id)", bool(_cpf2) and _cpf2["id"] == _cpf["id"])
-r = client.delete(f"/api/custom-attributes/{_cpf['id']}")
-check("P19 DELETE atributo de sistema -> 400", r.status_code == 400)
-# rename guard (plano 19 §5): mudar key/scope de um atributo de sistema -> 400
-r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"attribute_key": "cpf_novo"})
-check("P19 PUT renomear atributo de sistema -> 400", r.status_code == 400)
+# Default editável: renomear display_name -> 200; apagar -> 200 (não é protegido).
 r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"display_name": "CPF do cliente"})
+check("P19 PUT editar display_name de default -> 200", r.status_code == 200)
+r = client.delete(f"/api/custom-attributes/{_cpf['id']}")
+check("P19 DELETE default (CPF) -> 200 (deletável)", r.status_code == 200)
+
+# Trava is_system=1 ainda funciona: cria um atributo de sistema sintético e
+# confirma que DELETE e rename de key/scope são bloqueados (400).
+_locked = _cad_repo.create_definition(
+    attribute_key="sys_locked", display_name="Travado", applies_to="contact",
+    is_system=1)
+r = client.delete(f"/api/custom-attributes/{_locked['id']}")
+check("P19 DELETE atributo de sistema (is_system=1) -> 400", r.status_code == 400)
+r = client.put(f"/api/custom-attributes/{_locked['id']}", json={"attribute_key": "outro"})
+check("P19 PUT renomear atributo de sistema (is_system=1) -> 400", r.status_code == 400)
+r = client.put(f"/api/custom-attributes/{_locked['id']}", json={"display_name": "Travado 2"})
 check("P19 PUT editar display_name de atributo de sistema -> 200", r.status_code == 200)
 
 # ── P22: motor único (config-in-DB) — sem espelhamento, invariante do default ──

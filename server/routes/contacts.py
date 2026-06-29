@@ -346,22 +346,31 @@ def register_routes(app, deps):
         # Custom attribute definitions (plano 05) become extra CSV columns,
         # dynamically — a newly created attribute shows up here automatically.
         attr_defs = await asyncio.to_thread(ca_repo.list_definitions, "contact")
+        # Email/Profissão/Empresa/Endereço are now custom attributes too, but stay
+        # as fixed CSV columns (sourced from the JSON) for a stable, familiar
+        # format — so they're excluded from the dynamic-attribute columns to avoid
+        # duplicate headers.
+        _CORE_ATTR_KEYS = {"email", "profession", "company", "address"}
+        extra_defs = [d for d in attr_defs if d["attribute_key"] not in _CORE_ATTR_KEYS]
 
         output = io.StringIO()
         writer = csv.writer(output)
         header = ["phone", "name", "email", "profession", "company",
                   "address", "ai_enabled", "tags"]
-        header.extend(d["attribute_key"] for d in attr_defs)
+        header.extend(d["attribute_key"] for d in extra_defs)
         writer.writerow(header)
         for r in rows:
             custom = r.get("custom_attributes") or {}
             row_out = [
-                r["phone"], r["name"], r["email"], r["profession"],
-                r["company"], r["address"],
+                r["phone"], r["name"],
+                _format_attr_cell(custom.get("email")),
+                _format_attr_cell(custom.get("profession")),
+                _format_attr_cell(custom.get("company")),
+                _format_attr_cell(custom.get("address")),
                 "1" if r["ai_enabled"] else "0",
                 ", ".join(r["tags"]),
             ]
-            for d in attr_defs:
+            for d in extra_defs:
                 row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
             writer.writerow(row_out)
         # BOM (﻿) so Excel opens the UTF-8 file with the right encoding.
@@ -458,17 +467,35 @@ def register_routes(app, deps):
                     phone, default_ai_enabled=ai_default)
                 cid = contact["id"]
 
+                # Name + ai_enabled stay as real contact columns.
                 fields = {}
-                for f in ("name", "email", "profession", "company", "address"):
-                    val = _cell(row, f)
-                    if val:
-                        fields[f] = val
+                name_val = _cell(row, "name")
+                if name_val:
+                    fields["name"] = name_val
                 ai_raw = _cell(row, "ai_enabled").lower()
                 if ai_raw:
                     fields["ai_enabled"] = 0 if ai_raw in ("0", "false", "nao",
                                                            "não", "no", "off") else 1
                 if fields:
                     contact_repo.update(cid, **fields)
+
+                # Email/Profissão/Empresa/Endereço are now custom attributes — import
+                # their cells (PT-BR aliases honoured by _IMPORT_COLUMN_ALIASES) into
+                # custom_attributes, validated against the seeded definitions.
+                core_partial = {}
+                for f in ("email", "profession", "company", "address"):
+                    val = _cell(row, f)
+                    if not val:
+                        continue
+                    d = attr_defs_map.get(f)
+                    if d is None:
+                        continue
+                    norm, err = validate_value(d, val)
+                    if err or norm is None:
+                        continue
+                    core_partial[f] = norm
+                if core_partial:
+                    ca_repo.set_values(contacts_table, cid, core_partial)
 
                 tags_raw = _cell(row, "tags")
                 if tags_raw:

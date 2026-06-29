@@ -90,13 +90,17 @@ def create_definition(*, attribute_key: str, display_name: str, type: str = "tex
 
 def ensure_system_definition(*, attribute_key: str, display_name: str, type: str = "text",
                              applies_to: str = "contact", description: str = "",
-                             position: int = 0, **_) -> dict | None:
-    """Idempotently seed a built-in system attribute (``is_system=1``) — plano 19.
+                             position: int = 0, is_system: int = 1, **_) -> dict | None:
+    """Idempotently seed a built-in attribute — plano 19.
 
     No-op when a definition with this ``(attribute_key, applies_to)`` already exists,
     whether ACTIVE or soft-deleted, so user edits and deletions are respected across
     boots (and the ``UniqueConstraint(attribute_key, applies_to)`` is never violated).
     Returns the created row, or ``None`` when it already existed.
+
+    ``is_system`` defaults to 1 (locked: no rename/delete, "Sistema" badge — e.g. CPF).
+    Pass ``is_system=0`` to seed a *default* attribute that ships pre-defined but stays
+    fully editable AND deletable (e.g. Email/Profissão/Empresa/Endereço).
     """
     with get_engine().connect() as conn:
         existing = conn.execute(
@@ -108,7 +112,7 @@ def ensure_system_definition(*, attribute_key: str, display_name: str, type: str
     return create_definition(
         attribute_key=attribute_key, display_name=display_name, type=type,
         applies_to=applies_to, description=description, position=position,
-        is_system=1)
+        is_system=is_system)
 
 
 def list_filterable(applies_to: str) -> list[dict]:
