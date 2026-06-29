@@ -61,8 +61,27 @@ def execute(ctx, args: dict) -> str | None:
         try:
             conv = conversation_repo.get_open_for_contact(ctx.contact.id)
             if conv:
+                # plano 23 Fase B5 (§4.2): the round-robin DESTINATION of a
+                # human handoff is a plugin seam. Default = unassigned
+                # ("Não atribuídas" inbox). A plugin returning a dict with
+                # ``assignee_user_id`` rewrites the destination; ``None`` keeps
+                # the default. No-op (value passes through) when unregistered.
+                assignment = {"assignee_user_id": None,
+                              "reason": args.get("reason")}
+                try:
+                    from plugins.events import apply_filter_sync
+                    rewritten = apply_filter_sync(
+                        "filter.conversation.assignment", assignment,
+                        {"conversation_id": conv["id"],
+                         "contact_id": ctx.contact.id,
+                         "phone": ctx.contact.phone})
+                    if isinstance(rewritten, dict):
+                        assignment = rewritten
+                except Exception:
+                    logger.debug("filter.conversation.assignment falhou para %s",
+                                 ctx.contact.phone)
                 conversation_repo.assign_agent(
-                    conv["id"], assignee_user_id=None,
+                    conv["id"], assignee_user_id=assignment.get("assignee_user_id"),
                     active_agent_key=None, ai_active=0)
                 # plano 23 Fase C0: surface the handoff to a human as a domain event
                 # (``conversation.transferred_to_human``) on the plugin bus. Best-effort.

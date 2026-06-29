@@ -53,8 +53,11 @@ def register_routes(app, deps):
         except Exception as e:
             logger.warning("[Sandbox] could not flag %s as sandbox: %s", phone, e)
 
-        result = await asyncio.to_thread(
-            agent_handler.process_message, phone, "",
+        # B5 (C-1): the sync ``process_message`` was removed; the sandbox now
+        # awaits the async ``aprocess_message`` directly (it already runs on the
+        # event loop). Same ProcessResult contract — reply/tool_calls/usage.
+        result = await agent_handler.aprocess_message(
+            phone, "",
             save_user_message=False, save_response=False,
         )
 
