@@ -335,4 +335,3 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
   `;
 }
 
-export default PluginsManager;

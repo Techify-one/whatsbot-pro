@@ -296,4 +296,3 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   `;
 }
 
-export default ConversationInfoPanel;

@@ -43,4 +43,3 @@ export function BoardColumn({ column, cards, canDrop, isDropTarget, cardProps, o
   `;
 }
 
-export default BoardColumn;

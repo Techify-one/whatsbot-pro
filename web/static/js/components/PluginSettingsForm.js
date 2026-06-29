@@ -186,4 +186,3 @@ export function PluginSettingsForm({ pluginId, onSaved }) {
   `;
 }
 
-export default PluginSettingsForm;

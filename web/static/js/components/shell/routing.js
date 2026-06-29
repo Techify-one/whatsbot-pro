@@ -46,7 +46,7 @@ export const CORE_TAB_PATHS = {
 // Legacy Portuguese URLs → canonical English paths. The routes were standardized
 // to English; these redirects keep old bookmarks/links working (applied with
 // replaceState so they don't pollute history).
-export const LEGACY_PATH_REDIRECTS = {
+const LEGACY_PATH_REDIRECTS = {
   '/contatos': '/contacts',
   '/atendimentos': '/attendances',
   '/painel': '/dashboard',

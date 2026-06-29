@@ -18,4 +18,3 @@ export function Slot({ name, ctx = {} }) {
     h(C, { key: `${pluginId}:${i}`, ...ctx, pluginId }));
 }
 
-export default Slot;

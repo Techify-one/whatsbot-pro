@@ -60,4 +60,3 @@ export function AttendanceCard({ convo, canDrag, assigneeName, showChannel, labe
   `;
 }
 
-export default AttendanceCard;

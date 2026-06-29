@@ -157,4 +157,3 @@ export function AssigneePicker({ conv, onChange }) {
   `;
 }
 
-export default AssigneePicker;

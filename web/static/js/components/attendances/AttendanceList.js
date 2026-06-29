@@ -84,4 +84,3 @@ export function AttendanceList({ conversations, assigneeNameOf, currentUserId, s
   `;
 }
 
-export default AttendanceList;

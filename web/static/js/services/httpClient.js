@@ -16,7 +16,7 @@ const BASE = '';
 /**
  * @returns {string} The bearer token from localStorage (empty when absent).
  */
-export function getToken() {
+function getToken() {
   return localStorage.getItem('whatsbot_token') || '';
 }
 
