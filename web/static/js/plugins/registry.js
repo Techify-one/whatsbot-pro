@@ -17,6 +17,33 @@
 //
 // Observability: subscribe()/getVersion() bump on every mutation so the app
 // re-renders when plugin modules (which load async) register late.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// STABLE FRONTEND EXTENSION CONTRACTS (Plano 23 · D1) — versioned by
+// FRONTEND_API_VERSION in plugins/api.js.
+//
+//   SLOTS (getSlot/addSlot) — additive list of components; empty ⇒ renders
+//   nothing (a no-plugin install is byte-identical). Render via <Slot>.
+//     • sidebar.row.badges  — ctx {row}                          (ContactList row)
+//     • chat.header.banner  — ctx {conv, conversationId, phone,  (ContactDetail,
+//                                   channelId, contact}           below the header)
+//     • conversation.header.actions, conversation.info.panel,
+//       attendances.toolbar, gear.menu.items                     (pre-existing)
+//
+//   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
+//   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep
+//   override (replace) semantics — do NOT compose. D2/D3 must preserve the
+//   'attendances' claim. Used by the `atendimentos` plugin.
+//
+//   CLIENT EVENTS (emit/on) — fire-and-forget; a throwing handler is isolated.
+//     • ui.conversation.selected — {conversationId, phone, channelId}  (selectContact)
+//     • ui.conversation.opened   — {conversationId, phone, channelId}  (ContactDetail mount)
+//     • ui.conversation.closed   — {conversationId, phone, channelId}  (ContactDetail unmount)
+//
+//   FILTERS (applyFilter/addFilter) — priority-ordered; null aborts the chain.
+//   ModalHost.openModal (plugins/ModalHost.js) — async modal seam (await operator
+//   answer); <PluginModalHost> mounted once at app root. Both are stable contracts.
+// ─────────────────────────────────────────────────────────────────────────────
 
 const _filters = new Map();    // name  -> [{priority, pluginId, fn}]   (sorted asc)
 const _slots = new Map();      // name  -> [{priority, pluginId, component}] (sorted asc)
@@ -79,6 +106,13 @@ export function addSlot(name, component, priority = 100, pluginId = 'core') {
 export function getSlot(name) { return _slots.get(name) || []; }
 
 // ── Route overrides (exclusive) ──────────────────────────────────────────────
+/**
+ * Claim a core route (`tabId`) and REPLACE its component. EXCLUSIVE contract
+ * (Plano 23 · D1, decision Q5 = keep override/replace, do NOT change to compose):
+ * the first registrant wins; any later claim for the same `tabId` is logged and
+ * ignored (anti-conflict policy — never fails silently). The `atendimentos`
+ * plugin claims 'attendances'; D2/D3 must preserve this claim.
+ */
 export function overrideRoute(tabId, component, opts = {}, pluginId = 'core') {
   if (typeof component !== 'function') return;
   const existing = _routes.get(tabId);
