@@ -19,6 +19,7 @@ import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
 import { Slot } from '../../plugins/Slot.js';
+import { getFilters } from '../../plugins/registry.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
@@ -149,8 +150,14 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   function onStatusClick() {
     if (busy) return;
     if (!isOpen) { run(() => setConversationStatus(conv.id, 'open')); return; }
-    const convMissing = missingRequiredAttributes(convDefs, conv.custom_attributes);
-    if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+    // When a plugin owns the resolve flow (filter.conversation.beforeResolve), it collects
+    // and saves the conversation attributes in its own pre-filled popup — skip the native
+    // conversation-scope gate so the two popups don't stack. Contact-scope stays gated here
+    // (the plugin popup doesn't handle contact attributes).
+    if (!getFilters('filter.conversation.beforeResolve').length) {
+      const convMissing = missingRequiredAttributes(convDefs, conv.custom_attributes);
+      if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+    }
     const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
     if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
     // Plugin filter (filter.conversation.beforeResolve) runs after the native guard;
