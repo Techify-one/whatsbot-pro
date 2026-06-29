@@ -19,6 +19,7 @@ import { h } from 'preact';
 import { useState, useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { ConversationFilterDialog } from './ConversationFilterDialog.js';
+import { getCustomAttributes } from '../../services/api.js';
 
 const html = htm.bind(h);
 
@@ -56,20 +57,38 @@ function _agentLabel(agentsUsers, agentsAi, value) {
   }
   return value;
 }
-function advClauseLabel(cl, channels, agentsUsers, agentsAi) {
-  const dimLabel = DIM_LABELS[cl.dim] || cl.dim;
+// Rótulo amigável do chip para uma dimensão de atributo personalizado
+// (cattr:<scope>:<key>): "Contato · Plano" / "Conversa · Plano" pra desambiguar
+// quando o mesmo key existe nos dois escopos. Usa as defs carregadas para o nome.
+function _cattrLabel(cl, attrDefs) {
+  const m = String(cl.dim).match(/^cattr:(contact|conversation):(.+)$/);
+  if (!m) return null;
+  const scope = m[1], key = m[2];
+  const def = (attrDefs || []).find(d => d.attribute_key === key && d.applies_to === scope);
+  const name = def ? (def.display_name || key) : key;
+  const prefix = scope === 'contact' ? 'Contato · ' : 'Conversa · ';
+  return prefix + name;
+}
+function advClauseLabel(cl, channels, agentsUsers, agentsAi, attrDefs) {
+  const cattrLabel = _cattrLabel(cl, attrDefs);
+  const dimLabel = cattrLabel || DIM_LABELS[cl.dim] || cl.dim;
   if (cl.dim === 'activity') {
     const days = `${cl.value} dia${String(cl.value) === '1' ? '' : 's'}`;
     if (cl.op === 'gt') return `Atividade: há mais de ${days}`;
     if (cl.op === 'lt') return `Atividade: há menos de ${days}`;
     return `Atividade: há ${days}`;
   }
-  let val;
-  if (cl.dim === 'status') val = STATUS_LABELS[cl.value] || cl.value;
-  else if (cl.dim === 'channel') val = _channelLabel(channels, cl.value);
-  else if (cl.dim === 'agent') val = _agentLabel(agentsUsers, agentsAi, cl.value);
-  else val = cl.value;   // tag
-  const sep = cl.op === 'ne' ? ' ≠ ' : ': ';
+  // channel/agent/tag e atributos `list` são multi-select (lista). Rotula cada valor.
+  const labelOne = (v) => {
+    if (cl.dim === 'status') return STATUS_LABELS[v] || v;
+    if (cl.dim === 'channel') return _channelLabel(channels, v);
+    if (cl.dim === 'agent') return _agentLabel(agentsUsers, agentsAi, v);
+    return v;   // tag / atributo personalizado
+  };
+  const list = Array.isArray(cl.value) ? cl.value : [cl.value];
+  const val = list.map(labelOne).join(', ');
+  const OP_SEP = { ne: ' ≠ ', contains: ' contém ', not_contains: ' não contém ', gt: ' > ', lt: ' < ' };
+  const sep = OP_SEP[cl.op] || ': ';
   return `${dimLabel}${sep}${val}`;
 }
 
@@ -214,6 +233,21 @@ export function ConversationFilterBar({
   const [savedOpen, setSavedOpen] = useState(false);     // popover de filtros salvos
   const [saveDialog, setSaveDialog] = useState(null);    // { mode: 'create'|'rename', id?, name? } | null
   const [confirmDelete, setConfirmDelete] = useState(null); // { id, name } | null — confirmação de exclusão
+  // Definições de atributos personalizados (plano 05) — viram dimensões de filtro
+  // dinâmicas no construtor. Recarrega ao ouvir o evento global de mudança.
+  const [contactAttrDefs, setContactAttrDefs] = useState([]);
+  const [convAttrDefs, setConvAttrDefs] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      getCustomAttributes('contact').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setContactAttrDefs(r.data); }).catch(() => {});
+      getCustomAttributes('conversation').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvAttrDefs(r.data); }).catch(() => {});
+    };
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
+  }, []);
+  const allAttrDefs = [...contactAttrDefs, ...convAttrDefs];
 
   const tagNames = Object.keys(globalTags || {});
   const advCount = (advFilters || []).length;
@@ -236,10 +270,11 @@ export function ConversationFilterBar({
     onRemove: () => onTagFilterChange((tagFilter || []).filter(x => x !== t)),
   }));
   (advFilters || []).forEach(cl => {
-    if (cl.value === '' || cl.value == null) return;   // incomplete clause — not applied
+    // incomplete clause — not applied (escalar vazio OU multi-select sem seleção)
+    if (cl.value === '' || cl.value == null || (Array.isArray(cl.value) && cl.value.length === 0)) return;
     filterChips.push({
       key: `adv:${cl.id}`,
-      label: advClauseLabel(cl, channels, agentsUsers, agentsAi),
+      label: advClauseLabel(cl, channels, agentsUsers, agentsAi, allAttrDefs),
       onRemove: () => onAdvFiltersChange((advFilters || []).filter(c => c.id !== cl.id)),
     });
   });
@@ -431,6 +466,8 @@ export function ConversationFilterBar({
               agentsUsers=${agentsUsers || []}
               agentsAi=${agentsAi || []}
               tagNames=${tagNames}
+              contactAttrDefs=${contactAttrDefs}
+              convAttrDefs=${convAttrDefs}
               sortBy=${sortBy}
               onSortChange=${onSortChange}
               sortOptions=${SORT_OPTIONS}

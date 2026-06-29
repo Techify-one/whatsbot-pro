@@ -53,6 +53,61 @@ export function matchesAssignment(c, tab, uid) {
 export const DAY_SECONDS = 86400;
 
 /**
+ * Whether a single (scalar) channel/tag/agent value matches a row. The clause
+ * value may be a list (multi-select) — `clauseMatches` ORs this over the list.
+ * @param {Record<string, any>} c - the conversation row.
+ * @param {string} dim - 'channel' | 'tag' | 'agent'.
+ * @param {string} value - one scalar selection.
+ * @returns {boolean}
+ */
+function matchOne(c, dim, value) {
+  if (dim === 'channel') return (c.channel_id || 'default') === value;
+  if (dim === 'tag') return (c.tags || []).includes(value);
+  // agent
+  if (value === 'none') return c.assignee_user_id == null && !c.active_agent_key;
+  if (value.startsWith('user:')) return String(c.assignee_user_id) === value.slice(5);
+  if (value.startsWith('ai:')) return (c.active_agent_key || '') === value.slice(3);
+  return false;
+}
+
+/**
+ * Evaluate a custom-attribute clause (dim `cattr:<scope>:<key>`) against a row.
+ * Reads the attribute value from the contact bag (`custom_attributes`) or the
+ * conversation bag (`conv_custom_attributes`) per scope, then compares per op.
+ * @param {Record<string, any>} c - the conversation row.
+ * @param {string} scope - 'contact' | 'conversation'.
+ * @param {string} key - the attribute_key.
+ * @param {string} op - eq|ne|contains|not_contains|gt|lt.
+ * @param {any} value - the clause value (list for multi-select, else scalar).
+ * @returns {boolean}
+ */
+function attrMatches(c, scope, key, op, value) {
+  const bag = scope === 'contact' ? (c.custom_attributes || {}) : (c.conv_custom_attributes || {});
+  const raw = bag[key];
+  if (op === 'eq' || op === 'ne') {
+    // list value (multi-select) → "é uma de" / "não é nenhuma"; escalar → igualdade.
+    const list = Array.isArray(value) ? value : [value];
+    const hit = list.some(v => String(raw) === String(v));
+    return op === 'ne' ? !hit : hit;
+  }
+  if (op === 'contains' || op === 'not_contains') {
+    const has = String(raw ?? '').toLowerCase().includes(String(value).toLowerCase());
+    return op === 'not_contains' ? !has : has;
+  }
+  if (op === 'gt' || op === 'lt') {
+    // número ou data: Number() é estrito (NaN p/ "2026-06-29"), então datas caem
+    // no Date.parse — diferente de parseFloat, que parsearia o "2026" inicial.
+    let a = Number(raw), b = Number(value);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      a = Date.parse(raw); b = Date.parse(value);
+    }
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return true;  // incomparável → não restringe
+    return op === 'gt' ? a > b : a < b;
+  }
+  return true;
+}
+
+/**
  * Evaluate a single advanced-filter clause against a row.
  * @param {Record<string, any>} c - the conversation row.
  * @param {{ dim: string, op: string, value: any }} cl - the clause.
@@ -63,26 +118,22 @@ export function clauseMatches(c, cl, now) {
   const { dim, op } = cl;
   const value = cl.value;
   if (value === '' || value == null) return true;   // cláusula incompleta → ignorada
-  if (dim === 'channel') {
-    const ch = c.channel_id || 'default';
-    return op === 'ne' ? ch !== value : ch === value;
+  if (Array.isArray(value) && value.length === 0) return true;   // multi-select vazio → ignorada
+  // Atributo personalizado dinâmico: cattr:<scope>:<key>.
+  const cattr = typeof dim === 'string' && dim.match(/^cattr:(contact|conversation):(.+)$/);
+  if (cattr) return attrMatches(c, cattr[1], cattr[2], op, value);
+  // channel / tag / agent — valor pode ser lista (multi-select). eq = "é uma de"
+  // (OR); ne = "não é nenhuma de". Escalar legado é tratado como lista de 1.
+  if (dim === 'channel' || dim === 'tag' || dim === 'agent') {
+    const list = Array.isArray(value) ? value : [value];
+    if (list.length === 0) return true;             // cláusula incompleta → ignorada
+    const hit = list.some(v => matchOne(c, dim, v));
+    return op === 'ne' ? !hit : hit;
   }
   if (dim === 'status') {
     if (value === 'all') return true;                // "Todas" → não restringe
     const st = c.conv_status || 'open';              // 'open' | 'closed'
     return op === 'ne' ? st !== value : st === value;
-  }
-  if (dim === 'tag') {
-    const has = (c.tags || []).includes(value);
-    return op === 'ne' ? !has : has;
-  }
-  if (dim === 'agent') {
-    let hit;
-    if (value === 'none') hit = (c.assignee_user_id == null && !c.active_agent_key);
-    else if (value.startsWith('user:')) hit = String(c.assignee_user_id) === value.slice(5);
-    else if (value.startsWith('ai:')) hit = (c.active_agent_key || '') === value.slice(3);
-    else hit = false;
-    return op === 'ne' ? !hit : hit;
   }
   if (dim === 'activity') {
     const n = parseFloat(value);
@@ -139,9 +190,13 @@ export const DEFAULT_SPEC = { statusFilter: 'open', sortBy: 'activity', tagFilte
 export function normalizeSpec(spec) {
   const s = spec || {};
   const tags = [...(s.tagFilter || [])].sort();
+  // value pode ser lista (multi-select) ou escalar (status/days, presets legados).
+  // Listas são ordenadas para que dois filtros equivalentes serializem igual.
+  const normVal = (v) => (Array.isArray(v) ? [...v].map(String).sort() : String(v ?? ''));
   const adv = (s.advFilters || [])
-    .map(f => ({ dim: f.dim, op: f.op, value: String(f.value ?? '') }))
-    .sort((a, b) => (a.dim + a.op + a.value).localeCompare(b.dim + b.op + b.value));
+    .map(f => ({ dim: f.dim, op: f.op, value: normVal(f.value) }))
+    .sort((a, b) => (a.dim + a.op + JSON.stringify(a.value))
+      .localeCompare(b.dim + b.op + JSON.stringify(b.value)));
   return {
     statusFilter: s.statusFilter || 'open',
     sortBy: s.sortBy || 'activity',
@@ -245,6 +300,7 @@ export function buildRows(contacts, conversations) {
       rows.push({
         ...c, contact_id: c.id, conversation_id: null,
         channel_id: 'default', channel_provider: null, channel_name: null,
+        conv_custom_attributes: {},
       });
     } else {
       for (const cv of convs) {
@@ -261,6 +317,10 @@ export function buildRows(contacts, conversations) {
           conv_ai_active: cv.ai_active,
           assignee_user_id: cv.assignee_user_id,
           active_agent_key: cv.active_agent_key,
+          // Conversation-scoped custom attributes (plano 05) — kept under a distinct
+          // key so they don't collide with the contact's `custom_attributes` (spread
+          // from `...c` above). Both feed the cattr: filter dimensions.
+          conv_custom_attributes: cv.custom_attributes || {},
           // Preview + não-lidas vêm da CONVERSA (sobrescrevem os agregados do contato).
           last_message: (cv.last_message != null && cv.last_message !== '') ? cv.last_message : c.last_message,
           last_message_role: cv.last_message_role || c.last_message_role,

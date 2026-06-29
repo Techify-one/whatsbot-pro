@@ -158,6 +158,70 @@ test('clauseMatches: unknown dimension → true (no restriction)', () => {
   assert.equal(clauseMatches({}, { dim: 'mystery', op: 'eq', value: 'x' }, NOW), true);
 });
 
+test('clauseMatches: multi-select channel eq = "é uma de" (OR)', () => {
+  const c = { channel_id: 'tg' };
+  assert.equal(clauseMatches(c, { dim: 'channel', op: 'eq', value: ['wa', 'tg'] }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'channel', op: 'eq', value: ['wa', 'n1'] }, NOW), false);
+});
+
+test('clauseMatches: multi-select ne = "não é nenhuma de"', () => {
+  const c = { channel_id: 'tg' };
+  assert.equal(clauseMatches(c, { dim: 'channel', op: 'ne', value: ['wa', 'n1'] }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'channel', op: 'ne', value: ['wa', 'tg'] }, NOW), false);
+});
+
+test('clauseMatches: multi-select agent OR across user/ai/none', () => {
+  assert.equal(clauseMatches({ assignee_user_id: 5 },
+    { dim: 'agent', op: 'eq', value: ['user:5', 'user:9'] }, NOW), true);
+  assert.equal(clauseMatches({ active_agent_key: 'bot' },
+    { dim: 'agent', op: 'eq', value: ['user:5', 'ai:bot'] }, NOW), true);
+  assert.equal(clauseMatches({ assignee_user_id: 1 },
+    { dim: 'agent', op: 'eq', value: ['user:5', 'ai:bot'] }, NOW), false);
+});
+
+test('clauseMatches: empty array value → ignored (true)', () => {
+  assert.equal(clauseMatches({ channel_id: 'wa' }, { dim: 'channel', op: 'eq', value: [] }, NOW), true);
+});
+
+// ── custom attributes (cattr:<scope>:<key>) ────────────────────────
+test('clauseMatches: cattr conversation list eq/ne (multi OR)', () => {
+  const c = { conv_custom_attributes: { plano: 'gold' } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:plano', op: 'eq', value: ['gold', 'silver'] }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:plano', op: 'eq', value: ['silver'] }, NOW), false);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:plano', op: 'ne', value: ['silver'] }, NOW), true);
+});
+
+test('clauseMatches: cattr contact reads contact bag (not conversation)', () => {
+  const c = { custom_attributes: { cpf: '123' }, conv_custom_attributes: { cpf: '999' } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:contact:cpf', op: 'eq', value: '123' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:contact:cpf', op: 'eq', value: '999' }, NOW), false);
+});
+
+test('clauseMatches: cattr text contains / not_contains (case-insensitive)', () => {
+  const c = { conv_custom_attributes: { notes: 'Cliente URGENTE' } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:notes', op: 'contains', value: 'urgente' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:notes', op: 'not_contains', value: 'spam' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:notes', op: 'not_contains', value: 'urgente' }, NOW), false);
+});
+
+test('clauseMatches: cattr number gt/lt', () => {
+  const c = { conv_custom_attributes: { score: 7 } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:score', op: 'gt', value: '5' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:score', op: 'lt', value: '5' }, NOW), false);
+});
+
+test('clauseMatches: cattr date gt/lt (ISO strings)', () => {
+  const c = { conv_custom_attributes: { contrato: '2026-06-29' } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:contrato', op: 'gt', value: '2026-01-01' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:contrato', op: 'lt', value: '2026-01-01' }, NOW), false);
+});
+
+test('clauseMatches: cattr checkbox eq via string compare', () => {
+  const c = { conv_custom_attributes: { vip: true } };
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:vip', op: 'eq', value: 'true' }, NOW), true);
+  assert.equal(clauseMatches(c, { dim: 'cattr:conversation:vip', op: 'eq', value: 'false' }, NOW), false);
+});
+
 // ── matchesAdvFilters / matchesTags / matchesStatus / matchesAssignment ──
 test('matchesAdvFilters: empty list → true; AND across clauses', () => {
   assert.equal(matchesAdvFilters({}, [], NOW), true);
@@ -240,6 +304,19 @@ test('normalizeSpec: drops clause ids, sorts tags + clauses', () => {
   assert.equal(s.advFilters[0].dim, 'channel'); // sorted by dim+op+value
   assert.equal(s.advFilters[0].id, undefined);  // id dropped
   assert.equal(s.advFilters[1].value, 'z');
+});
+
+test('normalizeSpec: preserves + sorts array (multi-select) values', () => {
+  const s = normalizeSpec({
+    advFilters: [{ id: 'x', dim: 'channel', op: 'eq', value: ['tg', 'wa', 'n1'] }],
+  });
+  assert.deepEqual(s.advFilters[0].value, ['n1', 'tg', 'wa']);
+});
+
+test('specsEqual: equivalent multi-select filters compare equal regardless of order', () => {
+  const a = { advFilters: [{ dim: 'channel', op: 'eq', value: ['wa', 'tg'] }] };
+  const b = { advFilters: [{ dim: 'channel', op: 'eq', value: ['tg', 'wa'] }] };
+  assert.equal(specsEqual(a, b), true);
 });
 
 test('specsEqual / isDefaultSpec', () => {

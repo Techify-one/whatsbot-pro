@@ -282,6 +282,11 @@ def list_contacts(q: str = "", archived: bool = False,
                 "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
                 "is_pinned": bool(row["is_pinned"]) if row["is_pinned"] is not None else False,
                 "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
+                # Contact-scoped custom attributes (plano 05) — exposed in the list so
+                # the client-side conversation filter can match on them. The column is
+                # already SELECTed (full contacts table); coerce_attrs tolerates the
+                # SQLite str-serialized form.
+                "custom_attributes": _coerce_attrs(row),
                 "tags": tags_list,
                 "updated_at": row["updated_at"],
                 # Active conversation (plano 10 FF2) — drives the status/assignment
