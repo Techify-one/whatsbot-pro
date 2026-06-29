@@ -73,3 +73,55 @@ class ChannelRegistry:
 
     def set_credential(self, channel_id: str, key: str, value: str) -> None:
         channel_credential_repo.set(channel_id, key, value)
+
+    # ── Provider instantiation (R15) ─────────────────────────────────
+    def instantiate(
+        self,
+        provider: str,
+        channel_id: str,
+        *,
+        row: Optional[dict] = None,
+        gowa_client: object = None,
+        gowa_manager: object = None,
+    ) -> Optional[object]:
+        """Build a live Channel instance for ``channel_id`` of ``provider`` (R15).
+
+        Single source of truth for the provider-construction shape that used to be
+        copied across ``server/app.py`` (boot materialization) and
+        ``server/routes/channels.py`` (live registration on create + the
+        capabilities probe):
+
+        * **GOWA** gets its own per-device client via ``build_gowa_channel`` (needs
+          the shared ``gowa_client``/``gowa_manager``); ``default`` reuses the
+          singleton client. Returns ``None`` if those deps are absent (a GOWA
+          channel cannot be built without them).
+        * **Other providers** are constructed from the registered provider class,
+          preferring the ``(channel_id, registry=self)`` signature and falling back
+          to ``(channel_id)`` for providers that don't take a registry kwarg.
+
+        Returns ``None`` when the provider class isn't registered (plugin not
+        loaded). NEVER raises — construction is a pure constructor (no network),
+        and any failure yields ``None`` so a probe/registration glitch never blocks
+        the caller. Callers that want to log/swallow differently can catch around
+        this, but the contract is best-effort-None.
+        """
+        if provider == "gowa":
+            if gowa_client is None:
+                return None
+            try:
+                from channels.providers.gowa_channel import build_gowa_channel
+                return build_gowa_channel(
+                    channel_id, row, gowa_client=gowa_client,
+                    gowa_manager=gowa_manager)
+            except Exception:
+                return None
+        provider_cls = self._providers.get(provider)
+        if provider_cls is None:
+            return None
+        try:
+            try:
+                return provider_cls(channel_id, registry=self)
+            except TypeError:
+                return provider_cls(channel_id)
+        except Exception:
+            return None

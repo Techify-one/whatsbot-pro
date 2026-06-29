@@ -29,7 +29,6 @@ from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
 from channels.outbound import OutboundRouter
 from channels.providers.gowa_channel import GOWAChannel
-from channels.providers.gowa_channel import build_gowa_channel
 from db.repositories import channel_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
@@ -167,21 +166,20 @@ def create_app(
                 if provider == "gowa":
                     channel_registry.add_channel(
                         cid,
-                        build_gowa_channel(cid, row,
-                                           gowa_client=gowa_client, gowa_manager=gowa_manager))
+                        channel_registry.instantiate(
+                            provider, cid, row=row,
+                            gowa_client=gowa_client, gowa_manager=gowa_manager))
                     continue
                 if not row.get("enabled", 1):
                     continue
-                provider_cls = channel_registry.get_provider(provider)
-                if provider_cls is None:
+                if channel_registry.get_provider(provider) is None:
                     logger.info(
                         "Channel %s: provider %r not loaded; skipping live instance",
                         cid, provider)
                     continue
-                try:
-                    inst = provider_cls(cid, registry=channel_registry)
-                except TypeError:
-                    inst = provider_cls(cid)
+                inst = channel_registry.instantiate(provider, cid)
+                if inst is None:
+                    continue
                 channel_registry.add_channel(cid, inst)
                 logger.info("Channel %s (%s) live instance registered", cid, provider)
             except Exception as e:

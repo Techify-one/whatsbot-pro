@@ -9,139 +9,36 @@ Live registration: creating/deleting a channel persists to the DB; the live
 ``ChannelRegistry`` is (re)built from the DB at boot, so a new channel becomes
 operational on the next restart (same model as plugins). Status reads prefer the
 live instance when present, else the stored flags.
+
+Plano 23 · Fase B6 — these routes are THIN delegators: they resolve permission +
+body validation + 404, then delegate the WRITE + side effects to
+``app.services.channel_service`` / ``app.services.template_service``.
 """
 
 import asyncio
-import json
-import logging
-import re
-import time
 import uuid
 
 from fastapi import Request
 from fastapi.responses import Response
 
-from channels.providers.gowa_channel import build_gowa_channel
-from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
-                             inbox_member_repo, user_repo,
-                             contact_repo, conversation_repo, message_repo)
-from plugins.events import emit_with_filter
+from app.services import channel_service as svc
+from app.services import template_service as tpl_svc
+from db.repositories import channel_repo
 from server.authz import permission_denied, has_permission
 from server.helpers import _ok, _err
 
-logger = logging.getLogger(__name__)
-
-_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-_ALLOWED_PROVIDERS = {"gowa", "whatsapp_cloud", "telegram", "test"}
-
-
-def _mask(value: str) -> str:
-    if not value:
-        return ""
-    tail = value[-4:] if len(value) >= 4 else value
-    return f"••••{tail}"
-
-
-# Non-secret credential keys returned in CLEAR so the edit form can show + pre-fill
-# them (they are public identifiers, not secrets). Everything else is masked (P15).
-_NON_SECRET_CRED_KEYS = {"waba_id", "phone_number_id"}
-
-
-def _serialize(row: dict, creds: dict) -> dict:
-    row = dict(row)
-    row["credentials"] = {
-        k: (v if k in _NON_SECRET_CRED_KEYS else _mask(v))
-        for k, v in creds.items()
-    }
-    return row
-
-
-def _assignable_users() -> list[dict]:
-    """Active panel users for the channel agent picker (id/name/email/is_admin)."""
-    return [
-        {"id": u["id"], "name": u.get("name") or u.get("email"),
-         "email": u.get("email"), "is_admin": bool(u.get("is_admin"))}
-        for u in user_repo.list_all() if u.get("is_active")
-    ]
+_ID_RE = svc.ID_RE
+_ALLOWED_PROVIDERS = svc.ALLOWED_PROVIDERS
 
 
 def register_routes(app, deps):
-
-    registry = getattr(deps, "channel_registry", None)
-    gowa_client = getattr(deps, "gowa_client", None)
-    gowa_manager = getattr(deps, "gowa_manager", None)
-
-    def _register_live_gowa(cid: str, row: dict) -> None:
-        """Make a freshly-created GOWA channel operational without a restart, so
-        its QR/status endpoints work immediately."""
-        if registry is None or gowa_client is None:
-            return
-        try:
-            inst = build_gowa_channel(cid, row, gowa_client=gowa_client,
-                                      gowa_manager=gowa_manager)
-            registry.add_channel(cid, inst)
-        except Exception:
-            pass
-
-    def _required_credentials(provider: str) -> list[str]:
-        """Credential keys a provider MUST have to ever become operational
-        (capability-driven, anti zombie-channel).
-
-        Read from the provider's ``ChannelCapabilities.required_credentials`` by
-        probing a throwaway instance — a pure constructor (no network/DB). Empty
-        for QR/linked-device providers (GOWA): they bootstrap from an empty channel
-        via the QR connect flow, so an empty channel is legitimate. Best-effort →
-        ``[]`` on any failure, so a probe issue never spuriously blocks creation.
-        Never branches on provider name (the knowledge lives in each provider)."""
-        if registry is None:
-            return []
-        provider_cls = registry.get_provider(provider)
-        if provider_cls is None:
-            return []
-        try:
-            try:
-                inst = provider_cls("__probe__", registry=registry)
-            except TypeError:
-                inst = provider_cls("__probe__")
-            caps = getattr(inst, "capabilities", None)
-            return list(getattr(caps, "required_credentials", ()) or ())
-        except Exception:
-            return []
-
-    def _register_live_provider(cid: str, provider: str) -> None:
-        """Make a freshly-created non-GOWA channel (Cloud/Telegram/…) live without
-        a restart, when its provider plugin is loaded.
-
-        Mirrors the boot-time materialization in ``create_app``: instantiate the
-        registered provider class with ``(channel_id, registry=...)`` so status/QR/
-        send and (for Telegram) the long-poll loop pick it up immediately. Pure
-        constructor — no network — so it is safe and best-effort."""
-        if registry is None:
-            return
-        provider_cls = registry.get_provider(provider)
-        if provider_cls is None:
-            return
-        try:
-            try:
-                inst = provider_cls(cid, registry=registry)
-            except TypeError:
-                inst = provider_cls(cid)
-            registry.add_channel(cid, inst)
-        except Exception:
-            pass
 
     @app.get("/api/channels")
     async def list_channels(request: Request, archived: bool = False):
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        rows = await asyncio.to_thread(
-            channel_repo.list_archived if archived else channel_repo.list_all)
-        out = []
-        for row in rows:
-            creds = await asyncio.to_thread(channel_credential_repo.get_all, row["id"])
-            out.append(_serialize(row, creds))
-        return _ok(out)
+        return _ok(await svc.list_channels(deps, archived=archived))
 
     @app.get("/api/channels/connected")
     async def list_connected_channels(request: Request):
@@ -150,43 +47,12 @@ def register_routes(app, deps):
         Lighter and lower-privileged than ``GET /api/channels`` (gated by
         ``conversation.reply`` instead of ``channel.manage``, no credentials): the
         "start conversation" inbox picker needs only id/provider/name/status.
-        Status prefers the live registry instance, falling back to the stored flags.
-
-        Inclusion is by ``logged_in`` (the session is authenticated and can send),
-        NOT ``connected``. For GOWA the two flags mean different things —
-        ``connected`` tracks the local subprocess manager (``manager.is_running``),
-        while ``logged_in`` reflects the live WhatsApp session via ``/app/status``.
-        A GOWA inbox can be ``Desconectado · Autenticado`` (subprocess not owned by
-        this process, e.g. launched externally in dev) yet fully usable to send;
-        requiring ``connected`` would wrongly hide it. ``logged_in`` already implies
-        the REST API is reachable, so it is the correct "can I send" signal. For
-        Cloud/Telegram the two flags are always equal, so nothing changes there.
+        Inclusion is by ``logged_in`` (the session can send), NOT ``connected``.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        rows = await asyncio.to_thread(channel_repo.list_all)
-        out = []
-        for row in rows:
-            if not row.get("enabled"):
-                continue
-            logged_in = bool(row.get("logged_in"))
-            inst = registry.get(row["id"]) if registry is not None else None
-            if inst is not None:
-                try:
-                    st = await asyncio.to_thread(inst.status)
-                    logged_in = bool(st.get("logged_in"))
-                except Exception:
-                    pass
-            if not logged_in:
-                continue
-            out.append({
-                "id": row["id"],
-                "provider": row.get("provider"),
-                "display_name": row.get("display_name") or "",
-                "own_phone": row.get("own_phone"),
-            })
-        return _ok(out)
+        return _ok(await svc.list_connected(deps))
 
     @app.get("/api/channels/{channel_id}/session-state")
     async def channel_session_state(channel_id: str, request: Request, phone: str = ""):
@@ -194,16 +60,7 @@ def register_routes(app, deps):
 
         The "Nova conversa" modal needs to know, BEFORE a conversation row exists,
         whether free text is allowed to ``phone`` on this channel or a template is
-        required. Resolves the contact's latest conversation IN this channel's inbox
-        (if any) and computes the 24h free-text window from its last inbound.
-
-        Returns ``{templates_supported, session_open, has_conversation,
-        conversation_id, last_inbound_ts}``:
-        - always-open channels (GOWA) → ``session_open=True`` (free text always ok);
-        - windowed channels (WhatsApp Cloud) → ``session_open`` is True only when an
-          existing conversation has an inbound within 24h. No conversation, or an
-          expired window, yields ``False`` (a template is then mandatory).
-        Capability-driven — never by provider name.
+        required. Capability-driven — never by provider name.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -214,29 +71,7 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        outbound = deps.outbound_router
-
-        def _resolve() -> dict:
-            templates_supported = outbound.supports(channel_id, "templates")
-            contact = contact_repo.get_by_phone(phone)
-            conv = None
-            if contact:
-                inbox = inbox_repo.get_by_channel(channel_id)
-                if inbox:
-                    conv = conversation_repo.get_latest_for_contact_inbox(
-                        contact["id"], inbox["id"])
-            conv_id = conv["id"] if conv else None
-            last_ts = (message_repo.last_inbound_ts(conversation_id=conv_id)
-                       if conv_id else None)
-            return {
-                "templates_supported": templates_supported,
-                "session_open": outbound.session_open(channel_id, last_ts),
-                "has_conversation": conv is not None,
-                "conversation_id": conv_id,
-                "last_inbound_ts": last_ts,
-            }
-
-        data = await asyncio.to_thread(_resolve)
+        data = await asyncio.to_thread(tpl_svc.session_state, deps, channel_id, phone)
         return _ok(data)
 
     @app.get("/api/channels/{channel_id}/templates")
@@ -251,13 +86,12 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        outbound = deps.outbound_router
         can_create = has_permission(request, "template.create")
         can_delete = has_permission(request, "template.delete")
-        if not outbound.supports(channel_id, "templates"):
+        if not tpl_svc.supports_templates(deps, channel_id):
             return _ok({"supported": False, "templates": [],
                         "can_create": can_create, "can_delete": can_delete})
-        templates = await asyncio.to_thread(outbound.list_templates, channel_id)
+        templates = await tpl_svc.list_templates(deps, channel_id)
         return _ok({"supported": True, "templates": templates,
                     "can_create": can_create, "can_delete": can_delete})
 
@@ -265,9 +99,7 @@ def register_routes(app, deps):
     async def channel_send_template(channel_id: str, body: dict, request: Request):
         """Send an approved template to ``phone`` through ``channel_id`` when there is
         no conversation yet (plano 21). Channel-scoped twin of
-        ``POST /api/conversations/{id}/send-template``: saving the operator message
-        creates the contact + conversation in this channel's inbox, so the new thread
-        appears in the sidebar exactly like a normal first send.
+        ``POST /api/conversations/{id}/send-template``.
 
         body: ``{phone, template_name, language?, components?, preview_text?}``.
         """
@@ -287,39 +119,18 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        outbound = deps.outbound_router
-        if not outbound.supports(channel_id, "templates"):
+        if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
 
-        result = await asyncio.to_thread(
-            outbound.send_template, channel_id, phone, template_name,
-            lang=language, components=components or None)
-        if not result.ok:
-            return _err(f"Falha ao enviar template: {result.error}", status=502)
-
-        msg_id = result.external_msg_id or None
-        preview = (body.get("preview_text") or "").strip() or f"📋 Template: {template_name}"
-        try:
-            msg_data = await asyncio.to_thread(
-                deps.agent_handler.save_operator_message, phone, preview,
-                status="operator", msg_id=msg_id, channel_id=channel_id)
-        except Exception as e:  # noqa: BLE001
-            return _err(f"Template enviado, mas falha ao salvar a mensagem: {e}", status=500)
-
-        try:
-            await deps.ws_manager.broadcast("new_message", {
-                "phone": phone, "channel_id": channel_id, "message": msg_data})
-        except Exception:
-            pass
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": preview, "msg_id": msg_id,
-            "media_type": None, "media_path": None,
-            "source": "template", "status": "operator",
-            "template_name": template_name, "ts": time.time(),
-        })
-        return _ok({"message": "Template enviado.", "msg_id": msg_id, "phone": phone})
-
-    _TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+        kind, data = await tpl_svc.send_template(
+            deps, channel_id, phone=phone, template_name=template_name,
+            language=language, components=components,
+            preview_text=body.get("preview_text") or "")
+        if kind == "send_failed":
+            return _err(f"Falha ao enviar template: {data}", status=502)
+        if kind == "save_failed":
+            return _err(f"Template enviado, mas falha ao salvar a mensagem: {data}", status=500)
+        return _ok(data)
 
     @app.post("/api/channels/{channel_id}/templates")
     async def channel_create_template(channel_id: str, body: dict, request: Request):
@@ -336,8 +147,8 @@ def register_routes(app, deps):
         if not body_text:
             return _err("body_text é obrigatório.", status=400)
         category = (body.get("category") or "UTILITY").strip().upper()
-        if category not in _TEMPLATE_CATEGORIES:
-            return _err(f"category deve ser uma de {sorted(_TEMPLATE_CATEGORIES)}.", status=400)
+        if category not in tpl_svc.TEMPLATE_CATEGORIES:
+            return _err(f"category deve ser uma de {sorted(tpl_svc.TEMPLATE_CATEGORIES)}.", status=400)
         language = (body.get("language") or "pt_BR").strip() or "pt_BR"
         body_examples = body.get("body_examples")
         header_examples = body.get("header_examples")
@@ -348,23 +159,17 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        outbound = deps.outbound_router
-        if not outbound.supports(channel_id, "templates"):
+        if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
-        result = await asyncio.to_thread(
-            outbound.create_template, channel_id, name,
-            category=category, language=language, body_text=body_text,
+        kind, data = await tpl_svc.create_template(
+            deps, channel_id, name=name, category=category, language=language,
+            body_text=body_text,
             header_text=(body.get("header_text") or "").strip() or None,
             footer_text=(body.get("footer_text") or "").strip() or None,
-            body_examples=body_examples or None,
-            header_examples=header_examples or None)
-        if not result.get("ok"):
-            return _err(f"Falha ao criar template: {result.get('error')}", status=502)
-        return _ok({
-            "message": "Template enviado para aprovação da Meta.",
-            "id": result.get("id"), "status": result.get("status"),
-            "category": result.get("category"), "name": name,
-        })
+            body_examples=body_examples, header_examples=header_examples)
+        if kind == "failed":
+            return _err(f"Falha ao criar template: {data}", status=502)
+        return _ok(data)
 
     @app.delete("/api/channels/{channel_id}/templates/{name}")
     async def channel_delete_template(channel_id: str, name: str, request: Request):
@@ -376,13 +181,12 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        outbound = deps.outbound_router
-        if not outbound.supports(channel_id, "templates"):
+        if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
-        result = await asyncio.to_thread(outbound.delete_template, channel_id, name)
-        if not result.get("ok"):
-            return _err(f"Falha ao apagar template: {result.get('error')}", status=502)
-        return _ok({"message": "Template apagado.", "name": name})
+        kind, data = await tpl_svc.delete_template(deps, channel_id, name)
+        if kind == "failed":
+            return _err(f"Falha ao apagar template: {data}", status=502)
+        return _ok(data)
 
     @app.get("/api/channels/assignable-users")
     async def assignable_users(request: Request):
@@ -393,7 +197,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        users = await asyncio.to_thread(_assignable_users)
+        users = await asyncio.to_thread(svc.assignable_users)
         return _ok({"users": users})
 
     @app.get("/api/channels/providers")
@@ -402,34 +206,22 @@ def register_routes(app, deps):
 
         A provider is only offered when its backing plugin is enabled — i.e. its
         ``CHANNEL_PROVIDERS`` class is registered in the live ``ChannelRegistry``.
-        GOWA is core and always present; ``whatsapp_cloud``/``telegram``/``test``
-        come from their plugins, so they disappear from the "Novo canal" picker
-        when the plugin is disabled. Gated by ``channel.manage`` (same as the rest
-        of this screen). Registered before ``/{channel_id}`` so the literal path
-        wins the match."""
+        GOWA is core and always present. Gated by ``channel.manage``. Registered
+        before ``/{channel_id}`` so the literal path wins the match."""
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        if registry is not None:
-            names = sorted(set(registry.providers()) & _ALLOWED_PROVIDERS)
-        else:
-            names = sorted(_ALLOWED_PROVIDERS)
-        # Required credentials per provider (capability-driven) so the "Novo canal"
-        # form can require those fields and the card can flag a misconfigured
-        # channel — single source of truth is the provider's capabilities.
-        required = {p: _required_credentials(p) for p in names}
-        return _ok({"providers": names, "required_credentials": required})
+        return _ok(await svc.providers(deps))
 
     @app.get("/api/channels/{channel_id}")
     async def get_channel(channel_id: str, request: Request):
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        row = await asyncio.to_thread(channel_repo.get, channel_id)
-        if row is None:
+        data = await svc.get_serialized(deps, channel_id)
+        if data is None:
             return _err("Canal não encontrado.", 404)
-        creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-        return _ok(_serialize(row, creds))
+        return _ok(data)
 
     @app.post("/api/channels")
     async def create_channel(body: dict, request: Request):
@@ -442,11 +234,9 @@ def register_routes(app, deps):
             return _err(f"provider deve ser um de: {', '.join(sorted(_ALLOWED_PROVIDERS))}.", 400)
         # Anti zombie-channel (capability-driven): a credential-only provider with no
         # connect step (Cloud/Telegram) is useless without its required credentials —
-        # it would sit forever "Desconectado" with no way to fix it from the UI.
-        # Reject the create up front. GOWA's required set is empty (QR flow), so it is
-        # unaffected. Validated against the SUBMITTED credentials (before storing).
+        # reject the create up front. GOWA's required set is empty (QR flow).
         submitted_creds = body.get("credentials") or {}
-        missing_creds = [k for k in _required_credentials(provider)
+        missing_creds = [k for k in svc.required_credentials(deps, provider)
                          if not str(submitted_creds.get(k) or "").strip()]
         if missing_creds:
             return _err(
@@ -457,14 +247,12 @@ def register_routes(app, deps):
         gowa_device_id = body.get("gowa_device_id")
         if not gowa_device_id and isinstance(config, dict):
             gowa_device_id = config.get("gowa_device_id")
-        # GOWA device id is auto-generated, never user-chosen. Each channel maps to
-        # its own GOWA device (X-Device-Id) on the shared GOWA process.
+        # GOWA device id is auto-generated, never user-chosen.
         if provider == "gowa" and not gowa_device_id:
             gowa_device_id = f"gowa_{uuid.uuid4().hex[:8]}"
         # Channel id is auto-generated: the user only picks a display name. GOWA
         # reuses its device id as the channel id; other providers get
-        # "<provider>_<hex>". A client may still send an explicit id (back-compat):
-        # it is validated and checked for uniqueness as before.
+        # "<provider>_<hex>". A client may still send an explicit id (back-compat).
         if cid:
             if not _ID_RE.match(cid):
                 return _err("id inválido (use snake_case: a-z, 0-9, _; começa com letra).", 400)
@@ -475,36 +263,12 @@ def register_routes(app, deps):
                    else f"{provider}_{uuid.uuid4().hex[:8]}")
             while await asyncio.to_thread(channel_repo.get, cid):
                 cid = f"{provider}_{uuid.uuid4().hex[:8]}"
-        row = await asyncio.to_thread(
-            channel_repo.create, id=cid, provider=provider,
+        data = await svc.create(
+            deps, cid=cid, provider=provider,
             display_name=body.get("display_name", "") or cid,
-            gowa_device_id=gowa_device_id,
-            config=json.dumps(config) if isinstance(config, (dict, list)) else config,
-        )
-        for key, value in submitted_creds.items():
-            if value:  # never store an empty/placeholder secret
-                await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
-        # One inbox per channel (plano 11): conversations on this channel get their
-        # own thread. Best-effort — a failure here never blocks channel creation
-        # (resolve_inbox_id self-heals on first inbound).
-        try:
-            await asyncio.to_thread(
-                inbox_repo.get_or_create_for_channel, cid,
-                name=row.get("display_name") or cid)
-        except Exception:
-            # A failed inbox creation is the root cause of channel/inbox drift
-            # (órfãs, nomes velhos). resolve_inbox_id self-heals on first inbound,
-            # but log it loudly so the inconsistency is visible.
-            logger.warning("Falha ao criar inbox do canal %s", cid, exc_info=True)
-        # Register the live channel now so status/QR/send work without a restart.
-        # GOWA needs its per-device client; other providers are built generically
-        # from the registered provider class (no-op if the plugin isn't loaded).
-        if provider == "gowa":
-            _register_live_gowa(cid, row)
-        else:
-            _register_live_provider(cid, provider)
-        stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
-        return _ok(_serialize(row, stored))
+            submitted_creds=submitted_creds, config=config,
+            gowa_device_id=gowa_device_id)
+        return _ok(data)
 
     @app.put("/api/channels/{channel_id}")
     async def update_channel(channel_id: str, body: dict, request: Request):
@@ -514,66 +278,21 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        fields = {}
-        if "display_name" in body:
-            fields["display_name"] = body["display_name"]
-        if "enabled" in body:
-            fields["enabled"] = 1 if body["enabled"] else 0
-        if "config" in body:
-            cfg = body["config"]
-            fields["config"] = json.dumps(cfg) if isinstance(cfg, (dict, list)) else cfg
-        if fields:
-            row = await asyncio.to_thread(channel_repo.update, channel_id, **fields)
-            # Keep the channel's inbox name in sync (plano inboxes/canais §4.1):
-            # ``channels.display_name`` is the source of truth; the UI shows it, but
-            # ``inbox.name`` is kept current as cache/compat.
-            if "display_name" in fields:
-                inbox = await asyncio.to_thread(inbox_repo.get_by_channel, channel_id)
-                if inbox:
-                    await asyncio.to_thread(
-                        inbox_repo.update, inbox["id"],
-                        name=fields["display_name"] or channel_id)
-        # A config edit may change the GOWA JID-type filter — drop its cache so
-        # the webhook picks up the new allowed types without waiting for the TTL.
-        if "config" in body:
-            try:
-                from server.routes.webhook import reset_allowed_jid_cache
-                reset_allowed_jid_cache()
-            except Exception:
-                pass
-            # Drop the per-channel AI settings cache too (plano 21) so the new
-            # overrides take effect without waiting for the TTL.
-            try:
-                from channels import ai_settings
-                ai_settings.reset_cache(channel_id)
-            except Exception:
-                pass
-        # Credentials: a non-empty value replaces; the masked placeholder (••••) is ignored.
-        for key, value in (body.get("credentials") or {}).items():
-            if value and not str(value).startswith("••••"):
-                await asyncio.to_thread(channel_credential_repo.set, channel_id, str(key), str(value))
-        stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-        return _ok(_serialize(row, stored))
+        return _ok(await svc.update(deps, row, body))
 
     @app.get("/api/channels/{channel_id}/members")
     async def get_channel_members(channel_id: str, request: Request):
         """Agents (panel users) who see/receive this channel's inbox.
 
         Returns the channel's inbox id, the current member user ids, and the full
-        list of assignable (active) users for the picker — one round-trip for the
-        editor. Gated by ``channel.manage`` (same as the rest of this screen)."""
+        list of assignable (active) users for the picker. Gated by ``channel.manage``."""
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        inbox = await asyncio.to_thread(
-            inbox_repo.get_or_create_for_channel, channel_id,
-            name=row.get("display_name") or channel_id)
-        members = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
-        users = await asyncio.to_thread(_assignable_users)
-        return _ok({"inbox_id": inbox["id"], "member_ids": members, "users": users})
+        return _ok(await svc.get_members(deps, row))
 
     @app.put("/api/channels/{channel_id}/members")
     async def set_channel_members(channel_id: str, body: dict, request: Request):
@@ -591,12 +310,7 @@ def register_routes(app, deps):
             user_ids = [int(u) for u in raw]
         except (TypeError, ValueError):
             return _err("user_ids deve conter apenas inteiros.", 400)
-        inbox = await asyncio.to_thread(
-            inbox_repo.get_or_create_for_channel, channel_id,
-            name=row.get("display_name") or channel_id)
-        members = await asyncio.to_thread(
-            inbox_member_repo.set_members, inbox["id"], user_ids)
-        return _ok({"inbox_id": inbox["id"], "member_ids": members})
+        return _ok(await svc.set_members(deps, row, user_ids))
 
     @app.delete("/api/channels/{channel_id}")
     async def delete_channel(channel_id: str, request: Request, purge: bool = False):
@@ -606,9 +320,8 @@ def register_routes(app, deps):
         inbox, escondendo-os da UI mas PRESERVANDO o histórico de conversas. Pode
         ser desfeito via ``POST /api/channels/{id}/restore``.
 
-        ``?purge=true`` = hard-delete: apaga o canal e a inbox de vez. A FK
-        ``inboxes.channel_id → channels.id ON DELETE CASCADE`` leva conversas,
-        contact_inboxes e inbox_members junto. **Destrói histórico** — irreversível.
+        ``?purge=true`` = hard-delete: apaga o canal e a inbox de vez (CASCADE leva
+        conversas/membros junto). **Destrói histórico** — irreversível.
         """
         denied = permission_denied(request, "channel.manage")
         if denied:
@@ -618,41 +331,10 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        # Best-effort: log the GOWA device out so the WhatsApp number is freed.
-        inst = registry.get(channel_id) if registry is not None else None
-        if inst is not None and getattr(inst, "_client", None) is not None:
-            try:
-                await asyncio.to_thread(inst._client.logout)
-            except Exception:
-                pass
-
-        if purge:
-            # Hard-delete: drop the inbox first (CASCADE clears conversas/membros),
-            # then the credentials and the channel row.
-            inbox = await asyncio.to_thread(inbox_repo.get_by_channel, channel_id)
-            if inbox:
-                await asyncio.to_thread(inbox_repo.delete, inbox["id"])
-            await asyncio.to_thread(channel_credential_repo.delete_all, channel_id)
-            ok = await asyncio.to_thread(channel_repo.delete, channel_id)
-            if not ok:
-                return _err("Canal não encontrado.", 404)
-            if registry is not None:
-                try:
-                    registry.remove_channel(channel_id)
-                except Exception:
-                    pass
-            logger.info("Canal %s removido (purge).", channel_id)
-            return _ok({"deleted": channel_id, "purged": True})
-
-        # Soft-delete: archive the channel; the inbox + history stay intact.
-        await asyncio.to_thread(channel_repo.archive, channel_id)
-        if registry is not None:
-            try:
-                registry.remove_channel(channel_id)
-            except Exception:
-                pass
-        logger.info("Canal %s arquivado (soft-delete).", channel_id)
-        return _ok({"deleted": channel_id, "archived": True})
+        result = await svc.delete(deps, channel_id, purge=purge)
+        if result is None:
+            return _err("Canal não encontrado.", 404)
+        return _ok(result)
 
     @app.post("/api/channels/{channel_id}/restore")
     async def restore_channel(channel_id: str, request: Request):
@@ -664,9 +346,7 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        row = await asyncio.to_thread(channel_repo.restore, channel_id)
-        creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-        return _ok(_serialize(row, creds))
+        return _ok(await svc.restore(deps, channel_id))
 
     @app.get("/api/channels/{channel_id}/status")
     async def channel_status(channel_id: str, request: Request):
@@ -676,21 +356,7 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        # Prefer the live instance's status; fall back to the stored flags.
-        inst = registry.get(channel_id) if registry is not None else None
-        if inst is not None:
-            try:
-                st = await asyncio.to_thread(inst.status)
-                return _ok(st)
-            except Exception as e:
-                return _ok({"connected": False, "logged_in": False,
-                            "needs_qr": False, "error": str(e)})
-        return _ok({
-            "connected": bool(row.get("connected")),
-            "logged_in": bool(row.get("logged_in")),
-            "needs_qr": False,
-            "error": row.get("last_error"),
-        })
+        return _ok(await svc.status(deps, row))
 
     @app.get("/api/channels/{channel_id}/qr")
     async def channel_qr(channel_id: str, request: Request):
@@ -700,22 +366,15 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        if row.get("provider") != "gowa":
+        result = await svc.qr(deps, row)
+        if result == "not_gowa":
             return _err("QR disponível apenas para canais GOWA.", 400)
-        inst = registry.get(channel_id) if registry is not None else None
-        # The channel may exist in the DB but not be live yet (created before this
-        # boot, or registry unavailable) — build/register it on demand.
-        if inst is None:
-            _register_live_gowa(channel_id, row)
-            inst = registry.get(channel_id) if registry is not None else None
-        if inst is None or not hasattr(inst, "qr"):
+        if result == "unavailable":
             return _err("Canal GOWA indisponível.", 503)
-        try:
-            png = await asyncio.to_thread(inst.qr)
-        except Exception as e:  # noqa: BLE001
-            return _err(f"Falha ao obter QR: {e}", 502)
-        if not png:
+        if isinstance(result, tuple) and result and result[0] == "error":
+            return _err(f"Falha ao obter QR: {result[1]}", 502)
+        if not result:
             # Already logged in, or GOWA not ready yet — 204 tells the UI to poll status.
             return Response(status_code=204)
-        return Response(content=png, media_type="image/png",
+        return Response(content=result, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
