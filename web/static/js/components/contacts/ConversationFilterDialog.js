@@ -1,49 +1,196 @@
 // Chatwoot-style "Filtrar conversas" builder (plano 10 FF6+). Opened from the funnel
 // icon in the inbox toolbar. Each row is a clause: [dimensão] [operador] [valor] [🗑].
 // Dimensions: Status (Aberta/Fechada/Todas), Canais, Agente (atendente humano +
-// IA), Etiqueta, Última atividade.
+// IA), Etiqueta, Última atividade — MAIS os atributos personalizados (dinâmicos),
+// de contato e de conversa, que aparecem conforme cadastrados (plano 05).
 //
 // Operators:
 //   - Status / Canais / Agente / Etiqueta → "Igual a" (eq) / "Diferente" (ne)
 //   - Última atividade → "É maior que" (gt) / "É menor que" (lt) / "É X dias antes"
 //     (days_before), todos sobre número de DIAS desde a última atividade.
+//   - Atributo personalizado → varia pelo tipo (list/checkbox/number/date/text).
 //
-// The dialog only BUILDS the clause list ({dim, op, value}); evaluation is done
-// client-side in Contacts.js over the already-fetched rows (instant, AND entre as
-// cláusulas). "Aplicar filtros" commits o rascunho; "Limpar filtros" zera tudo.
+// Canais / Agente / Etiqueta e atributos do tipo `list` são MULTI-SELECT (o valor
+// vira uma lista; eq = "é uma de" / ne = "não é nenhuma"). As demais dimensões são
+// escalares. The dialog only BUILDS the clause list ({dim, op, value}); evaluation
+// is done client-side in conversationRows.clauseMatches over the already-fetched
+// rows (instant, AND entre as cláusulas). Dimensões de atributo são codificadas
+// como `cattr:<scope>:<attribute_key>` (scope ∈ contact|conversation).
 
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
 
-const DIMENSIONS = [
+const CORE_DIMENSIONS = [
   { key: 'status',   label: 'Status',           ops: ['eq', 'ne'],                valueType: 'status' },
   { key: 'channel',  label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'agent',    label: 'Agente',           ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',      label: 'Etiqueta',         ops: ['eq', 'ne'],                valueType: 'tag' },
   { key: 'activity', label: 'Última atividade', ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
-const DIM_BY_KEY = Object.fromEntries(DIMENSIONS.map(d => [d.key, d]));
+const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
+
 const OP_LABELS = {
   eq: 'Igual a', ne: 'Diferente',
   gt: 'É maior que', lt: 'É menor que', days_before: 'É X dias antes',
+  contains: 'Contém', not_contains: 'Não contém',
 };
 
+// Mapa tipo-de-atributo → {valueType de input, operadores oferecidos}.
+const ATTR_TYPE_MAP = {
+  list:     { valueType: 'attr_list',   ops: ['eq', 'ne'] },
+  checkbox: { valueType: 'attr_bool',   ops: ['eq'] },
+  number:   { valueType: 'attr_number', ops: ['eq', 'ne', 'gt', 'lt'] },
+  date:     { valueType: 'attr_date',   ops: ['eq', 'ne', 'gt', 'lt'] },
+  text:     { valueType: 'attr_text',   ops: ['contains', 'not_contains', 'eq', 'ne'] },
+  link:     { valueType: 'attr_text',   ops: ['contains', 'not_contains', 'eq', 'ne'] },
+};
+
+// Valores cujo input é multi-select (lista). As demais são escalares.
+const MULTI_TYPES = new Set(['channel', 'agent', 'tag', 'attr_list']);
+const isMultiType = (valueType) => MULTI_TYPES.has(valueType);
+const emptyValueFor = (dimDesc) => (dimDesc && isMultiType(dimDesc.valueType) ? [] : '');
+const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
+// Presets antigos podem trazer um escalar onde agora esperamos lista — normaliza ao ler.
+const asList = (v) => (Array.isArray(v) ? v : (v == null || v === '' ? [] : [v]));
+
+// Constrói a dimensão de filtro de um atributo personalizado.
+function attrDim(def, scope) {
+  const t = (def.type || 'text').toLowerCase();
+  const m = ATTR_TYPE_MAP[t] || ATTR_TYPE_MAP.text;
+  return {
+    key: `cattr:${scope}:${def.attribute_key}`,
+    label: def.display_name || def.attribute_key,
+    ops: m.ops,
+    valueType: m.valueType,
+    attrDef: def,
+    group: scope,   // 'contact' | 'conversation'
+  };
+}
+
 let _seq = 0;
-const newClause = (dim = 'channel') => ({
-  id: `f${++_seq}`, dim, op: DIM_BY_KEY[dim].ops[0], value: '',
-});
+const newClause = (dim = 'channel') => {
+  const d = CORE_BY_KEY[dim] || CORE_BY_KEY.channel;
+  return { id: `f${++_seq}`, dim: d.key, op: d.ops[0], value: emptyValueFor(d) };
+};
 
 function TrashIcon() {
   return html`<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
 }
+function ChevronIcon({ open = false }) {
+  return html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"
+    class="shrink-0 text-wa-secondary transition-transform ${open ? 'rotate-180' : ''}"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>`;
+}
 
 const FIELD = 'wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-border';
 
-function ValueInput({ clause, channels, agentsUsers, agentsAi, tagNames, onChange }) {
-  const t = DIM_BY_KEY[clause.dim].valueType;
+// Fecha o dropdown em clique-fora / Escape. Compartilhado por MultiSelect e DimensionPicker.
+function useCloseOnOutside(open, setOpen, ref) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+}
+
+// Dropdown custom de multi-seleção (checkboxes). Evita o `<select multiple>` nativo
+// (feio e ruim no dark mode). options: [{ value, label, group? }] — agrupadas por `group`.
+function MultiSelect({ options, selected, onChange, placeholder = '+ Selecione uma opção...' }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useCloseOnOutside(open, setOpen, ref);
+
+  const sel = new Set(selected || []);
+  const toggle = (v) => {
+    const next = new Set(sel);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    onChange(options.filter(o => next.has(o.value)).map(o => o.value));  // preserva ordem das options
+  };
+
+  const chosen = options.filter(o => sel.has(o.value));
+  const summary = chosen.length === 0
+    ? placeholder
+    : (chosen.length <= 2 ? chosen.map(o => o.label).join(', ') : `${chosen.length} selecionados`);
+
+  // Agrupa preservando a ordem de aparição dos grupos.
+  const groups = [];
+  const byGroup = new Map();
+  for (const o of options) {
+    const g = o.group || '';
+    if (!byGroup.has(g)) { byGroup.set(g, []); groups.push(g); }
+    byGroup.get(g).push(o);
+  }
+
+  return html`<div ref=${ref} class="relative flex-1 min-w-0">
+    <button type="button" onClick=${() => setOpen(o => !o)}
+      class="${FIELD} w-full flex items-center justify-between gap-1.5 text-left">
+      <span class="truncate ${chosen.length === 0 ? 'text-wa-secondary' : ''}">${summary}</span>
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="shrink-0 text-wa-secondary"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+    </button>
+    ${open ? html`<div class="absolute z-[80] mt-1 left-0 right-0 max-h-[220px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
+      ${groups.map(g => html`<div key=${'g' + g}>
+        ${g ? html`<div class="px-2.5 pt-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-wa-secondary">${g}</div>` : null}
+        ${byGroup.get(g).map(o => html`<label key=${o.value}
+          class="flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-wa-text hover:bg-wa-hover cursor-pointer">
+          <input type="checkbox" checked=${sel.has(o.value)} onChange=${() => toggle(o.value)} class="shrink-0" />
+          <span class="truncate">${o.label}</span>
+        </label>`)}
+      </div>`)}
+    </div>` : null}
+  </div>`;
+}
+
+// Seletor de DIMENSÃO (single-select custom). Lista as dimensões core no topo e, em
+// seguida, dois accordions recolhíveis — "Atributos do contato" e "Atributos da
+// conversa" — recolhidos por padrão, para esconder os atributos e manter a lista limpa.
+function DimensionPicker({ dimensions, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [openContact, setOpenContact] = useState(false);
+  const [openConv, setOpenConv] = useState(false);
+  const ref = useRef(null);
+  useCloseOnOutside(open, setOpen, ref);
+
+  const core = dimensions.filter(d => !d.group);
+  const contactDims = dimensions.filter(d => d.group === 'contact');
+  const convDims = dimensions.filter(d => d.group === 'conversation');
+  const current = dimensions.find(d => d.key === value);
+  const pick = (key) => { onChange(key); setOpen(false); };
+
+  const row = (d) => html`<button type="button" key=${d.key} onClick=${() => pick(d.key)}
+    class="w-full text-left px-2.5 py-1.5 text-[13px] hover:bg-wa-hover transition-colors ${d.key === value ? 'text-wa-teal font-medium' : 'text-wa-text'}">
+    ${d.label}
+  </button>`;
+
+  const accordion = (label, dims, isOpen, setIsOpen) => (dims.length === 0 ? null : html`<div class="border-t border-wa-border mt-1 pt-1">
+    <button type="button" onClick=${() => setIsOpen(o => !o)}
+      class="w-full flex items-center justify-between gap-1.5 px-2.5 py-1.5 text-[12px] font-semibold uppercase tracking-wide text-wa-secondary hover:bg-wa-hover transition-colors">
+      <span>${label} (${dims.length})</span>
+      <${ChevronIcon} open=${isOpen} />
+    </button>
+    ${isOpen ? html`<div>${dims.map(row)}</div>` : null}
+  </div>`);
+
+  return html`<div ref=${ref} class="relative shrink-0 w-[150px]">
+    <button type="button" onClick=${() => setOpen(o => !o)}
+      class="${FIELD} w-full flex items-center justify-between gap-1.5 text-left">
+      <span class="truncate">${current ? current.label : 'Selecione...'}</span>
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="shrink-0 text-wa-secondary"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+    </button>
+    ${open ? html`<div class="absolute z-[80] mt-1 left-0 w-[240px] max-h-[320px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
+      ${core.map(row)}
+      ${accordion('Atributos do contato', contactDims, openContact, setOpenContact)}
+      ${accordion('Atributos da conversa', convDims, openConv, setOpenConv)}
+    </div>` : null}
+  </div>`;
+}
+
+function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames, onChange }) {
+  const t = dimDesc.valueType;
   const cls = `${FIELD} flex-1 min-w-0`;
   if (t === 'status') {
     return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
@@ -54,28 +201,44 @@ function ValueInput({ clause, channels, agentsUsers, agentsAi, tagNames, onChang
     </select>`;
   }
   if (t === 'channel') {
-    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
-      <option value="">+ Selecione uma opção...</option>
-      ${channels.map(c => html`<option key=${c.id} value=${c.id}>${c.label}</option>`)}
-    </select>`;
+    const options = channels.map(c => ({ value: c.id, label: c.label }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'agent') {
-    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
-      <option value="">+ Selecione uma opção...</option>
-      <option value="none">— Não atribuído —</option>
-      ${agentsUsers.length ? html`<optgroup label="Atendentes">
-        ${agentsUsers.map(u => html`<option key=${'u' + u.id} value=${'user:' + u.id}>${u.name}</option>`)}
-      </optgroup>` : null}
-      ${agentsAi.length ? html`<optgroup label="Agentes de IA">
-        ${agentsAi.map(a => html`<option key=${'a' + a.agent_key} value=${'ai:' + a.agent_key}>${a.display_name}</option>`)}
-      </optgroup>` : null}
-    </select>`;
+    const options = [
+      { value: 'none', label: '— Não atribuído —' },
+      ...agentsUsers.map(u => ({ value: 'user:' + u.id, label: u.name, group: 'Atendentes' })),
+      ...agentsAi.map(a => ({ value: 'ai:' + a.agent_key, label: a.display_name, group: 'Agentes de IA' })),
+    ];
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'tag') {
+    const options = tagNames.map(n => ({ value: n, label: n }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  // ── Atributos personalizados ──
+  if (t === 'attr_list') {
+    const options = ((dimDesc.attrDef && dimDesc.attrDef.options) || []).map(o => ({ value: o, label: o }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'attr_bool') {
     return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
       <option value="">+ Selecione uma opção...</option>
-      ${tagNames.map(n => html`<option key=${n} value=${n}>${n}</option>`)}
+      <option value="true">Sim</option>
+      <option value="false">Não</option>
     </select>`;
+  }
+  if (t === 'attr_number') {
+    return html`<input type="number" step="any" value=${clause.value} placeholder="Inserir valor"
+      onInput=${(e) => onChange(e.target.value)} class=${cls} />`;
+  }
+  if (t === 'attr_date') {
+    return html`<input type="date" value=${clause.value}
+      onInput=${(e) => onChange(e.target.value)} class=${cls} />`;
+  }
+  if (t === 'attr_text') {
+    return html`<input type="text" value=${clause.value} placeholder="Inserir valor"
+      onInput=${(e) => onChange(e.target.value)} class=${cls} />`;
   }
   // days — número de dias desde a última atividade
   return html`<div class="flex items-center gap-1.5 flex-1 min-w-0">
@@ -87,19 +250,31 @@ function ValueInput({ clause, channels, agentsUsers, agentsAi, tagNames, onChang
 }
 
 export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
+  contactAttrDefs = [], convAttrDefs = [],
   sortBy, onSortChange, sortOptions, onApply, onClose }) {
+  // Dimensões = core + atributos personalizados (contato e conversa), dinâmicas.
+  const dimensions = useMemo(() => [
+    ...CORE_DIMENSIONS,
+    ...(contactAttrDefs || []).map(d => attrDim(d, 'contact')),
+    ...(convAttrDefs || []).map(d => attrDim(d, 'conversation')),
+  ], [contactAttrDefs, convAttrDefs]);
+  const dimByKey = useMemo(() => Object.fromEntries(dimensions.map(d => [d.key, d])), [dimensions]);
+
   // Local draft so editing rows doesn't re-filter the list until "Aplicar". Mounts
   // fresh each time the popover opens, so seed straight from the applied filters.
   const [draft, setDraft] = useState(() =>
     (filters && filters.length) ? filters.map(f => ({ ...f })) : [newClause()]);
 
   const patch = (id, changes) => setDraft(d => d.map(c => (c.id === id ? { ...c, ...changes } : c)));
-  const changeDim = (id, dim) => patch(id, { dim, op: DIM_BY_KEY[dim].ops[0], value: '' });
+  const changeDim = (id, dimKey) => {
+    const d = dimByKey[dimKey] || CORE_BY_KEY.channel;
+    patch(id, { dim: d.key, op: d.ops[0], value: emptyValueFor(d) });
+  };
   const removeRow = (id) => setDraft(d => (d.length > 1 ? d.filter(c => c.id !== id) : [newClause()]));
   const addRow = () => setDraft(d => [...d, newClause()]);
 
   const apply = () => {
-    onApply(draft.filter(c => c.value !== '' && c.value != null));
+    onApply(draft.filter(c => !isEmptyValue(c.value)));
     onClose();
   };
   const clear = () => { onApply([]); onClose(); };
@@ -117,15 +292,13 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
       ` : null}
       <div class="flex flex-col gap-2 mb-3">
         ${draft.map((c) => {
-          const dim = DIM_BY_KEY[c.dim];
+          const dim = dimByKey[c.dim] || CORE_BY_KEY.channel;
           return html`<div key=${c.id} class="flex items-center gap-1.5">
-            <select class="${FIELD} shrink-0 w-[130px]" value=${c.dim} onChange=${(e) => changeDim(c.id, e.target.value)}>
-              ${DIMENSIONS.map(d => html`<option key=${d.key} value=${d.key}>${d.label}</option>`)}
-            </select>
+            <${DimensionPicker} dimensions=${dimensions} value=${c.dim} onChange=${(k) => changeDim(c.id, k)} />
             <select class="${FIELD} shrink-0 w-[120px]" value=${c.op} onChange=${(e) => patch(c.id, { op: e.target.value })}>
               ${dim.ops.map(op => html`<option key=${op} value=${op}>${OP_LABELS[op]}</option>`)}
             </select>
-            <${ValueInput} clause=${c} channels=${channels} agentsUsers=${agentsUsers}
+            <${ValueInput} clause=${c} dimDesc=${dim} channels=${channels} agentsUsers=${agentsUsers}
               agentsAi=${agentsAi} tagNames=${tagNames} onChange=${(v) => patch(c.id, { value: v })} />
             <button onClick=${() => removeRow(c.id)} title="Remover filtro"
               class="shrink-0 w-[30px] h-[30px] flex items-center justify-center rounded-md text-wa-secondary hover:bg-wa-hover hover:text-red-400 transition-colors">
