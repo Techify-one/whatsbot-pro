@@ -269,10 +269,13 @@ async def qr(deps, row: dict):
     if inst is None:
         register_live(deps, channel_id, "gowa", row)
         inst = registry.get(channel_id) if registry is not None else None
-    if inst is None or not hasattr(inst, "qr"):
+    # Canonical method is ``get_qr`` (Channel.get_qr); fall back to the deprecated
+    # ``qr`` alias for a provider not yet migrated (plano 23 Fase C4 Expand-Contract).
+    qr_method = getattr(inst, "get_qr", None) or getattr(inst, "qr", None)
+    if inst is None or qr_method is None:
         return "unavailable"
     try:
-        png = await asyncio.to_thread(inst.qr)
+        png = await asyncio.to_thread(qr_method)
     except Exception as e:  # noqa: BLE001
         return ("error", str(e))
     return png or ""

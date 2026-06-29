@@ -62,7 +62,7 @@ class GOWAChannel(Channel):
                 "needs_qr": connected and not logged_in,
                 "own_phone": own_phone, "error": None}
 
-    def qr(self) -> bytes | None:
+    def get_qr(self) -> bytes | None:
         """PNG bytes of this device's login QR (None if logged in / unavailable).
 
         Re-verifies the GOWA device exists before requesting a QR. A device that
@@ -71,6 +71,10 @@ class GOWAChannel(Channel):
         ready — which makes ``/app/login`` fail with DEVICE_NOT_FOUND. Clearing
         the cache forces ``ensure_device`` to recreate it, so connecting an
         existing channel behaves like connecting a freshly-created one.
+
+        This is the canonical name (matches ``Channel.get_qr``). The legacy
+        :meth:`qr` is a deprecated alias kept one wave for compatibility
+        (plano 23 Fase C4 — Expand-Contract).
         """
         if self._client is None:
             return None
@@ -78,8 +82,22 @@ class GOWAChannel(Channel):
             self._client._device_ready = False
             self._client.ensure_device()
         except Exception as e:  # noqa: BLE001
-            logger.debug("GOWAChannel.qr: ensure_device failed: %s", e)
+            logger.debug("GOWAChannel.get_qr: ensure_device failed: %s", e)
         return self._client.get_qr_code()
+
+    # Deprecated alias (plano 23 Fase C4). ``get_qr`` is canonical; ``qr`` stays
+    # for one wave so any caller still on the old name (and any third-party
+    # provider mirroring it) keeps working. Logs a one-time deprecation note.
+    _qr_deprecation_warned = False
+
+    def qr(self) -> bytes | None:
+        """Deprecated alias for :meth:`get_qr`. Use ``get_qr`` instead."""
+        if not GOWAChannel._qr_deprecation_warned:
+            GOWAChannel._qr_deprecation_warned = True
+            logger.warning(
+                "GOWAChannel.qr() is deprecated; use get_qr() — the alias will "
+                "be removed in a future release.")
+        return self.get_qr()
 
     # ── Outbound (delegates to the existing client) ──────────────────
     def send_text(self, chat_id: str, text: str, *, reply_to=None,

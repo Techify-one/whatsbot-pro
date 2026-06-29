@@ -25,48 +25,85 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ── WebSocket broadcast bridge for plugins ────────────────────────────────
+# ── PluginRuntime: the single object that holds the wired services ─────────
 #
-# Plugin tool executors run synchronously inside ``asyncio.to_thread``. To let
-# a plugin push a real-time event to the frontend (e.g. "novo lembrete"), we
-# expose a thread-safe ``broadcast(event, data)`` helper that schedules the
-# coroutine on the main event loop. The server wires the ws_manager and loop
-# at startup via ``set_runtime``.
+# Everything the core wires into the plugin layer at server startup lives on ONE
+# ``PluginRuntime`` instance (the process-wide ``_runtime`` singleton) instead of
+# ~8 scattered module globals. The ``set_*`` functions mutate ``_runtime``;
+# ``broadcast`` / ``spawn_*`` / the getters read from it. The public surface is
+# unchanged — ``from plugins.context import broadcast, make_plugin_db, set_runtime,
+# set_deps, get_deps, get_channel_runtime`` all still resolve and behave the same.
+#
+# Backwards-compat: a few consumers (this module's ``spawn_*``, and
+# ``plugins.lifecycle._stop_owned`` via ``getattr(context, "_supervisor", None)``)
+# historically read the old module-level names (``_loop``, ``_ws_manager``,
+# ``_supervisor``, ``_subprocess_service``, ``_channel_registry``, …). A module
+# ``__getattr__`` (PEP 562) maps those names onto the live ``_runtime`` fields, so
+# no stale copies exist and the legacy reads keep working.
+#
+# Field meanings (unchanged from the old globals):
+# * ws_manager / loop — the thread-safe ``broadcast`` bridge (a plugin tool runs
+#   in ``asyncio.to_thread`` and schedules a WS push on the main loop).
+# * supervisor / subprocess_service — plano 09 Fase 5: ``PluginContext.spawn_*``
+#   delegate here.
+# * channel_registry / outbound_router / ingest_event — plano 13 Fase 1.1: a
+#   channel-provider plugin registers/looks up live channels and pushes inbound
+#   through the SAME orchestrator the GOWA webhook uses.
+# * deps — plano 13 Fase 1.2: the ServerDeps a first-party lifecycle plugin (GOWA)
+#   reads to own its subprocess + polling loops. None in the test harness.
 
-_ws_manager: Optional[Any] = None
-_loop: Optional[asyncio.AbstractEventLoop] = None
-# Runtime services (plano 09 Fase 5): the task supervisor + subprocess service,
-# wired at lifespan so PluginContext.spawn_* can delegate to them.
-_supervisor: Optional[Any] = None
-_subprocess_service: Optional[Any] = None
-# Channel runtime (plano 13 Fase 1.1): the channel registry, outbound router and
-# the provider-agnostic inbound funnel, wired at lifespan so a channel-provider
-# plugin (GOWA, Telegram, …) can register/look up live channels and push inbound
-# events through the SAME orchestrator the GOWA webhook uses — without the core
-# knowing the provider. Read by PluginContext (and, when useful, tools).
-_channel_registry: Optional[Any] = None
-_outbound_router: Optional[Any] = None
-_ingest_event: Optional[Any] = None
-# Server dependencies (plano 13 Fase 1.2): the ServerDeps container, wired at
-# lifespan BEFORE plugin setup() runs. A first-party lifecycle plugin (GOWA) reads
-# it to own the subprocess + polling loops that the core used to register itself
-# (deps already holds gowa_manager/gowa_client/ws_manager/state/settings). Optional
-# — None in the test harness (lifespan is skipped) and for zero-channel boots.
-_deps: Optional[Any] = None
+
+@dataclasses.dataclass
+class PluginRuntime:
+    """Single container for every service the core wires into the plugin layer."""
+
+    ws_manager: Optional[Any] = None
+    loop: Optional[asyncio.AbstractEventLoop] = None
+    supervisor: Optional[Any] = None
+    subprocess_service: Optional[Any] = None
+    channel_registry: Optional[Any] = None
+    outbound_router: Optional[Any] = None
+    ingest_event: Optional[Any] = None
+    deps: Optional[Any] = None
+
+
+# Process-wide singleton. Mutated in place by the ``set_*`` wiring functions so a
+# late import of ``broadcast``/``spawn_*`` always sees the current wiring.
+_runtime = PluginRuntime()
+
+
+# Map the legacy private module-global names onto the live runtime fields so any
+# consumer still doing ``context._supervisor`` / ``getattr(context, "_loop", …)``
+# reads the current value (PEP 562 module __getattr__).
+_LEGACY_RUNTIME_ALIASES = {
+    "_ws_manager": "ws_manager",
+    "_loop": "loop",
+    "_supervisor": "supervisor",
+    "_subprocess_service": "subprocess_service",
+    "_channel_registry": "channel_registry",
+    "_outbound_router": "outbound_router",
+    "_ingest_event": "ingest_event",
+    "_deps": "deps",
+}
+
+
+def __getattr__(name: str) -> Any:  # noqa: N807 — module-level PEP 562 hook
+    field = _LEGACY_RUNTIME_ALIASES.get(name)
+    if field is not None:
+        return getattr(_runtime, field)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def set_runtime(ws_manager: Any, loop: asyncio.AbstractEventLoop) -> None:
     """Called once during server startup. Plugins read these via ``broadcast``."""
-    global _ws_manager, _loop
-    _ws_manager = ws_manager
-    _loop = loop
+    _runtime.ws_manager = ws_manager
+    _runtime.loop = loop
 
 
 def set_runtime_services(supervisor: Any, subprocess_service: Any) -> None:
     """Wire the task supervisor + subprocess service (plano 09 Fase 5)."""
-    global _supervisor, _subprocess_service
-    _supervisor = supervisor
-    _subprocess_service = subprocess_service
+    _runtime.supervisor = supervisor
+    _runtime.subprocess_service = subprocess_service
 
 
 def set_channel_runtime(channel_registry: Any, outbound_router: Any,
@@ -76,19 +113,19 @@ def set_channel_runtime(channel_registry: Any, outbound_router: Any,
     Called once at lifespan, BEFORE plugin ``setup()`` runs, so a channel plugin
     can materialise its live channels and feed inbound through ``ctx.ingest_event``.
     """
-    global _channel_registry, _outbound_router, _ingest_event
-    _channel_registry = channel_registry
-    _outbound_router = outbound_router
-    _ingest_event = ingest_event
+    _runtime.channel_registry = channel_registry
+    _runtime.outbound_router = outbound_router
+    _runtime.ingest_event = ingest_event
 
 
 def get_channel_runtime() -> tuple:
     """Return the wired ``(channel_registry, outbound_router, ingest_event)``.
 
-    Reads the live module globals (re-bound by :func:`set_channel_runtime`), so a
+    Reads the live runtime (re-bound by :func:`set_channel_runtime`), so a
     consumer always sees the current wiring rather than a stale import-time copy.
     """
-    return (_channel_registry, _outbound_router, _ingest_event)
+    return (_runtime.channel_registry, _runtime.outbound_router,
+            _runtime.ingest_event)
 
 
 def set_deps(deps: Any) -> None:
@@ -98,22 +135,23 @@ def set_deps(deps: Any) -> None:
     can reach gowa_manager/gowa_client/ws_manager/state/settings to own its
     subprocess + polling loops. Other plugins ignore it.
     """
-    global _deps
-    _deps = deps
+    _runtime.deps = deps
 
 
 def get_deps() -> Optional[Any]:
     """Return the wired ``ServerDeps`` (None until :func:`set_deps`, e.g. in tests)."""
-    return _deps
+    return _runtime.deps
 
 
 def broadcast(event: str, data: dict) -> None:
     """Best-effort WS broadcast from any thread. Never raises."""
-    if _ws_manager is None or _loop is None:
+    ws_manager = _runtime.ws_manager
+    loop = _runtime.loop
+    if ws_manager is None or loop is None:
         return
     try:
         asyncio.run_coroutine_threadsafe(
-            _ws_manager.broadcast(event, data), _loop
+            ws_manager.broadcast(event, data), loop
         )
     except Exception as e:
         logger.debug("plugin broadcast failed: %s", e)
@@ -277,7 +315,8 @@ class PluginContext:
         set). The task is auto-stopped on disable/teardown via ``stop_owner``.
         Returns the fully-qualified task name (``<plugin_id>:<name>``).
         """
-        if _supervisor is None:
+        supervisor = _runtime.supervisor
+        if supervisor is None:
             raise RuntimeError("runtime supervisor not wired (plano 09 Fase 5)")
         from runtime.supervisor import TaskSpec, RestartPolicy
         full = f"{self.plugin_id}:{name}"
@@ -286,10 +325,10 @@ class PluginContext:
             policy=policy or RestartPolicy.PERMANENT,
             max_restarts=max_restarts, window_sec=window_sec, owner=self.plugin_id,
         )
-        _supervisor.register(spec)
-        loop = self.loop or _loop
+        supervisor.register(spec)
+        loop = self.loop or _runtime.loop
         if loop is not None:
-            loop.create_task(_supervisor.start(full))
+            loop.create_task(supervisor.start(full))
         return full
 
     def spawn_subprocess(self, spec):
@@ -298,10 +337,11 @@ class PluginContext:
         ``spec`` is a ``runtime.subprocess_service.SubprocessSpec``; ``owner`` is
         forced to this plugin's id. May block briefly during spawn/readiness.
         """
-        if _subprocess_service is None:
+        subprocess_service = _runtime.subprocess_service
+        if subprocess_service is None:
             raise RuntimeError("subprocess service not wired (plano 09 Fase 5)")
         spec.owner = self.plugin_id
-        return _subprocess_service.spawn(spec)
+        return subprocess_service.spawn(spec)
 
 
 @dataclasses.dataclass
