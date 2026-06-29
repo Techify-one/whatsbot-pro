@@ -39,6 +39,11 @@ FilterFn = Callable[..., Any]
 KNOWN_EVENTS: set[str] = {
     # GOWA inbound / outbound message lifecycle
     "message.received", "message.sent", "message.saved",
+    # ``message.persisted`` (plano 23 Fase C5): emitted by ``agent.memory.add_message``
+    # AFTER the DB INSERT — the single decoupling signal the lifecycle WS/notice
+    # effects (created/reopened) listen on. Public payload:
+    # ``{conversation_id, contact_id, role, msg_id, ts}``.
+    "message.persisted",
     "message.reaction", "message.edited", "message.revoked", "message.deleted",
     # Presence / receipts
     "presence.changed", "receipt.changed",
@@ -172,6 +177,74 @@ _filters: dict[str, list[tuple[int, str, FilterFn]]] = {}
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _agent_handler: Optional[Any] = None
 
+# ── Synchronous CORE subscribers (plano 23 Fase C5) ──────────────────────────
+#
+# A core WS-projection listener (``app.services.ws_projections``) must turn each
+# lifecycle DOMAIN event into the WS broadcast the panel expects (the Contract
+# step of the Parallel Change: the broadcast becomes a LISTENER of the event, so
+# the event is the SINGLE trigger). The plugin fan-out (:func:`emit`) schedules
+# handlers as ``create_task`` — deferred — which would RACE the characterization /
+# 876 suites that perform an action then immediately assert ``ws_manager.broadcast``
+# was called. So the WS projection is registered HERE, as a SYNCHRONOUS in-process
+# core subscriber that runs INSIDE the emit (``await``-ed in the async path, called
+# directly in the sync path), BEFORE the deferred plugin fan-out — giving identical
+# observable timing to the old inline ``ws_manager.broadcast`` call.
+#
+# These are core-only (registered at server startup, cleared by ``reset()``), run
+# after ``filter.event.before_emit`` (they see the same payload subscribers/audit
+# see), and are isolated: an exception in one never reaches the producer or the
+# other subscribers. They are NOT the plugin bus — plugins still use
+# ``EVENT_HANDLERS``.
+_core_sync_listeners: list[Callable[[str, dict], Any]] = []
+
+
+def register_core_sync_listener(fn: Callable[[str, dict], Any]) -> None:
+    """Register a CORE listener invoked synchronously inside every (filtered) emit.
+
+    ``fn(event_name, payload)`` runs in-line within ``emit_with_filter`` /
+    ``emit_with_filter_sync`` (awaited if it returns a coroutine in the async path),
+    so any side effect it performs (the WS broadcast in ``ws_projections``) is
+    observable with the SAME timing the old inline broadcast had. Lifecycle events
+    (which bypass ``filter.event.before_emit``) also reach core listeners. Idempotent
+    against the same callable object.
+    """
+    if fn not in _core_sync_listeners:
+        _core_sync_listeners.append(fn)
+
+
+async def _run_core_sync_listeners(event_name: str, payload: dict) -> None:
+    """Invoke every core sync listener for ``event_name`` (async emit path).
+
+    Each listener is isolated — a raising listener logs and never blocks the others
+    or the producer. Coroutine results are awaited so the WS broadcast completes
+    before the emit returns (preserving the old inline-await timing)."""
+    for fn in list(_core_sync_listeners):
+        try:
+            result = fn(event_name, payload)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.debug("core sync listener for %s failed: %s", event_name, e)
+
+
+def _run_core_sync_listeners_sync(event_name: str, payload: dict) -> None:
+    """Invoke every core sync listener for ``event_name`` (sync emit path).
+
+    Mirrors :func:`_run_core_sync_listeners` for ``emit_with_filter_sync``. If a
+    listener returns a coroutine it is scheduled on the bus loop (best-effort) so a
+    sync call site (a tool / memory thread) still drives the WS broadcast; when no
+    loop is wired (legacy script tests) it is run to completion inline."""
+    for fn in list(_core_sync_listeners):
+        try:
+            result = fn(event_name, payload)
+            if inspect.isawaitable(result):
+                if _loop is not None and _loop.is_running():
+                    asyncio.run_coroutine_threadsafe(result, _loop)
+                else:
+                    asyncio.get_event_loop().run_until_complete(result)
+        except Exception as e:
+            logger.debug("core sync listener for %s failed: %s", event_name, e)
+
 
 def set_runtime(loop: asyncio.AbstractEventLoop, agent_handler: Any) -> None:
     """Wire the bus at server lifespan start. Idempotent."""
@@ -184,6 +257,7 @@ def reset() -> None:
     """Clear all handlers and filters. For tests only."""
     _handlers.clear()
     _filters.clear()
+    _core_sync_listeners.clear()
 
 
 # ── Exported-dict validation (single source — plano 23 Fase C4) ────────────
@@ -338,6 +412,7 @@ async def emit_with_filter(event_name: str, payload: dict) -> None:
     directly for lifecycle / perf-sensitive sync paths.
     """
     if event_name in _LIFECYCLE_EVENTS:
+        await _run_core_sync_listeners(event_name, payload)
         emit(event_name, payload)
         return
     filtered = await apply_filter(
@@ -345,7 +420,10 @@ async def emit_with_filter(event_name: str, payload: dict) -> None:
     )
     if filtered is None:
         return
-    emit(event_name, filtered if isinstance(filtered, dict) else payload)
+    out = filtered if isinstance(filtered, dict) else payload
+    # Core projection FIRST (synchronous, observable timing), then plugin fan-out.
+    await _run_core_sync_listeners(event_name, out)
+    emit(event_name, out)
 
 
 def emit_with_filter_sync(event_name: str, payload: dict) -> None:
@@ -357,6 +435,7 @@ def emit_with_filter_sync(event_name: str, payload: dict) -> None:
     semantics as :func:`apply_filter_sync`.
     """
     if event_name in _LIFECYCLE_EVENTS:
+        _run_core_sync_listeners_sync(event_name, payload)
         emit(event_name, payload)
         return
     filtered = apply_filter_sync(
@@ -364,7 +443,9 @@ def emit_with_filter_sync(event_name: str, payload: dict) -> None:
     )
     if filtered is None:
         return
-    emit(event_name, filtered if isinstance(filtered, dict) else payload)
+    out = filtered if isinstance(filtered, dict) else payload
+    _run_core_sync_listeners_sync(event_name, out)
+    emit(event_name, out)
 
 
 async def _run_one(

@@ -285,6 +285,12 @@ def create_app(
         _set_plugin_runtime(ws_manager, _loop)
         _set_events_runtime(_loop, agent_handler)
         register_audit_listener()  # plano 07: core "*" listener for the audit trail
+        # plano 23 Fase C5 (Contract): conversation-lifecycle WS broadcasts are now
+        # LISTENERS of the domain event (single source). The synchronous core
+        # subscriber runs inside emit_with_filter, so the panel sees the same WS
+        # events with identical timing.
+        from app.services.ws_projections import register_lifecycle_ws_projection
+        register_lifecycle_ws_projection(ws_manager)
         _set_balance_runtime(ws_manager, _loop, settings)
         # Lifecycle: plugins finished loading + bus is live, now broadcast
         for loaded in registry.loaded.values():
