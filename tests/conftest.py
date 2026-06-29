@@ -72,6 +72,110 @@ collect_ignore = [
 ]
 
 
+# ── Plugin test discovery (Phase G2) ───────────────────────────────────────
+#
+# Goal: let pytest collect tests that ship INSIDE a plugin
+# (``storages/plugins/<id>/tests/test_*.py``) WHEN they exist, while staying a
+# strict no-op in the common case (CI / fresh checkout) where
+# ``storages/plugins/`` is empty (``WHATSBOT_TEST=1`` makes bootstrap a no-op).
+#
+# Mechanism: ``pytest_configure`` globs the plugin test dirs and appends each to
+# ``config.args`` (the collection roots) — but ONLY when pytest is running off
+# its ``testpaths`` (no explicit file/dir given on the CLI). That guard is the
+# reason it never pollutes a focused run: ``./venv/bin/pytest tests/foo.py`` has
+# ``args_source == ARGS`` and is left untouched; only the bare
+# ``./venv/bin/pytest`` (``args_source == TESTPATHS``) gets the plugin dirs.
+#
+# Why it's a no-op when empty: ``_discover_plugin_test_dirs`` returns ``[]`` when
+# ``storages/plugins`` is absent, has no plugin folders, or no plugin has a
+# ``tests/`` dir containing a ``test_*.py`` — so nothing is appended and
+# collection is byte-for-byte what it was before.
+#
+# Guards:
+#   * skip dotfiles and ``__pycache__`` folders;
+#   * require a plugin manifest (``plugin.yaml``/``plugin.yml``) so a stray dir
+#     is never treated as a plugin (a broken/half-deleted folder is ignored, not
+#     imported);
+#   * require at least one ``test_*.py`` (an empty ``tests/`` or one holding only
+#     ``__pycache__`` contributes nothing);
+#   * name-collision safety: two plugins can both ship ``tests/test_routes.py``.
+#     Under pytest's default ``prepend`` import mode that would raise
+#     "import file mismatch". We give each discovered ``tests/`` dir a package
+#     chain (auto-create ``<id>/__init__.py`` + ``<id>/tests/__init__.py`` when
+#     missing) so the module name becomes ``<id>.tests.test_routes`` — unique per
+#     plugin. The writes only ever touch a plugin that ALREADY ships a ``tests/``
+#     dir with real tests (never the empty CI tree), and ``__init__.py`` is the
+#     standard, expected marker for a Python test package.
+
+_PLUGIN_MANIFEST_NAMES = ("plugin.yaml", "plugin.yml")
+
+
+def _plugins_root() -> Path:
+    """``storages/plugins`` under the project root (may not exist)."""
+    return PROJECT_ROOT / "storages" / "plugins"
+
+
+def _discover_plugin_test_dirs(plugins_root: Path) -> list[Path]:
+    """Return ``storages/plugins/<id>/tests`` dirs that hold a ``test_*.py``.
+
+    Pure + side-effect free; returns ``[]`` for a missing/empty tree so the
+    caller is a guaranteed no-op in CI.
+    """
+    if not plugins_root.is_dir():
+        return []
+    found: list[Path] = []
+    for child in sorted(plugins_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith(".") or child.name == "__pycache__":
+            continue
+        # Must look like a real plugin (has a manifest), else ignore the folder.
+        if not any((child / name).is_file() for name in _PLUGIN_MANIFEST_NAMES):
+            continue
+        tests_dir = child / "tests"
+        if not tests_dir.is_dir():
+            continue
+        if not any(tests_dir.glob("test_*.py")):
+            continue
+        found.append(tests_dir)
+    return found
+
+
+def _ensure_pkg_init(tests_dir: Path) -> None:
+    """Give ``<id>/tests`` a package chain so module names are plugin-unique.
+
+    Creates ``<id>/__init__.py`` and ``<id>/tests/__init__.py`` when absent so
+    ``test_routes.py`` imports as ``<id>.tests.test_routes`` (no cross-plugin
+    basename collision under ``prepend`` mode). Best-effort: a read-only tree is
+    tolerated (collection still works for non-colliding basenames).
+    """
+    plugin_dir = tests_dir.parent
+    for init_path in (plugin_dir / "__init__.py", tests_dir / "__init__.py"):
+        if not init_path.exists():
+            try:
+                init_path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+
+
+def pytest_configure(config) -> None:
+    """Append discovered plugin test dirs to the collection roots (no-op when empty)."""
+    from _pytest.config import Config
+
+    # Only when running off ``testpaths`` (bare invocation). An explicit path on
+    # the CLI (``args_source == ARGS``) is left exactly as the user asked.
+    if getattr(config, "args_source", None) != Config.ArgsSource.TESTPATHS:
+        return
+
+    existing = {str(Path(a).resolve()) for a in config.args}
+    for tests_dir in _discover_plugin_test_dirs(_plugins_root()):
+        _ensure_pkg_init(tests_dir)
+        resolved = str(tests_dir.resolve())
+        if resolved not in existing:
+            config.args.append(str(tests_dir))
+            existing.add(resolved)
+
+
 # ── Engine bootstrap (session-scoped, once per process) ────────────────────
 
 @pytest.fixture(scope="session")
@@ -242,6 +346,48 @@ def build_app(_engine_ready):
 
     def _factory(plugins=("gowa",), **kwargs):
         built = build_test_app(plugins, **kwargs)
+        built_apps.append(built)
+        return built
+
+    yield _factory
+
+    for built in built_apps:
+        try:
+            built.client.__exit__(None, None, None)
+        except Exception:
+            pass
+        try:
+            if built._tmp is not None:
+                built._tmp.cleanup()
+        except Exception:
+            pass
+
+
+# ── Real-app-with-plugin fixture (Phase G2) ─────────────────────────────────
+
+@pytest.fixture
+def plugin_app(_engine_ready):
+    """Factory: boot the REAL app with ONE plugin enabled, for plugin tests.
+
+    Lets a plugin's own test (``storages/plugins/<id>/tests/test_*.py``, now
+    collected — see ``pytest_configure`` above) hit ``/api/plugins/<id>/...`` and
+    assert filter/event behavior against the live app, with no boilerplate::
+
+        def test_my_route(plugin_app):
+            built = plugin_app("telegram")
+            r = built.client.get("/api/plugins/telegram/channels")
+            assert r.json()["ok"] is True
+
+    Wraps :func:`tests.support.build_test_app_with_plugin`. Depends on
+    ``_engine_ready`` (process-global DB) like ``build_app``; every app it
+    creates is torn down (TestClient exited, tmp dir cleaned) at test end.
+    """
+    from tests.support import build_test_app_with_plugin
+
+    built_apps = []
+
+    def _factory(plugin_id: str = "gowa", **kwargs):
+        built = build_test_app_with_plugin(plugin_id, **kwargs)
         built_apps.append(built)
         return built
 
