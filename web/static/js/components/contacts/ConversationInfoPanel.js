@@ -14,6 +14,7 @@ import { ConversationLabelEditor } from './ConversationLabelEditor.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
+import { useInfoPanelResize } from './hooks/useInfoPanelResize.js';
 
 const html = htm.bind(h);
 
@@ -51,6 +52,14 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
   const [highlightAttrs, setHighlightAttrs] = useState(false);
   const attrsRef = useRef(null);
+  const panelRootRef = useRef(null);   // overlay que delimita a área de conversa
+
+  // Largura arrastável do painel (desktop), persistida por-dispositivo. O máximo é
+  // dinâmico: pode crescer até quase cobrir toda a conversa (medida via panelRootRef).
+  const { width, isResizing, isDesktop, startResize } = useInfoPanelResize({
+    storageKey: 'whatsbot_conv_info_panel_width',
+    containerRef: panelRootRef,
+  });
 
   // Identity — permission gating for the Resolver/Reabrir action (P48: hide).
   useEffect(() => {
@@ -179,8 +188,21 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   const canResolve = hasPermission(user, 'conversation.resolve');
 
   return html`
-    <div class="absolute inset-0 z-50 flex justify-end">
-      <div class="w-full lg:w-[400px] h-full bg-wa-panel flex flex-col shadow-xl animate-slide-in-right">
+    <div ref=${panelRootRef} class="absolute inset-0 z-50 flex justify-end">
+      <!-- Alça de redimensionamento (desktop): arraste p/ ajustar a largura do painel.
+           Fica na borda esquerda porque o painel é ancorado à direita. -->
+      <div
+        onMouseDown=${startResize}
+        class="hidden lg:flex items-center justify-center w-[10px] shrink-0 self-stretch select-none cursor-col-resize group animate-slide-in-right transition-colors ${isResizing ? 'bg-wa-teal/40' : 'hover:bg-wa-hover'}"
+        role="separator"
+        aria-orientation="vertical"
+        title="Arraste para redimensionar"
+      >
+        <span class="w-px h-8 bg-wa-border group-hover:bg-wa-teal pointer-events-none transition-colors"></span>
+      </div>
+      <div
+        class="w-full h-full bg-wa-panel flex flex-col shadow-xl animate-slide-in-right"
+        style=${isDesktop ? `width:${width}px` : ''}>
         <!-- Header -->
         <div class="h-[59px] flex items-center px-4 bg-wa-teal shrink-0 gap-4">
           <button onClick=${onClose} class="text-white hover:opacity-80 shrink-0">
