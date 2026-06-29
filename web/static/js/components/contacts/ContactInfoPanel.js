@@ -19,7 +19,9 @@ const TAG_COLORS = [
 // attributes live in ConversationInfoPanel.
 
 export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
-  const [form, setForm] = useState({ name: '', email: '', profession: '', company: '', address: '', observations: [] });
+  // Only Nome stays a fixed field — Email/Profissão/Empresa/Endereço are now
+  // custom attributes (seeded defaults), rendered in the attributes section below.
+  const [form, setForm] = useState({ name: '', observations: [] });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -44,10 +46,6 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
     if (info) {
       setForm({
         name: (info.name || '').replace(/^~/, ''),
-        email: info.email || '',
-        profession: info.profession || '',
-        company: info.company || '',
-        address: info.address || '',
         observations: [...(info.observations || [])],
       });
       setCustomValues({ ...(info.custom_attributes || {}) });
@@ -200,10 +198,6 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
 
   const fields = [
     { key: 'name', label: 'Nome', placeholder: 'Nome do contato' },
-    { key: 'email', label: 'Email', placeholder: 'email@exemplo.com' },
-    { key: 'profession', label: 'Profissão', placeholder: 'Ex: Desenvolvedor' },
-    { key: 'company', label: 'Empresa', placeholder: 'Nome da empresa' },
-    { key: 'address', label: 'Endereço', placeholder: 'Rua, número, bairro' },
   ];
 
   // The panel closes only via the X button or by switching conversations

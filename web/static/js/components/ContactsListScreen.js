@@ -49,8 +49,10 @@ function clauseChipLabel(cl, contactAttrDefs) {
     const name = def ? (def.display_name || m[1]) : m[1];
     return `${name}${sep}${list.join(', ')}`;
   }
-  if (cl.dim === 'tag') return `Etiqueta${sep}${list.join(', ')}`;
-  return `${cl.dim}${sep}${list.join(', ')}`;
+  // Email/Profissão/Empresa/Endereço chegam como cattr:contact:* (atributos),
+  // tratados acima. Só o core 'tag' resta aqui.
+  const CORE_LABELS = { tag: 'Etiqueta' };
+  return `${CORE_LABELS[cl.dim] || cl.dim}${sep}${list.join(', ')}`;
 }
 
 
@@ -389,10 +391,11 @@ export default function ContactsListScreen({ initialEntity = null }) {
     const q = foldStr(search.trim());
     const digits = search.replace(/\D/g, '');
     const now = Math.floor(Date.now() / 1000);
+    // Busca por nome / telefone / tags. Email NÃO entra na busca (a pedido) — para
+    // filtrar por email use o filtro (é um atributo personalizado).
     const bySearch = (!q && !digits) ? sorted : sorted.filter((c) => {
       if (q && foldStr(c.name).includes(q)) return true;
       if (digits && (c.phone || '').includes(digits)) return true;
-      if (q && foldStr(c.email).includes(q)) return true;
       if (q && (c.tags || []).some((t) => foldStr(t).includes(q))) return true;
       return false;
     });
@@ -420,13 +423,17 @@ export default function ContactsListScreen({ initialEntity = null }) {
     navigate('/');
   }
 
-  // Salvou no painel: reflete nome/email/tags na linha da lista.
+  // Salvou no painel: reflete nome/email/tags/atributos na linha da lista. Email é
+  // atributo personalizado agora — lê do custom_attributes salvo (top-level fica
+  // só pra exibição na lista).
   function handleSaved(contact, savedInfo, savedTags) {
+    const savedAttrs = savedInfo.custom_attributes || {};
+    const savedEmail = savedAttrs.email ?? savedInfo.email;
     setContacts((prev) => prev.map((c) => c.id === contact.id
-      ? { ...c, name: savedInfo.name ?? c.name, email: savedInfo.email ?? c.email, tags: savedTags ?? c.tags }
+      ? { ...c, name: savedInfo.name ?? c.name, email: savedEmail ?? c.email, custom_attributes: savedAttrs, tags: savedTags ?? c.tags }
       : c));
     setDetail((d) => (d && d.id === contact.id
-      ? { ...d, name: savedInfo.name ?? d.name, email: savedInfo.email ?? d.email, tags: savedTags ?? d.tags }
+      ? { ...d, name: savedInfo.name ?? d.name, email: savedEmail ?? d.email, custom_attributes: savedAttrs, tags: savedTags ?? d.tags }
       : d));
   }
 

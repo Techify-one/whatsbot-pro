@@ -16,6 +16,9 @@ import htm from 'htm';
 
 const html = htm.bind(h);
 
+// Apenas Etiqueta é dimensão core. Email/Profissão/Empresa/Endereço NÃO são
+// hardcoded — vêm dinamicamente como atributos personalizados do contato (são
+// seeds padrão), via `contactAttrDefs`.
 const CORE_DIMENSIONS = [
   { key: 'tag', label: 'Etiqueta', ops: ['eq', 'ne'], valueType: 'tag' },
 ];

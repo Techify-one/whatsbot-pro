@@ -11,8 +11,10 @@ SAVE_CONTACT_INFO_TOOL = {
     "function": {
         "name": "save_contact_info",
         "description": (
-            "Salva informações pessoais do contato (nome, email, profissão, empresa, "
-            "endereço ou observação relevante). "
+            "Salva o NOME do contato ou uma OBSERVAÇÃO relevante. "
+            "Para email, profissão, empresa, endereço (ou qualquer outro atributo "
+            "definido), use a tool set_custom_attribute — esses dados agora são "
+            "atributos personalizados. "
             "Chame APENAS quando a ÚLTIMA mensagem do usuário contiver dados pessoais "
             "NOVOS que ainda NÃO estão listados na seção 'Informações já conhecidas' "
             "do system prompt. NÃO chame se os dados já foram salvos anteriormente."
@@ -23,22 +25,6 @@ SAVE_CONTACT_INFO_TOOL = {
                 "name": {
                     "type": "string",
                     "description": "Nome completo do contato",
-                },
-                "email": {
-                    "type": "string",
-                    "description": "Email do contato",
-                },
-                "profession": {
-                    "type": "string",
-                    "description": "Profissão ou cargo do contato",
-                },
-                "company": {
-                    "type": "string",
-                    "description": "Empresa onde trabalha",
-                },
-                "address": {
-                    "type": "string",
-                    "description": "Endereço completo do contato (rua, número, bairro, cidade)",
                 },
                 "observation": {
                     "type": "string",

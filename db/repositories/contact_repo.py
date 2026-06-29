@@ -261,11 +261,16 @@ def list_contacts(q: str = "", archived: bool = False,
             group_name = row["group_name"] or ""
             name = group_name if is_group else (row["name"] or "")
 
+            attrs = _coerce_attrs(row)
+
             results.append({
                 "id": contact_id,
                 "phone": row["phone"],
                 "name": name,
-                "email": row["email"] or "",
+                # Email is now a (default) custom attribute — source it from the JSON,
+                # falling back to the legacy column for not-yet-migrated rows. Kept at
+                # top-level so the contacts list can still show it under the name.
+                "email": (attrs.get("email") if isinstance(attrs, dict) else None) or (row["email"] or ""),
                 "last_message": last_content,
                 "last_message_role": row["last_msg_role"] or "",
                 "last_message_ts": row["last_msg_ts"] or 0,
@@ -283,10 +288,11 @@ def list_contacts(q: str = "", archived: bool = False,
                 "is_pinned": bool(row["is_pinned"]) if row["is_pinned"] is not None else False,
                 "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
                 # Contact-scoped custom attributes (plano 05) — exposed in the list so
-                # the client-side conversation filter can match on them. The column is
-                # already SELECTed (full contacts table); coerce_attrs tolerates the
-                # SQLite str-serialized form.
-                "custom_attributes": _coerce_attrs(row),
+                # the client-side contact/conversation filter can match on them
+                # (incl. the seeded defaults Email/Profissão/Empresa/Endereço). The
+                # column is already SELECTed (full contacts table); coerce_attrs
+                # tolerates the SQLite str-serialized form.
+                "custom_attributes": attrs,
                 "tags": tags_list,
                 "updated_at": row["updated_at"],
                 # Active conversation (plano 10 FF2) — drives the status/assignment
