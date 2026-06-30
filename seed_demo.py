@@ -9,7 +9,7 @@ init_engine("sqlite:///storages/whatsbot.db")
 import time
 from sqlalchemy import text
 from db.repositories import (
-    agent_repo, prompt_repo, tool_repo, user_repo,
+    agent_repo, tool_repo, user_repo,
     quick_reply_repo, tag_repo, custom_attribute_repo,
 )
 from server.auth import hash_password_argon2
@@ -40,9 +40,8 @@ AGENTS = [
 ]
 for key, name, is_router, targets, prompt_body, tools in AGENTS:
     try:
-        prompt_repo.save(f"{key}_prompt", prompt_body)
         agent_repo.save(
-            key, display_name=name, prompt_key=f"{key}_prompt",
+            key, display_name=name, prompt=prompt_body,
             model_config={"model": MODEL},
             tool_names=tools, enabled=True,
             description=f"Agente de demonstração: {name}.",

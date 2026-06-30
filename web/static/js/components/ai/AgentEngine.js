@@ -1,5 +1,7 @@
 // AI Engine — container screen for the "/ai" tab (plano 06). Holds the sub-tabs
-// (Agentes, Prompts, Variáveis, Tools) and renders the matching editor below.
+// (Agentes, Variáveis, Tools, Configurações) and renders the matching editor below.
+// O prompt deixou de ser uma aba/recurso reutilizável: cada agente tem seu próprio
+// prompt inline, editado no formulário do agente (aba Agentes).
 // Plano 22: there is a single AI engine (config-in-DB) — no on/off toggle. Only
 // the "Reiniciar worker" action remains (needed for code-in-DB tools).
 
@@ -7,7 +9,6 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import AgentsManager from './AgentsManager.js';
-import PromptsEditor from './PromptsEditor.js';
 import VariablesEditor from './VariablesEditor.js';
 import ToolsUnified from './ToolsUnified.js';
 import GeneralSettings from './GeneralSettings.js';
@@ -18,21 +19,24 @@ const html = htm.bind(h);
 
 const TABS = [
   { id: 'agents', label: 'Agentes' },
-  { id: 'prompts', label: 'Prompts' },
   { id: 'variables', label: 'Variáveis' },
   { id: 'tools', label: 'Tools' },
   { id: 'general', label: 'Configurações' },
 ];
 
+const VALID_TABS = new Set(TABS.map(t => t.id));
+
 export default function AgentEngine({ initialEntity }) {
-  // Sub-aba ativa: inicia da URL (/ai/<sub>) e segue back/forward.
-  const [tab, setTab] = useState(() => initialEntity?.sub || 'agents');
+  // Sub-aba ativa: inicia da URL (/ai/<sub>) e segue back/forward. Sub-abas
+  // removidas (ex.: /ai/prompts de bookmarks antigos) caem em "agents".
+  const [tab, setTab] = useState(() =>
+    VALID_TABS.has(initialEntity?.sub) ? initialEntity.sub : 'agents');
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState('');
 
   // Deep-link de sub-aba: back/forward (ou reload) leva à sub-aba da URL.
   useEffect(() => {
-    if (initialEntity?.sub) setTab(initialEntity.sub);
+    if (VALID_TABS.has(initialEntity?.sub)) setTab(initialEntity.sub);
   }, [initialEntity]);
 
   async function handleRestart() {
@@ -113,7 +117,6 @@ export default function AgentEngine({ initialEntity }) {
       </div>
 
       ${tab === 'agents' ? html`<${AgentsManager} initialEntity=${initialEntity} />` : null}
-      ${tab === 'prompts' ? html`<${PromptsEditor} initialEntity=${initialEntity} />` : null}
       ${tab === 'variables' ? html`<${VariablesEditor} initialEntity=${initialEntity} />` : null}
       ${tab === 'tools' ? html`<${ToolsUnified} initialEntity=${initialEntity} />` : null}
       ${tab === 'general' ? html`<${GeneralSettings} />` : null}

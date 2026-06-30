@@ -58,7 +58,7 @@ export const PLUGIN_SERVICES_DENY = Object.freeze([
   // WhatsApp connection lifecycle / provisioning
   'reconnect', 'logout', 'setupRequestKey', 'setupKeyStatus',
   // AI engine config-in-DB (agents/prompts/tools/variables) + restart
-  'listAgents', 'getAgent', 'saveAgent', 'getAgentHistory', 'rollbackAgent', 'deleteAgent',
+  'listAgents', 'getAgent', 'saveAgent', 'saveAgentPrompt', 'getAgentHistory', 'rollbackAgent', 'deleteAgent',
   'listPrompts', 'getPrompt', 'savePrompt', 'getPromptHistory', 'rollbackPrompt',
   'listVariables', 'saveVariable', 'deleteVariable',
   'listTools', 'getTool', 'saveTool', 'deleteTool', 'getToolHistory', 'rollbackTool',

@@ -60,6 +60,7 @@ def ensure(
     agent_key: str,
     *,
     display_name: str = "",
+    prompt: str = "",
     prompt_key: str = "",
     model_config: dict | None = None,
     tool_names: list[str] | None = None,
@@ -73,6 +74,7 @@ def ensure(
     values = {
         "agent_key": agent_key,
         "display_name": display_name,
+        "prompt": prompt,
         "prompt_key": prompt_key,
         "model_config": json.dumps(model_config or {}, ensure_ascii=False),
         "tool_names": None if tool_names is None else json.dumps(tool_names, ensure_ascii=False),
@@ -88,7 +90,8 @@ def save(
     agent_key: str,
     *,
     display_name: str,
-    prompt_key: str,
+    prompt: str = "",
+    prompt_key: str = "",
     model_config: dict,
     tool_names: list[str] | None,
     enabled: bool,
@@ -97,14 +100,20 @@ def save(
     routing_targets: list[str] | None = None,
     hooks_config: dict | None = None,
 ) -> dict:
-    """Upsert an agent, bump version and snapshot to history. Returns the row."""
+    """Upsert an agent, bump version and snapshot to history. Returns the row.
+
+    ``prompt`` is the inline, per-agent system prompt (source of truth).
+    ``prompt_key`` is legacy (a reference to a shared ai_prompts template) and is
+    no longer read for resolution; it is still accepted/persisted for back-compat.
+    """
     now = time.time()
     existing = get(agent_key)
     version = (existing["version"] + 1) if existing else 1
     values = {
         "agent_key": agent_key,
         "display_name": display_name,
-        "prompt_key": prompt_key,
+        "prompt": prompt or "",
+        "prompt_key": prompt_key or "",
         "model_config": json.dumps(model_config or {}, ensure_ascii=False),
         "tool_names": None if tool_names is None else json.dumps(tool_names, ensure_ascii=False),
         "enabled": 1 if enabled else 0,
@@ -119,7 +128,7 @@ def save(
     with get_engine().begin() as conn:
         conn.execute(upsert(
             ai_agents, values, conflict_cols=["agent_key"],
-            update_cols=["display_name", "prompt_key", "model_config",
+            update_cols=["display_name", "prompt", "prompt_key", "model_config",
                          "tool_names", "enabled", "description", "is_router",
                          "routing_targets", "hooks_config", "version", "updated_at"],
         ))
@@ -161,6 +170,7 @@ def rollback(agent_key: str, version: int) -> dict | None:
     return save(
         agent_key,
         display_name=snap.get("display_name", ""),
+        prompt=snap.get("prompt", ""),
         prompt_key=snap.get("prompt_key", ""),
         model_config=_decode_json(snap.get("model_config"), {}),
         tool_names=_decode_json(snap.get("tool_names"), None),

@@ -18,13 +18,16 @@ import re
 from dataclasses import dataclass, field
 
 from db.repositories import (
-    agent_repo, prompt_repo, variable_repo, conversation_repo, inbox_repo,
+    agent_repo, variable_repo, conversation_repo, inbox_repo,
 )
 from ai_engine import dynamic_registry
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_KEY = agent_repo.DEFAULT_AGENT_KEY
+# Legacy: agents used to reference a shared ai_prompts template by key. The prompt
+# is now inline on each agent (``ai_agents.prompt``); this constant is retained
+# only for back-compat with old call sites/tests.
 DEFAULT_PROMPT_KEY = "default"
 
 # Seed constants — used ONLY to plant the default agent/prompt on the very first
@@ -88,24 +91,24 @@ def render_template(body: str, variables: dict[str, str]) -> str:
 
 
 def seed_default_agent(settings=None) -> None:
-    """Create the default prompt + agent rows if absent (idempotent).
+    """Create the default agent row if absent (idempotent).
 
     Seeds from the in-code constants (:data:`DEFAULT_SYSTEM_PROMPT` /
-    :data:`DEFAULT_MODEL`). Never overwrites existing rows (no version bump), so
-    user edits in the DB are preserved across boots. ``settings`` is accepted for
-    backwards-compatible call sites but is no longer used.
+    :data:`DEFAULT_MODEL`) with the prompt stored inline on the agent. Never
+    overwrites an existing row (no version bump), so user edits in the DB are
+    preserved across boots. ``settings`` is accepted for backwards-compatible call
+    sites but is no longer used.
     """
     try:
-        prompt_repo.ensure(DEFAULT_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT)
         agent_repo.ensure(
             DEFAULT_AGENT_KEY,
             display_name="Agente padrão",
-            prompt_key=DEFAULT_PROMPT_KEY,
+            prompt=DEFAULT_SYSTEM_PROMPT,
             model_config={"model": DEFAULT_MODEL},
             tool_names=None,  # all registered tools
             enabled=True,
         )
-        logger.info("AI engine: default agent/prompt seeded (or already present)")
+        logger.info("AI engine: default agent seeded (or already present)")
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
 
@@ -115,41 +118,48 @@ def migrate_legacy_config_to_default_agent() -> None:
 
     Older installs configured the AI via ``config.system_prompt`` / ``config.model``.
     Those keys are being retired, so — *before* anything stops reading them — copy a
-    user's customised values into the canonical default agent. Safe to run on every
-    boot: only fills the default prompt when it is still empty/seed, and the default
-    model when it is empty or still the seed value, so a real DB edit is never lost.
+    user's customised values into the canonical default agent's inline prompt/model.
+    Safe to run on every boot: only fills the prompt when it is still empty/seed, and
+    the model when it is empty or still the seed value, so a real DB edit is never lost.
     """
     try:
         from db.repositories import config_repo
 
+        agent = agent_repo.get(DEFAULT_AGENT_KEY)
+        if not agent:
+            return
+
+        # Re-save once if either the legacy prompt or model still needs migrating.
+        new_prompt = agent.get("prompt") or ""
+        mc = dict(agent.get("model_config") or {})
+        changed = False
+
         legacy_prompt = config_repo.get("system_prompt", None)
         if legacy_prompt and legacy_prompt not in _LEGACY_SEED_PROMPTS:
-            current_body = (prompt_repo.get(DEFAULT_PROMPT_KEY) or {}).get("body") or ""
-            if current_body in _LEGACY_SEED_PROMPTS:
-                prompt_repo.save(DEFAULT_PROMPT_KEY, legacy_prompt)
-                logger.info("Legacy config.system_prompt migrated → default agent prompt")
+            if (new_prompt or "").strip() in _LEGACY_SEED_PROMPTS:
+                new_prompt = legacy_prompt
+                changed = True
 
         legacy_model = config_repo.get("model", None)
-        if legacy_model:
-            agent = agent_repo.get(DEFAULT_AGENT_KEY)
-            if agent:
-                mc = dict(agent.get("model_config") or {})
-                if not mc.get("model") or mc.get("model") == DEFAULT_MODEL:
-                    if mc.get("model") != legacy_model:
-                        mc["model"] = legacy_model
-                        agent_repo.save(
-                            DEFAULT_AGENT_KEY,
-                            display_name=agent.get("display_name") or "Agente padrão",
-                            prompt_key=agent.get("prompt_key") or DEFAULT_PROMPT_KEY,
-                            model_config=mc,
-                            tool_names=agent.get("tool_names"),
-                            enabled=bool(agent.get("enabled", True)),
-                            description=agent.get("description", ""),
-                            is_router=bool(agent.get("is_router", False)),
-                            routing_targets=agent.get("routing_targets"),
-                            hooks_config=agent.get("hooks_config") or {},
-                        )
-                        logger.info("Legacy config.model migrated → default agent model")
+        if legacy_model and (not mc.get("model") or mc.get("model") == DEFAULT_MODEL):
+            if mc.get("model") != legacy_model:
+                mc["model"] = legacy_model
+                changed = True
+
+        if changed:
+            agent_repo.save(
+                DEFAULT_AGENT_KEY,
+                display_name=agent.get("display_name") or "Agente padrão",
+                prompt=new_prompt,
+                model_config=mc,
+                tool_names=agent.get("tool_names"),
+                enabled=bool(agent.get("enabled", True)),
+                description=agent.get("description", ""),
+                is_router=bool(agent.get("is_router", False)),
+                routing_targets=agent.get("routing_targets"),
+                hooks_config=agent.get("hooks_config") or {},
+            )
+            logger.info("Legacy config (system_prompt/model) migrated → default agent")
     except Exception as e:
         logger.warning("Legacy config migration failed: %s", e)
 
@@ -207,11 +217,10 @@ def build_for_contact(handler, contact) -> AgentSpec:
                 "agente default ausente ou desativado (banco inconsistente)"
             )
 
-        prompt_row = dynamic_registry.get_prompt(agent.get("prompt_key") or DEFAULT_PROMPT_KEY)
-        body = (prompt_row or {}).get("body") or ""
+        body = agent.get("prompt") or ""
         if not body:
-            # No prompt body in the DB — fall back to the seed prompt so the agent
-            # never runs with an empty system prompt.
+            # No inline prompt on the agent — fall back to the seed prompt so the
+            # agent never runs with an empty system prompt.
             body = DEFAULT_SYSTEM_PROMPT
 
         variables = dynamic_registry.variables_map()

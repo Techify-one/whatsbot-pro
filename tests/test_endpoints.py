@@ -1841,25 +1841,35 @@ r = client.put(f"/api/custom-attributes/{_locked['id']}", json={"display_name": 
 check("P19 PUT editar display_name de atributo de sistema -> 200", r.status_code == 200)
 
 # ── P22: motor único (config-in-DB) — sem espelhamento, invariante do default ──
-from db.repositories import agent_repo as _agent_repo, prompt_repo as _prompt_repo
-from agent.agent_factory import DEFAULT_PROMPT_KEY as _DPK
+from db.repositories import agent_repo as _agent_repo
 _def_agent = _agent_repo.get("default")
 check("P22 agente 'default' semeado", _def_agent is not None)
 check("P22 default tem modelo não-vazio",
       bool(dict((_def_agent or {}).get("model_config") or {}).get("model")))
 check("P22 default usa todas as tools core (tool_names None)",
       (_def_agent or {}).get("tool_names") is None)
-# Editar agente/prompt default já NÃO espelha em config (config não tem mais essas chaves).
+check("P22 default tem prompt inline (semeado)",
+      bool((_def_agent or {}).get("prompt")))
+# Editar agente default já NÃO espelha em config (config não tem mais essas chaves).
+# O prompt agora é inline no próprio agente (sem tabela de prompts reutilizáveis).
 client.put("/api/ai/agents/default", json={
-    "display_name": "Agente padrão", "prompt_key": "default",
+    "display_name": "Agente padrão",
+    "prompt": "Prompt inline do agente default",
     "model_config": {"model": "anthropic/claude-sonnet-4-6"}})
+_saved = _agent_repo.get("default") or {}
 check("P22 default model salvo no DB",
-      dict((_agent_repo.get("default") or {}).get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
+      dict(_saved.get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
+check("P22 default prompt inline salvo no DB",
+      _saved.get("prompt") == "Prompt inline do agente default")
 check("P22 config NÃO ganha chave 'model'",
       "model" not in client.get("/api/config").json()["data"])
-client.put("/api/ai/prompts/default", json={"body": "Prompt via aba Prompts"})
-check("P22 prompt default salvo no DB",
-      (_prompt_repo.get(_DPK) or {}).get("body") == "Prompt via aba Prompts")
+# Patch dedicado de prompt (usado pelo wizard): grava o prompt e preserva os demais campos.
+client.put("/api/ai/agents/default/prompt", json={"prompt": "Prompt via wizard"})
+_after = _agent_repo.get("default") or {}
+check("P22 PUT /agents/default/prompt grava o prompt inline",
+      _after.get("prompt") == "Prompt via wizard")
+check("P22 PUT /agents/default/prompt preserva o modelo",
+      dict(_after.get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
 check("P22 config NÃO ganha chave 'system_prompt'",
       "system_prompt" not in client.get("/api/config").json()["data"])
 # Invariante do agente default (Fase 5): não pode ser desativado nem excluído.

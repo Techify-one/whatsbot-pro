@@ -81,6 +81,7 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
             display_name=body.get("display_name", ""),
+            prompt=body.get("prompt", ""),
             prompt_key=body.get("prompt_key", ""),
             model_config=model_config,
             tool_names=tool_names,
@@ -92,6 +93,35 @@ def register_routes(app, deps):
         )
         _emit_changed("agent", agent_key)
         logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
+        return _ok(row)
+
+    @app.put("/api/ai/agents/{agent_key}/prompt",
+             dependencies=[Depends(require_permission("agent.manage"))])
+    async def save_agent_prompt(agent_key: str, body: dict):
+        """Patch only an agent's inline prompt, preserving its other fields.
+
+        Used by the onboarding wizard (which knows the prompt but not the full
+        agent payload). The agent must already exist — the default is seeded at
+        boot; for any other key the caller uses the full PUT above.
+        """
+        existing = await asyncio.to_thread(agent_repo.get, agent_key)
+        if not existing:
+            return _err("Agente não encontrado.", status=404)
+        row = await asyncio.to_thread(
+            agent_repo.save, agent_key,
+            display_name=existing.get("display_name") or "",
+            prompt=body.get("prompt", ""),
+            prompt_key=existing.get("prompt_key", ""),
+            model_config=existing.get("model_config") or {},
+            tool_names=existing.get("tool_names"),
+            enabled=bool(existing.get("enabled", True)),
+            description=existing.get("description", ""),
+            is_router=bool(existing.get("is_router", False)),
+            routing_targets=existing.get("routing_targets"),
+            hooks_config=existing.get("hooks_config") or {},
+        )
+        _emit_changed("agent", agent_key)
+        logger.info("AI agent prompt saved: %s (v%s)", agent_key, row.get("version"))
         return _ok(row)
 
     @app.delete("/api/ai/agents/{agent_key}",
