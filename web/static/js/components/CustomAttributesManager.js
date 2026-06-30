@@ -64,6 +64,29 @@ function notifyChanged() {
   try { window.dispatchEvent(new Event('whatsbot:custom-attributes-changed')); } catch (e) {}
 }
 
+// Modal de confirmação in-app (substitui o confirm() nativo do navegador).
+function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = false, busy = false, onConfirm, onClose }) {
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-sm"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[15px] font-medium text-wa-text">${title}</div>
+          <button class="text-wa-secondary hover:text-wa-text text-xl leading-none" onClick=${onClose}>×</button>
+        </div>
+        <div class="text-[13px] text-wa-secondary mb-4 break-words">${message}</div>
+        <div class="flex gap-2 justify-end">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onClose} disabled=${busy}>Cancelar</button>
+          <button
+            class="px-4 py-2 rounded-md text-[14px] text-white transition-opacity disabled:opacity-50 ${danger ? 'bg-red-600 hover:opacity-90' : 'bg-wa-teal hover:opacity-90'}"
+            onClick=${onConfirm} disabled=${busy}>${busy ? 'Aguarde…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
   const [displayName, setDisplayName] = useState(editing ? editing.display_name : '');
   const [key, setKey] = useState(editing ? editing.attribute_key : '');
@@ -201,6 +224,7 @@ export default function CustomAttributesManager({ initialEntity }) {
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // row pendente de exclusão
   // Aba de escopo (Chatwoot-style) espelha /custom-attributes/<scope>[/<key>].
   const [tab, setTab] = useState(() => initialEntity?.sub || 'conversation');
 
@@ -268,11 +292,13 @@ export default function CustomAttributesManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao salvar.');
   }
 
-  async function handleDelete(row) {
-    if (!confirm(`Excluir o atributo "${row.attribute_key}"? Os valores já preenchidos são preservados.`)) return;
-    const res = await deleteCustomAttribute(row.id);
-    if (res && res.ok) { notifyChanged(); load(); }
-    else setError((res && res.error) || 'Falha ao excluir.');
+  async function handleDelete() {
+    if (!confirmDelete) return;
+    setBusy(true);
+    const res = await deleteCustomAttribute(confirmDelete.id);
+    setBusy(false);
+    if (res && res.ok) { setConfirmDelete(null); notifyChanged(); load(); }
+    else { setConfirmDelete(null); setError((res && res.error) || 'Falha ao excluir.'); }
   }
 
   const typeLabel = (t) => (TYPES.find(([v]) => v === t) || [t, t])[1];
@@ -354,7 +380,7 @@ export default function CustomAttributesManager({ initialEntity }) {
                       ${!row.is_system ? html`
                       <button title="Excluir" aria-label="Excluir"
                         class="p-1.5 rounded-md text-red-500 hover:bg-red-500/10 transition-colors"
-                        onClick=${() => handleDelete(row)}>${TrashIcon}</button>
+                        onClick=${() => setConfirmDelete(row)}>${TrashIcon}</button>
                       ` : null}
                     </div>
                   </td>
@@ -363,6 +389,17 @@ export default function CustomAttributesManager({ initialEntity }) {
             </tbody>
           </table>
         </div>
+      ` : null}
+
+      ${confirmDelete ? html`
+        <${ConfirmModal}
+          title="Excluir atributo"
+          message=${html`Excluir o atributo "${confirmDelete.display_name}"? Os valores já preenchidos são preservados.`}
+          confirmLabel="Excluir"
+          danger
+          busy=${busy}
+          onConfirm=${handleDelete}
+          onClose=${() => setConfirmDelete(null)} />
       ` : null}
     </div>
   `;
