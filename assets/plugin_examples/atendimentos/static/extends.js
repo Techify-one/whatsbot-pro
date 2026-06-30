@@ -70,14 +70,28 @@ export default function register(api) {
     } catch (_) { /* ignore — o gate do core/plugin é a rede de segurança */ }
 
     // 2) Grava resultado/observação + FIM no vínculo (cria o vínculo se o evento de
-    //    auto-link ainda não rodou). O before_status do backend ainda barra se faltar required.
+    //    auto-link ainda não rodou). O before_status do backend ainda barra se faltar
+    //    required. LÊ a resposta p/ capturar o atendimento_id (liga conversa→atendimento;
+    //    vem de get_latest_cycle/_conversa_dict, que inclui a coluna atendimento_id).
+    let atendimentoId = null;
     try {
-      await fetch(`${apiBase}/conversas/${conv.id}/resolve`, {
+      const r = await fetch(`${apiBase}/conversas/${conv.id}/resolve`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields: result.fields || {} }),
       });
+      const j = await r.json();
+      if (j && j.ok && j.data && j.data.atendimento_id != null) atendimentoId = j.data.atendimento_id;
     } catch (_) { /* ignore — o before_status do backend é a rede de segurança */ }
+
+    // 3) "Resolver e ir ao atendimento" (result.goTo): navega à aba Atendimentos abrindo
+    //    o detalhe daquele atendimento. Contido no plugin — o core resolve a aba pelo
+    //    pathname /attendances (tabFromPathPure) e o AtendimentosList lê ?detail no
+    //    mount/popstate (precedente: o chat lê ?message via scrollMsgFromSearchStr).
+    if (result.goTo && atendimentoId != null) {
+      history.pushState(null, '', `/attendances?detail=${atendimentoId}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
     return conv;                                 // segue → o core chama /status
   });
 

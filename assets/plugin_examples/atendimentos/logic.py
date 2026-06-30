@@ -53,6 +53,16 @@ _CA_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.custom_attrs_backfilled"
 # Liga/desliga o espelho dos campos de resolução no core (conversations.custom_attributes).
 _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
 
+# Visualizações personalizadas do Kanban (abas de "Agrupar por"). Nome interno (não vem
+# de input) → seguro em f-string SQL.
+_VIEWS_TABLE = "plugin_atendimentos_kanban_views"
+_VIEW_GROUP_BY = {"status", "atendente", "data", "attr"}
+_VIEW_SCOPES = {"personal", "team"}
+_VIEW_DATE_MODES = {"dia", "faixas", "mes"}
+# Teto interno de varredura ao filtrar por atributo (o filtro é em Python, antes do corte
+# final) — limita o custo quando a aba usa filtro por atributo de conversa.
+_ATTR_SCAN_CAP = 2000
+
 # Tabela de valores de extras por escopo — SEPARADAS: os extras do atendimento e os
 # da conversa vivem em tabelas distintas, chaveadas pelo seu próprio dono (atendimento_id
 # vs conversa-ciclo id). Nomes internos (não vêm de input) → seguro em f-string SQL.
@@ -460,6 +470,11 @@ def ensure_atendimento_for_contact(contact_id: int, phone: str = "", name: str =
     at = _select_open_atendimento(contact_id)
     if created and at and announce_open:
         _write_open_note(at, conversation_id)
+        # Card de sistema "Atendimento aberto" no fio da conversa (igual ao de resolver
+        # conversa). Só na CRIAÇÃO real (não em re-seleção do existente nem no backfill).
+        _emit_atend_notice("atendimento_opened", conversation_id=conversation_id,
+                           contact_id=at.get("contact_id"),
+                           phone=at.get("contact_phone") or None)
     return at
 
 
@@ -495,6 +510,58 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
         broadcast("new_message", {"phone": phone, "message": note})
     except Exception as e:  # noqa: BLE001
         logger.debug("atendimentos: nota de abertura falhou: %s", e)
+
+
+# ── Avisos de sistema no fio da conversa (cards conversation_event) ───────────
+# Marca a ABERTURA e a FINALIZAÇÃO do atendimento como cards de sistema no chat —
+# mesmo visual dos avisos de resolver/reabrir CONVERSA (plano 12). O plugin REGISTRA
+# seu próprio grupo + tipos no registry do core (``server.system_notices``) via
+# ``plugins.context.register_notice*`` — SEM dar patch no core. Gate por config
+# namespaceada do plugin (``plugin.atendimentos.system_notice_lifecycle``, default ON).
+# Late import do ``server``: logic.py segue importável standalone nos testes.
+
+_NOTICE_GROUP = "atendimento_lifecycle"
+_NOTICE_CONFIG_KEY = f"plugin.{PLUGIN_ID}.system_notice_lifecycle"
+
+
+def _f_atendimento_opened(actor=None, **_) -> str:
+    return f"📂 {actor} abriu o atendimento." if actor else "📂 Atendimento aberto."
+
+
+def _f_atendimento_closed(actor=None, **_) -> str:
+    return f"🏁 {actor} finalizou o atendimento." if actor else "🏁 Atendimento finalizado."
+
+
+def register_system_notices() -> None:
+    """Registra (idempotente) o grupo + os 2 tipos de aviso do atendimento no core.
+    Best-effort: falha (ex.: ``server`` ausente nos testes) nunca quebra o startup."""
+    try:
+        from plugins.context import register_notice_group, register_notice
+        register_notice_group(_NOTICE_GROUP, "Atendimento (abrir/finalizar)",
+                              config_key=_NOTICE_CONFIG_KEY, default=True)
+        register_notice("atendimento_opened", _NOTICE_GROUP, _f_atendimento_opened)
+        register_notice("atendimento_closed", _NOTICE_GROUP, _f_atendimento_closed)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("atendimentos: register_system_notices falhou: %s", e)
+
+
+def _emit_atend_notice(event_type: str, *, conversation_id: int | None = None,
+                       contact_id: int | None = None, phone: str | None = None,
+                       actor: str | None = None) -> None:
+    """Emite um card ``conversation_event`` no fio da conversa (gate de config no core).
+    Com ``conversation_id`` ancora naquela conversa; senão resolve a do contato
+    (aberta→última). Best-effort: nunca levanta (um aviso jamais quebra a ação)."""
+    try:
+        from server import system_notices
+        if conversation_id is not None:
+            system_notices.emit_conversation_notice(
+                event_type=event_type, conversation_id=conversation_id,
+                contact_id=contact_id, phone=phone, actor=actor)
+        elif contact_id is not None:
+            system_notices.emit_for_contact(
+                event_type=event_type, contact_id=contact_id, phone=phone, actor=actor)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("atendimentos: emitir aviso %s falhou: %s", event_type, e)
 
 
 def update_atendimento_fields(atid: int, values: dict, assignee_user_id: int | None = None,
@@ -565,6 +632,10 @@ def close_atendimento(atid: int, assignee_user_id: int | None = None,
             {"ts": ts, "auid": assignee_user_id, "aname": assignee_name or "", "id": atid},
         )
     _broadcast_changed(at["contact_id"], atid)
+    # Card de sistema "Atendimento finalizado" no fio da conversa (resolve a conversa do
+    # contato: aberta→última). Autor = operador que finalizou, quando houver.
+    _emit_atend_notice("atendimento_closed", contact_id=at.get("contact_id"),
+                       phone=at.get("contact_phone") or None, actor=(assignee_name or None))
     return get_atendimento(atid), None
 
 
@@ -653,12 +724,23 @@ def assign_atendimento(atid: int, assignee_user_id: int | None,
     return get_atendimento(atid), None
 
 
+def _hydrate_atendimentos(rows) -> list[dict]:
+    """Batch: extras do atendimento + rótulos/atributos da última conversa (evita N+1)."""
+    extras = _visible_extras("atendimento", [r["id"] for r in rows])
+    out = [_atend_dict(r, extras.get(r["id"], {})) for r in rows]
+    _attach_latest_conversa(out)  # conversa_fields + conversa_attrs (última conversa)
+    return out
+
+
 def list_atendimentos(*, status: str | None = None, assignee_user_id: int | None = None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
+                      attr_filters: dict | None = None,
                       limit: int = 200, offset: int = 0) -> list[dict]:
     where = ["1=1"]
-    params: dict = {"limit": max(1, min(int(limit or 200), 500)), "offset": max(0, int(offset or 0))}
+    lim = max(1, min(int(limit or 200), 500))
+    off = max(0, int(offset or 0))
+    params: dict = {}
     if status in ("aberto", "fechado"):
         where.append("status = :status")
         params["status"] = status
@@ -677,14 +759,28 @@ def list_atendimentos(*, status: str | None = None, assignee_user_id: int | None
     if opened_to is not None:
         where.append("opened_at <= :oto")
         params["oto"] = float(opened_to)
-    sql = ("SELECT * FROM plugin_atendimentos_atendimentos WHERE " + " AND ".join(where)
-           + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :limit OFFSET :offset")
+    base = ("SELECT * FROM plugin_atendimentos_atendimentos WHERE " + " AND ".join(where)
+            + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
+
+    # Filtro por atributo de CONVERSA (valor na última conversa). Como o valor não vive nas
+    # colunas do atendimento, filtra-se em Python ANTES do corte: varre um teto interno,
+    # atribui conversa_attrs e só então aplica offset/limit (caro só quando a aba usa este
+    # filtro — caminho normal continua com LIMIT/OFFSET no SQL).
+    af = {k: v for k, v in (attr_filters or {}).items() if k and _KEY_RE.match(k)}
+    if af:
+        with make_plugin_db() as conn:
+            rows = conn.execute(text(base + " LIMIT :scan"),
+                                {**params, "scan": _ATTR_SCAN_CAP}).mappings().all()
+        out = _hydrate_atendimentos(rows)
+        out = [a for a in out
+               if all(str((a.get("conversa_attrs") or {}).get(k, "")) == str(v)
+                      for k, v in af.items())]
+        return out[off:off + lim]
+
     with make_plugin_db() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    extras = _visible_extras("atendimento", [r["id"] for r in rows])  # batch (evita N+1)
-    out = [_atend_dict(r, extras.get(r["id"], {})) for r in rows]
-    _attach_latest_conversa(out)  # rótulos de conversa + atributos do core (última conversa)
-    return out
+        rows = conn.execute(text(base + " LIMIT :limit OFFSET :offset"),
+                            {**params, "limit": lim, "offset": off}).mappings().all()
+    return _hydrate_atendimentos(rows)
 
 
 def _conversation_core_attrs(conv_ids: list[int]) -> dict[int, dict]:
@@ -749,6 +845,164 @@ def _attach_latest_conversa(items: list[dict]) -> None:
         a["conversa_attrs"] = core_attrs.get(lc["conversation_id"], {}) if lc.get("conversation_id") else {}
 
 
+# ── Visualizações personalizadas do Kanban (abas de "Agrupar por") ────────────
+# CRUD puro sobre plugin_atendimentos_kanban_views. O GATE (pessoal x equipe, ownership)
+# vive na rota (precisa do request p/ checar manage_team_views) — aqui só valida o shape.
+
+def _view_dict(row) -> dict:
+    d = dict(row)
+    d["filters"] = _safe_json(d.get("filters"))  # JSON TEXT → dict
+    return d
+
+
+def list_kanban_views(*, user_id: int | None = None) -> list[dict]:
+    """Visualizações visíveis ao usuário: as PESSOAIS dele + TODAS as de equipe.
+    user_id None (legado/open, sem identidade) → todas. Ordena por (scope, position, id)."""
+    with make_plugin_db() as conn:
+        if user_id is not None:
+            rows = conn.execute(
+                text(f"SELECT * FROM {_VIEWS_TABLE} "
+                     "WHERE scope = 'team' OR owner_user_id = :uid "
+                     "ORDER BY scope ASC, position ASC, id ASC"),
+                {"uid": int(user_id)},
+            ).mappings().all()
+        else:
+            rows = conn.execute(
+                text(f"SELECT * FROM {_VIEWS_TABLE} ORDER BY scope ASC, position ASC, id ASC")
+            ).mappings().all()
+    return [_view_dict(r) for r in rows]
+
+
+def get_kanban_view(vid: int) -> dict | None:
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text(f"SELECT * FROM {_VIEWS_TABLE} WHERE id = :id"), {"id": int(vid)},
+        ).mappings().first()
+    return _view_dict(row) if row else None
+
+
+def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode) -> str | None:
+    if not (name or "").strip():
+        return "Informe um nome para a visualização."
+    if scope not in _VIEW_SCOPES:
+        return "Escopo inválido."
+    if group_by not in _VIEW_GROUP_BY:
+        return "Agrupamento inválido."
+    if group_by == "attr" and not _KEY_RE.match(group_attr_key or ""):
+        return "Selecione um atributo (lista) válido para agrupar."
+    if group_by == "data" and (group_date_mode or "") not in _VIEW_DATE_MODES:
+        return "Selecione um modo de data válido (dia, faixas ou mês)."
+    return None
+
+
+def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_key=None,
+                       group_date_mode=None, filters=None,
+                       owner_user_id=None) -> tuple[dict | None, str | None]:
+    name = (name or "").strip()
+    err = _validate_view(name=name, scope=scope, group_by=group_by,
+                         group_attr_key=group_attr_key, group_date_mode=group_date_mode)
+    if err:
+        return None, err
+    ts = now()
+    fjson = json.dumps(filters if isinstance(filters, dict) else {})
+    gak = (group_attr_key or None) if group_by == "attr" else None
+    gdm = (group_date_mode or None) if group_by == "data" else None
+    with make_plugin_db() as conn:
+        pos = conn.execute(
+            text(f"SELECT COALESCE(MAX(position), -1) + 1 AS p FROM {_VIEWS_TABLE}")
+        ).scalar() or 0
+        conn.execute(
+            text(f"INSERT INTO {_VIEWS_TABLE} "
+                 "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
+                 " filters, position, created_at, updated_at) "
+                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :pos, :ts, :ts)"),
+            {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
+             "gak": gak, "gdm": gdm, "filters": fjson, "pos": int(pos), "ts": ts},
+        )
+        # Re-seleciona a linha recém-criada de forma portável (SQLite/Postgres): created_at
+        # + name (ts é um float preciso do time.time desta chamada) ordenado por id DESC.
+        row = conn.execute(
+            text(f"SELECT * FROM {_VIEWS_TABLE} WHERE created_at = :ts AND name = :name "
+                 "ORDER BY id DESC LIMIT 1"),
+            {"ts": ts, "name": name},
+        ).mappings().first()
+    _broadcast_changed(None, None)
+    return (_view_dict(row) if row else None), None
+
+
+def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_key=None,
+                       group_date_mode=None, filters=None) -> tuple[dict | None, str | None]:
+    cur = get_kanban_view(vid)
+    if not cur:
+        return None, "Visualização não encontrada."
+    name = cur["name"] if name is None else (name or "").strip()
+    scope = scope or cur["scope"]
+    group_by = group_by or cur["group_by"]
+    group_attr_key = cur.get("group_attr_key") if group_attr_key is None else group_attr_key
+    group_date_mode = cur.get("group_date_mode") if group_date_mode is None else group_date_mode
+    err = _validate_view(name=name, scope=scope, group_by=group_by,
+                         group_attr_key=group_attr_key, group_date_mode=group_date_mode)
+    if err:
+        return None, err
+    fjson = json.dumps(filters if isinstance(filters, dict) else (cur.get("filters") or {}))
+    gak = (group_attr_key or None) if group_by == "attr" else None
+    gdm = (group_date_mode or None) if group_by == "data" else None
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text(f"UPDATE {_VIEWS_TABLE} SET name = :name, scope = :scope, group_by = :gby, "
+                 "group_attr_key = :gak, group_date_mode = :gdm, filters = :filters, "
+                 "updated_at = :ts WHERE id = :id"),
+            {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
+             "filters": fjson, "ts": ts, "id": int(vid)},
+        )
+    _broadcast_changed(None, None)
+    return get_kanban_view(vid), None
+
+
+def delete_kanban_view(vid) -> tuple[bool, str | None]:
+    cur = get_kanban_view(vid)
+    if not cur:
+        return False, "Visualização não encontrada."
+    with make_plugin_db() as conn:
+        conn.execute(text(f"DELETE FROM {_VIEWS_TABLE} WHERE id = :id"), {"id": int(vid)})
+    _broadcast_changed(None, None)
+    return True, None
+
+
+def set_conversa_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:
+    """Drag no kanban por atributo: grava ``key`` = ``value`` em
+    ``conversations.custom_attributes`` da ÚLTIMA conversa (ciclo mais recente) do
+    atendimento. ``value`` None/"" remove a chave (cai na coluna "Sem valor"). Espelha o
+    padrão de ``mirror_conversa_to_core`` (set_values direto). Retorna o atendimento com
+    ``conversa_attrs`` já recarregado."""
+    if not _KEY_RE.match(key or ""):
+        return None, "Atributo inválido."
+    at = get_atendimento(atid)
+    if not at:
+        return None, "Atendimento não encontrado."
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT conversation_id FROM plugin_atendimentos_conversas "
+                 "WHERE atendimento_id = :aid AND conversation_id IS NOT NULL "
+                 "ORDER BY started_at DESC, id DESC LIMIT 1"),
+            {"aid": int(atid)},
+        ).mappings().first()
+    conv_id = row["conversation_id"] if row else None
+    if not conv_id:
+        return None, "Este atendimento ainda não tem conversa vinculada."
+    v = None if value in (None, "") else str(value)
+    try:
+        custom_attribute_repo.set_values(_conversations_tbl, int(conv_id), {key: v})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("atendimentos: set_conversa_attr falhou: %s", e)
+        return None, "Falha ao gravar o atributo."
+    _broadcast_changed(at.get("contact_id"), atid)
+    out = [get_atendimento(atid)]
+    _attach_latest_conversa(out)
+    return out[0], None
+
+
 # ── Conversas do atendimento = CICLOS (aberto→resolvido) ──────────────────────
 # Cada linha de plugin_atendimentos_conversas é UM ciclo de atendimento de uma
 # conversa: nasce quando o cliente engaja (inbound) e fecha quando o operador
@@ -763,7 +1017,15 @@ def list_conversas(atid: int) -> list[dict]:
             {"id": atid},
         ).mappings().all()
     extras = _visible_extras("conversa", [r["id"] for r in rows])  # batch (evita N+1)
-    return [_conversa_dict(r, extras.get(r["id"], {})) for r in rows]
+    out = [_conversa_dict(r, extras.get(r["id"], {})) for r in rows]
+    # Anexa os ATRIBUTOS PERSONALIZADOS do core (is_system=0) de CADA ciclo (lidos de
+    # conversations.custom_attributes pelo conversation_id). A tabela de detalhe os mostra
+    # numa coluna própria, separados das informações da conversa. Batch (evita N+1).
+    core_attrs = _conversation_core_attrs([c.get("conversation_id") for c in out])
+    for c in out:
+        cid = c.get("conversation_id")
+        c["attrs"] = core_attrs.get(int(cid), {}) if cid else {}
+    return out
 
 
 def cycle_anchor(conversa_id: int) -> dict:
@@ -960,7 +1222,9 @@ def on_outbound(ctx, payload: dict) -> None:
 
 def on_startup(ctx, payload: dict) -> None:
     """``app.startup`` → backfills one-time idempotentes + registro dos atributos de
-    conversa no core. Boot nunca quebra por causa daqui (tudo defensivo)."""
+    conversa no core + registro dos avisos de sistema do atendimento. Boot nunca quebra
+    por causa daqui (tudo defensivo)."""
+    register_system_notices()  # grupo + tipos de aviso (abrir/finalizar atendimento)
     try:
         _maybe_backfill()  # blob `fields` legado → tabelas normalizadas
     except Exception as e:  # noqa: BLE001

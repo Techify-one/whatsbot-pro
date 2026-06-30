@@ -1500,6 +1500,82 @@ check("delete_plugin_permissions -> keys gone",
       not _rrepo.plugin_permission_keys())
 _urepo.delete(_pu_id)  # cleanup the test user
 
+# ── Atendimentos: Kanban Views (visualizações personalizadas) ──────────────
+section("Atendimentos Kanban Views")
+import importlib.util as _ilu
+from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
+from plugins.migrator import run_pending_migrations as _run_pending
+
+_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "atendimentos"
+
+# 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
+_atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
+_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "atendimentos")
+check("atendimentos rbac -> manage_team_views declarada",
+      any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
+
+# 2) Aplica as migrations do plugin no DB de teste (cria plugin_atendimentos_* incl. 006).
+_atd_manifest = _load_manifest(_atd_dir)
+_run_pending(_atd_manifest, _atd_dir)
+_alogic_spec = _ilu.spec_from_file_location("atendimentos_logic_test", _atd_dir / "logic.py")
+_alogic = _ilu.module_from_spec(_alogic_spec)
+_alogic_spec.loader.exec_module(_alogic)
+
+# 3) CRUD + validação.
+_v1, _e1 = _alogic.create_kanban_view(name="Por etapa", scope="personal", group_by="attr",
+                                      group_attr_key="etapa", filters={"status": "aberto"},
+                                      owner_user_id=101)
+check("create view pessoal -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
+check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
+_v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
+                                      group_date_mode="mes", owner_user_id=101)
+check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
+_, _ev_attr = _alogic.create_kanban_view(name="x", group_by="attr", group_attr_key="", owner_user_id=1)
+check("validação: attr sem key -> erro", _ev_attr is not None)
+_, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
+check("validação: data mode inválido -> erro", _ev_date is not None)
+_, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
+check("validação: nome vazio -> erro", _ev_name is not None)
+
+# 4) list_kanban_views: pessoal do user + TODAS as de equipe.
+_ids101 = {v["id"] for v in _alogic.list_kanban_views(user_id=101)}
+_ids999 = {v["id"] for v in _alogic.list_kanban_views(user_id=999)}
+check("list user 101 -> vê pessoal + equipe", {_v1["id"], _v2["id"]} <= _ids101)
+check("list user 999 -> vê equipe, NÃO vê pessoal de 101",
+      _v2["id"] in _ids999 and _v1["id"] not in _ids999)
+
+# 5) update + delete.
+_vu, _eu = _alogic.update_kanban_view(_v1["id"], name="Por etapa v2")
+check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") == "Por etapa v2")
+_okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
+check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
+
+# 6) set_conversa_attr: branches de erro (sem e2e de conversa — coberto manualmente).
+_, _esa = _alogic.set_conversa_attr(99999, "etapa", "Proposta")
+check("set_conversa_attr -> atendimento inexistente -> erro", _esa is not None)
+
+# 7) attr_filters: caminho do filtro por atributo aceito sem quebrar (lista vazia/segura).
+_lf = _alogic.list_atendimentos(attr_filters={"etapa": "Proposta"}, limit=50)
+check("list_atendimentos(attr_filters) -> retorna lista", isinstance(_lf, list))
+
+# 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
+_rrepo.upsert_plugin_permission("plugin.atendimentos.manage_team_views",
+                                "Criar/editar visualizações de EQUIPE no Kanban",
+                                "atendimentos", "Atendimentos")
+_tvu = _urepo.create(email="teamviews@test.com", name="TV",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_tvu_id = _tvu["id"]
+_tv_req = _types.SimpleNamespace(
+    state=_types.SimpleNamespace(user={"id": _tvu_id}),
+    url=_types.SimpleNamespace(path="/api/plugins/atendimentos/kanban-views"))
+check("manage_team_views -> user SEM perm negado",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is False)
+_urepo.set_custom_permissions(_tvu_id, ["plugin.atendimentos.manage_team_views"])
+check("manage_team_views -> user COM perm permitido",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is True)
+_urepo.delete(_tvu_id)
+_rrepo.delete_plugin_permissions("atendimentos")
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
