@@ -15,11 +15,13 @@ import asyncio
 import logging
 import time
 
-from fastapi import Depends
+from fastapi import Depends, Query
 
 from server.helpers import _ok, _err
 from server.deps import require_permission, install_exception_handlers
-from db.repositories import agent_repo, prompt_repo, variable_repo, tool_repo
+from db.repositories import (
+    agent_repo, agent_prompt_repo, prompt_repo, variable_repo, tool_repo,
+)
 from plugins.events import emit as emit_event
 from plugins.restart import schedule_restart
 
@@ -74,6 +76,9 @@ def register_routes(app, deps):
         hooks_config = body.get("hooks_config", {})
         if hooks_config is not None and not isinstance(hooks_config, dict):
             return _err("hooks_config deve ser um objeto.")
+        version_mode = body.get("version_mode", "new")
+        if version_mode not in ("new", "amend"):
+            return _err("version_mode deve ser 'new' ou 'amend'.")
         # Plano 22: the default agent is the engine's fallback (build_for_contact
         # cascade always lands on it) — it must never be disabled.
         if agent_key == agent_repo.DEFAULT_AGENT_KEY and not bool(body.get("enabled", True)):
@@ -90,9 +95,12 @@ def register_routes(app, deps):
             is_router=bool(body.get("is_router", False)),
             routing_targets=routing_targets,
             hooks_config=hooks_config or {},
+            change_note=body.get("change_note"),
+            version_mode=version_mode,
         )
         _emit_changed("agent", agent_key)
-        logger.info("AI agent saved: %s (v%s)", agent_key, row.get("version"))
+        logger.info("AI agent saved: %s (v%s, prompt=%s)",
+                    agent_key, row.get("version"), version_mode)
         return _ok(row)
 
     @app.put("/api/ai/agents/{agent_key}/prompt",
@@ -119,6 +127,7 @@ def register_routes(app, deps):
             is_router=bool(existing.get("is_router", False)),
             routing_targets=existing.get("routing_targets"),
             hooks_config=existing.get("hooks_config") or {},
+            change_note=body.get("change_note"),
         )
         _emit_changed("agent", agent_key)
         logger.info("AI agent prompt saved: %s (v%s)", agent_key, row.get("version"))
@@ -165,6 +174,61 @@ def register_routes(app, deps):
             return _err("Versão não encontrada.", status=404)
         _emit_changed("agent", agent_key)
         logger.info("AI agent rolled back: %s -> v%s (nova v%s)",
+                    agent_key, version, row.get("version"))
+        return _ok(row)
+
+    # ── Dedicated prompt version trail (git-like, additive to /history) ──
+    @app.get("/api/ai/agents/{agent_key}/prompt/history")
+    async def agent_prompt_history(agent_key: str):
+        return _ok(await asyncio.to_thread(agent_prompt_repo.list_history, agent_key))
+
+    @app.get("/api/ai/agents/{agent_key}/prompt/history/{version}")
+    async def agent_prompt_version(agent_key: str, version: int):
+        row = await asyncio.to_thread(agent_prompt_repo.get_version, agent_key, version)
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        return _ok(row)
+
+    @app.get("/api/ai/agents/{agent_key}/prompt/diff")
+    async def agent_prompt_diff(
+        agent_key: str,
+        from_version: int = Query(..., alias="from"),
+        to_version: int = Query(..., alias="to"),
+    ):
+        d = await asyncio.to_thread(
+            agent_prompt_repo.diff, agent_key, from_version, to_version)
+        if d is None:
+            return _err("Versão não encontrada.", status=404)
+        return _ok(d)
+
+    @app.patch("/api/ai/agents/{agent_key}/prompt/history/{version}",
+               dependencies=[Depends(require_permission("agent.manage"))])
+    async def agent_prompt_rename(agent_key: str, version: int, body: dict):
+        row = await asyncio.to_thread(
+            agent_prompt_repo.rename_version, agent_key, version, body.get("note"))
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        logger.info("AI agent prompt version renamed: %s v%s", agent_key, version)
+        return _ok(row)
+
+    @app.delete("/api/ai/agents/{agent_key}/prompt/history/{version}",
+                dependencies=[Depends(require_permission("agent.manage"))])
+    async def agent_prompt_delete(agent_key: str, version: int):
+        ok = await asyncio.to_thread(
+            agent_prompt_repo.delete_version, agent_key, version)
+        if not ok:
+            return _err("Versão não encontrada.", status=404)
+        logger.info("AI agent prompt version deleted: %s v%s", agent_key, version)
+        return _ok({"version": version})
+
+    @app.post("/api/ai/agents/{agent_key}/prompt/restore/{version}",
+              dependencies=[Depends(require_permission("agent.manage"))])
+    async def agent_prompt_restore(agent_key: str, version: int):
+        row = await asyncio.to_thread(agent_prompt_repo.restore, agent_key, version)
+        if not row:
+            return _err("Versão não encontrada.", status=404)
+        _emit_changed("agent", agent_key)
+        logger.info("AI agent prompt restored: %s -> v%s (nova agente v%s)",
                     agent_key, version, row.get("version"))
         return _ok(row)
 

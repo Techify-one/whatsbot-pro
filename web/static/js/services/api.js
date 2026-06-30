@@ -741,6 +741,33 @@ export async function rollbackAgent(key, version) {
   return request('POST', `/api/ai/agents/${encodeURIComponent(key)}/rollback/${version}`);
 }
 
+// ── Dedicated prompt version trail (git-like). Separate from the whole-agent
+// history above. Diff is computed server-side from full snapshots.
+export async function getAgentPromptHistory(key) {
+  return request('GET', `/api/ai/agents/${encodeURIComponent(key)}/prompt/history`);
+}
+
+export async function getAgentPromptVersion(key, version) {
+  return request('GET', `/api/ai/agents/${encodeURIComponent(key)}/prompt/history/${version}`);
+}
+
+export async function getAgentPromptDiff(key, fromV, toV) {
+  const qs = new URLSearchParams({ from: fromV, to: toV }).toString();
+  return request('GET', `/api/ai/agents/${encodeURIComponent(key)}/prompt/diff?${qs}`);
+}
+
+export async function restoreAgentPrompt(key, version) {
+  return request('POST', `/api/ai/agents/${encodeURIComponent(key)}/prompt/restore/${version}`);
+}
+
+export async function renameAgentPromptVersion(key, version, note) {
+  return request('PATCH', `/api/ai/agents/${encodeURIComponent(key)}/prompt/history/${version}`, { note });
+}
+
+export async function deleteAgentPromptVersion(key, version) {
+  return request('DELETE', `/api/ai/agents/${encodeURIComponent(key)}/prompt/history/${version}`);
+}
+
 export async function deleteAgent(key) {
   return request('DELETE', `/api/ai/agents/${encodeURIComponent(key)}`);
 }
