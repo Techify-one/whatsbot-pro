@@ -14,6 +14,7 @@ import time
 from sqlalchemy import select
 
 from db.engine import get_engine
+from db.repositories import agent_prompt_repo
 from db.repositories._mapping import coerce_json
 from db.tables import ai_agents, ai_agents_history
 from db.upsert import upsert, upsert_ignore
@@ -99,15 +100,39 @@ def save(
     is_router: bool = False,
     routing_targets: list[str] | None = None,
     hooks_config: dict | None = None,
+    change_note: str | None = None,
+    version_mode: str = "new",
 ) -> dict:
     """Upsert an agent, bump version and snapshot to history. Returns the row.
 
     ``prompt`` is the inline, per-agent system prompt (source of truth).
     ``prompt_key`` is legacy (a reference to a shared ai_prompts template) and is
     no longer read for resolution; it is still accepted/persisted for back-compat.
+    ``change_note`` is an optional commit message for the dedicated prompt trail.
+    ``version_mode`` controls the dedicated prompt trail only (the whole-agent
+    history always snapshots): ``"new"`` (default) appends a new prompt version;
+    ``"amend"`` overwrites the latest prompt version in place (git ``--amend``).
+
+    Dedup: if every versioned field is identical to the stored row, this is a no-op
+    (no version bump, no history row, no prompt-trail growth) and the existing row
+    is returned unchanged. Values are compared as Python objects *before* JSON
+    encoding, so key ordering never produces a false positive.
     """
     now = time.time()
     existing = get(agent_key)
+    if existing is not None and (
+        (display_name or "") == (existing.get("display_name") or "")
+        and (prompt or "") == (existing.get("prompt") or "")
+        and (prompt_key or "") == (existing.get("prompt_key") or "")
+        and (model_config or {}) == (existing.get("model_config") or {})
+        and tool_names == existing.get("tool_names")
+        and bool(enabled) == bool(existing.get("enabled", True))
+        and (description or "") == (existing.get("description") or "")
+        and bool(is_router) == bool(existing.get("is_router", False))
+        and routing_targets == existing.get("routing_targets")
+        and (hooks_config or {}) == (existing.get("hooks_config") or {})
+    ):
+        return existing
     version = (existing["version"] + 1) if existing else 1
     values = {
         "agent_key": agent_key,
@@ -138,6 +163,13 @@ def save(
             snapshot=json.dumps(values, ensure_ascii=False),
             created_at=now,
         ))
+        # Dedicated prompt trail — same transaction (atomic). "new" appends a
+        # version (record()'s dedup keeps it from growing on an unchanged prompt);
+        # "amend" overwrites the latest version in place (git --amend).
+        if version_mode == "amend":
+            agent_prompt_repo.amend(agent_key, prompt or "", note=change_note, conn=conn)
+        else:
+            agent_prompt_repo.record(agent_key, prompt or "", note=change_note, conn=conn)
     return _row_to_dict(values)
 
 

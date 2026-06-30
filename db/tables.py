@@ -649,6 +649,25 @@ ai_tools_history = Table(
 Index("idx_ai_tools_hist", ai_tools_history.c.name, ai_tools_history.c.version)
 
 
+# Dedicated, git-like version trail for an agent's INLINE prompt only. Each row is
+# a full snapshot of the prompt text (the git "blob" content model); the diff is
+# computed on demand by ``agent.prompt_diff`` (never stored). ``version`` is an
+# independent per-``agent_key`` counter (MAX(version)+1), with dedup on save. This
+# is ADDITIVE to ``ai_agents_history`` (the whole-agent trail) — both coexist.
+ai_agent_prompt_history = Table(
+    "ai_agent_prompt_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("agent_key", Text, nullable=False),
+    Column("version", Integer, nullable=False),   # own counter (independe de ai_agents.version)
+    Column("prompt", Text, nullable=False),        # snapshot COMPLETO do texto (modelo blob do git)
+    Column("note", Text),                          # mensagem de commit (nullable)
+    Column("created_at", Float, nullable=False),
+)
+Index("idx_ai_agent_prompt_hist",
+      ai_agent_prompt_history.c.agent_key, ai_agent_prompt_history.c.version)
+
+
 # Audit trail (plano 07). Append-only "who did what, when, to which resource,
 # before/after". FK to users.id is LOGICAL (no ForeignKey/cascade — the trail
 # must survive user deletion). before/after are TEXT JSON, masked at ingestion

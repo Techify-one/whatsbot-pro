@@ -22,6 +22,7 @@ import {
 } from '../../services/api.js';
 import { ModelSelect } from '../ModelSelect.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
+import PromptHistoryModal from './PromptHistoryModal.js';
 
 const html = htm.bind(h);
 
@@ -102,11 +103,13 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }) {
+function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, onOpenPromptHistory }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
   const [prompt, setPrompt] = useState(agent.prompt || '');
+  // Commit message for the prompt trail — ephemeral, not rehydrated from the agent.
+  const [changeNote, setChangeNote] = useState('');
   const placeholders = useMemo(() => extractPlaceholders(prompt), [prompt]);
   const [model, setModel] = useState(mc.model || '');
   const [temperature, setTemperature] = useState(numField(mc.temperature));
@@ -123,6 +126,35 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }
   const [routingTargets, setRoutingTargets] = useState(
     Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []
   );
+  // Save flow: split button ("Salvar" = nova versão / caret = sobrescrever) gated
+  // by a confirmation modal. pendingMode ∈ {null, 'new', 'amend'}; menuOpen = caret.
+  const [pendingMode, setPendingMode] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Quando o pai troca o agente em edição por outra revisão (ex.: restaurar uma
+  // versão do prompt, que volta com a versão bumpada), re-sincroniza os campos do
+  // formulário — senão os useState ficam presos no valor da 1ª montagem e o
+  // textarea continua mostrando o prompt antigo até um reload da página.
+  const agentRev = `${agent.agent_key || ''}:v${agent.version || 1}`;
+  const lastRevRef = useRef(agentRev);
+  useEffect(() => {
+    if (lastRevRef.current === agentRev) return; // mesma revisão → não pisa edição em andamento
+    lastRevRef.current = agentRev;
+    const mc2 = agent.model_config || {};
+    setDisplayName(agent.display_name || '');
+    setPrompt(agent.prompt || '');
+    setModel(mc2.model || '');
+    setTemperature(numField(mc2.temperature));
+    setTopP(numField(mc2.top_p));
+    setMaxTokens(numField(mc2.max_tokens));
+    setEnabled(agent.enabled !== false);
+    setDescription(agent.description || '');
+    setIsRouter(!!agent.is_router);
+    setAllTools(agent.tool_names == null);
+    setToolNames(Array.isArray(agent.tool_names) ? [...agent.tool_names] : []);
+    setRoutingTargets(Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []);
+    setChangeNote('');
+  }, [agentRev]);
 
   const trimmedKey = key.trim();
   const keyFormatErr = isNew && trimmedKey && !KEY_RE.test(trimmedKey)
@@ -159,12 +191,22 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }
     && (isNew ? (trimmedKey && !keyErr) : true)
     && (!isDefault || !!model.trim());
 
-  function submit() {
+  // Step 1 — a save button opens the confirmation modal for that mode.
+  function requestSave(mode) {
     if (!canSave) return;
+    setMenuOpen(false);
+    setPendingMode(mode);
+  }
+
+  // Step 2 — confirm: actually persist with the chosen version_mode.
+  function confirmSave() {
+    if (!canSave || !pendingMode) return;
     const finalKey = isNew ? trimmedKey : agent.agent_key;
     onSave(finalKey, {
       display_name: displayName.trim(),
       prompt: prompt,
+      change_note: changeNote.trim() || null,
+      version_mode: pendingMode,
       model_config: buildModelConfig(),
       tool_names: allTools ? null : toolNames,
       enabled,
@@ -172,6 +214,8 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }
       is_router: isRouter,
       routing_targets: isRouter ? routingTargets : null,
     });
+    setChangeNote('');
+    setPendingMode(null);
   }
 
   // Routing targets: other agents only (can't route to itself).
@@ -204,13 +248,23 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }
         </div>
 
         <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Prompt do agente</label>
+          <div class="flex items-center justify-between mb-1 gap-2">
+            <label class="block text-[12px] text-wa-secondary">Prompt do agente</label>
+            <button type="button"
+              class="px-2 py-1 rounded-md text-[11px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
+              disabled=${isNew}
+              title=${isNew ? 'Salve o agente para começar a versionar o prompt.' : 'Ver versões do prompt'}
+              onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
+          </div>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="12"
             placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis."
             value=${prompt} onInput=${(e) => setPrompt(e.target.value)}></textarea>
           <div class="text-[11px] text-wa-secondary mt-1">
             Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
           </div>
+          <input class="wa-field w-full px-3 py-2 rounded-md text-[13px] mt-2"
+            type="text" placeholder="Descreva a mudança do prompt (opcional)"
+            value=${changeNote} onInput=${(e) => setChangeNote(e.target.value)} />
           ${placeholders.length > 0 ? html`
             <div class="mt-2">
               <div class="text-[11px] text-wa-secondary mb-1">Placeholders detectados (resolvidos pela aba <span class="font-medium">Variáveis</span>)</div>
@@ -316,13 +370,63 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }
           </div>
         ` : null}
 
-        <div class="flex gap-2 justify-end">
+        <div class="flex gap-2 justify-end items-center">
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
             onClick=${onCancel} disabled=${busy}>Cancelar</button>
-          <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick=${submit} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+          ${isNew ? html`
+            <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick=${() => requestSave('amend')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+          ` : html`
+            <div class="relative flex">
+              <button class="px-4 py-2 rounded-l-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+                onClick=${() => requestSave('amend')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+              <button class="px-2 py-2 rounded-r-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50 border-l border-white/25"
+                title="Mais opções de salvamento" onClick=${() => setMenuOpen(o => !o)} disabled=${!canSave}>▾</button>
+              ${menuOpen ? html`
+                <div class="fixed inset-0 z-30" onClick=${() => setMenuOpen(false)}></div>
+                <div class="absolute right-0 top-full mt-1 z-40 w-72 bg-wa-bg border border-wa-border rounded-md shadow-lg overflow-hidden">
+                  <button class="w-full text-left px-3 py-2 text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                    onClick=${() => requestSave('new')}>
+                    Salvar criando uma nova versão
+                    <div class="text-[11px] text-wa-secondary">Registra uma nova versão no histórico do prompt</div>
+                  </button>
+                </div>
+              ` : null}
+            </div>
+          `}
         </div>
       </div>
+
+      ${pendingMode ? html`
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick=${() => !busy && setPendingMode(null)}>
+          <div class="bg-wa-bg border border-wa-border rounded-lg w-full max-w-md flex flex-col"
+            onClick=${(e) => e.stopPropagation()}>
+            <div class="px-5 py-3 border-b border-wa-border text-[15px] font-medium text-wa-text">
+              ${isNew
+                ? 'Criar agente'
+                : (pendingMode === 'amend' ? 'Sobrescrever a versão atual' : 'Salvar e criar nova versão')}
+            </div>
+            <div class="px-5 py-4 text-[13px] text-wa-text">
+              ${isNew
+                ? html`Isso cria o agente e registra a <span class="font-medium">primeira versão</span> do prompt no histórico.`
+                : (pendingMode === 'amend'
+                  ? html`Isso salva o agente e <span class="font-medium">sobrescreve a última versão</span> do prompt no histórico, sem criar uma nova. O texto anterior dessa versão será <span class="font-medium">substituído e não poderá ser recuperado</span>.`
+                  : html`Isso salva o agente e registra uma <span class="font-medium">nova versão</span> do prompt no histórico, preservando as versões anteriores.`)}
+            </div>
+            <div class="px-5 py-3 border-t border-wa-border flex justify-end gap-2">
+              <button class="px-3 py-2 rounded-md text-[13px] text-wa-text bg-wa-panel border border-wa-border hover:bg-wa-hover transition-colors disabled:opacity-50"
+                disabled=${busy} onClick=${() => setPendingMode(null)}>Cancelar</button>
+              <button class=${`px-3 py-2 rounded-md text-[13px] text-white hover:opacity-90 transition-opacity disabled:opacity-50 ${pendingMode === 'amend' ? 'bg-amber-600' : 'bg-wa-teal'}`}
+                disabled=${busy} onClick=${confirmSave}>
+                ${busy
+                  ? 'Salvando…'
+                  : (isNew ? 'Criar agente' : (pendingMode === 'amend' ? 'Sobrescrever' : 'Criar versão'))}
+              </button>
+            </div>
+          </div>
+        </div>
+      ` : null}
     </div>
   `;
 }
@@ -340,6 +444,8 @@ export default function AgentsManager({ initialEntity }) {
   const [historyFor, setHistoryFor] = useState(null);
   const [historyRows, setHistoryRows] = useState([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  // Dedicated prompt-trail modal state (separate from the whole-agent history)
+  const [promptHistoryFor, setPromptHistoryFor] = useState(null);
 
   async function load() {
     setLoading(true);
@@ -452,7 +558,8 @@ export default function AgentsManager({ initialEntity }) {
       ${editing ? html`
         <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
           tools=${tools}
-          onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
+          onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy}
+          onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
       ` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
@@ -502,12 +609,28 @@ export default function AgentsManager({ initialEntity }) {
 
       ${historyFor ? html`
         <${HistoryModal}
-          title=${`Histórico — ${historyFor.display_name || historyFor.agent_key}`}
+          title=${`Histórico do agente — ${historyFor.display_name || historyFor.agent_key}`}
           versions=${historyRows}
           current=${historyFor.version}
           busy=${historyBusy}
           onRollback=${handleRollback}
           onClose=${() => setHistoryFor(null)} />
+      ` : null}
+
+      ${promptHistoryFor ? html`
+        <${PromptHistoryModal}
+          agentKey=${promptHistoryFor.agent_key}
+          agentLabel=${promptHistoryFor.display_name || promptHistoryFor.agent_key}
+          currentVersion=${null}
+          onClose=${() => setPromptHistoryFor(null)}
+          onRestored=${(restored) => {
+            setPromptHistoryFor(null);
+            // Reflete o prompt restaurado no formulário aberto: troca o agente em
+            // edição pela linha restaurada (com a versão bumpada), o que remonta o
+            // AgentForm (via key) e reinicia o textarea com o prompt restaurado.
+            if (restored && restored.agent_key) setEditing(restored);
+            load();
+          }} />
       ` : null}
     </div>
   `;

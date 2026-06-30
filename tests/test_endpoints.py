@@ -2162,6 +2162,110 @@ check("rollback restaura routing_targets", r.json()["data"]["routing_targets"] =
 check("rollback restaura hooks_config",
       r.json()["data"]["hooks_config"] == {"buscar_pedido": {"call_limit": 2}})
 
+# ═══════════════════════════════════════════════════════════════════
+#  15j-bis. AI Engine — dedicated prompt version trail (git-like)
+# ═══════════════════════════════════════════════════════════════════
+section("AI Engine prompt trail")
+
+_pk = "promptver"
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("create agent c/ prompt -> 200", r.status_code == 200)
+
+
+def _ptrail():
+    return client.get(f"/api/ai/agents/{_pk}/prompt/history").json()["data"]
+
+
+_t0 = _ptrail()
+check("prompt trail tem v1 inicial", len(_t0) >= 1)
+_base = len(_t0)
+
+# Muda só o display_name → trilha do prompt NÃO cresce (dedup do record)
+client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("save só display_name -> trilha do prompt não cresce", len(_ptrail()) == _base)
+
+# Save idêntico → dedup do agente (não bumpa versão) + trilha não cresce
+_vbefore = client.get(f"/api/ai/agents/{_pk}").json()["data"]["version"]
+client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("save idêntico -> agente não bumpa versão",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["version"] == _vbefore)
+check("save idêntico -> trilha do prompt não cresce", len(_ptrail()) == _base)
+
+# Muda o prompt → cria versão na trilha, com change_note
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2 alterada\nLinha 3",
+    "model_config": {"model": "x"}, "enabled": True, "change_note": "ajuste de tom"})
+check("save muda prompt -> 200", r.status_code == 200)
+_t1 = _ptrail()
+check("prompt trail cresceu", len(_t1) == _base + 1)
+check("trilha newest-first", _t1[0]["version"] > _t1[1]["version"])
+check("change_note gravado e exposto", _t1[0]["note"] == "ajuste de tom")
+check("history enriquecido (added/removed)",
+      "added_lines" in _t1[0] and "removed_lines" in _t1[0])
+
+_newv = _t1[0]["version"]
+_oldv = _t1[-1]["version"]
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/{_newv}")
+check("GET prompt version -> 200 c/ prompt completo",
+      r.status_code == 200 and "Linha 3" in r.json()["data"]["prompt"])
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/9999")
+check("GET prompt version inexistente -> 404", r.status_code == 404)
+
+r = client.get(f"/api/ai/agents/{_pk}/prompt/diff", params={"from": _oldv, "to": _newv})
+check("GET prompt diff -> 200", r.status_code == 200)
+_d = r.json()["data"]
+check("diff unified_diff não vazio", bool(_d["unified_diff"]))
+check("diff conta added_lines", _d["added_lines"] >= 1)
+check("diff tem lines estruturadas", isinstance(_d["lines"], list) and len(_d["lines"]) > 0)
+r = client.get(f"/api/ai/agents/{_pk}/prompt/diff", params={"from": _oldv, "to": 9999})
+check("diff versão inexistente -> 404", r.status_code == 404)
+
+r = client.post(f"/api/ai/agents/{_pk}/prompt/restore/{_oldv}")
+check("POST prompt restore -> 200", r.status_code == 200)
+check("restore restaura o prompt antigo",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["prompt"] == "Linha 1\nLinha 2")
+check("restore cria nova versão na trilha", len(_ptrail()) == _base + 2)
+
+r = client.post(f"/api/ai/agents/{_pk}/prompt/restore/9999")
+check("restore versão inexistente -> 404", r.status_code == 404)
+
+# version_mode="amend" → sobrescreve a última versão da trilha (não cresce)
+_before_amend = _ptrail()
+_topv = _before_amend[0]["version"]
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Prompt sobrescrito",
+    "model_config": {"model": "x"}, "enabled": True,
+    "change_note": "amend nota", "version_mode": "amend"})
+check("amend -> 200", r.status_code == 200)
+_after_amend = _ptrail()
+check("amend não cria nova versão na trilha", len(_after_amend) == len(_before_amend))
+check("amend mantém o número da versão", _after_amend[0]["version"] == _topv)
+check("amend sobrescreve o prompt vivo",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["prompt"] == "Prompt sobrescrito")
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/{_topv}")
+check("amend sobrescreve o texto da versão",
+      r.json()["data"]["prompt"] == "Prompt sobrescrito")
+check("amend grava a nova nota", r.json()["data"]["note"] == "amend nota")
+
+# version_mode="new" (default) → volta a criar nova versão
+_before_new = _ptrail()
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Mais uma alteração",
+    "model_config": {"model": "x"}, "enabled": True, "version_mode": "new"})
+check("version_mode=new cria nova versão", len(_ptrail()) == len(_before_new) + 1)
+
+# version_mode inválido → 400
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "x",
+    "model_config": {"model": "x"}, "enabled": True, "version_mode": "zzz"})
+check("version_mode inválido -> ok=False", r.json()["ok"] is False)
+
 r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key": "default"})
 check("POST /conversations/{id}/agent -> 200", r.status_code == 200)
 check("conversa ganha active_agent_key", r.json()["data"]["conversation"]["active_agent_key"] == "default")
