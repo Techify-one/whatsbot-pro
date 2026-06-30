@@ -241,3 +241,51 @@ html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { c
    A dedicated class so the dark utility overrides above never touch it. */
 .wa-field { background-color: #e5e7eb; color: #000; }
 .wa-field::placeholder { color: #6b7280; }
+
+/* Toast UI WYSIWYG editor (MarkdownEditor.js): round the corners and use the
+   app border color so it blends with the surrounding form. The base/dark themes
+   handle the inner surfaces; this only frames the widget. */
+.wa-md-editor .toastui-editor-defaultUI {
+  border-radius: 0.375rem; /* matches .rounded-md inputs */
+  border-color: rgb(var(--wa-border));
+}
+
+/* Mode switch as a single toggle: hide Toast UI's two native tabs and show our
+   own injected button ("Markdown" ⇄ "Editor"), styled to sit in the same bottom
+   bar. "Markdown" reveals the raw text with all markup; "Editor" returns to the
+   formatted WYSIWYG view. */
+.wa-md-editor .toastui-editor-mode-switch .tab-item { display: none; }
+.wa-md-editor .wa-md-mode-toggle {
+  display: inline-block;
+  height: 24px;
+  line-height: 24px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgb(var(--wa-secondary));
+  background: transparent;
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-mode-toggle:hover { color: rgb(var(--wa-text)); }
+
+/* Markdown mode shows a single full-width raw-text pane: hide the Write/Preview
+   tab bar so only the editable markdown (with all its markup) is visible. Toast UI
+   sets `display:block` inline on this element in tab style, so `!important` is
+   required to override it. */
+.wa-md-editor .toastui-editor-md-tab-container { display: none !important; }
+
+/* Undo/redo buttons: a custom toolbar group floated to the far right of the bar
+   (the float itself is applied inline in JS via margin-left:auto on the group). */
+.wa-md-editor .wa-md-history-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-image: none; /* drop Toast UI's sprite background */
+  color: rgb(var(--wa-text));
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-history-btn:not(:disabled):hover { background-color: rgb(var(--wa-hover)); }
+.wa-md-editor .wa-md-history-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
