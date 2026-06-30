@@ -7,11 +7,12 @@ atendente vêm do ``current_user`` do request. Formato ``{"ok", "data"|"error"}`
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import APIRouter, Request
 
 from plugins.context import plugin_permission
-from server.authz import current_user
+from server.authz import acheck, current_user
 
 from . import logic
 
@@ -29,16 +30,49 @@ def _err(msg: str, status: int = 400):
     return JSONResponse(status_code=status, content={"ok": False, "error": msg})
 
 
+async def _can_team(request: Request) -> bool:
+    """Pode criar/editar visualizações de EQUIPE? (default-allow em legado/open via acheck)."""
+    return await acheck(request, "plugin.atendimentos.manage_team_views")
+
+
+async def _gate_view_write(request: Request, *, existing: dict | None,
+                           target_scope: str | None) -> tuple[bool, str]:
+    """Gate de escrita de visualização. Envolver EQUIPE (a existente OU o alvo) exige
+    manage_team_views; uma PESSOAL exige ser o dono (owner_user_id == uid) — ou ter a
+    permissão de equipe. Default-allow em legado/open vem do acheck/uid None."""
+    uid, _ = _atendente(request)
+    involves_team = (existing and existing.get("scope") == "team") or (target_scope == "team")
+    if involves_team:
+        if await _can_team(request):
+            return True, ""
+        return False, "Requer permissão para gerenciar visualizações de equipe."
+    if (existing is not None and existing.get("owner_user_id") not in (None, uid)
+            and not await _can_team(request)):
+        return False, "Você só pode editar suas próprias visualizações."
+    return True, ""
+
+
 # ── Atendimentos ──────────────────────────────────────────────────────────────
 
 @router.get("/atendimentos", dependencies=[plugin_permission("view")])
 async def list_atendimentos(status: str | None = None, assignee_user_id: int | None = None,
                             contact_id: int | None = None, q: str | None = None,
                             opened_from: float | None = None, opened_to: float | None = None,
+                            attr_filters: str | None = None,
                             limit: int = 200, offset: int = 0):
+    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de conversa da aba).
+    af = None
+    if attr_filters:
+        try:
+            parsed = json.loads(attr_filters)
+            if isinstance(parsed, dict):
+                af = {str(k): v for k, v in parsed.items()}
+        except (ValueError, TypeError):
+            af = None
     data = logic.list_atendimentos(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, limit=limit, offset=offset)
+        opened_from=opened_from, opened_to=opened_to, attr_filters=af,
+        limit=limit, offset=offset)
     return {"ok": True, "data": data}
 
 
@@ -118,6 +152,77 @@ async def assign_atendimento(atid: int, body: dict):
     if err:
         return _err(err, status=404)
     return {"ok": True, "data": at}
+
+
+@router.post("/atendimentos/{atid}/set-attr", dependencies=[plugin_permission("edit")])
+async def set_atendimento_attr(atid: int, body: dict):
+    """Drag-and-drop do kanban agrupado por ATRIBUTO: grava o valor do atributo na última
+    conversa do atendimento (custom_attributes do core). value vazio/None limpa a chave."""
+    key = str((body or {}).get("key") or "")
+    value = (body or {}).get("value")
+    at, err = logic.set_conversa_attr(atid, key, value)
+    if err:
+        return _err(err, status=404 if "encontrado" in err else 400)
+    return {"ok": True, "data": at}
+
+
+# ── Visualizações personalizadas do Kanban (abas de "Agrupar por") ────────────
+
+@router.get("/kanban-views", dependencies=[plugin_permission("view")])
+async def list_kanban_views(request: Request):
+    uid, _ = _atendente(request)
+    return {"ok": True, "data": logic.list_kanban_views(user_id=uid)}
+
+
+@router.post("/kanban-views", dependencies=[plugin_permission("view")])
+async def create_kanban_view(body: dict, request: Request):
+    uid, _ = _atendente(request)
+    scope = str((body or {}).get("scope") or "personal")
+    if scope == "team" and not await _can_team(request):
+        return _err("Requer permissão para criar visualizações de equipe.", status=403)
+    view, err = logic.create_kanban_view(
+        name=(body or {}).get("name"), scope=scope,
+        group_by=(body or {}).get("group_by") or "status",
+        group_attr_key=(body or {}).get("group_attr_key"),
+        group_date_mode=(body or {}).get("group_date_mode"),
+        filters=(body or {}).get("filters") or {}, owner_user_id=uid)
+    if err:
+        return _err(err, status=400)
+    return {"ok": True, "data": view}
+
+
+@router.put("/kanban-views/{vid}", dependencies=[plugin_permission("view")])
+async def update_kanban_view(vid: int, body: dict, request: Request):
+    existing = logic.get_kanban_view(vid)
+    if not existing:
+        return _err("Visualização não encontrada.", status=404)
+    target_scope = str((body or {}).get("scope") or existing.get("scope") or "personal")
+    allowed, msg = await _gate_view_write(request, existing=existing, target_scope=target_scope)
+    if not allowed:
+        return _err(msg, status=403)
+    view, err = logic.update_kanban_view(
+        vid, name=(body or {}).get("name"), scope=target_scope,
+        group_by=(body or {}).get("group_by"),
+        group_attr_key=(body or {}).get("group_attr_key"),
+        group_date_mode=(body or {}).get("group_date_mode"),
+        filters=(body or {}).get("filters"))
+    if err:
+        return _err(err, status=404 if "não encontrada" in err else 400)
+    return {"ok": True, "data": view}
+
+
+@router.delete("/kanban-views/{vid}", dependencies=[plugin_permission("view")])
+async def delete_kanban_view(vid: int, request: Request):
+    existing = logic.get_kanban_view(vid)
+    if not existing:
+        return _err("Visualização não encontrada.", status=404)
+    allowed, msg = await _gate_view_write(request, existing=existing, target_scope=None)
+    if not allowed:
+        return _err(msg, status=403)
+    ok, err = logic.delete_kanban_view(vid)
+    if err:
+        return _err(err, status=400)
+    return {"ok": True, "data": {"deleted": ok}}
 
 
 # ── Vínculo / resolução de conversa ───────────────────────────────────────────

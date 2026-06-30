@@ -1,6 +1,6 @@
 id: atendimentos
 name: Atendimentos
-version: 1.8.0
+version: 1.9.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de atendimentos sobre as conversas (estilo Chatwoot personalizado). MANTÉM o
@@ -43,4 +43,5 @@ rbac:
   permissions:
     - { key: view, label: "Ver atendimentos" }
     - { key: edit, label: "Editar/fechar atendimentos, resolver e configurar campos" }
+    - { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" }
 dependencies: []

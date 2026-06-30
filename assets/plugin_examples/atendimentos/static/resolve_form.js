@@ -73,8 +73,9 @@ function isFilled(def, v) {
 //   2. `attrDefs` — atributos personalizados do core NÃO-espelho (is_system=0), via o
 //                   CustomAttributeField do core. (Os espelhados do plugin chegam como
 //                   is_system=1 e são filtrados fora no extends.js p/ não duplicar.)
-// O botão "Resolver" só habilita quando todos os obrigatórios (dos dois conjuntos) estão
-// preenchidos. onOk devolve { fields, custom_attributes } p/ o chamador gravar cada um.
+// Os botões de finalizar ("Resolver" e "Resolver e ir ao atendimento") só habilitam
+// quando todos os obrigatórios (dos dois conjuntos) estão preenchidos. onOk devolve
+// { fields, custom_attributes, goTo } — goTo=true só no botão "ir ao atendimento".
 export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk, onCancel }) {
   const init0 = initialValues || {};
   const [vals, setVals] = useState(() => {
@@ -102,6 +103,9 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
       .map((a) => a.display_name || a.attribute_key),
   ];
   const allRequired = missing.length === 0;
+  // Com os DOIS conjuntos, rotula cada zona p/ deixar claro a origem: os campos de cima
+  // são informações da conversa; abaixo da barra, atributos personalizados.
+  const showHeaders = defs.length > 0 && attrDefs.length > 0;
 
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4"
@@ -111,33 +115,44 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
         <p class="text-sm text-wa-secondary mb-4">Preencha antes de resolver:</p>
 
         ${defs.length ? html`
-          <div class="space-y-3">
-            ${defs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
-              value=${vals[d.key]}
-              onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
+          <div>
+            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-wa-teal mb-2">Informações da conversa</div>` : null}
+            <div class="space-y-3">
+              ${defs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
+                value=${vals[d.key]}
+                onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
+            </div>
           </div>` : null}
 
         ${attrDefs.length ? html`
-          <div class="space-y-4 ${defs.length ? 'mt-4 pt-4 border-t border-wa-border' : ''}">
-            ${attrDefs.map((a) => html`<${CustomAttributeField} key=${a.id} def=${a}
-              value=${attrVals[a.attribute_key]}
-              onChange=${(v) => setAttrVals((s) => {
-                const next = { ...s };
-                if (v === null || v === undefined || v === '') delete next[a.attribute_key];
-                else next[a.attribute_key] = v;
-                return next;
-              })} />`)}
+          <div class="${defs.length ? 'mt-4 pt-4 border-t border-wa-border' : ''}">
+            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-amber-600 mb-2">Atributos personalizados</div>` : null}
+            <div class="space-y-4">
+              ${attrDefs.map((a) => html`<${CustomAttributeField} key=${a.id} def=${a}
+                value=${attrVals[a.attribute_key]}
+                onChange=${(v) => setAttrVals((s) => {
+                  const next = { ...s };
+                  if (v === null || v === undefined || v === '') delete next[a.attribute_key];
+                  else next[a.attribute_key] = v;
+                  return next;
+                })} />`)}
+            </div>
           </div>` : null}
 
         ${!allRequired ? html`
           <div class="mt-4 px-3 py-2.5 rounded-md bg-red-500/15 border border-red-500 text-red-500 text-[14px] font-semibold">
             Preencha os campos obrigatórios: ${missing.join(', ')}.
           </div>` : null}
-        <div class="flex gap-2 mt-5">
-          <button onClick=${() => onOk({ fields: vals, custom_attributes: attrVals })} disabled=${!allRequired}
-            class="flex-1 py-2.5 px-4 bg-wa-teal text-white rounded-lg disabled:opacity-50">Resolver</button>
-          <button onClick=${onCancel}
-            class="flex-1 py-2.5 px-4 bg-wa-panel hover:bg-wa-hover text-wa-text rounded-lg">Cancelar</button>
+        <div class="mt-5 space-y-2">
+          <div class="flex gap-2">
+            <button onClick=${() => onOk({ fields: vals, custom_attributes: attrVals, goTo: false })} disabled=${!allRequired}
+              class="flex-1 py-2.5 px-4 bg-wa-teal text-white rounded-lg disabled:opacity-50">Resolver</button>
+            <button onClick=${onCancel}
+              class="flex-1 py-2.5 px-4 bg-wa-panel hover:bg-wa-hover text-wa-text rounded-lg">Cancelar</button>
+          </div>
+          <button onClick=${() => onOk({ fields: vals, custom_attributes: attrVals, goTo: true })} disabled=${!allRequired}
+            class="w-full py-2.5 px-4 rounded-lg border border-wa-teal text-wa-teal hover:bg-wa-teal/10 disabled:opacity-50 text-[14px] font-medium">
+            Resolver e ir ao atendimento</button>
         </div>
       </div>
     </div>`;
