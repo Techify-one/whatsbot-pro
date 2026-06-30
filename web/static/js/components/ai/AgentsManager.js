@@ -27,6 +27,25 @@ import PromptHistoryModal from './PromptHistoryModal.js';
 
 const html = htm.bind(h);
 
+// Strip common markdown markup so the card preview shows clean, readable text
+// instead of raw syntax (**bold**, # heading, [link](url), `code`, lists, …).
+function stripMarkdown(body) {
+  return (body || '')
+    .replace(/```[\s\S]*?```/g, ' ')          // fenced code blocks
+    .replace(/`([^`]+)`/g, '$1')              // inline code
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')    // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')  // links → link text
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')       // headings
+    .replace(/^\s{0,3}>\s?/gm, '')            // blockquotes
+    .replace(/^\s{0,3}([-*+]|\d+\.)\s+/gm, '') // list markers
+    .replace(/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/gm, ' ') // horizontal rules
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')       // bold
+    .replace(/(\*|_)(.*?)\1/g, '$2')          // italic
+    .replace(/~~(.*?)~~/g, '$1')              // strikethrough
+    .replace(/\s+/g, ' ')                      // collapse whitespace
+    .trim();
+}
+
 // Extract {placeholder} tokens from the prompt body for a small preview chip list
 // (resolved from the Variáveis tab at render time).
 function extractPlaceholders(body) {
@@ -590,7 +609,7 @@ export default function AgentsManager({ initialEntity }) {
                 <span>tools: ${a.tool_names == null ? 'todas' : `${a.tool_names.length} selecionadas`}</span>
                 <span>v${a.version || 1}</span>
               </div>
-              ${a.prompt ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words line-clamp-2 whitespace-pre-wrap">${a.prompt.slice(0, 160)}${a.prompt.length > 160 ? '…' : ''}</div>` : null}
+              ${a.prompt ? (() => { const p = stripMarkdown(a.prompt); return p ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words line-clamp-2">${p.slice(0, 160)}${p.length > 160 ? '…' : ''}</div>` : null; })() : null}
               ${a.description ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${a.description}</div>` : null}
             </div>
             <div class="flex gap-1 shrink-0 flex-wrap justify-end">
