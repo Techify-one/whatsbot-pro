@@ -455,8 +455,20 @@ class MessageIngestService:
         media_path = _filtered.media_path
         media_extras = _filtered.media_extras
 
+        # plano 25 Fase 2 (bug #2): materialize the atendimento thread NOW (t=0), so a
+        # brand-new conversation's sidebar row appears together with the tab badge —
+        # not only when the batch saves the combined message (t≈message_batch_delay).
+        # Idempotent: the batch's add_message re-resolves the SAME thread → no
+        # re-announce. Runs AFTER echo suppression (:400) and filter.message.before_save
+        # (:447) so a dropped/echo message never creates a conversation.
+        conversation_id = await asyncio.to_thread(contact.ensure_conversation_live)
+
         broadcast_msg: dict = {"role": "user", "content": display_text,
                                "ts": time.time(), "msg_id": msg_id}
+        # The frontend matches the sidebar row by conversation_id first (precedence
+        # over phone/channel), so a NEW conversation's row updates in place at t=0.
+        if conversation_id is not None:
+            broadcast_msg["conversation_id"] = conversation_id
         if reply_to:
             broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:

@@ -167,42 +167,61 @@ class ContactMemory:
         suffix = "g.us" if self.is_group else "s.whatsapp.net"
         return f"{self.phone}@{suffix}"
 
+    def _resolve_conversation(self, role: str) -> tuple[dict | None, int | None, str | None]:
+        """Resolve (idempotent get-or-create + reopen-if-closed) the atendimento
+        thread for a save. PURE — no side effects, so the caller decides WHEN the
+        lifecycle reactions run (``add_message`` keeps them AFTER the INSERT,
+        byte-identical to before; the ingest runs them at t=0).
+
+        ``resolve_for_contact_ex`` is idempotent: the 2nd resolve of the same thread
+        returns ``transition=None``. That is the mechanism that makes the
+        created/reopened announcements fire EXACTLY ONCE across the two-phase ingest
+        (materialize, t=0) + batch (save, t≈batch_delay) pipeline (plano 25 Fase 2).
+
+        Uma conversa closed é reaberta tanto por mensagem do cliente ("user") quanto
+        por resposta do atendente/IA ("assistant"); roles painel-only NÃO reabrem.
+        Returns ``(conv, conversation_id, transition)``; on a resolution error returns
+        ``(None, None, None)`` (fail-soft — the save still happens, just unlinked)."""
+        try:
+            conv, transition = conversation_repo.resolve_for_contact_ex(
+                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
+                inbox_id=self.inbox_id)
+            return conv, conv["id"], transition
+        except Exception:
+            logger.exception("Falha ao resolver conversa para %s", self.phone)
+            return None, None, None
+
+    def _run_lifecycle_reactions(self, conversation_id: int, transition: str | None,
+                                 conv: dict | None, role: str) -> None:
+        """Drive the after-resolve lifecycle reactions for one resolve: the automatic
+        created/reopened notice card, the ``conversation_created`` /
+        ``conversation_status_changed`` list broadcasts (sidebar/kanban re-file live)
+        and the ``conversation.reopened`` bus verb (plano 23 Fase C5 — they live in
+        :mod:`agent.message_listeners`). Runs SYNCHRONOUSLY in the caller's thread (a
+        sync ``add_message`` must still broadcast — the reopen-assertion suite checks
+        this right after the call). Exactly-once: only the resolve that actually
+        transitioned carries a non-None ``transition``; a reused thread no-ops inside
+        :func:`on_message_persisted`. Defensive — a failed reaction never breaks the
+        caller."""
+        try:
+            from agent.message_listeners import on_message_persisted
+            on_message_persisted(
+                conversation_id, self.id, self.phone,
+                transition=transition, conv=conv, role=role)
+        except Exception:
+            logger.exception("Falha nas reações de message.persisted para %s", self.phone)
+
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
                     reply_to_msg_id: str | None = None):
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
-        # tocar webhook.py. Inbound user message reabre uma conversa closed.
-        conversation_id = None
-        conv = None
-        transition = None  # "created" | "reopened" | None (plano 12 §3)
-        try:
-            # Uma conversa closed é reaberta tanto por mensagem do cliente ("user")
-            # quanto por resposta do atendente/IA ("assistant") — qualquer um dos dois
-            # lados voltando a falar reativa o atendimento (comportamento Chatwoot).
-            # Roles painel-only (private_note, system, tool_call, …) NÃO reabrem.
-            conv, transition = conversation_repo.resolve_for_contact_ex(
-                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
-                inbox_id=self.inbox_id)
-            conversation_id = conv["id"]
-            # New thread → tell the panel so the inbox row shows its assignee
-            # (e.g. "IA padrão") live, without waiting for a full refetch.
-            if conv.get("created"):
-                try:
-                    from plugins.context import broadcast
-                    broadcast("conversation_created", {
-                        "conversation_id": conv["id"],
-                        "contact_id": self.id,
-                        "status": conv.get("status"),
-                        "assignee_user_id": conv.get("assignee_user_id"),
-                        "active_agent_key": conv.get("active_agent_key"),
-                        "ai_active": conv.get("ai_active"),
-                    })
-                except Exception:
-                    logger.debug("conversation_created broadcast falhou para %s", self.phone)
-        except Exception:
-            logger.exception("Falha ao resolver conversa para %s", self.phone)
+        # tocar webhook.py. plano 25 Fase 2: the resolve is now a shared helper (also
+        # used by the ingest's ensure_conversation_live); the lifecycle reactions stay
+        # AFTER the INSERT — byte-identical ordering for any save not preceded by an
+        # ingest materialization (user message row first, then the created notice card).
+        conv, conversation_id, transition = self._resolve_conversation(role)
         saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
@@ -214,26 +233,41 @@ class ContactMemory:
                 conversation_repo.touch_activity(conversation_id)
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
-            # plano 23 Fase C5 (§2.4 — desacoplar memory.py): the hot path EMITS
-            # ``message.persisted`` (the single decoupling signal for plugins/audit)
-            # AND drives the lifecycle LISTENER directly. The after-INSERT side
-            # effects (automatic created/reopened notice, conversation_created /
-            # conversation_status_changed list broadcasts, the conversation.reopened
-            # bus verb) moved OUT of here into ``agent.message_listeners`` — this is
-            # the listener-reacts inversion. Driving it directly (not via the bus)
-            # keeps it exactly-once and synchronous (a sync save with no running bus
-            # loop must still broadcast — the 876 reopen assertion). Defensive: a
-            # failed reaction never breaks the save.
+            # plano 23 Fase C5 (§2.4): the hot path EMITS the PUBLIC ``message.persisted``
+            # signal (for plugins/audit) and then drives the lifecycle listener directly
+            # (kept here AFTER the INSERT to preserve the old ordering). Driving it
+            # directly (not via the bus) keeps it exactly-once and synchronous.
             self._emit_message_persisted(conversation_id, role, msg_id, saved)
-            try:
-                from agent.message_listeners import on_message_persisted
-                on_message_persisted(
-                    conversation_id, self.id, self.phone,
-                    transition=transition, conv=conv, role=role)
-            except Exception:
-                logger.exception("Falha nas reações de message.persisted para %s", self.phone)
+            self._run_lifecycle_reactions(conversation_id, transition, conv, role)
         # Touch updated_at
         contact_repo.update(self.id)
+
+    def ensure_conversation_live(self, role: str = "user") -> int | None:
+        """Materialize the atendimento thread at INGEST time (t=0) WITHOUT saving a
+        message (plano 25 Fase 2, bug #2 — "aba notifica antes da lista").
+
+        The receive pipeline is two-phase: the inbound message is only saved by the
+        batch (t≈``message_batch_delay``), which is also where ``add_message`` would
+        create/announce a brand-new conversation. Until then the conversa-cêntrica
+        sidebar has no row to show, so a NEW conversation appears ~3-4 s after the tab
+        badge. This resolves/creates the conversation NOW and fires the
+        created/reopened lifecycle reactions, so the panel's conversation list
+        materializes the row immediately (the ingest's ``new_message`` also carries the
+        returned ``conversation_id`` so the row updates in place).
+
+        Idempotent / exactly-once: the later batch ``add_message`` re-resolves the SAME
+        thread → ``transition=None`` → no re-announce. Deliberately does NOT save a
+        message and does NOT emit ``message.persisted`` (those belong to the real save
+        in the batch). Returns the conversation_id (``None`` if resolution failed).
+        Best-effort — never blocks ingest."""
+        conv, conversation_id, transition = self._resolve_conversation(role)
+        if conversation_id is not None:
+            try:
+                conversation_repo.touch_activity(conversation_id)
+            except Exception:
+                logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
+            self._run_lifecycle_reactions(conversation_id, transition, conv, role)
+        return conversation_id
 
     def _emit_message_persisted(self, conversation_id: int, role: str,
                                 msg_id: str | None, saved: dict | None) -> None:
