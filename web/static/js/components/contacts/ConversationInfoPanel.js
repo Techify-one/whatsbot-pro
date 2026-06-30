@@ -7,6 +7,7 @@ import {
 } from '../../services/api.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
 import { Slot } from '../../plugins/Slot.js';
+import { getFilters } from '../../plugins/registry.js';
 import { CloseIcon } from './icons.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { AssigneePicker } from './AssigneePicker.js';
@@ -132,27 +133,38 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   async function toggleStatus() {
     if (!conv || busy) return;
     const closing = conv.status === 'open';
+    // When a plugin owns the resolve flow (filter.conversation.beforeResolve), it collects
+    // and saves the conversation attributes in its own pre-filled popup — skip the native
+    // conversation-scope gate here so the two popups don't stack. Contact-scope stays gated.
+    const pluginOwnsResolve = getFilters('filter.conversation.beforeResolve').length > 0;
     // Resolver guard: every required ("Obrigatório preencher") attribute must have
     // a value before closing — conversation attributes first (priority), then the
     // contact's. Conversation values use the live (edited) state so the operator
     // can fill them right here; contact values come from the contact panel. Pending
     // conversation edits are persisted before closing. Reopening is never blocked.
     if (closing) {
-      const convMissing = missingRequiredAttributes(convDefs, convValues);
-      if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+      if (!pluginOwnsResolve) {
+        const convMissing = missingRequiredAttributes(convDefs, convValues);
+        if (convMissing.length) { setMissingAttrs({ list: convMissing, target: 'conversation' }); return; }
+      }
       const contactMissing = missingRequiredAttributes(contactDefs, contactInfo && contactInfo.custom_attributes);
       if (contactMissing.length) { setMissingAttrs({ list: contactMissing, target: 'contact' }); return; }
     }
     setBusy(true);
     try {
+      let convForResolve = conv;
       if (closing) {
         // Persist pending attribute edits first; abort the close if it fails
-        // (e.g. regex validation) so nothing is silently lost.
+        // (e.g. regex validation) so nothing is silently lost. The saved values also
+        // pre-fill the plugin's resolve popup (it reads conv.custom_attributes).
         const saveRes = await updateConversationInfo(conv.id, { custom_attributes: convValues });
         if (!(saveRes && saveRes.ok)) return;
-        if (saveRes.data && saveRes.data.conversation) mergeConv(saveRes.data.conversation);
+        if (saveRes.data && saveRes.data.conversation) {
+          mergeConv(saveRes.data.conversation);
+          convForResolve = { ...conv, ...saveRes.data.conversation };
+        }
       }
-      const r = await resolveConversation(conv, closing ? 'closed' : 'open');
+      const r = await resolveConversation(convForResolve, closing ? 'closed' : 'open');
       if (r && r.ok && r.data && r.data.conversation) mergeConv(r.data.conversation);
     } finally {
       setBusy(false);
