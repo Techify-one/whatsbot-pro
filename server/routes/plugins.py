@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import zipfile
@@ -21,6 +22,7 @@ from plugins.manifest import (
     find_manifest_file,
     load_manifest,
 )
+from plugins.migrator import run_pending_migrations
 from plugins.restart import schedule_restart
 from plugins.lifecycle import manager as _lifecycle_manager
 from plugins.events import emit as emit_event
@@ -32,6 +34,115 @@ logger = logging.getLogger(__name__)
 
 
 _PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+# Cap on the total UNCOMPRESSED size of an uploaded plugin zip (anti zip-bomb).
+_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB
+
+
+def _read_zip_manifest(contents: bytes) -> tuple[zipfile.ZipFile, dict, str]:
+    """Open an uploaded plugin zip and return (zipfile, manifest dict, plugin id).
+
+    Raises ValueError(<mensagem amigável>) on any malformed input so callers can
+    surface it via ``_err``.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(contents))
+    except zipfile.BadZipFile:
+        raise ValueError("arquivo .zip inválido")
+
+    names = zf.namelist()
+    manifest_name = next(
+        (c for c in ("plugin.yaml", "plugin.yml", "plugin.json") if c in names), None
+    )
+    if manifest_name is None:
+        raise ValueError("manifest (plugin.yaml/plugin.json) ausente na raiz do zip")
+    try:
+        manifest_text = zf.read(manifest_name).decode("utf-8")
+    except Exception as e:
+        raise ValueError(f"falha ao ler manifest: {e}")
+
+    if manifest_name.endswith(".json"):
+        try:
+            meta = json.loads(manifest_text)
+        except Exception as e:
+            raise ValueError(f"manifest JSON inválido: {e}")
+    else:
+        from plugins.manifest import _parse_yaml  # type: ignore
+        try:
+            meta = _parse_yaml(manifest_text) or {}
+        except Exception as e:
+            raise ValueError(f"manifest YAML inválido: {e}")
+
+    pid = meta.get("id") if isinstance(meta, dict) else None
+    if not isinstance(pid, str) or not _PLUGIN_ID_RE.match(pid):
+        raise ValueError("manifest sem id válido")
+    return zf, meta, pid
+
+
+def _reject_unsafe_zip_paths(zf: zipfile.ZipFile) -> None:
+    """Block path traversal (absolute paths / ``..``) before extracting."""
+    for member in zf.infolist():
+        name = member.filename
+        if name.startswith("/") or ".." in name.replace("\\", "/").split("/"):
+            raise ValueError(f"caminho perigoso no zip: {name}")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """Best-effort numeric key for comparing semver-ish versions.
+
+    Only the leading dotted integer components are compared (``1.2.3`` →
+    ``(1, 2, 3)``); pre-release/build suffixes are ignored. Good enough to flag a
+    downgrade — not a strict semver gate.
+    """
+    raw = str(version or "0").strip()
+    if raw[:1] in ("v", "V"):          # tolera prefixo "v" (ex.: "v1.2.3")
+        raw = raw[1:]
+    parts: list[int] = []
+    for chunk in re.split(r"[.\-+]", raw):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        else:
+            break
+    return tuple(parts) or (0,)
+
+
+def _swap_plugin_dir(zf: zipfile.ZipFile, plugins_dir: Path, pid: str) -> None:
+    """Replace ``plugins_dir/pid`` with the zip's contents, atomically-ish.
+
+    Extracts into a dot-prefixed staging dir (ignored by the loader), then renames
+    the current folder aside and the staging folder into place. On failure the
+    original folder is restored. NEVER touches the plugin's DB tables, settings or
+    migration history — only the on-disk code is swapped.
+    """
+    # Guard against a zip-bomb: cap the total uncompressed size before extracting.
+    total_uncompressed = sum(getattr(i, "file_size", 0) for i in zf.infolist())
+    if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(
+            f"zip grande demais: {total_uncompressed} bytes descomprimidos "
+            f"(limite {_MAX_UNCOMPRESSED_BYTES})"
+        )
+
+    target = plugins_dir / pid
+    staging = plugins_dir / f".{pid}.update-staging"
+    backup = plugins_dir / f".{pid}.update-backup"
+    for tmp in (staging, backup):
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    staging.mkdir(parents=True)
+    try:
+        zf.extractall(staging)
+    except Exception as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ValueError(f"falha ao extrair zip: {e}")
+
+    os.replace(target, backup)          # current code aside (same fs → atomic)
+    try:
+        os.replace(staging, target)     # new code into place
+    except Exception:
+        os.replace(backup, target)      # restore original on failure
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def register_routes(app, deps):
@@ -307,6 +418,100 @@ def register_routes(app, deps):
         if pid == "gowa":
             await asyncio.to_thread(config_repo.set, "gowa_uninstalled", "0")
         return _ok({"id": pid, "version": version, "enabled": False})
+
+    @app.post("/api/plugins/{plugin_id}/update",
+              dependencies=[Depends(require_permission("plugins.manage"))])
+    async def update_plugin(plugin_id: str, file: UploadFile):
+        """Update an already-installed plugin from a new .zip WITHOUT data loss.
+
+        Unlike import (which refuses an existing plugin) + delete (which drops the
+        plugin's tables), this swaps only the on-disk code. The DB tables, settings
+        (``plugin.<id>.*``) and migration history (``plugin_migrations``) are left
+        untouched, so on the next boot the loader applies ONLY the new pending
+        migrations (the migrator skips already-applied versions) — existing rows
+        are preserved. Plugin authors must ship NEW additive migration files
+        (``NNN_*.sql`` with ``ALTER TABLE`` / ``CREATE TABLE IF NOT EXISTS``).
+
+        Two contracts the author must respect (review findings #4 / P1):
+        * Migrations are keyed by their NUMBER only — re-using an applied number
+          with different SQL is silently skipped. Always add a higher-numbered
+          file; never edit an already-shipped migration.
+        * The plugin FOLDER is fully replaced. Runtime state must live in the
+          plugin's DB tables (``plugin_<id>_*``), never in files inside the
+          folder — those are overwritten by the new bundle.
+        """
+        if not _PLUGIN_ID_RE.match(plugin_id):
+            return _err("plugin id inválido")
+        target = plugins_dir / plugin_id
+        if not target.is_dir():
+            return _err("plugin não instalado — use Importar (.zip)", 404)
+
+        contents = await file.read()
+        try:
+            zf, meta, pid = _read_zip_manifest(contents)
+            if pid != plugin_id:
+                return _err(f"o .zip é do plugin '{pid}', não '{plugin_id}'")
+            _reject_unsafe_zip_paths(zf)
+        except ValueError as e:
+            return _err(str(e))
+
+        existing = await asyncio.to_thread(plugin_repo.get, plugin_id)
+        old_version = str((existing or {}).get("version") or "0.0.0")
+        new_version = str(meta.get("version") or "0.0.0")
+        downgrade = _version_key(new_version) < _version_key(old_version)
+
+        def _do_update() -> None:
+            _swap_plugin_dir(zf, plugins_dir, plugin_id)
+            # Preserve ``enabled`` (enabled=None) — an update keeps the plugin's
+            # current on/off state; only the version + updated_at change.
+            plugin_repo.upsert(plugin_id, new_version)
+            # Keep schema in lockstep with the bumped version (review finding #2).
+            # The boot loader only migrates ENABLED plugins, so a DISABLED plugin
+            # that already has a schema would report v_new while its tables stay at
+            # v_old until re-enabled. Apply the new pending migrations now for any
+            # plugin that already has applied migrations (i.e. real data exists);
+            # idempotent with the boot run. Never pre-creates tables for a plugin
+            # that was never enabled (no applied migrations → skip).
+            if plugin_repo.applied_migrations(plugin_id):
+                try:
+                    run_pending_migrations(load_manifest(target), target)
+                except Exception as e:  # noqa: BLE001 — surface, don't fail the swap
+                    plugin_repo.set_load_error(
+                        plugin_id, f"migração no update falhou: {e}")
+
+        try:
+            await asyncio.to_thread(_do_update)
+        except ValueError as e:
+            return _err(str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("update of plugin %s failed", plugin_id)
+            return _err(f"falha ao atualizar: {e}")
+
+        emit_event("plugin.updated", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "from_version": old_version, "to_version": new_version,
+            "_audit_before": {"version": old_version},
+            "_audit_after": {"version": new_version},
+        })
+        warning = (
+            f"downgrade: versão enviada (v{new_version}) é menor que a instalada "
+            f"(v{old_version})"
+        ) if downgrade else None
+        # plano 09 Fase 2: run the OLD plugin's teardown before swapping in the new
+        # code on reboot (the folder is already swapped; teardown frees in-memory
+        # resources/tasks the running instance still holds).
+        schedule_restart(
+            reason=f"plugin {plugin_id} updated v{old_version} -> v{new_version}",
+            on_before_exit=lambda: _lifecycle_manager.run_teardown(plugin_id),
+        )
+        return _ok({
+            "id": plugin_id,
+            "from_version": old_version,
+            "to_version": new_version,
+            "downgrade": downgrade,
+            "warning": warning,
+            "restarting": True,
+        })
 
     @app.post("/api/plugins/restart",
               dependencies=[Depends(require_permission("plugins.manage"))])

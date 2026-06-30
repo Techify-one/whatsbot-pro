@@ -37,6 +37,7 @@ HTTP, so the matrix has no structural SKIPs):
   tool_override.changed   → tool.override          (PUT  /api/tools/{name})
   plugin.enabled          → plugin.enable          (POST /api/plugins/{id}/enable)
   plugin.disabled         → plugin.disable         (POST /api/plugins/{id}/disable)
+  plugin.updated          → plugin.update          (POST /api/plugins/{id}/update)
   plugin.settings.changed → plugin.settings_update (PUT  /api/plugins/{id}/settings)
   contact.updated         → contact.update         (PUT  /api/contacts/{phone}/info)
   contact.ai_toggled      → contact.toggle_ai      (POST /api/contacts/{phone}/toggle-ai)
@@ -137,7 +138,7 @@ def audit_app(build_app):
         built.client.portal.call(_d)
 
     def _drive(method: str, url: str, *, action: str, resource_id=None,
-               json_body=None, expect: int = 200):
+               json_body=None, files=None, expect: int = 200):
         """Run one HTTP action; return the audit rows IT wrote (chronological).
 
         Concurrency-robust against the shared process DB (sibling characterization
@@ -155,7 +156,7 @@ def audit_app(build_app):
         """
         _drain()  # flush any pending audit writes from prior setup calls
         before = audit_repo.count()
-        resp = built.client.request(method, url, json=json_body)
+        resp = built.client.request(method, url, json=json_body, files=files)
         assert resp.status_code == expect, (url, resp.status_code, resp.text)
         _drain()
         delta = audit_repo.count() - before
@@ -287,6 +288,44 @@ def test_audit_plugin_enabled(audit_app):
     assert len(rows) == 1
     assert rows[0]["resource_id"] == "telegram"
     golden_assert("audit_plugin_enabled", _capture(rows))
+
+
+# ── plugin.updated → plugin.update (POST /api/plugins/{id}/update) ────────────
+
+def _minimal_plugin_zip(pid: str, version: str) -> bytes:
+    """A tiny valid plugin .zip (manifest at root) for the update endpoint."""
+    import io as _io
+    import json as _json
+    import zipfile as _zip
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as zf:
+        zf.writestr("plugin.json", _json.dumps(
+            {"id": pid, "name": pid.capitalize(), "version": version}))
+    return buf.getvalue()
+
+
+def test_audit_plugin_updated(audit_app):
+    """plugin.updated → plugin.update. resource_id = plugin id (RESOLVES).
+
+    Drives the data-preserving update endpoint with a new .zip. We pin the prior
+    version first so the audit before/after (version bump) is deterministic, and
+    patch ``schedule_restart`` (the route schedules an os._exit after emitting).
+    """
+    built, drive = audit_app
+    from db.repositories import plugin_repo
+    plugin_repo.upsert("telegram", "1.0.0")  # deterministic 'before' for the golden
+    import server.routes.plugins as pr
+    with patch.object(pr, "schedule_restart", lambda *a, **k: None):
+        rows, _ = drive(
+            "POST", "/api/plugins/telegram/update",
+            action="plugin.update", resource_id="telegram",
+            files={"file": ("telegram.zip",
+                            _minimal_plugin_zip("telegram", "9.9.9"),
+                            "application/zip")},
+        )
+    assert len(rows) == 1
+    assert rows[0]["resource_id"] == "telegram"
+    golden_assert("audit_plugin_updated", _capture(rows))
 
 
 # ── plugin.settings.changed → plugin.settings_update ─────────────────────────
@@ -444,7 +483,8 @@ def test_audit_matrix_is_complete():
 
     covered = {
         "config.changed", "tool_override.changed",
-        "plugin.enabled", "plugin.disabled", "plugin.settings.changed",
+        "plugin.enabled", "plugin.disabled", "plugin.updated",
+        "plugin.settings.changed",
         "contact.updated", "contact.ai_toggled", "contact.tagged",
         "tag.created", "tag.updated", "tag.deleted",
     }

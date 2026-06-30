@@ -45,6 +45,7 @@ class AuditAction:
     # Plugins
     PLUGIN_ENABLE = "plugin.enable"
     PLUGIN_DISABLE = "plugin.disable"
+    PLUGIN_UPDATE = "plugin.update"
     PLUGIN_SETTINGS_UPDATE = "plugin.settings_update"
     # Contacts / tags
     CONTACT_UPDATE = "contact.update"
@@ -65,6 +66,7 @@ AUDITABLE_EVENTS: dict[str, tuple[str, str]] = {
     "tool_override.changed":  (AuditAction.TOOL_OVERRIDE, ResourceType.TOOL),
     "plugin.enabled":         (AuditAction.PLUGIN_ENABLE, ResourceType.PLUGIN),
     "plugin.disabled":        (AuditAction.PLUGIN_DISABLE, ResourceType.PLUGIN),
+    "plugin.updated":         (AuditAction.PLUGIN_UPDATE, ResourceType.PLUGIN),
     "plugin.settings.changed": (AuditAction.PLUGIN_SETTINGS_UPDATE, ResourceType.PLUGIN),
     "contact.updated":        (AuditAction.CONTACT_UPDATE, ResourceType.CONTACT),
     "contact.ai_toggled":     (AuditAction.CONTACT_TOGGLE_AI, ResourceType.CONTACT),

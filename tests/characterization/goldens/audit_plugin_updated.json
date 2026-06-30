@@ -1,0 +1,19 @@
+{
+  "row_count": 1,
+  "rows": [
+    {
+      "action": "plugin.update",
+      "actor_label": null,
+      "actor_type": "system",
+      "after": {
+        "version": "9.9.9"
+      },
+      "before": {
+        "version": "1.0.0"
+      },
+      "resource_id": "telegram",
+      "resource_id_resolved": true,
+      "resource_type": "plugin"
+    }
+  ]
+}
