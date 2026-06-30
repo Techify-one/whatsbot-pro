@@ -24,11 +24,12 @@ import htm from 'htm';
 const html = htm.bind(h);
 
 const CORE_DIMENSIONS = [
-  { key: 'status',   label: 'Status',           ops: ['eq', 'ne'],                valueType: 'status' },
-  { key: 'channel',  label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
-  { key: 'agent',    label: 'Agente',           ops: ['eq', 'ne'],                valueType: 'agent' },
-  { key: 'tag',      label: 'Etiqueta',         ops: ['eq', 'ne'],                valueType: 'tag' },
-  { key: 'activity', label: 'Última atividade', ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
+  { key: 'status',     label: 'Status',              ops: ['eq', 'ne'],                valueType: 'status' },
+  { key: 'channel',    label: 'Canais',              ops: ['eq', 'ne'],                valueType: 'channel' },
+  { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
+  { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
+  { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
+  { key: 'activity',   label: 'Última atividade',    ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
 
@@ -49,7 +50,7 @@ const ATTR_TYPE_MAP = {
 };
 
 // Valores cujo input é multi-select (lista). As demais são escalares.
-const MULTI_TYPES = new Set(['channel', 'agent', 'tag', 'attr_list']);
+const MULTI_TYPES = new Set(['channel', 'agent', 'tag', 'conv_label', 'attr_list']);
 const isMultiType = (valueType) => MULTI_TYPES.has(valueType);
 const emptyValueFor = (dimDesc) => (dimDesc && isMultiType(dimDesc.valueType) ? [] : '');
 const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
@@ -189,7 +190,7 @@ function DimensionPicker({ dimensions, value, onChange }) {
   </div>`;
 }
 
-function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames, onChange }) {
+function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames, convLabelNames, onChange }) {
   const t = dimDesc.valueType;
   const cls = `${FIELD} flex-1 min-w-0`;
   if (t === 'status') {
@@ -214,6 +215,10 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
   }
   if (t === 'tag') {
     const options = tagNames.map(n => ({ value: n, label: n }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'conv_label') {
+    const options = (convLabelNames || []).map(n => ({ value: n, label: n }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   // ── Atributos personalizados ──
@@ -250,7 +255,7 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
 }
 
 export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
-  contactAttrDefs = [], convAttrDefs = [],
+  convLabelNames = [], contactAttrDefs = [], convAttrDefs = [],
   sortBy, onSortChange, sortOptions, onApply, onClose }) {
   // Dimensões = core + atributos personalizados (contato e conversa), dinâmicas.
   const dimensions = useMemo(() => [
@@ -299,7 +304,8 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
               ${dim.ops.map(op => html`<option key=${op} value=${op}>${OP_LABELS[op]}</option>`)}
             </select>
             <${ValueInput} clause=${c} dimDesc=${dim} channels=${channels} agentsUsers=${agentsUsers}
-              agentsAi=${agentsAi} tagNames=${tagNames} onChange=${(v) => patch(c.id, { value: v })} />
+              agentsAi=${agentsAi} tagNames=${tagNames} convLabelNames=${convLabelNames}
+              onChange=${(v) => patch(c.id, { value: v })} />
             <button onClick=${() => removeRow(c.id)} title="Remover filtro"
               class="shrink-0 w-[30px] h-[30px] flex items-center justify-center rounded-md text-wa-secondary hover:bg-wa-hover hover:text-red-400 transition-colors">
               <${TrashIcon} />

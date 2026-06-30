@@ -12,7 +12,7 @@ import time
 from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
 
 from db.engine import get_engine
-from db.repositories import conversation_query
+from db.repositories import conversation_query, conversation_label_repo
 from db.tables import (conversations, contacts, conversation_counters,
                        messages, unread_msg_ids, conversation_label_links)
 
@@ -205,6 +205,20 @@ _enriched_from = conversation_query.enriched_from
 _finalize_conv = conversation_query.finalize_conv
 
 
+def _attach_labels(rows: list[dict]) -> list[dict]:
+    """Enrich finalized conversation rows with their conversation-label names.
+
+    Conversation labels are SEPARATE from contact tags (own registry). The sidebar
+    filters by them client-side, so each row carries ``labels`` (list of names).
+    Done in ONE batched query for the whole page.
+    """
+    ids = [r["id"] for r in rows if r.get("id") is not None]
+    by_conv = conversation_label_repo.get_names_for_conversations(ids)
+    for r in rows:
+        r["labels"] = by_conv.get(r.get("id"), [])
+    return rows
+
+
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
                        assignee_user_id: int | None = None, is_archived: int | None = None,
                        inbox_ids: list[int] | None = None,
@@ -233,7 +247,7 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-    return [_finalize_conv(r) for r in rows]
+    return _attach_labels([_finalize_conv(r) for r in rows])
 
 
 def list_filtered(where, *, inbox_ids: list[int] | None = None,
@@ -252,7 +266,7 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-    return [_finalize_conv(r) for r in rows]
+    return _attach_labels([_finalize_conv(r) for r in rows])
 
 
 def get_with_channel(conv_id: int) -> dict | None:

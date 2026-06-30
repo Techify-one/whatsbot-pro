@@ -20,7 +20,7 @@ const html = htm.bind(h);
 // hardcoded — vêm dinamicamente como atributos personalizados do contato (são
 // seeds padrão), via `contactAttrDefs`.
 const CORE_DIMENSIONS = [
-  { key: 'tag', label: 'Etiqueta', ops: ['eq', 'ne'], valueType: 'tag' },
+  { key: 'tag', label: 'Etiqueta do contato', ops: ['eq', 'ne'], valueType: 'tag' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
 

@@ -62,7 +62,8 @@ export const DAY_SECONDS = 86400;
  */
 function matchOne(c, dim, value) {
   if (dim === 'channel') return (c.channel_id || 'default') === value;
-  if (dim === 'tag') return (c.tags || []).includes(value);
+  if (dim === 'tag') return (c.tags || []).includes(value);           // etiqueta do CONTATO
+  if (dim === 'conv_label') return (c.conv_labels || []).includes(value); // etiqueta da CONVERSA
   // agent
   if (value === 'none') return c.assignee_user_id == null && !c.active_agent_key;
   if (value.startsWith('user:')) return String(c.assignee_user_id) === value.slice(5);
@@ -122,9 +123,9 @@ export function clauseMatches(c, cl, now) {
   // Atributo personalizado dinâmico: cattr:<scope>:<key>.
   const cattr = typeof dim === 'string' && dim.match(/^cattr:(contact|conversation):(.+)$/);
   if (cattr) return attrMatches(c, cattr[1], cattr[2], op, value);
-  // channel / tag / agent — valor pode ser lista (multi-select). eq = "é uma de"
-  // (OR); ne = "não é nenhuma de". Escalar legado é tratado como lista de 1.
-  if (dim === 'channel' || dim === 'tag' || dim === 'agent') {
+  // channel / tag / conv_label / agent — valor pode ser lista (multi-select). eq = "é
+  // uma de" (OR); ne = "não é nenhuma de". Escalar legado é tratado como lista de 1.
+  if (dim === 'channel' || dim === 'tag' || dim === 'conv_label' || dim === 'agent') {
     const list = Array.isArray(value) ? value : [value];
     if (list.length === 0) return true;             // cláusula incompleta → ignorada
     const hit = list.some(v => matchOne(c, dim, v));
@@ -300,7 +301,7 @@ export function buildRows(contacts, conversations) {
       rows.push({
         ...c, contact_id: c.id, conversation_id: null,
         channel_id: 'default', channel_provider: null, channel_name: null,
-        conv_custom_attributes: {},
+        conv_custom_attributes: {}, conv_labels: [],
       });
     } else {
       for (const cv of convs) {
@@ -321,6 +322,9 @@ export function buildRows(contacts, conversations) {
           // key so they don't collide with the contact's `custom_attributes` (spread
           // from `...c` above). Both feed the cattr: filter dimensions.
           conv_custom_attributes: cv.custom_attributes || {},
+          // Etiquetas da CONVERSA (registro próprio, separado das tags do contato em
+          // `...c.tags`) — alimentam a dimensão de filtro `conv_label`.
+          conv_labels: cv.labels || [],
           // Preview + não-lidas vêm da CONVERSA (sobrescrevem os agregados do contato).
           last_message: (cv.last_message != null && cv.last_message !== '') ? cv.last_message : c.last_message,
           last_message_role: cv.last_message_role || c.last_message_role,
