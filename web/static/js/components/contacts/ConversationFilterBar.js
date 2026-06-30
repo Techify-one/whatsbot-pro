@@ -19,7 +19,7 @@ import { h } from 'preact';
 import { useState, useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { ConversationFilterDialog } from './ConversationFilterDialog.js';
-import { getCustomAttributes } from '../../services/api.js';
+import { getCustomAttributes, getConversationLabels } from '../../services/api.js';
 
 const html = htm.bind(h);
 
@@ -39,7 +39,7 @@ const SORT_OPTIONS = [
 // Each active filter dimension renders as its own chip with an individual ✕, so the
 // operator can drop one filter without reopening a dropdown/modal. Labels reuse the
 // same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
-const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta', activity: 'Atividade' };
+const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
 
 function _channelLabel(channels, value) {
   const ch = (channels || []).find(c => String(c.id) === String(value));
@@ -237,16 +237,28 @@ export function ConversationFilterBar({
   // dinâmicas no construtor. Recarrega ao ouvir o evento global de mudança.
   const [contactAttrDefs, setContactAttrDefs] = useState([]);
   const [convAttrDefs, setConvAttrDefs] = useState([]);
+  // Etiquetas da conversa (registro próprio, separado das tags de contato) → opções
+  // da dimensão "Etiqueta da conversa". Recarrega ao abrir o modal avançado.
+  const [convLabelNames, setConvLabelNames] = useState([]);
   useEffect(() => {
     let alive = true;
     const load = () => {
       getCustomAttributes('contact').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setContactAttrDefs(r.data); }).catch(() => {});
       getCustomAttributes('conversation').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvAttrDefs(r.data); }).catch(() => {});
+      getConversationLabels().then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvLabelNames(r.data.map(l => l.name)); }).catch(() => {});
     };
     load();
     window.addEventListener('whatsbot:custom-attributes-changed', load);
     return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
   }, []);
+  // Refresca as etiquetas da conversa toda vez que o modal avançado abre (o registro
+  // pode ter mudado em outra tela desde o load inicial).
+  useEffect(() => {
+    if (!advOpen) return;
+    let alive = true;
+    getConversationLabels().then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvLabelNames(r.data.map(l => l.name)); }).catch(() => {});
+    return () => { alive = false; };
+  }, [advOpen]);
   const allAttrDefs = [...contactAttrDefs, ...convAttrDefs];
 
   const tagNames = Object.keys(globalTags || {});
@@ -466,6 +478,7 @@ export function ConversationFilterBar({
               agentsUsers=${agentsUsers || []}
               agentsAi=${agentsAi || []}
               tagNames=${tagNames}
+              convLabelNames=${convLabelNames}
               contactAttrDefs=${contactAttrDefs}
               convAttrDefs=${convAttrDefs}
               sortBy=${sortBy}

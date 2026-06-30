@@ -105,6 +105,27 @@ def get_names_for_conversation(conv_id: int) -> list[str]:
     return [r["name"] for r in get_for_conversation(conv_id)]
 
 
+def get_names_for_conversations(conv_ids: list[int]) -> dict[int, list[str]]:
+    """Batch: label names per conversation in ONE query (feeds the sidebar list).
+
+    Returns ``{conversation_id: [name, ...]}`` — only conversations that have at
+    least one label appear; callers default the rest to ``[]``.
+    """
+    if not conv_ids:
+        return {}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(links.c.conversation_id, labels.c.name)
+            .join(labels, labels.c.id == links.c.label_id)
+            .where(links.c.conversation_id.in_(conv_ids))
+            .order_by(labels.c.position, labels.c.name)
+        ).all()
+    out: dict[int, list[str]] = {}
+    for conv_id, name in rows:
+        out.setdefault(conv_id, []).append(name)
+    return out
+
+
 def set_for_conversation(conv_id: int, names: list[str]) -> list[dict]:
     """Replace a conversation's labels with the given names (snapshot).
 
