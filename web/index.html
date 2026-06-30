@@ -42,8 +42,14 @@
       }
     }
   </script>
+  <!-- Toast UI Editor — WYSIWYG markdown editor (vendored UMD, exposes window.toastui.Editor).
+       Both base + dark themes are loaded; the dark sheet only styles .toastui-editor-dark,
+       toggled per-element by the MarkdownEditor wrapper to follow the app theme. -->
+  <link rel="stylesheet" href="/static/vendor/toastui-editor.min.css">
+  <link rel="stylesheet" href="/static/vendor/toastui-editor-dark.min.css">
   <link rel="stylesheet" href="/static/css/custom.css">
   <script src="/static/vendor/opus-recorder/recorder.min.js"></script>
+  <script src="/static/vendor/toastui-editor-all.min.js"></script>
   <script type="importmap">
   {
     "imports": {

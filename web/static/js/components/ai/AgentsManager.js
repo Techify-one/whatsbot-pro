@@ -21,6 +21,7 @@ import {
   listRegisteredTools,
 } from '../../services/api.js';
 import { ModelSelect } from '../ModelSelect.js';
+import { MarkdownEditor } from '../MarkdownEditor.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
 import PromptHistoryModal from './PromptHistoryModal.js';
 
@@ -256,11 +257,12 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
               title=${isNew ? 'Salve o agente para começar a versionar o prompt.' : 'Ver versões do prompt'}
               onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
           </div>
-          <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="12"
-            placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis."
-            value=${prompt} onInput=${(e) => setPrompt(e.target.value)}></textarea>
+          <${MarkdownEditor}
+            value=${prompt}
+            onChange=${setPrompt}
+            placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis." />
           <div class="text-[11px] text-wa-secondary mt-1">
-            Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
+            Edite o texto já formatado (negrito, listas, títulos) usando a barra de ferramentas — não precisa escrever markdown na mão. Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
           </div>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[13px] mt-2"
             type="text" placeholder="Descreva a mudança do prompt (opcional)"
