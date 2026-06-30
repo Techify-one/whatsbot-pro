@@ -24,7 +24,7 @@ from sqlalchemy import update  # noqa: E402
 from db.engine import get_engine  # noqa: E402
 from db.tables import inboxes  # noqa: E402
 from db.repositories import (  # noqa: E402
-    agent_repo, prompt_repo, conversation_repo, contact_repo,
+    agent_repo, conversation_repo, contact_repo,
 )
 from agent import agent_factory  # noqa: E402
 from agent.tools import transferir_agente, CORE_TOOLS  # noqa: E402
@@ -63,14 +63,14 @@ class FakeCtx:
         self.contact = contact
 
 
-# ── Seed agents/prompts ─────────────────────────────────────────────
+# ── Seed agents (prompt inline em cada agente) ──────────────────────
 agent_factory.seed_default_agent()
-prompt_repo.save("suporte_prompt", "Você é o agente de SUPORTE técnico.")
-agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
+agent_repo.save("suporte", display_name="Suporte",
+                prompt="Você é o agente de SUPORTE técnico.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True)
-agent_repo.save("vendas", display_name="Vendas", prompt_key="default",
+agent_repo.save("vendas", display_name="Vendas", prompt="Você é o agente de vendas.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True)
-agent_repo.save("triagem", display_name="Triagem", prompt_key="default",
+agent_repo.save("triagem", display_name="Triagem", prompt="Você é a triagem.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True,
                 is_router=True, routing_targets=["vendas"])
 
@@ -130,7 +130,8 @@ with get_engine().begin() as cn:
     cn.execute(update(inboxes).where(inboxes.c.id == conv["inbox_id"])
                .values(default_agent_key=None))
 conversation_repo.set_agent(conv["id"], "suporte")
-agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
+agent_repo.save("suporte", display_name="Suporte",
+                prompt="Você é o agente de SUPORTE técnico.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=False)
 dynamic_registry.invalidate()  # a API faz isso via _emit_changed; aqui o save é direto
 spec = agent_factory.build_for_contact(handler_on, contact)

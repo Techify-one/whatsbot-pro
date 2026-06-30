@@ -120,8 +120,9 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | `unread_msg_ids` | IDs de mensagens não lidas por contato |
 | `executions` | Tracking de execuções (webhook → resposta). Inclui `agent_key`, `total_tokens`, `total_cost_usd` (populados pelo writer a cada chamada de LLM) |
 | `execution_steps` | Passos de cada execução (tool calls, llm_request, etc.) |
-| `ai_agents` / `ai_prompts` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB (flag `ai_engine_enabled`, default OFF): agente, prompt-template, variáveis e tools com código Python no banco. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
-| `ai_agents_history` / `ai_prompts_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/prompt/tool |
+| `ai_agents` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB: agente, variáveis e tools com código Python no banco. O **prompt é inline em cada agente** (coluna `ai_agents.prompt`, texto livre próprio do agente — não reutilizável; `{placeholder}` resolvidos por `ai_variables`); editado no formulário do agente, não há mais aba/tabela de prompts compartilhados. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
+| `ai_prompts` / `ai_prompts_history` | **Legado** — eram templates de prompt reutilizáveis referenciados por `ai_agents.prompt_key`. Não são mais lidas na resolução do agente (o prompt agora é inline). Mantidas (não destrutivo) por compat; os endpoints `/api/ai/prompts*` continuam existindo mas não alimentam o motor |
+| `ai_agents_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/tool. O snapshot do agente inclui o `prompt` inline, então Histórico/Reverter cobrem o prompt |
 | `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
 | `plugin_migrations` | Versões de SQL migrations já aplicadas, por plugin |
 | `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |
@@ -242,7 +243,7 @@ Pontos-chave da integração:
 - **Reply**: `_extract_reply` pega a ÚLTIMA mensagem `assistant` sem tool calls de `run_output.messages` (fallback: `run_output.content`). Isso evita que o AGNO concatene um "chatter" pré-tool com a resposta final — crítico com `split_messages` (saída JSON array) ligado.
 - **Transcrição/descrição de mídia** continuam em chamadas diretas ao cliente OpenAI no handler (não são agênticas) — o cliente OpenAI segue vivo só para isso e para `test_api_key`.
 
-O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py), ligada por `ai_engine_enabled` — também single-agent.
+O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py) — também single-agent. O **prompt de cada agente é inline** (coluna `ai_agents.prompt`): cada agente escreve o próprio prompt no formulário do agente (tela Engine de IA → Agentes), sem seleção de template compartilhado. `build_for_contact` lê `agent["prompt"]` direto (fallback para o seed `DEFAULT_SYSTEM_PROMPT` quando vazio) e resolve `{placeholder}` via `ai_variables`. A coluna `prompt_key` e a tabela `ai_prompts` são legado e não participam mais da resolução.
 
 ## Fotos de perfil (avatars)
 

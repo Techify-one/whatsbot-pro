@@ -539,6 +539,13 @@ ai_agents = Table(
     # ``agent_key`` is identity — never rename (breaks executions.agent_key).
     Column("agent_key", Text, primary_key=True),
     Column("display_name", Text, nullable=False, server_default=""),
+    # Inline, per-agent system prompt (free text, not reusable across agents).
+    # Source of truth for resolution. ``{placeholder}`` slots are resolved from
+    # ai_variables at render time.
+    Column("prompt", Text, nullable=False, server_default=""),
+    # Legacy: reference to a shared ai_prompts template. No longer read for
+    # resolution (the inline ``prompt`` above replaced it); kept for back-compat
+    # with old rows/snapshots.
     Column("prompt_key", Text, nullable=False, server_default=""),
     # JSON object: {model, temperature, top_p, max_tokens, ...}
     Column("model_config", Text, nullable=False, server_default="{}"),

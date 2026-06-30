@@ -1,15 +1,16 @@
 // AI Engine — agents editor (plano 06). Lists, CREATES, edits, duplicates and
-// deletes agents: display_name, prompt_key (select dos prompts), model (select
-// de /api/models), model_config (temperature/top_p/max_tokens → objeto),
-// tool_names (todas|null ou multiselect do registry completo — core + plugin +
-// code-in-DB), enabled, description, is_router toggle e routing_targets
-// (multiselect de agent_keys quando router). Criar um agente = mesmo PUT do
-// editar (upsert no backend), só com uma agent_key nova. Cada save bumpa a
-// versão; o botão Histórico lista versões com Reverter. O agente `default` é o
-// fallback do motor e não pode ser excluído.
+// deletes agents: display_name, prompt (texto inline, próprio de cada agente —
+// não reutilizável), model (select de /api/models), model_config
+// (temperature/top_p/max_tokens → objeto), tool_names (todas|null ou multiselect
+// do registry completo — core + plugin + code-in-DB), enabled, description,
+// is_router toggle e routing_targets (multiselect de agent_keys quando router).
+// Criar um agente = mesmo PUT do editar (upsert no backend), só com uma agent_key
+// nova. Cada save bumpa a versão; o botão Histórico lista versões com Reverter
+// (incluindo o prompt). O agente `default` é o fallback do motor e não pode ser
+// excluído.
 
 import { h } from 'preact';
-import { useEffect, useState, useRef } from 'preact/hooks';
+import { useEffect, useMemo, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listAgents,
@@ -17,14 +18,25 @@ import {
   deleteAgent,
   getAgentHistory,
   rollbackAgent,
-  listPrompts,
   listRegisteredTools,
 } from '../../services/api.js';
 import { ModelSelect } from '../ModelSelect.js';
-import { SearchableSelect } from '../SearchableSelect.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
+
+// Extract {placeholder} tokens from the prompt body for a small preview chip list
+// (resolved from the Variáveis tab at render time).
+function extractPlaceholders(body) {
+  const out = [];
+  const seen = new Set();
+  const re = /\{([a-zA-Z0-9_]+)\}/g;
+  let m;
+  while ((m = re.exec(body || '')) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
+  }
+  return out;
+}
 
 // agent_key é IDENTIDADE — não pode ser renomeada depois (quebra executions.agent_key
 // e o histórico de usage). Mesmo padrão de prompts/tools.
@@ -90,11 +102,12 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCancel, busy }) {
+function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
-  const [promptKey, setPromptKey] = useState(agent.prompt_key || '');
+  const [prompt, setPrompt] = useState(agent.prompt || '');
+  const placeholders = useMemo(() => extractPlaceholders(prompt), [prompt]);
   const [model, setModel] = useState(mc.model || '');
   const [temperature, setTemperature] = useState(numField(mc.temperature));
   const [topP, setTopP] = useState(numField(mc.top_p));
@@ -151,7 +164,7 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
     const finalKey = isNew ? trimmedKey : agent.agent_key;
     onSave(finalKey, {
       display_name: displayName.trim(),
-      prompt_key: promptKey,
+      prompt: prompt,
       model_config: buildModelConfig(),
       tool_names: allTools ? null : toolNames,
       enabled,
@@ -191,19 +204,23 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
         </div>
 
         <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Prompt</label>
-          <${SearchableSelect}
-            value=${promptKey}
-            onChange=${setPromptKey}
-            options=${(prompts || []).map(p => ({ value: p.prompt_key, label: p.prompt_key }))}
-            placeholder="— padrão do app —"
-            searchPlaceholder="Buscar prompt..."
-            allowEmpty=${true}
-            emptyLabel="— padrão do app —"
-          />
+          <label class="block text-[12px] text-wa-secondary mb-1">Prompt do agente</label>
+          <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="12"
+            placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis."
+            value=${prompt} onInput=${(e) => setPrompt(e.target.value)}></textarea>
           <div class="text-[11px] text-wa-secondary mt-1">
-            Sem prompt selecionado, o agente usa o system prompt padrão do app. Crie prompts na aba <span class="font-medium">Prompts</span>.
+            Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
           </div>
+          ${placeholders.length > 0 ? html`
+            <div class="mt-2">
+              <div class="text-[11px] text-wa-secondary mb-1">Placeholders detectados (resolvidos pela aba <span class="font-medium">Variáveis</span>)</div>
+              <div class="flex flex-wrap gap-1">
+                ${placeholders.map(p => html`
+                  <span key=${p} class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal font-mono">{${p}}</span>
+                `)}
+              </div>
+            </div>
+          ` : null}
         </div>
 
         <div>
@@ -312,7 +329,6 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
 
 export default function AgentsManager({ initialEntity }) {
   const [agents, setAgents] = useState([]);
-  const [prompts, setPrompts] = useState([]);
   const [tools, setTools] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -328,8 +344,8 @@ export default function AgentsManager({ initialEntity }) {
   async function load() {
     setLoading(true);
     setError('');
-    const [aRes, pRes, tRes] = await Promise.all([
-      listAgents(), listPrompts(), listRegisteredTools(),
+    const [aRes, tRes] = await Promise.all([
+      listAgents(), listRegisteredTools(),
     ]);
     if (aRes && aRes.ok) {
       const list = aRes.data || [];
@@ -338,7 +354,6 @@ export default function AgentsManager({ initialEntity }) {
     } else {
       setError((aRes && aRes.error) || 'Falha ao carregar agentes.');
     }
-    if (pRes && pRes.ok) setPrompts(pRes.data || []);
     if (tRes && tRes.ok) setTools(tRes.data || []);
     setLoading(false);
   }
@@ -430,13 +445,13 @@ export default function AgentsManager({ initialEntity }) {
       ${creating ? html`
         <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
           existingKeys=${agents.map(a => a.agent_key)}
-          prompts=${prompts} tools=${tools}
+          tools=${tools}
           onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
       ` : null}
 
       ${editing ? html`
         <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-          prompts=${prompts} tools=${tools}
+          tools=${tools}
           onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
       ` : null}
 
@@ -462,11 +477,11 @@ export default function AgentsManager({ initialEntity }) {
                 ${a.agent_key === 'default' ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
               </div>
               <div class="text-[12px] text-wa-secondary mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                <span>prompt: <span class="font-mono">${a.prompt_key || '—'}</span></span>
                 <span>modelo: <span class="font-mono">${(a.model_config && a.model_config.model) || 'padrão'}</span></span>
                 <span>tools: ${a.tool_names == null ? 'todas' : `${a.tool_names.length} selecionadas`}</span>
                 <span>v${a.version || 1}</span>
               </div>
+              ${a.prompt ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words line-clamp-2 whitespace-pre-wrap">${a.prompt.slice(0, 160)}${a.prompt.length > 160 ? '…' : ''}</div>` : null}
               ${a.description ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${a.description}</div>` : null}
             </div>
             <div class="flex gap-1 shrink-0 flex-wrap justify-end">

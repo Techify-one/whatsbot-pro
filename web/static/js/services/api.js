@@ -720,10 +720,17 @@ export async function getAgent(key) {
   return request('GET', `/api/ai/agents/${encodeURIComponent(key)}`);
 }
 
-// body: {display_name, prompt_key, model_config(obj), tool_names(list|null),
+// body: {display_name, prompt(string), model_config(obj), tool_names(list|null),
 //        enabled(bool), description, is_router(bool), routing_targets(list|null)}
+// `prompt` is the agent's inline system prompt (free text, per-agent — not reusable).
 export async function saveAgent(key, data) {
   return request('PUT', `/api/ai/agents/${encodeURIComponent(key)}`, data);
+}
+
+// Patch only an agent's inline prompt, preserving its other fields. Used by the
+// onboarding wizard (which knows the prompt but not the full agent payload).
+export async function saveAgentPrompt(key, prompt) {
+  return request('PUT', `/api/ai/agents/${encodeURIComponent(key)}/prompt`, { prompt });
 }
 
 export async function getAgentHistory(key) {
