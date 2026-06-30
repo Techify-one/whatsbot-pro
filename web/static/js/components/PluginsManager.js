@@ -56,7 +56,10 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
   const [importing, setImporting] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [exporting, setExporting] = useState({}); // { [pluginId]: pct (0-100) }
+  const [updating, setUpdating] = useState(null); // pid sendo atualizado
   const fileRef = useRef(null);
+  const updateFileRef = useRef(null);
+  const pendingUpdatePid = useRef(null); // pid alvo do <input> de atualização
 
   // Deep-link /plugins/<id>: a URL reflete o plugin com o modal Configurar aberto.
   const pushUrl = useDeepLink({
@@ -206,6 +209,44 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
     }
   }
 
+  // Atualizar: troca o código do plugin por um novo .zip SEM apagar tabelas/dados
+  // (diferente de Deletar + Importar). O backend preserva o banco e roda só as
+  // migrations novas no restart.
+  function pickUpdate(pid) {
+    if (!confirm(
+      `Atualizar o plugin '${pid}' com um novo .zip?\n\n` +
+      `Os dados e tabelas dele são PRESERVADOS — apenas o código é trocado e ` +
+      `as migrations novas rodam no reinício.`
+    )) return;
+    pendingUpdatePid.current = pid;
+    if (updateFileRef.current) updateFileRef.current.click();
+  }
+
+  async function updatePlugin(pid, file) {
+    if (!file || !pid) return;
+    setUpdating(pid);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`/api/plugins/${pid}/update`, { method: 'POST', body: fd, headers: authHeaders() });
+      if (r.status === 401) { handleUnauthorized(); throw new Error('Não autenticado.'); }
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || 'falha');
+      if (data.data && data.data.warning) alert(`Atenção — ${data.data.warning}`);
+      // Limpa o estado por-card: o RestartBanner (overlay) assume a UI a partir
+      // daqui, e se o poll de restart estourar o timeout o botão não fica preso
+      // em "Atualizando…".
+      setUpdating(null);
+      setRestarting(true);
+    } catch (e) {
+      alert(`Erro ao atualizar: ${e.message || e}`);
+      setUpdating(null);
+    } finally {
+      pendingUpdatePid.current = null;
+      if (updateFileRef.current) updateFileRef.current.value = '';
+    }
+  }
+
   if (loading) return html`<div class="text-wa-secondary">Carregando plugins…</div>`;
   if (error) return html`<div class="text-red-600">Erro: ${error}</div>`;
 
@@ -232,6 +273,8 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
           >Loja de Plugins</a>
           <input type="file" ref=${fileRef} accept=".zip" class="hidden"
             onChange=${e => importPlugin(e.target.files && e.target.files[0])} />
+          <input type="file" ref=${updateFileRef} accept=".zip" class="hidden"
+            onChange=${e => updatePlugin(pendingUpdatePid.current, e.target.files && e.target.files[0])} />
           <button
             disabled=${importing}
             onClick=${() => fileRef.current && fileRef.current.click()}
@@ -290,6 +333,12 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
                     disabled=${exporting[p.id] != null}
                     class="px-3 py-1 text-[13px] rounded bg-wa-panel border border-wa-border disabled:opacity-50"
                   >${exporting[p.id] != null ? 'Exportando…' : 'Exportar'}</button>
+                  <button
+                    onClick=${() => pickUpdate(p.id)}
+                    disabled=${updating === p.id}
+                    title="Enviar um novo .zip preservando os dados/tabelas do plugin"
+                    class="px-3 py-1 text-[13px] rounded bg-blue-50 text-blue-700 border border-blue-200 disabled:opacity-50"
+                  >${updating === p.id ? 'Atualizando…' : 'Atualizar'}</button>
                   <button
                     onClick=${() => deletePlugin(p.id)}
                     class="px-3 py-1 text-[13px] rounded bg-red-50 text-red-700 border border-red-200"

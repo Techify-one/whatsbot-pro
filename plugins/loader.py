@@ -14,6 +14,9 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import logging
+import os
+import re
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -84,12 +87,61 @@ class PluginRegistry:
         return self.loaded.get(plugin_id)
 
 
+_UPDATE_TMP_RE = re.compile(r"^\.(?P<pid>[a-z][a-z0-9_]{0,31})\.update-(?P<kind>staging|backup)$")
+
+
+def _recover_interrupted_updates(plugins_dir: Path) -> None:
+    """Heal a plugin folder swap that a hard crash interrupted (review finding #1).
+
+    ``server.routes.plugins._swap_plugin_dir`` replaces a plugin in two renames:
+    ``pid`` → ``.pid.update-backup``, then ``.pid.update-staging`` → ``pid``. A
+    process kill (OOM, power loss, a concurrent ``os._exit`` from
+    ``schedule_restart``) BETWEEN those two renames leaves ``pid`` gone with the
+    code stranded in the dot-dirs — which discovery skips — so the plugin would
+    silently vanish from disk with no auto-restore. On the next boot we recover:
+
+    * ``pid`` missing + staging present → promote staging (update all but finished).
+    * ``pid`` missing + only backup     → restore backup (revert to old code).
+    * ``pid`` present                   → drop any leftover staging/backup.
+    """
+    if not plugins_dir.is_dir():
+        return
+    pids: set[str] = set()
+    for child in plugins_dir.iterdir():
+        m = _UPDATE_TMP_RE.match(child.name)
+        if m and child.is_dir():
+            pids.add(m.group("pid"))
+    for pid in pids:
+        target = plugins_dir / pid
+        staging = plugins_dir / f".{pid}.update-staging"
+        backup = plugins_dir / f".{pid}.update-backup"
+        if target.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.rmtree(backup, ignore_errors=True)
+            continue
+        source = staging if staging.is_dir() else (backup if backup.is_dir() else None)
+        if source is None:
+            continue
+        try:
+            os.replace(source, target)
+            logger.warning("Recovered interrupted plugin update: %s -> %s/%s",
+                           source.name, plugins_dir.name, pid)
+        except OSError as e:
+            logger.error("Could not recover interrupted update for %s: %s", pid, e)
+            continue
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup, ignore_errors=True)
+
+
 def discover_and_load(plugins_dir: Path) -> PluginRegistry:
     """Scan ``plugins_dir``, sync DB, run migrations and import enabled plugins."""
     registry = PluginRegistry()
     if not plugins_dir.is_dir():
         plugins_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Created plugins directory: %s", plugins_dir)
+
+    # Before discovery: finish/revert any plugin update a crash left half-swapped.
+    _recover_interrupted_updates(plugins_dir)
 
     for child in sorted(plugins_dir.iterdir()):
         if not child.is_dir():

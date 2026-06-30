@@ -63,7 +63,7 @@ KNOWN_EVENTS: set[str] = {
     "connection.changed",
     "app.startup", "app.shutdown",
     "plugin.loaded", "plugin.enabled", "plugin.disabled",
-    "plugin.settings.changed",
+    "plugin.settings.changed", "plugin.updated",
     # LLM / tools
     "llm.before", "llm.after",
     "tool.before", "tool.after",
@@ -166,7 +166,7 @@ _DISPATCH_ONLY_KEYS: set[str] = {"*", "message.any"}
 _LIFECYCLE_EVENTS: set[str] = {
     "app.startup", "app.shutdown",
     "plugin.loaded", "plugin.enabled", "plugin.disabled",
-    "plugin.settings.changed",
+    "plugin.settings.changed", "plugin.updated",
 }
 
 # name -> [(plugin_id, handler), ...] in registration order
