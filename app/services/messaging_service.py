@@ -764,7 +764,14 @@ class MessagingService:
                 "combined_preview": "\n".join(t for t in text_parts if t)[:200],
             })
 
-            if self._channel_ai_enabled(channel_id):
+            # plano 25 Fase 1: only the AI auto-marking-read (+ real read-receipt) when
+            # it is actually TAKING OVER this conversation. The gate needs all three AI
+            # layers (plano 21): global auto_reply + channel ai_enabled (_channel_ai_enabled)
+            # AND the per-conversation ai_active flag (_conversation_ai_active) — mirror of
+            # the AI-reply gate at the text/media branches below. Without the per-conversation
+            # check, an IA-OFF conversation would still clear the unread badge and send a
+            # bogus "read"/blue-tick to the client on channels that support it.
+            if self._channel_ai_enabled(channel_id) and _conversation_ai_active(contact):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
