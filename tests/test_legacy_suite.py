@@ -32,7 +32,6 @@ LEGACY_FILES = [
     "test_agent_routing.py",
     "test_events_filters.py",
     "test_gowa_plugin.py",
-    "test_group_mentions.py",
     "test_hooks.py",
     "test_model_factory.py",
     "test_plugin_events.py",
