@@ -25,6 +25,8 @@ import {
   updateChannel,
   deleteChannel,
   getChannelStatus,
+  channelReconnect,
+  channelLogout,
   setChannelMembers,
   listChannelProviders,
   telegramAutoconfigure,
@@ -252,6 +254,25 @@ export default function ChannelsManager({ initialEntity }) {
     }
   }
 
+  // Reconnect a paired-but-offline GOWA device (no QR); refresh dots after.
+  async function handleReconnect(channel) {
+    setBusyId(channel.id); setError('');
+    const res = await channelReconnect(channel.id);
+    setBusyId('');
+    if (res && res.ok) refreshStatuses();
+    else setError((res && res.error) || 'Falha ao reconectar o canal.');
+  }
+
+  // Log the device out of WhatsApp — destructive, so confirm first.
+  async function handleLogout(channel) {
+    if (!confirm('Desconectar este número do WhatsApp? Vai precisar ler o QR de novo pra reconectar.')) return;
+    setBusyId(channel.id); setError('');
+    const res = await channelLogout(channel.id);
+    setBusyId('');
+    if (res && res.ok) refreshStatuses();
+    else setError((res && res.error) || 'Falha ao desconectar o canal.');
+  }
+
   return html`
     <div>
       <div class="flex items-center justify-between mb-4 gap-3">
@@ -302,6 +323,8 @@ export default function ChannelsManager({ initialEntity }) {
             onPurge=${handlePurge}
             onRefresh=${handleRefresh}
             onConnect=${handleConnect}
+            onReconnect=${handleReconnect}
+            onLogout=${handleLogout}
             onEdit=${handleEdit}
             busyId=${busyId}
             requiredCreds=${requiredCreds} />

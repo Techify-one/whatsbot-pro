@@ -281,6 +281,37 @@ async def qr(deps, row: dict):
     return png or ""
 
 
+async def _session_action(deps, row: dict, action: str):
+    """Shared body for per-channel ``reconnect``/``logout`` (plano 27 F3.1).
+
+    Mirrors :func:`qr`: gate to GOWA, register the live instance on-demand, then
+    call ``inst.<action>`` off-thread. Returns the ``{ok, error}`` dict, or a
+    sentinel: ``"not_gowa"`` (provider isn't GOWA) / ``"unavailable"`` (no live
+    instance / method)."""
+    if row.get("provider") != "gowa":
+        return "not_gowa"
+    registry = getattr(deps, "channel_registry", None)
+    channel_id = row["id"]
+    inst = registry.get(channel_id) if registry is not None else None
+    if inst is None:
+        register_live(deps, channel_id, "gowa", row)
+        inst = registry.get(channel_id) if registry is not None else None
+    method = getattr(inst, action, None)
+    if inst is None or method is None:
+        return "unavailable"
+    return await asyncio.to_thread(method)
+
+
+async def reconnect(deps, row: dict):
+    """Reconnect a GOWA channel's device socket (acts on the right device)."""
+    return await _session_action(deps, row, "reconnect")
+
+
+async def logout(deps, row: dict):
+    """Log a GOWA channel's device out of WhatsApp (acts on the right device)."""
+    return await _session_action(deps, row, "logout")
+
+
 # ── Members ─────────────────────────────────────────────────────────────────────
 
 async def get_members(deps, row: dict) -> dict:

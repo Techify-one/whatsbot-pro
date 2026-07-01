@@ -6,15 +6,21 @@ import { h } from 'preact';
 import htm from 'htm';
 import { providerMeta, credLabel, missingCredsFor } from './constants.js';
 import { Dot } from './notices.js';
+import { WebhookHealthRow } from './WebhookHealthRow.js';
 
 const html = htm.bind(h);
 
-export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onEdit, busyId, requiredCreds }) {
+export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onReconnect, onLogout, onEdit, busyId, requiredCreds }) {
   const meta = providerMeta(channel.provider);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
   const busy = busyId === channel.id;
-  const canConnect = channel.provider === 'gowa' && !channel.logged_in;
+  const isGowa = channel.provider === 'gowa';
+  const canConnect = isGowa && !channel.logged_in;
+  // Session actions (plano 27 D5), GOWA-only: "Reconectar" when paired but the
+  // socket is down; "Desconectar" whenever there's a session to drop.
+  const canReconnect = isGowa && channel.logged_in && !channel.connected;
+  const canLogout = isGowa && channel.logged_in;
   // Zombie-channel detection: required credentials this channel is missing
   // (capability-driven via the providers fetch, local fallback otherwise). A
   // credential-only provider missing these can never connect — flag it with a
@@ -48,6 +54,8 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
           ` : null}
         </div>
 
+        <${WebhookHealthRow} channel=${channel} />
+
         ${credEntries.length ? html`
           <div class="text-[12px] text-wa-secondary mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
             ${credEntries.map(([k, v]) => html`
@@ -76,6 +84,14 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
         ${canConnect ? html`
           <button class="px-2 py-1 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick=${() => onConnect(channel)} disabled=${busy}>Conectar</button>
+        ` : null}
+        ${canReconnect ? html`
+          <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
+            onClick=${() => onReconnect(channel)} disabled=${busy}>Reconectar</button>
+        ` : null}
+        ${canLogout ? html`
+          <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
+            onClick=${() => onLogout(channel)} disabled=${busy}>Desconectar</button>
         ` : null}
         <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onEdit(channel)} disabled=${busy}>Editar</button>

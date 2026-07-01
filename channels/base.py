@@ -71,6 +71,15 @@ class Channel(ABC):
     def get_qr(self) -> Optional[bytes]:
         return None
 
+    # Session actions — meaningful only for QR/linked-device providers (GOWA).
+    # Default no-op so telegram/cloud/test don't have to implement them
+    # (plano 27 D4).
+    def reconnect(self) -> dict:  # default: unsupported
+        return {"ok": False, "error": "não suportado"}
+
+    def logout(self) -> dict:  # default: unsupported
+        return {"ok": False, "error": "não suportado"}
+
     # ── Outbound ─────────────────────────────────────────────────────
     @abstractmethod
     def send_text(self, chat_id: str, text: str, *, reply_to=None,

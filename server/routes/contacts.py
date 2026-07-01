@@ -639,7 +639,7 @@ def register_routes(app, deps):
     @app.delete("/api/contacts/{phone}")
     async def delete_contact(phone: str, request: Request):
         """Permanently delete a contact and all associated data."""
-        denied = permission_denied(request, "contact.write")
+        denied = permission_denied(request, "contact.delete")
         if denied:
             return denied
         def _delete():

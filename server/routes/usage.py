@@ -76,7 +76,7 @@ def register_routes(app, deps):
 
     @app.get("/api/usage/summary")
     async def usage_summary_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
@@ -87,7 +87,7 @@ def register_routes(app, deps):
 
     @app.get("/api/usage/by-contact")
     async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
@@ -96,7 +96,7 @@ def register_routes(app, deps):
 
     @app.get("/api/usage/contact/{phone}")
     async def usage_contact_detail(phone: str, request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)

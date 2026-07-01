@@ -214,6 +214,8 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   const isOpen = conv && conv.status === 'open';
   const providerLabel = conv && (conv.channel_name || PROVIDER_LABELS[conv.channel_provider] || conv.channel_provider || '—');
   const canResolve = hasPermission(user, 'conversation.resolve');
+  const canAssign = hasPermission(user, 'conversation.assign');
+  const canReply = hasPermission(user, 'conversation.reply');
 
   return html`
     <div ref=${panelRootRef} class="absolute inset-0 z-50 flex justify-end">
@@ -267,17 +269,21 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             </div>
 
             <!-- Atribuição (humano ou IA) -->
+            ${canAssign ? html`
             <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
               <${AssigneePicker} conv=${conv} onChange=${mergeConv} />
             </div>
+            ` : null}
 
             <!-- Etiquetas da conversa (Onda 3) -->
+            ${canReply ? html`
             <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
-              <${ConversationLabelEditor} conversationId=${conv.id} />
+              <${ConversationLabelEditor} conversationId=${conv.id} currentUser=${user} />
             </div>
+            ` : null}
 
             <!-- Atributos da conversa -->
-            ${convDefs.length > 0 ? html`
+            ${canReply && convDefs.length > 0 ? html`
               <div ref=${attrsRef} class="bg-wa-bg px-6 py-4 border-b border-wa-border transition-all duration-300 ${highlightAttrs ? 'ring-2 ring-inset ring-red-500' : ''}">
                 <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados desta conversa</div>
                 <div class="space-y-4">

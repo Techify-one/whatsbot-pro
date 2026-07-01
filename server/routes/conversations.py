@@ -385,10 +385,11 @@ def register_routes(app, deps):
         """Hard-delete a single conversation/thread (plano 16, ação A).
 
         Removes only this conversation + its messages — the contact and its other
-        conversations are kept. Gated by ``conversation.resolve`` (reused; we do
-        NOT invent ``conversation.delete``). No lifecycle card is emitted (the
-        thread it would land in is destroyed)."""
-        denied = permission_denied(request, "conversation.resolve")
+        conversations are kept. Gated by ``conversation.delete`` (plano 24: split
+        from ``conversation.resolve`` so an atendente can resolve without hard-
+        deleting). No lifecycle card is emitted (the thread it would land in is
+        destroyed)."""
+        denied = permission_denied(request, "conversation.delete")
         if denied:
             return denied
         # Read the enriched row BEFORE deleting — afterwards the payload (phone,
@@ -411,7 +412,7 @@ def register_routes(app, deps):
 
     @app.post("/api/conversations/{conv_id}/archive")
     async def archive(conv_id: int, body: dict, request: Request):
-        denied = permission_denied(request, "conversation.read")
+        denied = permission_denied(request, "conversation.resolve")
         if denied:
             return denied
         archived = 1 if body.get("archived") else 0

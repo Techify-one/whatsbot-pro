@@ -35,13 +35,17 @@ screens:
     path: /atendimentos/config
     config: true
     component: /plugins/atendimentos/static/config.js
-    requires: edit
+    requires: config
 permissions:
   - db.write
 rbac:
   group: Atendimentos
   permissions:
     - { key: view, label: "Ver atendimentos" }
-    - { key: edit, label: "Editar/fechar atendimentos, resolver e configurar campos" }
+    - { key: edit, label: "Editar campos/observações do atendimento" }
     - { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" }
+    - { key: resolve, label: "Fechar/reabrir atendimento e resolver conversa" }
+    - { key: assign, label: "Atribuir/reatribuir atendimentos" }
+    - { key: config, label: "Configurar campos e avaliação do plugin" }
+    - { key: delete, label: "Excluir atendimentos" }
 dependencies: []

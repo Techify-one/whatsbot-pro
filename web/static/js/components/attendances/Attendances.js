@@ -306,7 +306,7 @@ export function Attendances() {
               showChannel=${showChannel} onOpenChat=${openChat} onCardDrop=${handleCardDrop} />`
           : html`<${AttendanceList}
               conversations=${conversationsForBoard} assigneeNameOf=${assigneeNameOf}
-              currentUserId=${currentUserId} showChannel=${showChannel} labelsOf=${labelsOf}
+              currentUserId=${currentUserId} currentUser=${currentUser} showChannel=${showChannel} labelsOf=${labelsOf}
               onOpenChat=${openChat} onAction=${handleAction} />`}
     </div>
   `;

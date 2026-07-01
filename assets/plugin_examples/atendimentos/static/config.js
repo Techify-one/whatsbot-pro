@@ -26,7 +26,7 @@ function slug(s) {
 }
 
 export default function AtendimentosConfig({ apiBase = '/api/plugins/atendimentos', can }) {
-  const canEdit = !can || can('edit');
+  const canEdit = !can || can('config');
   const [tab, setTab] = useState('atendimento'); // 'atendimento' | 'conversa' | 'avaliacao'
   const [defs, setDefs] = useState([]);
   const [loading, setLoading] = useState(true);

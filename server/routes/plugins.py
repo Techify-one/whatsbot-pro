@@ -153,7 +153,8 @@ def register_routes(app, deps):
     # _err(403) envelope (idempotent across route modules).
     install_exception_handlers(app)
 
-    @app.get("/api/plugins")
+    @app.get("/api/plugins",
+             dependencies=[Depends(require_permission("plugins.manage"))])
     async def list_plugins():
         """List every plugin known on disk, with DB metadata merged in."""
         rows = await asyncio.to_thread(plugin_repo.list_all)
@@ -280,7 +281,8 @@ def register_routes(app, deps):
 
     # ── Settings ─────────────────────────────────────────────────────
 
-    @app.get("/api/plugins/{plugin_id}/settings")
+    @app.get("/api/plugins/{plugin_id}/settings",
+             dependencies=[Depends(require_permission("plugins.manage"))])
     async def get_plugin_settings(plugin_id: str):
         loaded = registry.loaded.get(plugin_id) if registry else None
         if not loaded or not loaded.settings_cls:
@@ -325,7 +327,8 @@ def register_routes(app, deps):
 
     # ── Import / Export ───────────────────────────────────────────────
 
-    @app.get("/api/plugins/{plugin_id}/export")
+    @app.get("/api/plugins/{plugin_id}/export",
+             dependencies=[Depends(require_permission("plugins.manage"))])
     async def export_plugin(plugin_id: str):
         if not _PLUGIN_ID_RE.match(plugin_id):
             return _err("plugin id inválido")

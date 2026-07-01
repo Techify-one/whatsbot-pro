@@ -3,6 +3,7 @@ import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { EmojiPicker } from './EmojiPicker.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -25,7 +26,10 @@ function formatRecordTime(secs) {
 export function Composer({
   sandbox, canSend, templatesSupported, sessionClosed,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
+  currentUser = null,
 }) {
+  // P48: the /atalho quick-reply picker only shows for users who can manage them.
+  const canQuickReply = sandbox || hasPermission(currentUser, 'quickreply.manage');
   const {
     input, mode, setMode, aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen, inputRef, emojiRef,
@@ -276,7 +280,7 @@ export function Composer({
               </div>
             `;
           })() : ''}
-          ${quickReplyMenu ? (() => {
+          ${quickReplyMenu && canQuickReply ? (() => {
             const cands = getQuickReplyCandidates(quickReplyMenu.query);
             if (!cands.length) return '';
             const sel = Math.min(quickReplyMenu.index || 0, cands.length - 1);

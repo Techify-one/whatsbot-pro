@@ -39,7 +39,7 @@ def register_routes(app, deps):
 
     @app.post("/api/custom-attributes")
     async def create_custom_attribute(request: Request):
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "custom_attribute.manage")
         if denied:
             return denied
         body = await request.json()
@@ -80,7 +80,7 @@ def register_routes(app, deps):
 
     @app.put("/api/custom-attributes/{def_id}")
     async def update_custom_attribute(def_id: int, request: Request):
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "custom_attribute.manage")
         if denied:
             return denied
         body = await request.json()
@@ -123,7 +123,7 @@ def register_routes(app, deps):
 
     @app.delete("/api/custom-attributes/{def_id}")
     async def delete_custom_attribute(def_id: int, request: Request):
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "custom_attribute.manage")
         if denied:
             return denied
         existing = await asyncio.to_thread(ca_repo.get_definition, def_id)
@@ -140,7 +140,7 @@ def register_routes(app, deps):
 
     @app.post("/api/custom-attributes/purge-orphans")
     async def purge_orphans(request: Request, applies_to: str = "contact"):
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "custom_attribute.manage")
         if denied:
             return denied
         if applies_to not in _ENTITY_TABLES:

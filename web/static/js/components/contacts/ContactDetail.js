@@ -20,6 +20,7 @@ import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
 import { useMessageActions, myReaction } from './hooks/useMessageActions.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
 import { senderColor, quotedMediaText } from '../../services/messageView.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -35,7 +36,11 @@ const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 // reply-quote lookup and the dialogs (delete / improve / template / context menu)
 // stay here; everything composer-related lives in the hooks/components.
 
-export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+  // P48 hides (sandbox is always allowed — no RBAC identity there).
+  const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
+  const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
+  const canReply = sandbox || hasPermission(currentUser, 'conversation.reply');
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
@@ -223,13 +228,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         <button onClick=${onBack} class="lg:hidden text-wa-icon hover:text-wa-text mr-2 shrink-0">
           <${BackArrowIcon} />
         </button>
-        <div onClick=${onAvatarClick} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] cursor-pointer">
+        <div onClick=${canReadContact ? onAvatarClick : null} class="w-[40px] h-[40px] rounded-full overflow-hidden shrink-0 mr-[13px] ${canReadContact ? 'cursor-pointer' : ''}">
           ${isGroup
             ? html`<${GroupAvatar} size=${40} avatarUrl=${avatarUrl(phone, contact && contact.avatar_v)} />`
             : html`<${DefaultAvatar} size=${40} avatarUrl=${avatarUrl(phone, contact && contact.avatar_v)} />`
           }
         </div>
-        <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
+        <div class="flex-1 min-w-0 ${canReadContact ? 'cursor-pointer' : ''}" onClick=${canReadContact ? onAvatarClick : null}>
           <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
             <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
               const tagInfo = globalTags && globalTags[tagName];
@@ -256,7 +261,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} onOpenConversationInfo=${onOpenConversationInfo} onOpenContactInfo=${onAvatarClick} contactInfo=${info} />
 
         <!-- Informações da conversa (Onda 2): abre o painel lateral da conversa. -->
-        ${!sandbox && onOpenConversationInfo ? html`
+        ${!sandbox && onOpenConversationInfo && canReadConv ? html`
           <button
             type="button"
             onClick=${onOpenConversationInfo}
@@ -304,16 +309,23 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 key=${m._localId || i} message=${m} index=${i} isFirst=${isFirst}
                 isGroup=${isGroup} sandbox=${sandbox} displayName=${displayName} fmt=${fmt}
                 findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${focusMessage}
-                openMsgMenu=${actions.openMsgMenu} myReaction=${myReaction} handleRetry=${composer.handleRetry} />`];
+                openMsgMenu=${actions.openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null} />`];
             })
         }
       </div>
 
-      <!-- Composer: input bar (wires composer/autocomplete/media/audio hooks) -->
+      <!-- Composer: input bar (wires composer/autocomplete/media/audio hooks).
+           P48: hidden entirely without conversation.reply — read-only banner. -->
+      ${canReply ? html`
       <${Composer}
         sandbox=${sandbox} canSend=${canSend} templatesSupported=${templatesSupported} sessionClosed=${sessionClosed}
         composer=${composer} autocomplete=${autocomplete} media=${media} audio=${audio}
-        quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} />
+        quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} currentUser=${currentUser} />
+      ` : html`
+      <div class="px-[4%] lg:px-[7%] py-3 bg-wa-panel border-t border-wa-border shrink-0 text-center text-wa-secondary text-[13px]">
+        Somente leitura — você não tem permissão para responder nesta conversa.
+      </div>
+      `}
 
       ${showTemplatePicker ? html`
         <${TemplatePicker}
@@ -328,13 +340,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         <${MessageContextMenu}
           x=${actions.msgMenu.x}
           y=${actions.msgMenu.y}
-          reactionBar=${(!actions.msgMenu.message.revoked && actions.msgMenu.message.msg_id && !sandbox) ? {
+          reactionBar=${(canReply && !actions.msgMenu.message.revoked && actions.msgMenu.message.msg_id && !sandbox) ? {
             emojis: QUICK_REACTIONS,
             current: myReaction(actions.msgMenu.message),
             onReact: (em) => actions.performReact(actions.msgMenu.message, em),
           } : null}
           items=${[
-            ...((!actions.msgMenu.message.revoked && composer.mode !== 'private'
+            ...((canReply && !actions.msgMenu.message.revoked && composer.mode !== 'private'
                  && actions.msgMenu.message.role !== 'private_note') ? [
               { label: 'Responder', icon: ReplyIcon,
                 onClick: () => { composer.setMode('reply'); composer.setReplyingTo(actions.msgMenu.message);
@@ -344,10 +356,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             { label: 'Copiar link da mensagem', icon: LinkIcon,
               disabled: !actions.messagePermalink(actions.msgMenu.message),
               onClick: () => actions.copyMessageLink(actions.msgMenu.message) },
-            ...(actions.msgMenu.message.revoked ? [] : [
+            ...((canReply && !actions.msgMenu.message.revoked) ? [
               { label: 'Apagar', icon: TrashIcon, danger: true,
                 onClick: () => actions.setDeleteDialog({ message: actions.msgMenu.message, isFromMe: actions.msgMenu.isFromMe }) },
-            ]),
+            ] : []),
             ...((!actions.msgMenu.message.revoked && !sandbox
                  && actions.msgMenu.message.role === 'assistant'
                  && actions.msgMenu.message.status !== 'operator') ? [
