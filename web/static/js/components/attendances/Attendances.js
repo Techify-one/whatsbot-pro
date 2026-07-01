@@ -1,6 +1,6 @@
 // Tela "Atendimentos" (container). Toggle Lista|Kanban; o kanban agrupa de forma
 // configurável (atendente / etapa / etiqueta / status). Reaproveita as funções de
-// conversa do api.js e os eventos WS já existentes; o drag-and-drop é otimista
+// atendimento do api.js e os eventos WS já existentes; o drag-and-drop é otimista
 // com rollback. Abrir um card navega para o chat (/conversations/<id>).
 import { h } from 'preact';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
@@ -14,6 +14,8 @@ import {
 import { resolveConversation } from '../../utils/resolveConversation.js';
 import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, str } from '../../services/urlState.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { buildGrouping } from './grouping.js';
 import { GroupBySelector } from './GroupBySelector.js';
@@ -29,6 +31,19 @@ const STAGE_KEY = 'whatsbot_attendances_stage_attr';
 function lsGet(k, def) { try { return localStorage.getItem(k) || def; } catch (e) { return def; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
 
+// Deep-link do estado da tela (Plano 24) — view/agrupamento/atributo/só-abertos na
+// query-string legível. Serialize omite defaults → URL limpa quando nada mexeu.
+// `status=open` traduz o toggle onlyOpen; `attr` só vale no modo etapa.
+const ATT_URL_SCHEMA = [
+  enumStr('view', 'board'),      // board|list
+  enumStr('mode', 'assignee'),   // assignee|stage|label|status
+  str('attr', ''),               // attribute_key (só quando mode=stage)
+  // onlyOpen ↔ ?status=open: bool serializado como o valor legível "open" (omitido no default).
+  { key: 'status', default: false, dec: (v) => v === 'open', enc: () => 'open', isDefault: (v) => !v },
+];
+// Precedência URL > localStorage: só cai no localStorage quando a URL não traz o param.
+const urlHas = (key) => { try { return new URLSearchParams(location.search).has(key); } catch (e) { return false; } };
+
 export function Attendances() {
   const [view, setView] = useState(() => lsGet(VIEW_KEY, 'board'));   // 'board' | 'list'
   const [mode, setMode] = useState(() => lsGet(MODE_KEY, 'assignee'));
@@ -41,10 +56,10 @@ export function Attendances() {
   const [currentUser, setCurrentUser] = useState(null);
   const [agents, setAgents] = useState({ users: [], ai_agents: [] });
   const [labels, setLabels] = useState([]);          // [{id,name,color}]
-  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de conversa type=list
+  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de atendimento type=list
   const [stageAttrKey, setStageAttrKey] = useState(() => lsGet(STAGE_KEY, ''));
 
-  // label_names por conversa (hidratado sob demanda no modo etiqueta).
+  // label_names por atendimento (hidratado sob demanda no modo etiqueta).
   const [labelsByConv, setLabelsByConv] = useState({});
 
   // ── Lookups derivados ────────────────────────────────────────────
@@ -100,7 +115,7 @@ export function Attendances() {
     }).catch(() => {});
   }, []);
 
-  // ── Fetch das conversas ──────────────────────────────────────────
+  // ── Fetch dos atendimentos ──────────────────────────────────────────
   const fetchConversations = useCallback(async () => {
     setLoading(true); setError('');
     try {
@@ -127,7 +142,7 @@ export function Attendances() {
     return () => { alive = false; };
   }, [mode, conversations, labelsByConv]);
 
-  // Mescla label_names hidratados nas conversas (para grouping.columnIdOf e chips).
+  // Mescla label_names hidratados nos atendimentos (para grouping.columnIdOf e chips).
   const conversationsForBoard = useMemo(() => {
     if (mode !== 'label') return conversations;
     return conversations.map(c => c.label_names != null ? c : { ...c, label_names: labelsByConv[c.id] || [] });
@@ -211,7 +226,7 @@ export function Attendances() {
 
   // ── Navegação: abrir o chat ──────────────────────────────────────
   const openChat = useCallback((convo) => {
-    // /contacts/{id} agora é o detalhe do contato; o hub abre só por conversa.
+    // /contacts/{id} agora é o detalhe do contato; o hub abre só por atendimento.
     if (convo.id == null) return;
     history.pushState(null, '', `/conversations/${convo.id}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
@@ -256,10 +271,30 @@ export function Attendances() {
     if (mode === 'stage' && stageAttrs.length === 0) setMode('assignee');
   }, [mode, stageAttrs]);
 
-  // ── Persistência das prefs ───────────────────────────────────────
+  // ── Persistência das prefs (por-device, mantida) ─────────────────
   useEffect(() => { lsSet(VIEW_KEY, view); }, [view]);
   useEffect(() => { lsSet(MODE_KEY, mode); }, [mode]);
   useEffect(() => { if (stageAttrKey) lsSet(STAGE_KEY, stageAttrKey); }, [stageAttrKey]);
+
+  // ── Deep-link do estado → URL (Plano 24) ─────────────────────────
+  // Hidrata da URL no mount/back-forward e reflete na query (replaceState). Precedência
+  // URL > localStorage: no apply, só sobrescreve o estado quando o param existe na URL —
+  // senão preserva o valor semeado do localStorage (o useState inicial). Serialize omite
+  // defaults → link limpo. `attr` só entra na URL no modo etapa.
+  useUrlState({
+    read: () => readParams(location.search, ATT_URL_SCHEMA),
+    apply: (s) => {
+      if (urlHas('view')) setView(s.view);
+      if (urlHas('mode')) setMode(s.mode);
+      if (urlHas('attr') && s.attr) setStageAttrKey(s.attr);
+      if (urlHas('status')) setOnlyOpen(s.status);
+    },
+    serialize: () => writeParams({
+      view, mode, status: onlyOpen,
+      attr: mode === 'stage' ? stageAttrKey : '',  // atributo só faz sentido no modo etapa
+    }, ATT_URL_SCHEMA),
+    deps: [view, mode, stageAttrKey, onlyOpen],
+  });
 
   // ── Render ───────────────────────────────────────────────────────
   const TabBtn = (id, label) => html`

@@ -1,7 +1,7 @@
 // Custom attributes admin screen (plano 05) — full-page (FQ6).
 // Define contact AND conversation custom attributes: key, type, options…
 // attribute_key + applies_to are identity: settable on create, immutable after.
-// Chatwoot-style: abas (Conversas | Contato) + tabela.
+// Chatwoot-style: abas (Atendimentos | Contato) + tabela.
 // Dispatches `whatsbot:custom-attributes-changed` so open contact/conversation panels reload.
 
 import { h } from 'preact';
@@ -32,12 +32,12 @@ const KEY_RE = /^[a-z][a-z0-9_]*$/;
 // settable on create, immutable on update (same as attribute_key/type).
 const SCOPES = [
   ['contact', 'Contato'],
-  ['conversation', 'Conversa'],
+  ['conversation', 'Atendimento'],
 ];
 
-// Tab order mirrors the Chatwoot layout (Conversas first, then Contato).
+// Tab order mirrors the Chatwoot layout (Atendimentos first, then Contato).
 const SCOPE_TABS = [
-  ['conversation', 'Conversas'],
+  ['conversation', 'Atendimentos'],
   ['contact', 'Contato'],
 ];
 
@@ -169,7 +169,7 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
           </select>
           <div class="text-[12px] text-wa-secondary mt-1">
             ${appliesTo === 'conversation'
-              ? 'Aparece no painel "Informações da conversa" — um valor por atendimento.'
+              ? 'Aparece no painel "Informações do atendimento" — um valor por atendimento.'
               : 'Aparece no painel "Informações do contato" — um valor por contato.'}
           </div>
         </div>
@@ -238,7 +238,7 @@ export default function CustomAttributesManager({ initialEntity }) {
     if ((cRes && cRes.ok) || (vRes && vRes.ok)) {
       // Esta tela administra APENAS os atributos criados aqui (is_system=0). Os
       // is_system=1 são rótulos registrados por plugins (o Atendimentos espelha seus
-      // campos de "Resolver conversa" como atributos de conversa) — eles vivem e são
+      // campos de "Resolver atendimento" como atributos de atendimento) — eles vivem e são
       // editados na config do próprio plugin, não nesta lista. O backend já bloqueia
       // editar/excluir is_system, então aqui só os escondemos da gestão.
       const onlyUserCreated = (rows) => (rows || []).filter(a => !a.is_system);
@@ -315,7 +315,7 @@ export default function CustomAttributesManager({ initialEntity }) {
     <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Campos personalizados de contato e de conversa. Aparecem nos painéis de informações e a IA pode preenchê-los.
+          Campos personalizados de contato e de atendimento. Aparecem nos painéis de informações e a IA pode preenchê-los.
         </p>
         ${!creating && !editing ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"

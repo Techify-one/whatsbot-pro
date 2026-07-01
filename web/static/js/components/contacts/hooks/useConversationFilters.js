@@ -31,7 +31,7 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
  * @param {number|null} opts.currentUserId
  * @param {{ current: Record<string, any>[] }} opts.displayedRef
  */
-export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef }) {
+export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef, skipStoredPreset = false }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
@@ -45,10 +45,10 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
 
-  // Só entram na sidebar conversas com mensagem real trocada (last_message_ts > 0,
+  // Só entram na sidebar atendimentos com mensagem real trocada (last_message_ts > 0,
   // que já exclui eventos painel-only). Um contato recém-criado sem mensagem — ex:
   // recriado pela importação de chats do GOWA, ou aberto pelo modal sem enviar nada
-  // — não deve poluir a lista. A conversa atualmente ABERTA fica visível mesmo sem
+  // — não deve poluir a lista. O atendimento atualmente ABERTA fica visível mesmo sem
   // mensagem, pra não sumir enquanto o operador digita a 1ª mensagem.
   const activeContacts = useMemo(() => {
     const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
@@ -93,6 +93,10 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
     listSavedFilters().then(res => {
       if (!res || !res.ok || !Array.isArray(res.data)) return;
       setSavedFilters(res.data);
+      // Precedência (Plano 24 · D3): quando a URL já carrega filtros ad-hoc, NÃO
+      // auto-aplicar o preset salvo — a URL é a fonte da verdade. Ainda assim
+      // carregamos a lista de presets acima (o chip/menu da toolbar precisa dela).
+      if (skipStoredPreset) return;
       let storedId = null;
       try { storedId = parseInt(localStorage.getItem(ACTIVE_FILTER_KEY) || '', 10); } catch {}
       if (storedId != null && !Number.isNaN(storedId)) {

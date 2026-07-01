@@ -1,4 +1,4 @@
-"""REST endpoints do plugin Atendimentos (mountados em /api/plugins/atendimentos).
+"""REST endpoints do plugin Protocolos (mountados em /api/plugins/protocolos).
 
 Casca fina sobre ``logic.py``. Gating por ``plugin_permission``; snapshots de
 atendente vêm do ``current_user`` do request. Formato ``{"ok", "data"|"error"}``.
@@ -33,7 +33,7 @@ def _err(msg: str, status: int = 400):
 
 async def _can_team(request: Request) -> bool:
     """Pode criar/editar visualizações de EQUIPE? (default-allow em legado/open via acheck)."""
-    return await acheck(request, "plugin.atendimentos.manage_team_views")
+    return await acheck(request, "plugin.protocolos.manage_team_views")
 
 
 async def _gate_view_write(request: Request, *, existing: dict | None,
@@ -53,15 +53,15 @@ async def _gate_view_write(request: Request, *, existing: dict | None,
     return True, ""
 
 
-# ── Atendimentos ──────────────────────────────────────────────────────────────
+# ── Protocolos ──────────────────────────────────────────────────────────────
 
-@router.get("/atendimentos", dependencies=[plugin_permission("view")])
-async def list_atendimentos(status: str | None = None, assignee_user_id: int | None = None,
+@router.get("/protocolos", dependencies=[plugin_permission("view")])
+async def list_protocolos(status: str | None = None, assignee_user_id: int | None = None,
                             contact_id: int | None = None, q: str | None = None,
                             opened_from: float | None = None, opened_to: float | None = None,
                             attr_filters: str | None = None,
                             limit: int = 200, offset: int = 0):
-    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de conversa da aba).
+    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de atendimento da aba).
     af = None
     if attr_filters:
         try:
@@ -70,62 +70,62 @@ async def list_atendimentos(status: str | None = None, assignee_user_id: int | N
                 af = {str(k): v for k, v in parsed.items()}
         except (ValueError, TypeError):
             af = None
-    data = logic.list_atendimentos(
+    data = logic.list_protocolos(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
         opened_from=opened_from, opened_to=opened_to, attr_filters=af,
         limit=limit, offset=offset)
     return {"ok": True, "data": data}
 
 
-@router.get("/atendimentos/{atid}", dependencies=[plugin_permission("view")])
-async def get_atendimento(atid: int):
-    at = logic.get_atendimento(atid)
+@router.get("/protocolos/{atid}", dependencies=[plugin_permission("view")])
+async def get_protocolo(atid: int):
+    at = logic.get_protocolo(atid)
     if not at:
-        return _err("Atendimento não encontrado.", status=404)
-    return {"ok": True, "data": {"atendimento": at, "conversas": logic.list_conversas(atid)}}
+        return _err("Protocolo não encontrado.", status=404)
+    return {"ok": True, "data": {"protocolo": at, "atendimentos": logic.list_atendimentos(atid)}}
 
 
-@router.get("/contacts/{contact_id}/atendimento", dependencies=[plugin_permission("view")])
-async def get_contact_atendimento(contact_id: int):
-    """Atendimento ABERTO do contato + suas conversas (alimenta o painel do chat)."""
-    at = logic.get_open_atendimento_for_contact(contact_id)
-    conversas = logic.list_conversas(at["id"]) if at else []
-    return {"ok": True, "data": {"atendimento": at, "conversas": conversas}}
+@router.get("/contacts/{contact_id}/protocolo", dependencies=[plugin_permission("view")])
+async def get_contact_protocolo(contact_id: int):
+    """Protocolo ABERTO do contato + suas atendimentos (alimenta o painel do chat)."""
+    at = logic.get_open_protocolo_for_contact(contact_id)
+    atendimentos = logic.list_atendimentos(at["id"]) if at else []
+    return {"ok": True, "data": {"protocolo": at, "atendimentos": atendimentos}}
 
 
-@router.post("/contacts/{contact_id}/atendimento/ensure", dependencies=[plugin_permission("edit")])
-async def ensure_contact_atendimento(contact_id: int):
-    """Garante (cria se preciso) o atendimento aberto do contato — ação explícita
+@router.post("/contacts/{contact_id}/protocolo/ensure", dependencies=[plugin_permission("edit")])
+async def ensure_contact_protocolo(contact_id: int):
+    """Garante (cria se preciso) o protocolo aberto do contato — ação explícita
     do painel quando ainda não há nenhum (evita criar só ao visualizar). Ao CRIAR um
-    atendimento novo, grava a nota privada de abertura (announce_open)."""
+    protocolo novo, grava a nota privada de abertura (announce_open)."""
     from db.repositories import contact_repo, conversation_repo
     contact = contact_repo.get(contact_id)
     if not contact:
         return _err("Contato não encontrado.", status=404)
-    conv = (conversation_repo.get_open_for_contact(contact_id)
+    atend = (conversation_repo.get_open_for_contact(contact_id)
             or conversation_repo.get_latest_for_contact(contact_id))
-    at = logic.ensure_atendimento_for_contact(
+    at = logic.ensure_protocolo_for_contact(
         contact_id, phone=contact.get("phone", ""), name=logic._contact_name(contact),
-        conversation_id=(conv or {}).get("id"), announce_open=True)
-    return {"ok": True, "data": {"atendimento": at, "conversas": logic.list_conversas(at["id"])}}
+        conversation_id=(atend or {}).get("id"), announce_open=True)
+    return {"ok": True, "data": {"protocolo": at, "atendimentos": logic.list_atendimentos(at["id"])}}
 
 
-@router.put("/atendimentos/{atid}/fields", dependencies=[plugin_permission("edit")])
+@router.put("/protocolos/{atid}/fields", dependencies=[plugin_permission("edit")])
 async def update_fields(atid: int, body: dict, request: Request):
     uid, name = _atendente(request)
-    at, err = logic.update_atendimento_fields(
+    at, err = logic.update_protocolo_fields(
         atid, (body or {}).get("fields") or {}, assignee_user_id=uid, assignee_name=name)
     if err:
         return _err(err, status=400 if at is None else 400)
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/close", dependencies=[plugin_permission("resolve")])
-async def close_atendimento(atid: int, request: Request):
+@router.post("/protocolos/{atid}/close", dependencies=[plugin_permission("resolve")])
+async def close_protocolo(atid: int, request: Request):
     uid, name = _atendente(request)
-    at, err = logic.close_atendimento(atid, assignee_user_id=uid, assignee_name=name)
+    at, err = logic.close_protocolo(atid, assignee_user_id=uid, assignee_name=name)
     if err:
-        # 404 (não existe) | 400 (conversa aberta / campo obrigatório faltando).
+        # 404 (não existe) | 400 (atendimento aberta / campo obrigatório faltando).
         return _err(err, status=404 if at is None and "encontrado" in err else 400)
     # Ao finalizar: dispara as mensagens de protocolo/avaliação (em thread, best-effort).
     try:
@@ -135,33 +135,33 @@ async def close_atendimento(atid: int, request: Request):
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/reopen", dependencies=[plugin_permission("resolve")])
-async def reopen_atendimento(atid: int):
-    at, err = logic.reopen_atendimento(atid)
+@router.post("/protocolos/{atid}/reopen", dependencies=[plugin_permission("resolve")])
+async def reopen_protocolo(atid: int):
+    at, err = logic.reopen_protocolo(atid)
     if err:
         return _err(err, status=404 if "encontrado" in err else 409)
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/assign", dependencies=[plugin_permission("assign")])
-async def assign_atendimento(atid: int, body: dict):
-    """Define/limpa o atendente do atendimento (drag-and-drop do kanban por atendente)."""
+@router.post("/protocolos/{atid}/assign", dependencies=[plugin_permission("assign")])
+async def assign_protocolo(atid: int, body: dict):
+    """Define/limpa o atendente do protocolo (drag-and-drop do kanban por atendente)."""
     auid = (body or {}).get("assignee_user_id")
     auid = int(auid) if auid not in (None, "") else None
     aname = str((body or {}).get("assignee_name") or "")
-    at, err = logic.assign_atendimento(atid, auid, assignee_name=aname)
+    at, err = logic.assign_protocolo(atid, auid, assignee_name=aname)
     if err:
         return _err(err, status=404)
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/set-attr", dependencies=[plugin_permission("edit")])
-async def set_atendimento_attr(atid: int, body: dict):
+@router.post("/protocolos/{atid}/set-attr", dependencies=[plugin_permission("edit")])
+async def set_protocolo_attr(atid: int, body: dict):
     """Drag-and-drop do kanban agrupado por ATRIBUTO: grava o valor do atributo na última
-    conversa do atendimento (custom_attributes do core). value vazio/None limpa a chave."""
+    atendimento do protocolo (custom_attributes do core). value vazio/None limpa a chave."""
     key = str((body or {}).get("key") or "")
     value = (body or {}).get("value")
-    at, err = logic.set_conversa_attr(atid, key, value)
+    at, err = logic.set_atendimento_attr(atid, key, value)
     if err:
         return _err(err, status=404 if "encontrado" in err else 400)
     return {"ok": True, "data": at}
@@ -286,12 +286,12 @@ async def set_my_view_pref(vid: int, body: dict, request: Request):
     return {"ok": True, "data": pref}
 
 
-# ── Vínculo / resolução de conversa ───────────────────────────────────────────
+# ── Vínculo / resolução de atendimento ───────────────────────────────────────────
 
-@router.post("/conversas/{conversation_id}/resolve", dependencies=[plugin_permission("resolve")])
-async def resolve_conversa(conversation_id: int, body: dict, request: Request):
+@router.post("/atendimentos/{conversation_id}/resolve", dependencies=[plugin_permission("resolve")])
+async def resolve_atendimento(conversation_id: int, body: dict, request: Request):
     uid, name = _atendente(request)
-    link, err = logic.resolve_conversa(
+    link, err = logic.resolve_atendimento(
         conversation_id, (body or {}).get("fields") or {},
         assignee_name=name, assignee_user_id=uid)
     if err:
@@ -299,17 +299,17 @@ async def resolve_conversa(conversation_id: int, body: dict, request: Request):
     return {"ok": True, "data": link}
 
 
-@router.get("/conversas/{conversa_id}/anchor", dependencies=[plugin_permission("view")])
-async def conversa_anchor(conversa_id: int):
-    """Conversa (thread) + _id da 1ª mensagem do ciclo — alvo do scroll no chat
-    (permalink /conversations/<id>?message=<_id>). conversa_id = id do CICLO."""
-    return {"ok": True, "data": logic.cycle_anchor(conversa_id)}
+@router.get("/atendimentos/{atendimento_id}/anchor", dependencies=[plugin_permission("view")])
+async def atendimento_anchor(atendimento_id: int):
+    """Atendimento (thread) + _id da 1ª mensagem do ciclo — alvo do scroll no chat
+    (permalink /conversations/<id>?message=<_id>). atendimento_id = id do CICLO."""
+    return {"ok": True, "data": logic.cycle_anchor(atendimento_id)}
 
 
 # ── Definições de campos ──────────────────────────────────────────────────────
 
 @router.get("/field-defs", dependencies=[plugin_permission("view")])
-async def get_field_defs(scope: str = "conversa"):
+async def get_field_defs(scope: str = "atendimento"):
     return {"ok": True, "data": {"scope": scope, "defs": logic.get_field_defs(scope)}}
 
 

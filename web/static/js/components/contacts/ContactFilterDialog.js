@@ -1,5 +1,5 @@
 // "Filtrar contatos" — construtor de filtros da tela Contatos (full-page), espelhando
-// o "Filtrar conversas" da sidebar, mas restrito ao que faz sentido para um CONTATO:
+// o "Filtrar atendimentos" da sidebar, mas restrito ao que faz sentido para um CONTATO:
 //   - Etiqueta (tag) — multi-select; eq = "é uma de" / ne = "não é nenhuma".
 //   - Atributos personalizados do CONTATO (plano 05) — dimensões dinâmicas que
 //     aparecem conforme cadastradas em Configurações → Atributos personalizados.

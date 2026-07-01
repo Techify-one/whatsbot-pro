@@ -1,8 +1,8 @@
-// Chatwoot-style "Filtrar conversas" builder (plano 10 FF6+). Opened from the funnel
+// Chatwoot-style "Filtrar atendimentos" builder (plano 10 FF6+). Opened from the funnel
 // icon in the inbox toolbar. Each row is a clause: [dimensão] [operador] [valor] [🗑].
 // Dimensions: Status (Aberta/Fechada/Todas), Canais, Agente (atendente humano +
 // IA), Etiqueta, Última atividade — MAIS os atributos personalizados (dinâmicos),
-// de contato e de conversa, que aparecem conforme cadastrados (plano 05).
+// de contato e de atendimento, que aparecem conforme cadastrados (plano 05).
 //
 // Operators:
 //   - Status / Canais / Agente / Etiqueta → "Igual a" (eq) / "Diferente" (ne)
@@ -28,7 +28,7 @@ const CORE_DIMENSIONS = [
   { key: 'channel',    label: 'Canais',              ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
-  { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
+  { key: 'conv_label', label: 'Etiqueta do atendimento', ops: ['eq', 'ne'],               valueType: 'conv_label' },
   { key: 'activity',   label: 'Última atividade',    ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
@@ -148,7 +148,7 @@ function MultiSelect({ options, selected, onChange, placeholder = '+ Selecione u
 
 // Seletor de DIMENSÃO (single-select custom). Lista as dimensões core no topo e, em
 // seguida, dois accordions recolhíveis — "Atributos do contato" e "Atributos da
-// conversa" — recolhidos por padrão, para esconder os atributos e manter a lista limpa.
+// atendimento" — recolhidos por padrão, para esconder os atributos e manter a lista limpa.
 function DimensionPicker({ dimensions, value, onChange }) {
   const [open, setOpen] = useState(false);
   const [openContact, setOpenContact] = useState(false);
@@ -185,7 +185,7 @@ function DimensionPicker({ dimensions, value, onChange }) {
     ${open ? html`<div class="absolute z-[80] mt-1 left-0 w-[240px] max-h-[320px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
       ${core.map(row)}
       ${accordion('Atributos do contato', contactDims, openContact, setOpenContact)}
-      ${accordion('Atributos da conversa', convDims, openConv, setOpenConv)}
+      ${accordion('Atributos do atendimento', convDims, openConv, setOpenConv)}
     </div>` : null}
   </div>`;
 }
@@ -257,7 +257,7 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
 export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
   convLabelNames = [], contactAttrDefs = [], convAttrDefs = [],
   sortBy, onSortChange, sortOptions, onApply, onClose }) {
-  // Dimensões = core + atributos personalizados (contato e conversa), dinâmicas.
+  // Dimensões = core + atributos personalizados (contato e atendimento), dinâmicas.
   const dimensions = useMemo(() => [
     ...CORE_DIMENSIONS,
     ...(contactAttrDefs || []).map(d => attrDim(d, 'contact')),
@@ -286,7 +286,7 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
 
   return html`
     <div>
-      <div class="text-[15px] font-semibold text-wa-text mb-3">Filtrar conversas</div>
+      <div class="text-[15px] font-semibold text-wa-text mb-3">Filtrar atendimentos</div>
       ${onSortChange ? html`
         <label class="block text-[12px] text-wa-secondary mb-1">Ordenar por</label>
         <select value=${sortBy} onChange=${(e) => onSortChange(e.target.value)}

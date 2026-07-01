@@ -10,9 +10,9 @@
 -- SEMPRE. Sem grupos e sem incluídos numa view de EQUIPE = legado "todos veem" (compat).
 -- scope continua existindo (personal|team) e é DERIVADO: há grupo/incluído -> team.
 --
--- SQL portavel: o migrator valida o prefixo plugin_atendimentos_ e ADD COLUMN roda em
+-- SQL portavel: o migrator valida o prefixo plugin_protocolos_ e ADD COLUMN roda em
 -- SQLite e Postgres. Nao usar ponto-e-virgula nos comentarios (o splitter quebra por ele).
 
-ALTER TABLE plugin_atendimentos_kanban_views ADD COLUMN visibility_roles TEXT;
-ALTER TABLE plugin_atendimentos_kanban_views ADD COLUMN visibility_users_include TEXT;
-ALTER TABLE plugin_atendimentos_kanban_views ADD COLUMN visibility_users_exclude TEXT;
+ALTER TABLE plugin_protocolos_kanban_views ADD COLUMN visibility_roles TEXT;
+ALTER TABLE plugin_protocolos_kanban_views ADD COLUMN visibility_users_include TEXT;
+ALTER TABLE plugin_protocolos_kanban_views ADD COLUMN visibility_users_exclude TEXT;
