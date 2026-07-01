@@ -58,7 +58,6 @@ collect_ignore = [
     "test_agent_routing.py",
     "test_events_filters.py",
     "test_gowa_plugin.py",
-    "test_group_mentions.py",
     "test_hooks.py",
     "test_model_factory.py",
     "test_plugin_events.py",
@@ -70,6 +69,8 @@ collect_ignore = [
     "test_dynamic_registry.py",
     "manual_cloud_api_test.py",
 ]
+# NOTE: test_group_mentions.py was removed — its outgoing-mention coverage is a
+# byte-exact subset of tests/characterization/test_group_mentions_characterization.py.
 
 
 # ── Plugin test discovery (Phase G2) ───────────────────────────────────────

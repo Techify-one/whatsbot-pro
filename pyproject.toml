@@ -4,10 +4,7 @@
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Default "test_*.py" plus the harness shim, whose self-tests prove the
-# Checker works. _harness.py is a transition utility, not a "test_*" file, so
-# it must be named explicitly for collection.
-python_files = ["test_*.py", "_harness.py"]
+python_files = ["test_*.py"]
 addopts = "-q -ra"
 # Per-test wall-clock cap. The legacy-suite subprocess tests pass their own
 # generous timeout to subprocess.run; this is a backstop for the native tests.

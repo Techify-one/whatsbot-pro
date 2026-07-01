@@ -2297,7 +2297,6 @@ check("GET agent history -> 200", r.status_code == 200)
 _hist = r.json()["data"]
 check("agent history -> >=2 versões, mais nova primeiro",
       len(_hist) >= 2 and _hist[0]["version"] > _hist[1]["version"])
-_v_a = next(h["version"] for h in _hist if True)  # latest is 'Agente B'
 # rollback para a versão de "Agente A" (a penúltima salva)
 _target = sorted(h["version"] for h in _hist)[-2]
 r = client.post(f"/api/ai/agents/default/rollback/{_target}")

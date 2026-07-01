@@ -52,8 +52,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
-import pytest
-
 from tests.fakes import FakeGowaClient, fake_agent_reply
 from tests.characterization.golden import (
     EventRecorder, normalize, golden_assert, sort_events,
@@ -477,10 +475,13 @@ def test_agent_turn_routing_hop(build_app):
             result = _run_turn(built, phone, "quero comprar")
             rec.drain()
 
-        if call_log["hops"] < 2:
-            pytest.skip(
-                "routing hop not reached: transferir_agente did not change the "
-                f"resolved agent (hops={call_log['hops']}) — single-agent path only")
+        # The handoff MUST run a second hop: transferir_agente persists a new
+        # active_agent_key and _continue_routing re-resolves + runs it. A single
+        # hop here means routing regressed — fail loudly instead of silently
+        # skipping (which would let the regression pass as green).
+        assert call_log["hops"] >= 2, (
+            "routing hop not reached: transferir_agente did not change the "
+            f"resolved agent (hops={call_log['hops']}) — single-agent path only")
 
         # Two hops ran → final reply is the handed-off agent's, and TWO usage rows
         # were recorded (one per hop).
