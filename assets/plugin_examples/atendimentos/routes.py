@@ -7,11 +7,13 @@ atendente vêm do ``current_user`` do request. Formato ``{"ok", "data"|"error"}`
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import APIRouter, Request
 
 from plugins.context import plugin_permission
-from server.authz import current_user
+from server.authz import acheck, current_user
+from db.repositories import rbac_repo
 
 from . import logic
 
@@ -29,16 +31,49 @@ def _err(msg: str, status: int = 400):
     return JSONResponse(status_code=status, content={"ok": False, "error": msg})
 
 
+async def _can_team(request: Request) -> bool:
+    """Pode criar/editar visualizações de EQUIPE? (default-allow em legado/open via acheck)."""
+    return await acheck(request, "plugin.atendimentos.manage_team_views")
+
+
+async def _gate_view_write(request: Request, *, existing: dict | None,
+                           target_scope: str | None) -> tuple[bool, str]:
+    """Gate de escrita de visualização. Envolver EQUIPE (a existente OU o alvo) exige
+    manage_team_views; uma PESSOAL exige ser o dono (owner_user_id == uid) — ou ter a
+    permissão de equipe. Default-allow em legado/open vem do acheck/uid None."""
+    uid, _ = _atendente(request)
+    involves_team = (existing and existing.get("scope") == "team") or (target_scope == "team")
+    if involves_team:
+        if await _can_team(request):
+            return True, ""
+        return False, "Requer permissão para gerenciar visualizações de equipe."
+    if (existing is not None and existing.get("owner_user_id") not in (None, uid)
+            and not await _can_team(request)):
+        return False, "Você só pode editar suas próprias visualizações."
+    return True, ""
+
+
 # ── Atendimentos ──────────────────────────────────────────────────────────────
 
 @router.get("/atendimentos", dependencies=[plugin_permission("view")])
 async def list_atendimentos(status: str | None = None, assignee_user_id: int | None = None,
                             contact_id: int | None = None, q: str | None = None,
                             opened_from: float | None = None, opened_to: float | None = None,
+                            attr_filters: str | None = None,
                             limit: int = 200, offset: int = 0):
+    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de conversa da aba).
+    af = None
+    if attr_filters:
+        try:
+            parsed = json.loads(attr_filters)
+            if isinstance(parsed, dict):
+                af = {str(k): v for k, v in parsed.items()}
+        except (ValueError, TypeError):
+            af = None
     data = logic.list_atendimentos(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, limit=limit, offset=offset)
+        opened_from=opened_from, opened_to=opened_to, attr_filters=af,
+        limit=limit, offset=offset)
     return {"ok": True, "data": data}
 
 
@@ -118,6 +153,137 @@ async def assign_atendimento(atid: int, body: dict):
     if err:
         return _err(err, status=404)
     return {"ok": True, "data": at}
+
+
+@router.post("/atendimentos/{atid}/set-attr", dependencies=[plugin_permission("edit")])
+async def set_atendimento_attr(atid: int, body: dict):
+    """Drag-and-drop do kanban agrupado por ATRIBUTO: grava o valor do atributo na última
+    conversa do atendimento (custom_attributes do core). value vazio/None limpa a chave."""
+    key = str((body or {}).get("key") or "")
+    value = (body or {}).get("value")
+    at, err = logic.set_conversa_attr(atid, key, value)
+    if err:
+        return _err(err, status=404 if "encontrado" in err else 400)
+    return {"ok": True, "data": at}
+
+
+# ── Visualizações personalizadas do Kanban (abas de "Agrupar por") ────────────
+
+@router.get("/roles", dependencies=[plugin_permission("view")])
+async def list_roles():
+    """Grupos de permissão (roles) p/ o seletor "Quem pode ver" do editor de visualização.
+    Endpoint próprio do plugin (gated só por `view`) — o /api/roles do core exige users.manage."""
+    roles = await asyncio.to_thread(rbac_repo.list_roles)
+    return {"ok": True, "data": {"roles": [{"key": r["key"], "name": r["name"]} for r in roles]}}
+
+
+def _visibility_scope(body: dict, fallback: str) -> str:
+    """scope efetivo p/ o gate: há grupo OU usuário incluído → 'team' (compartilhar exige
+    manage_team_views). Senão o scope pedido/atual."""
+    if (body or {}).get("visibility_roles") or (body or {}).get("visibility_users_include"):
+        return "team"
+    return fallback
+
+
+@router.get("/kanban-views", dependencies=[plugin_permission("view")])
+async def list_kanban_views(request: Request):
+    uid, _ = _atendente(request)
+    return {"ok": True, "data": logic.list_kanban_views(user_id=uid)}
+
+
+@router.post("/kanban-views", dependencies=[plugin_permission("view")])
+async def create_kanban_view(body: dict, request: Request):
+    uid, _ = _atendente(request)
+    scope = _visibility_scope(body, str((body or {}).get("scope") or "personal"))
+    if scope == "team" and not await _can_team(request):
+        return _err("Requer permissão para criar visualizações de equipe.", status=403)
+    view, err = logic.create_kanban_view(
+        name=(body or {}).get("name"), scope=scope,
+        group_by=(body or {}).get("group_by") or "status",
+        group_attr_key=(body or {}).get("group_attr_key"),
+        group_date_mode=(body or {}).get("group_date_mode"),
+        filters=(body or {}).get("filters") or {},
+        available_filters=(body or {}).get("available_filters"),
+        visibility_roles=(body or {}).get("visibility_roles"),
+        visibility_users_include=(body or {}).get("visibility_users_include"),
+        visibility_users_exclude=(body or {}).get("visibility_users_exclude"),
+        owner_user_id=uid)
+    if err:
+        return _err(err, status=400)
+    return {"ok": True, "data": view}
+
+
+@router.put("/kanban-views/{vid}", dependencies=[plugin_permission("view")])
+async def update_kanban_view(vid: int, body: dict, request: Request):
+    existing = logic.get_kanban_view(vid)
+    if not existing:
+        return _err("Visualização não encontrada.", status=404)
+    fallback = str((body or {}).get("scope") or existing.get("scope") or "personal")
+    target_scope = _visibility_scope(body, fallback)
+    allowed, msg = await _gate_view_write(request, existing=existing, target_scope=target_scope)
+    if not allowed:
+        return _err(msg, status=403)
+    # Repassa só o que veio no body (ausente = mantém o atual, via sentinela no logic).
+    extra = {}
+    for k in ("available_filters", "visibility_roles",
+              "visibility_users_include", "visibility_users_exclude"):
+        if isinstance(body, dict) and k in body:
+            extra[k] = body[k]
+    view, err = logic.update_kanban_view(
+        vid, name=(body or {}).get("name"), scope=target_scope,
+        group_by=(body or {}).get("group_by"),
+        group_attr_key=(body or {}).get("group_attr_key"),
+        group_date_mode=(body or {}).get("group_date_mode"),
+        filters=(body or {}).get("filters"), **extra)
+    if err:
+        return _err(err, status=404 if "não encontrada" in err else 400)
+    return {"ok": True, "data": view}
+
+
+@router.delete("/kanban-views/{vid}", dependencies=[plugin_permission("view")])
+async def delete_kanban_view(vid: int, request: Request):
+    existing = logic.get_kanban_view(vid)
+    if not existing:
+        return _err("Visualização não encontrada.", status=404)
+    allowed, msg = await _gate_view_write(request, existing=existing, target_scope=None)
+    if not allowed:
+        return _err(msg, status=403)
+    ok, err = logic.delete_kanban_view(vid)
+    if err:
+        return _err(err, status=400)
+    return {"ok": True, "data": {"deleted": ok}}
+
+
+# ── Preferência pessoal x equipe dos filtros (POR-USUÁRIO, por visualização) ───
+# A preferência é do PRÓPRIO usuário (qual conjunto de filtros aplicar ao entrar na aba),
+# então exige só `view` — NÃO manage_team_views (essa só gate os filtros DA EQUIPE).
+
+@router.get("/kanban-views/{vid}/my-pref", dependencies=[plugin_permission("view")])
+async def get_my_view_pref(vid: int, request: Request):
+    if not logic.get_kanban_view(vid):
+        return _err("Visualização não encontrada.", status=404)
+    uid, _ = _atendente(request)
+    return {"ok": True, "data": logic.get_user_view_pref(vid, uid)}
+
+
+@router.put("/kanban-views/{vid}/my-pref", dependencies=[plugin_permission("view")])
+async def set_my_view_pref(vid: int, body: dict, request: Request):
+    """Preferência do PRÓPRIO usuário para esta aba: usar os filtros da EQUIPE (default) ou
+    os PESSOAIS dele. ``use_personal`` e ``personal_filters`` são opcionais/independentes."""
+    if not logic.get_kanban_view(vid):
+        return _err("Visualização não encontrada.", status=404)
+    uid, _ = _atendente(request)
+    if uid is None:
+        # Legado/open (sem identidade): nada a persistir → devolve o default de equipe.
+        return {"ok": True, "data": {"use_personal": False, "personal_filters": {}}}
+    body = body or {}
+    up = body.get("use_personal")
+    pf = body.get("personal_filters")
+    pref = logic.upsert_user_view_pref(
+        vid, uid,
+        use_personal=(None if up is None else bool(up)),
+        personal_filters=(pf if isinstance(pf, dict) else None))
+    return {"ok": True, "data": pref}
 
 
 # ── Vínculo / resolução de conversa ───────────────────────────────────────────

@@ -236,9 +236,15 @@ export default function CustomAttributesManager({ initialEntity }) {
       getCustomAttributes('conversation'),
     ]);
     if ((cRes && cRes.ok) || (vRes && vRes.ok)) {
+      // Esta tela administra APENAS os atributos criados aqui (is_system=0). Os
+      // is_system=1 são rótulos registrados por plugins (o Atendimentos espelha seus
+      // campos de "Resolver conversa" como atributos de conversa) — eles vivem e são
+      // editados na config do próprio plugin, não nesta lista. O backend já bloqueia
+      // editar/excluir is_system, então aqui só os escondemos da gestão.
+      const onlyUserCreated = (rows) => (rows || []).filter(a => !a.is_system);
       setItems([
-        ...((cRes && cRes.ok && cRes.data) || []),
-        ...((vRes && vRes.ok && vRes.data) || []),
+        ...onlyUserCreated(cRes && cRes.ok && cRes.data),
+        ...onlyUserCreated(vRes && vRes.ok && vRes.data),
       ]);
       setError('');
     } else {
@@ -365,7 +371,6 @@ export default function CustomAttributesManager({ initialEntity }) {
                 <tr key=${row.id} class="border-b border-wa-border last:border-0 hover:bg-wa-hover transition-colors">
                   <td class="px-4 py-3 text-[14px] text-wa-text">
                     ${row.display_name}${row.required ? html`<span class="text-red-500"> *</span>` : null}
-                    ${row.is_system ? html`<span class="ml-2 text-[10px] font-semibold text-wa-teal bg-wa-teal/10 rounded px-[5px] py-[1px] align-middle" title="Atributo padrão do sistema — não pode ser apagado nem ter a chave alterada.">Sistema</span>` : null}
                   </td>
                   <td class="px-4 py-3 text-[14px] text-wa-secondary">${row.description || '—'}</td>
                   <td class="px-4 py-3 text-[14px] text-wa-text">
@@ -377,11 +382,9 @@ export default function CustomAttributesManager({ initialEntity }) {
                       <button title="Editar" aria-label="Editar"
                         class="p-1.5 rounded-md text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors"
                         onClick=${() => { setEditing(row); setCreating(false); setError(''); }}>${PencilIcon}</button>
-                      ${!row.is_system ? html`
                       <button title="Excluir" aria-label="Excluir"
                         class="p-1.5 rounded-md text-red-500 hover:bg-red-500/10 transition-colors"
                         onClick=${() => setConfirmDelete(row)}>${TrashIcon}</button>
-                      ` : null}
                     </div>
                   </td>
                 </tr>
