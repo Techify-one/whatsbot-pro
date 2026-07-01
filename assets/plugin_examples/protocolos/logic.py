@@ -804,7 +804,7 @@ def _conversation_core_attrs(atend_ids: list[int]) -> dict[int, dict]:
     out: dict[int, dict] = {}
     with make_plugin_db() as conn:
         crows = conn.execute(
-            text("SELECT id, custom_attributes FROM conversations WHERE id IN :ids")
+            text("SELECT id, custom_attributes FROM atendimentos WHERE id IN :ids")
             .bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).mappings().all()
@@ -1533,7 +1533,7 @@ def _maybe_backfill_custom_attrs() -> None:
     ts = now()
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text("SELECT id, contact_id, custom_attributes FROM conversations")
+            text("SELECT id, contact_id, custom_attributes FROM atendimentos")
         ).mappings().all()
     # Filtra em Python (portável SQLite/Postgres; custom_attributes pode vir str ou dict).
     candidates = []
