@@ -13,6 +13,8 @@ import { avatarUrl } from './contacts/utils.js';
 import { ContactInfoPanel } from './contacts/ContactInfoPanel.js';
 import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, str, json } from '../services/urlState.js';
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
@@ -211,6 +213,13 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
   `;
 }
 
+// Deep-link do estado da lista de contatos (Plano 24): busca + filtro avançado
+// na query legível. `adv` guarda só as cláusulas (JSON), omitido quando vazio.
+const CONTACTS_URL_SCHEMA = [
+  str('search', ''),
+  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
+];
+
 // ── Tela principal ───────────────────────────────────────────────────────
 export default function ContactsListScreen({ initialEntity = null }) {
   const [contacts, setContacts] = useState([]);
@@ -231,6 +240,21 @@ export default function ContactsListScreen({ initialEntity = null }) {
   const [showFilters, setShowFilters] = useState(false); // dropdown do construtor
   const [contactAttrDefs, setContactAttrDefs] = useState([]); // atributos de contato (dinâmicos)
   const filterRef = useRef(null);
+
+  // Deep-link do estado da lista → URL (Plano 24). Busca + filtro avançado na
+  // query legível; hidrata no mount/back-forward, reflete ao mudar (replaceState).
+  useUrlState({
+    read: () => readParams(window.location.search, CONTACTS_URL_SCHEMA),
+    apply: (s) => {
+      setSearch(s.search);
+      setAdvFilters(Array.isArray(s.adv) ? s.adv.map((f, i) => ({ ...f, id: `u${i}` })) : []);
+    },
+    serialize: () => writeParams({
+      search,
+      adv: (advFilters || []).map(({ id, ...rest }) => rest),
+    }, CONTACTS_URL_SCHEMA),
+    deps: [search, advFilters],
+  });
 
   function reload() {
     setLoading(true);

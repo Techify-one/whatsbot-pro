@@ -37,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 
 from plugins.context import broadcast, make_plugin_db
 from db.repositories import (config_repo, contact_repo, conversation_repo,
-                             custom_attribute_repo, message_repo)
+                             custom_attribute_repo)
 from db.tables import conversations as _conversations_tbl
 
 logger = logging.getLogger(__name__)
@@ -45,8 +45,9 @@ logger = logging.getLogger(__name__)
 PLUGIN_ID = "protocolos"
 SCOPES = ("protocolo", "atendimento")
 EXTRA_SCOPES = ("protocolo", "atendimento")  # ambos têm rótulos extras
-FIELD_TYPES = {"text", "textarea", "select", "radio", "checkbox"}
+FIELD_TYPES = {"text", "textarea", "number", "date", "select", "checkboxes", "radio", "checkbox"}
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,48}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
 # Backfill one-time dos valores que o ext_demo gravou em conversations.custom_attributes.
 _CA_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.custom_attrs_backfilled"
@@ -162,6 +163,9 @@ def get_extra_defs(scope: str) -> list[dict]:
         nd.setdefault("options", [])
         nd.setdefault("required", False)
         nd.setdefault("label", nd.get("key"))
+        nd.setdefault("regex_pattern", "")   # validação por padrão (text/textarea/number)
+        nd.setdefault("regex_cue", "")       # dica do formato mostrada ao usuário
+        nd.setdefault("multiple", False)     # só p/ type=checkboxes: permite marcar várias
         nd["fixed"] = False
         out.append(nd)
     return out
@@ -182,7 +186,7 @@ def _normalize_extra_def(d: dict) -> dict:
     if ftype not in FIELD_TYPES:
         raise ValueError(f"Tipo de campo inválido: '{ftype}'")
     opts = d.get("options") or []
-    if ftype in ("select", "radio") and not isinstance(opts, list):
+    if ftype in ("select", "radio", "checkboxes") and not isinstance(opts, list):
         raise ValueError(f"Campo '{key}': opções devem ser uma lista")
     did = str((d or {}).get("id") or "").strip() or _new_def_id()
     return {
@@ -192,6 +196,9 @@ def _normalize_extra_def(d: dict) -> dict:
         "type": ftype,
         "options": [str(o) for o in opts] if isinstance(opts, list) else [],
         "required": bool(d.get("required")),
+        "regex_pattern": str(d.get("regex_pattern") or "").strip(),
+        "regex_cue": str(d.get("regex_cue") or "").strip(),
+        "multiple": bool(d.get("multiple")),
         "fixed": False,
     }
 
@@ -239,27 +246,81 @@ def required_keys(scope: str) -> list[str]:
     return [d["key"] for d in get_field_defs(scope) if d.get("required")]
 
 
+def _is_filled_extra(d: dict, v) -> bool:
+    """Um valor conta como "preenchido"? checkbox (bool) sempre; checkboxes (lista) só
+    quando não-vazia; os demais quando string não-vazia."""
+    ftype = d.get("type") or "text"
+    if ftype == "checkbox":
+        return True
+    if ftype == "checkboxes":
+        return isinstance(v, list) and len(v) > 0
+    return v is not None and str(v).strip() != ""
+
+
+def _coerce_extra(d: dict, value) -> tuple:
+    """Coage + valida UM valor conforme o tipo do rótulo. Retorna (valor_normalizado,
+    erro|None). Valor VAZIO nunca é inválido aqui — o `required` é checado à parte.
+    - checkbox → bool; checkboxes → lista de opções (corta p/ 1 quando não-múltiplo);
+    - number → string numérica (aceita vírgula); date → 'AAAA-MM-DD';
+    - regex_pattern (text/textarea/number) → re.search, com a `regex_cue` na mensagem."""
+    ftype = d.get("type") or "text"
+    label = d.get("label") or d.get("key")
+    if ftype == "checkbox":
+        return bool(value), None
+    if ftype == "checkboxes":
+        if value is None or value == "":
+            vals = []
+        elif isinstance(value, list):
+            vals = [str(x).strip() for x in value if str(x).strip()]
+        else:
+            vals = [s.strip() for s in str(value).split(",") if s.strip()]
+        opts = d.get("options") or []
+        if opts:
+            bad = [v for v in vals if v not in opts]
+            if bad:
+                return vals, f"'{label}': opção inválida ({', '.join(bad)})."
+        if not d.get("multiple") and len(vals) > 1:
+            vals = vals[:1]
+        return vals, None
+    s = "" if value is None else str(value)
+    st = s.strip()
+    if st == "":
+        return s, None
+    if ftype == "number":
+        try:
+            float(st.replace(",", "."))
+        except ValueError:
+            return s, f"'{label}' deve ser um número."
+    elif ftype == "date":
+        if not _DATE_RE.match(st):
+            return s, f"'{label}' deve ser uma data (AAAA-MM-DD)."
+    pat = d.get("regex_pattern")
+    if pat and ftype in ("text", "textarea", "number"):
+        try:
+            if not re.search(pat, s):
+                cue = d.get("regex_cue") or f"formato esperado: {pat}"
+                return s, f"'{label}' inválido ({cue})."
+        except re.error:
+            pass  # regex mal-formado guardado → não bloqueia o valor (igual ao core)
+    return s, None
+
+
 def normalize_values(scope: str, values: dict) -> tuple[dict, str | None]:
-    """Mantém só chaves editáveis (não-readonly), coage checkbox→bool, exige os
-    obrigatórios EDITÁVEIS (obs + extras). Os fixos readonly (atendente/início/…) são
-    checados contra a coluna no fechamento (ver ``_missing_required``), pois não vêm
-    no formulário. Checkbox conta sempre como preenchido."""
+    """Mantém só chaves editáveis (não-readonly), coage/valida cada valor por tipo
+    (ver ``_coerce_extra``) e exige os obrigatórios EDITÁVEIS (obs + extras). Os fixos
+    readonly (atendente/início/…) são checados contra a coluna no fechamento (ver
+    ``_missing_required``), pois não vêm no formulário. checkbox conta sempre como
+    preenchido; checkboxes exige ao menos uma opção."""
     defs = {d["key"]: d for d in get_field_defs(scope) if not d.get("readonly")}
     values = values or {}
     clean: dict = {}
     for key, d in defs.items():
-        v = values.get(key)
-        if d["type"] == "checkbox":
-            clean[key] = bool(v)
-            continue
-        if v is None:
-            v = ""
-        clean[key] = v
+        cv, err = _coerce_extra(d, values.get(key))
+        if err:
+            return clean, err
+        clean[key] = cv
     for key, d in defs.items():
-        if not d.get("required") or d["type"] == "checkbox":
-            continue
-        v = clean.get(key)
-        if v is None or str(v).strip() == "":
+        if d.get("required") and not _is_filled_extra(d, clean.get(key)):
             return clean, f"Campo obrigatório não preenchido: {d.get('label', key)}"
     return clean, None
 
@@ -274,13 +335,15 @@ def _effective_values(scope: str, entity: dict) -> dict:
 
 
 def _missing_required(scope: str, eff: dict) -> str | None:
-    """1ª mensagem de obrigatório vazio em ``eff`` (fixos + extras), ou None.
-    Checkbox conta sempre como preenchido."""
+    """1ª mensagem de obrigatório vazio OU valor inválido (por tipo) em ``eff`` (fixos +
+    extras), ou None. Gate do FECHAMENTO — revalida tipos (número/data/regex/opções) além
+    do required, já que o save parcial não bloqueia. checkbox sempre conta como preenchido;
+    checkboxes exige ao menos uma opção."""
     for d in get_field_defs(scope):
-        if not d.get("required") or d.get("type") == "checkbox":
-            continue
-        v = eff.get(d["key"])
-        if v is None or str(v).strip() == "":
+        _cv, terr = _coerce_extra(d, eff.get(d["key"]))
+        if terr:
+            return terr
+        if d.get("required") and not _is_filled_extra(d, _cv):
             return f"Campo obrigatório não preenchido: {d.get('label', d['key'])}"
     return None
 
@@ -288,8 +351,13 @@ def _missing_required(scope: str, eff: dict) -> str | None:
 # ── Campos EXTRAS (valores normalizados, 1 linha por atendimento-ciclo + def) ────
 
 def _extra_value_type(ftype: str) -> str:
-    """Tipo de VALOR no JSON (fiel ao diagrama: string/boolean)."""
-    return "boolean" if ftype == "checkbox" else "string"
+    """Tipo de VALOR no JSON auto-descritivo: boolean (checkbox), list (checkboxes) ou
+    string (demais — inclui number/date, guardados como texto)."""
+    if ftype == "checkbox":
+        return "boolean"
+    if ftype == "checkboxes":
+        return "list"
+    return "string"
 
 
 def _extras_payload(d: dict, value) -> dict:
@@ -373,7 +441,9 @@ def _atendimento_dict(row, extras: dict | None = None) -> dict:
 # (``applies_to="conversation"``) p/ aparecerem no painel de info. Desligável via o
 # setting ``mirror_custom_attributes``.
 
-_CORE_ATTR_TYPE = {"checkbox": "checkbox"}  # demais tipos do plugin → "text"
+# date/number têm equivalente direto no core; checkboxes (multi) não tem → cai em "text"
+# (valor espelhado como lista separada por vírgula). select/radio/text/textarea → "text".
+_CORE_ATTR_TYPE = {"checkbox": "checkbox", "date": "date", "number": "number"}
 
 
 def _core_attr_type(ftype: str) -> str:
@@ -381,9 +451,14 @@ def _core_attr_type(ftype: str) -> str:
 
 
 def _mirror_value(d: dict, value):
-    """Valor a gravar no custom_attributes do core: checkbox→bool, demais→string."""
-    if (d.get("type") or "text") == "checkbox":
+    """Valor a gravar no custom_attributes do core: checkbox→bool, checkboxes→lista
+    unida por vírgula (core não tem multi), demais→string (number/date incluídos —
+    o core coage/valida no set_values)."""
+    ftype = d.get("type") or "text"
+    if ftype == "checkbox":
         return bool(value)
+    if ftype == "checkboxes":
+        return ", ".join(str(x) for x in value) if isinstance(value, list) else ("" if value is None else str(value))
     return "" if value is None else str(value)
 
 
@@ -485,8 +560,8 @@ def ensure_protocolo_for_contact(contact_id: int, phone: str = "", name: str = "
 def _write_open_note(at: dict, conversation_id: int | None) -> None:
     """Nota PRIVADA (painel-only, NÃO vai ao cliente) marcando a ABERTURA do protocolo
     com um ID pesquisável e não-editável pela interface:
-    ``ATD-AAAAMMDD-HHMMSS-<id_atendimento>`` (data/hora da abertura + id da atendimento que
-    disparou). Best-effort: qualquer falha só loga em debug."""
+    ``PROT-AAAAMMDD-HHMMSS-<id_protocolo>`` (data/hora da abertura + id do protocolo).
+    Best-effort: qualquer falha só loga em debug."""
     try:
         from plugins.context import get_deps
         deps = get_deps()
@@ -500,18 +575,22 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
         if not phone:
             return
         lt = time.localtime(float((at or {}).get("opened_at") or now()))
-        atd_id = (f"ATD-{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}-"
-                  f"{lt.tm_hour:02d}{lt.tm_min:02d}{lt.tm_sec:02d}-{conversation_id or 0}")
-        text_p = f"🔖 Protocolo aberto · {atd_id}"
-        channel_id = _channel_for_contact(contact_id)
+        proto_id = (f"PROT-{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}-"
+                    f"{lt.tm_hour:02d}{lt.tm_min:02d}{lt.tm_sec:02d}-{(at or {}).get('id') or 0}")
+        text_p = f"🔖 Protocolo aberto · {proto_id}"
+        # Ancora no canal da PRÓPRIA conversa que disparou a nota (não contact-scoped,
+        # que funde canais em multicanal — plano 11).
+        channel_id = _channel_for_conversation(conversation_id) or _channel_for_contact(contact_id)
         cm = agent_handler._get_contact(phone, channel_id=channel_id)
-        cm.add_message("private_note", text_p)
-        saved = message_repo.get_last(cm.id)
+        # Usa a linha que add_message RETORNA (id/ts/conversation_id) — não um get_last
+        # racy (que, numa rajada, pega a última msg do contato, não esta nota).
+        saved = cm.add_message("private_note", text_p)
         note = {"role": "private_note", "content": text_p,
-                "ts": (saved or {}).get("ts", now()), "status": None}
-        if saved and saved.get("_id"):
-            note["_id"] = saved["_id"]
-        broadcast("new_message", {"phone": phone, "message": note})
+                "ts": (saved or {}).get("ts", now()), "status": None,
+                "conversation_id": (saved or {}).get("conversation_id")}
+        if saved and saved.get("id"):
+            note["_id"] = saved["id"]
+        broadcast("new_message", {"phone": phone, "channel_id": channel_id, "message": note})
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos: nota de abertura falhou: %s", e)
 
@@ -618,8 +697,8 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     # Só finaliza quando a ÚLTIMA atendimento do protocolo estiver resolvida: se há ciclo
     # aberto, força resolver antes (a UI abre o popup "Resolver atendimento"). HTTP 400.
     if _open_cycles_of_protocolo(atid):
-        return None, ("Existe uma atendimento aberta neste protocolo — "
-                      "resolva-a antes de finalizar.")
+        return None, ("Existe um atendimento aberto neste protocolo — "
+                      "resolva-o antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
     # está salvo (a UI grava os campos antes de fechar).
     err = _missing_required("protocolo", _effective_values("protocolo", at))
@@ -636,9 +715,12 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
             {"ts": ts, "auid": assignee_user_id, "aname": assignee_name or "", "id": atid},
         )
     _broadcast_changed(at["contact_id"], atid)
-    # Card de sistema "Protocolo finalizado" no fio da atendimento (resolve a atendimento do
-    # contato: aberta→última). Autor = operador que finalizou, quando houver.
-    _emit_proto_notice("protocolo_closed", contact_id=at.get("contact_id"),
+    # Card de sistema "Protocolo finalizado" ancorado na atendimento MAIS RECENTE do
+    # protocolo (via conversation_id) — não no caminho contact-scoped, que em multicanal
+    # cairia na thread errada. Autor = operador que finalizou, quando houver.
+    _emit_proto_notice("protocolo_closed",
+                       conversation_id=_latest_conversation_of_protocolo(atid),
+                       contact_id=at.get("contact_id"),
                        phone=at.get("contact_phone") or None, actor=(assignee_name or None))
     return get_protocolo(atid), None
 
@@ -956,14 +1038,16 @@ def _view_visible(view: dict, uid, role_keys) -> bool:
 def list_kanban_views(*, user_id: int | None = None, role_keys=None) -> list[dict]:
     """Visualizações VISÍVEIS ao usuário (ver ``_view_visible``): pessoais dele + equipe
     conforme a ACL (grupos/usuários) + sempre as que ele criou + admin vê tudo. user_id None
-    (legado/open) → todas. Ordena por (scope, position, id). Anexa ``view["pref"]`` do
-    chamador (default de equipe). ``role_keys`` None → resolvido do banco (testes passam)."""
+    (legado/open) → todas. Ordena por (position, id) — as abas padrão semeadas (Status/Atendente,
+    position 0 e 1) ficam à esquerda; NÃO ordena por scope (senão views pessoais viriam antes das
+    de equipe). Anexa ``view["pref"]`` do chamador (default de equipe). ``role_keys`` None →
+    resolvido do banco (testes passam)."""
     if role_keys is None:
         role_keys = _user_role_keys(user_id)
     role_keys = set(role_keys or [])
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text(f"SELECT * FROM {_VIEWS_TABLE} ORDER BY scope ASC, position ASC, id ASC")
+            text(f"SELECT * FROM {_VIEWS_TABLE} ORDER BY position ASC, id ASC")
         ).mappings().all()
         pref_rows = []
         if user_id is not None:
@@ -1191,7 +1275,7 @@ def set_atendimento_attr(atid: int, key: str, value) -> tuple[dict | None, str |
         ).mappings().first()
     atend_id = row["conversation_id"] if row else None
     if not atend_id:
-        return None, "Este protocolo ainda não tem atendimento vinculada."
+        return None, "Este protocolo ainda não tem atendimento vinculado."
     v = None if value in (None, "") else str(value)
     try:
         custom_attribute_repo.set_values(_conversations_tbl, int(atend_id), {key: v})
@@ -1628,6 +1712,37 @@ def _channel_for_contact(contact_id) -> str:
     return "default"
 
 
+def _channel_for_conversation(conversation_id) -> str | None:
+    """Canal (channel_id) de UMA conversa específica — âncora correta em multicanal.
+    Diferente de ``_channel_for_contact`` (contact-scoped, funde canais): resolve o
+    canal da própria conversa que disparou a ação. None quando indisponível."""
+    if not conversation_id:
+        return None
+    try:
+        full = conversation_repo.get_with_channel(int(conversation_id))
+        if full and full.get("channel_id"):
+            return full["channel_id"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _latest_conversation_of_protocolo(atid: int) -> int | None:
+    """conversation_id da atendimento MAIS RECENTE do protocolo (âncora do card de
+    finalização). None quando o protocolo ainda não tem atendimento vinculada."""
+    try:
+        with make_plugin_db() as conn:
+            row = conn.execute(
+                text("SELECT conversation_id FROM plugin_protocolos_atendimentos "
+                     "WHERE protocolo_id = :aid AND conversation_id IS NOT NULL "
+                     "ORDER BY started_at DESC, id DESC LIMIT 1"),
+                {"aid": int(atid)},
+            ).mappings().first()
+        return int(row["conversation_id"]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _compose_message(title: str, link: str, params: dict) -> str:
     body = _append_query(link, params)
     return f"{title}\n{body}" if title else body
@@ -1658,7 +1773,11 @@ def send_protocol_on_close(at: dict) -> None:
             return
         params = {"assignee_id": (at or {}).get("assignee_user_id") or "",
                   "id_protocol": _gen_protocol()}
-        channel_id = _channel_for_contact((at or {}).get("contact_id"))
+        # Canal da atendimento mais recente do protocolo (conversation-scoped), com
+        # fallback contact-scoped — evita fundir canais em multicanal (plano 11).
+        conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+        channel_id = (_channel_for_conversation(conv_id)
+                      or _channel_for_contact((at or {}).get("contact_id")))
 
         # 1) Link normal → WhatsApp (envia pelo canal + salva como mensagem do operador).
         if normal.get("link") and outbound:
@@ -1683,13 +1802,16 @@ def send_protocol_on_close(at: dict) -> None:
                 # uma atendimento nova em OUTRO canal. Os dois links têm que ir na mesma
                 # atendimento do mesmo canal.
                 cm = agent_handler._get_contact(phone, channel_id=channel_id)
-                cm.add_message("private_note", text_p)
-                saved = message_repo.get_last(cm.id)
+                # Usa o retorno de add_message (id/ts/conversation_id) em vez de um
+                # get_last racy; leva conversation_id/channel_id p/ rotear no painel.
+                saved = cm.add_message("private_note", text_p)
                 note = {"role": "private_note", "content": text_p,
-                        "ts": (saved or {}).get("ts", now()), "status": None}
-                if saved and saved.get("_id"):
-                    note["_id"] = saved["_id"]
-                broadcast("new_message", {"phone": phone, "message": note})
+                        "ts": (saved or {}).get("ts", now()), "status": None,
+                        "conversation_id": (saved or {}).get("conversation_id")}
+                if saved and saved.get("id"):
+                    note["_id"] = saved["id"]
+                broadcast("new_message",
+                          {"phone": phone, "channel_id": channel_id, "message": note})
             except Exception as e:  # noqa: BLE001
                 logger.warning("protocolos: falha ao salvar nota privada de protocolo: %s", e)
     except Exception as e:  # noqa: BLE001

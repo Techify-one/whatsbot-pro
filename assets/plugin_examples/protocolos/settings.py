@@ -16,7 +16,7 @@ class Settings(BaseModel):
         default=True,
         title="Exigir campos no backend",
         description=(
-            "Recusar fechar a atendimento via API (HTTP 403) se algum campo de "
+            "Recusar fechar o atendimento via API (HTTP 403) se algum campo de "
             "resolução obrigatório não estiver preenchido — não burlável por "
             "chamada direta."
         ),
@@ -25,18 +25,18 @@ class Settings(BaseModel):
         default=True,
         title="Vincular atendimentos automaticamente",
         description=(
-            "Ao receber/enviar mensagens, vincular a atendimento ao protocolo "
+            "Ao receber/enviar mensagens, vincular o atendimento ao protocolo "
             "aberto do contato (criando um novo se não houver). Desligado, os "
-            "vínculos só acontecem ao resolver uma atendimento."
+            "vínculos só acontecem ao resolver um atendimento."
         ),
     )
     mirror_custom_attributes: bool = Field(
         default=True,
         title="Espelhar campos no core (custom_attributes)",
         description=(
-            "Ao resolver uma atendimento, gravar também os campos preenchidos em "
+            "Ao resolver um atendimento, gravar também os campos preenchidos em "
             "conversations.custom_attributes do core — assim eles aparecem no painel "
-            "de informações da atendimento, ficam filtráveis e sobrevivem mesmo se o "
+            "de informações do atendimento, ficam filtráveis e sobrevivem mesmo se o "
             "plugin for desativado. Desligado, os campos ficam só nas tabelas do plugin."
         ),
     )

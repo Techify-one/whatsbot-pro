@@ -1,14 +1,14 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { markAllUnread, markAllRead } from '../services/api.js';
 import { DatabaseSettings } from './DatabaseSettings.js';
 
 const html = htm.bind(h);
 
-function Section({ title, children }) {
+function Section({ title, id, children }) {
   return html`
-    <div class="bg-wa-bg rounded-xl p-5 border border-wa-border shadow-sm">
+    <div id=${id} class="bg-wa-bg rounded-xl p-5 border border-wa-border shadow-sm scroll-mt-4">
       ${title ? html`
         <h3 class="text-xs font-semibold text-wa-secondary uppercase tracking-wider mb-4">${title}</h3>
       ` : null}
@@ -37,6 +37,22 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [removePassword, setRemovePassword] = useState(false);
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
+  // (marcar-atendimentos | avisos | avancado | banco). Roda uma vez, quando o
+  // conteúdo já montou (config carregada).
+  const sectionScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!config || sectionScrolledRef.current) return;
+    sectionScrolledRef.current = true;
+    let section = null;
+    try { section = new URLSearchParams(window.location.search).get('section'); } catch {}
+    if (!section) return;
+    requestAnimationFrame(() => {
+      const el = document.getElementById(section);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [config]);
 
   // Populate form when config loads
   useEffect(() => {
@@ -124,13 +140,13 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     <div class="flex flex-col gap-4 flex-1">
 
       <!-- Section: Marcar atendimentos -->
-      <${Section} title="Marcar atendimentos">
+      <${Section} id="marcar-atendimentos" title="Marcar atendimentos">
         <!-- Mark all read / unread -->
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para um atendimento específica, use o botão direito sobre o contato na lista.</span>
+          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para um atendimento específico, use o botão direito sobre o contato na lista.</span>
           ${confirmUnreadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS os atendimentos como não lidas?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODOS os atendimentos como não lidos?</span>
               <span class="text-xs text-amber-700">Reacende o indicador verde em todos os contatos do painel. Não afeta o WhatsApp do celular.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -149,7 +165,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             </div>
           ` : confirmReadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS os atendimentos como lidas?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODOS os atendimentos como lidos?</span>
               <span class="text-xs text-amber-700">Remove o indicador verde de não lido de todos os contatos do painel.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -184,9 +200,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <//>
 
       <!-- Section: Avisos de sistema no chat (plano 12) -->
-      <${Section} title="Avisos de sistema no chat">
+      <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
-          Registra no fio do atendimento, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas os atendimentos — nada é gravado nem exibido.
+          Registra no fio do atendimento, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todos os atendimentos — nada é gravado nem exibido.
         </span>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -251,7 +267,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <//>
 
       <!-- Section: Avancado -->
-      <${Section} title="Avançado">
+      <${Section} id="avancado" title="Avançado">
         <!-- Max Executions -->
         <div>
           <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
@@ -328,7 +344,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
         </div>
       <//>
 
-      <${DatabaseSettings} onNotify=${onNotify} />
+      <div id="banco" class="scroll-mt-4">
+        <${DatabaseSettings} onNotify=${onNotify} />
+      </div>
 
       <!-- Save Button (sticky) -->
       <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">

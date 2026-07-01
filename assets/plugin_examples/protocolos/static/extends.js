@@ -15,7 +15,7 @@ import htm from 'htm';
 import { ResolveForm } from '/plugins/protocolos/static/resolve_form.js';
 import { ProtocolosTab } from '/plugins/protocolos/static/protocolos_tab.js';
 // Helpers do core p/ ler as definições de atributos de atendimento e gravar os valores
-// (mesma rota da aba "Informações da atendimento"). Carregam auth como qualquer chamada core.
+// (mesma rota da aba "Informações do atendimento"). Carregam auth como qualquer chamada core.
 import { getCustomAttributes, updateConversationInfo } from '/static/js/services/api.js';
 
 const html = htm.bind(h);
@@ -32,7 +32,7 @@ export default function register(api) {
   // 1) Popup ao resolver atendimento — pré-preenchido. Roda em TODOS os 5 sites de
   //    "Resolver" porque o core os afunila por resolveConversation. Mostra os rótulos do
   //    protocolo (escopo atendimento) E os atributos personalizados do core, já preenchidos
-  //    com o que está na atendimento (mesma fonte da aba "Informações da atendimento").
+  //    com o que está na atendimento (mesma fonte da aba "Informações do atendimento").
   api.addFilter('filter.conversation.beforeResolve', async (ctx, atend) => {
     // (a) Rótulos editáveis do protocolo: OBS (fixo editável) + extras. Os fixos de
     //     sistema (Início/Fim/Atendente/ID) são preenchidos pelo fluxo, não digitados.
@@ -50,7 +50,7 @@ export default function register(api) {
       attrDefs = ((a && a.ok && Array.isArray(a.data)) ? a.data : []).filter((x) => !x.is_system);
     } catch (_) { /* sem atributos → segue sem essa seção */ }
 
-    // Valores atuais p/ pré-preencher (o que foi salvo na aba "Informações da atendimento").
+    // Valores atuais p/ pré-preencher (o que foi salvo na aba "Informações do atendimento").
     const initialValues = (atend && atend.custom_attributes) || {};
 
     let result = { fields: {}, custom_attributes: {} };

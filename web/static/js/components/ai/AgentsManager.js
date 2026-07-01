@@ -23,9 +23,18 @@ import {
 import { ModelSelect } from '../ModelSelect.js';
 import { MarkdownEditor } from '../MarkdownEditor.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, bool } from '../../services/urlState.js';
 import PromptHistoryModal from './PromptHistoryModal.js';
 
 const html = htm.bind(h);
+
+// Deep-link (Plano 24) — flags de query ADITIVAS sobre o path /ai/agents/{key}
+// (o path já é dono do agente aberto via useDeepLink). Só refletem o modal aberto.
+const AGENT_URL_SCHEMA = [
+  bool('history'),         // ?history=1 → modal de histórico do agente
+  bool('prompt-history'),  // ?prompt-history=1 → modal de trilha de prompt
+];
 
 // Strip common markdown markup so the card preview shows clean, readable text
 // instead of raw syntax (**bold**, # heading, [link](url), `code`, lists, …).
@@ -508,6 +517,36 @@ export default function AgentsManager({ initialEntity }) {
     pushUrl(editing ? { sub: 'agents', id: editing.agent_key } : { sub: 'agents' });
   }, [editing]);
 
+  // Reflete os modais de histórico na query (?history / ?prompt-history), aditivo
+  // ao path do agente. Ao hidratar/voltar, reabre o modal contra o agente já
+  // resolvido pelo path (editing) — reusa openHistory (carrega historyRows) e o
+  // mesmo setPromptHistoryFor do botão "Versões do prompt".
+  useUrlState({
+    read: () => readParams(window.location.search, AGENT_URL_SCHEMA),
+    apply: (s) => {
+      if (s.history) { if (editing && !historyFor) openHistory(editing); }
+      else if (historyFor) setHistoryFor(null);
+      if (s['prompt-history']) { if (editing && !promptHistoryFor) setPromptHistoryFor(editing); }
+      else if (promptHistoryFor) setPromptHistoryFor(null);
+    },
+    serialize: () => writeParams({
+      history: !!historyFor,
+      'prompt-history': !!promptHistoryFor,
+    }, AGENT_URL_SCHEMA),
+    deps: [historyFor, promptHistoryFor, editing],
+  });
+  // Corrida de montagem: o hydrate do useUrlState roda no mount, mas o agente do
+  // path (editing) só resolve depois da lista carregar. Quando editing aparecer,
+  // reabre o modal pedido pela URL uma única vez (não repete em cada troca).
+  const flagsHydratedRef = useRef(false);
+  useEffect(() => {
+    if (flagsHydratedRef.current || !editing) return;
+    flagsHydratedRef.current = true;
+    const s = readParams(window.location.search, AGENT_URL_SCHEMA);
+    if (s.history && !historyFor) openHistory(editing);
+    if (s['prompt-history'] && !promptHistoryFor) setPromptHistoryFor(editing);
+  }, [editing]);
+
   async function handleSave(key, data) {
     setBusy(true); setError('');
     const res = await saveAgent(key, data);
@@ -525,7 +564,7 @@ export default function AgentsManager({ initialEntity }) {
 
   async function handleDelete(a) {
     if (a.agent_key === 'default') return;
-    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Atendimentos vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Atendimentos vinculados voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
     setError('');
     const res = await deleteAgent(a.agent_key);
     if (res && res.ok) {

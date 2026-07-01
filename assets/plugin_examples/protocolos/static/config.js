@@ -13,7 +13,8 @@ import { authHeaders } from '/static/js/services/api.js';
 const html = htm.bind(h);
 
 const TYPES = [
-  ['text', 'Texto'], ['textarea', 'Área de texto'], ['select', 'Seleção'],
+  ['text', 'Texto'], ['textarea', 'Área de texto'], ['number', 'Número'], ['date', 'Data'],
+  ['select', 'Seleção'], ['checkboxes', 'Caixa de seleção'],
   ['radio', 'Opções (rádio)'], ['checkbox', 'Caixa (sim/não)'],
 ];
 // Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
@@ -62,7 +63,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     setDefs((list) => list.map((d, j) => (j === i ? { ...d, ...patch } : d)));
   }
   function addField() {
-    setDefs((list) => [...list, { key: '', label: '', type: 'text', options: [], required: false, fixed: false }]);
+    setDefs((list) => [...list, { key: '', label: '', type: 'text', options: [], required: false, multiple: false, regex_pattern: '', regex_cue: '', fixed: false }]);
   }
   function remove(i) { setDefs((list) => list.filter((_, j) => j !== i)); }
 
@@ -79,7 +80,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
         const key = slug(nm);
         if (have.has(key)) continue;
         have.add(key);
-        adds.push({ key, label: nm, type: 'text', options: [], required: false, fixed: false });
+        adds.push({ key, label: nm, type: 'text', options: [], required: false, multiple: false, regex_pattern: '', regex_cue: '', fixed: false });
       }
       return [...list, ...adds];
     });
@@ -162,13 +163,35 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
                 ${(!isFixed && canEdit) ? html`<button onClick=${() => askRemove(i, d)}
                   class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}
               </div>
-              ${(d.type === 'select' || d.type === 'radio') ? html`
+              ${(d.type === 'select' || d.type === 'radio' || d.type === 'checkboxes') ? html`
                 <div>
                   <label class="block text-[12px] text-wa-secondary mb-1">Opções (uma por linha)</label>
                   <textarea class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] min-h-[64px]"
                     disabled=${locked}
                     value=${(d.options || []).join('\n')}
                     onInput=${(e) => update(i, { options: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) })} />
+                </div>` : null}
+              ${d.type === 'checkboxes' ? html`
+                <label class="flex items-center gap-1.5 text-[13px] text-wa-text">
+                  <input type="checkbox" checked=${!!d.multiple} disabled=${locked}
+                    onChange=${(e) => update(i, { multiple: e.target.checked })} /> Permitir marcar várias opções
+                </label>` : null}
+              ${(!isFixed && (d.type === 'text' || d.type === 'textarea' || d.type === 'number')) ? html`
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="block text-[12px] text-wa-secondary mb-1">Regex (opcional)</label>
+                    <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] font-mono" type="text"
+                      placeholder="^\\d{11}$" disabled=${locked}
+                      value=${d.regex_pattern || ''}
+                      onInput=${(e) => update(i, { regex_pattern: e.target.value })} />
+                  </div>
+                  <div>
+                    <label class="block text-[12px] text-wa-secondary mb-1">Dica do formato</label>
+                    <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" type="text"
+                      placeholder="11 dígitos" disabled=${locked}
+                      value=${d.regex_cue || ''}
+                      onInput=${(e) => update(i, { regex_cue: e.target.value })} />
+                  </div>
                 </div>` : null}
             </div>`;
           })}

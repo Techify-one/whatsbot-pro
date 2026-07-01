@@ -15,6 +15,7 @@ import {
   setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
@@ -179,6 +180,10 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
+      <!-- Copiar link do atendimento (permalink /conversations/<id>) — plano 24 -->
+      ${!sandbox && conversationId != null ? html`
+        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link do atendimento" />
+      ` : null}
       <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
         <button

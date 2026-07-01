@@ -6,6 +6,7 @@ import { h } from 'preact';
 import htm from 'htm';
 import { providerMeta, credLabel, missingCredsFor } from './constants.js';
 import { Dot } from './notices.js';
+import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 
 const html = htm.bind(h);
 
@@ -72,7 +73,9 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
         ` : null}
       </div>
 
-      <div class="flex gap-1 shrink-0 flex-wrap justify-end">
+      <div class="flex gap-1 shrink-0 flex-wrap justify-end items-center">
+        <${CopyLinkButton} path=${`/channels/${encodeURIComponent(channel.id)}`}
+          title="Copiar link deste canal" />
         ${canConnect ? html`
           <button class="px-2 py-1 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick=${() => onConnect(channel)} disabled=${busy}>Conectar</button>

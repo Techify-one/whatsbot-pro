@@ -1,7 +1,7 @@
 // Tabela de "Atendimentos" (ciclos) do protocolo, com COLUNAS DINÂMICAS + filtro.
 //
 // Colunas em DOIS grupos, com cabeçalho de grupo p/ deixar CLARO a origem de cada coluna:
-//  - "Informações da atendimento": fixos (Início/Fim/Atendente/Observações) + rótulos do
+//  - "Informações do atendimento": fixos (Início/Fim/Atendente/Observações) + rótulos do
 //    plugin (escopo atendimento, lidos de `c.fields`), NA ORDEM da config.
 //  - "Atributos personalizados": atributos do core (is_system=0, lidos de `c.attrs`).
 // Rótulos/atributos apagados NÃO aparecem: o backend só devolve em `c.fields`/`c.attrs` os
@@ -27,7 +27,7 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 // Grupos de colunas (origem clara). 'atendimento' = info + rótulos da atendimento; 'atributo' =
 // atributo personalizado do core. A ordem aqui é a ordem dos grupos na tabela.
 const GROUPS = [
-  { id: 'atendimento', label: 'Informações da atendimento' },
+  { id: 'atendimento', label: 'Informações do atendimento' },
   { id: 'atributo', label: 'Atributos personalizados' },
 ];
 
@@ -43,7 +43,7 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
                                 defaultHidden = {}, showFilter = true,
                                 startField = 'started_at', endField = 'ended_at',
                                 onRowClick = null,
-                                emptyText = 'Nenhuma atendimento vinculada ainda.' }) {
+                                emptyText = 'Nenhum atendimento vinculado ainda.' }) {
   // Conjunto de colunas: fixos (group 'atendimento') + rótulos EXTRAS do plugin (group
   // 'atendimento', lidos de c.fields) + atributos do core (group 'atributo', lidos de
   // c.attrs). Defs fixas que cheguem em fieldDefs são ignoradas (já cobertas pela base).
@@ -81,7 +81,7 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
 
   const visCols = cols.filter((c) => visible(c.key));
   // Grupos visíveis (ordem fixa, só os com ≥1 coluna). Com >1 grupo, o cabeçalho ganha
-  // uma linha de grupo (Informações da atendimento | Atributos personalizados).
+  // uma linha de grupo (Informações do atendimento | Atributos personalizados).
   const visGroups = GROUPS
     .map((g) => ({ ...g, cols: visCols.filter((c) => c.group === g.id) }))
     .filter((g) => g.cols.length);
@@ -151,7 +151,7 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
             <tbody>
               ${atendimentos.map((c) => html`<tr key=${c.id}
                 onClick=${onRowClick ? () => onRowClick(c) : undefined}
-                title=${onRowClick ? 'Abrir esta atendimento' : undefined}
+                title=${onRowClick ? 'Abrir este atendimento' : undefined}
                 class="border-t border-wa-border text-wa-text align-top ${onRowClick ? 'cursor-pointer hover:bg-wa-hover' : ''}">
                 ${flatCols.map((col) => html`<td key=${col.key}
                   class="py-1 pr-2 ${col._sep ? 'border-l border-wa-border pl-2' : ''} ${(col.key === '__inicio' || col.key === '__fim') ? 'whitespace-nowrap' : ''}">${cell(c, col)}</td>`)}
