@@ -2,8 +2,24 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { getExecutions, getExecution } from '../services/api.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, str, enumStr, int } from '../services/urlState.js';
+import { CopyLinkButton } from '../utils/copyDeepLink.js';
 
 const html = htm.bind(h);
+
+// Deep-link do estado da tela (Plano 24). Duas camadas independentes que
+// COMPÕEM sobre a mesma URL: o PATH (/executions ou /executions/{id}) já é
+// versionado pelo pushState/popstate próprio do componente (não mexer nele);
+// aqui só adicionamos a QUERY (useUrlState preserva o pathname).
+//
+// Lista (/executions): filtros + página. `page` vai 1-based na URL (legível);
+// o estado interno é 0-based, então convertemos na hidratação/serialização.
+const LIST_URL_SCHEMA = [
+  str('phone', ''),
+  enumStr('status', ''),   // ''|completed|failed|running
+  int('page', 1),          // 1-based na URL; default 1 é omitido
+];
 
 const STEP_COLORS = {
   webhook_received: { bg: 'bg-wa-panel', text: 'text-wa-text', border: 'border-wa-border' },
@@ -73,11 +89,23 @@ function JsonBlock({ data, expandSignal }) {
 
 // ── Detail View ──────────────────────────────────────────────────
 
-function ExecutionDetail({ execution, onBack }) {
+function ExecutionDetail({ execution, onBack, focusStep, onFocusStep }) {
   const baseTsMs = execution.started_at * 1000;
   const steps = execution.steps || [];
   const [expandSignal, setExpandSignal] = useState({ value: true, ver: 0 });
   const toggleAll = () => setExpandSignal(s => ({ value: !s.value, ver: s.ver + 1 }));
+
+  // Passo focado via ?step=<id>: rola até ele ao abrir/mudar o alvo. Guarda os
+  // nós por id (chave estável = step.id) p/ o scrollIntoView.
+  const stepRefs = useRef({});
+  useEffect(() => {
+    if (focusStep == null) return;
+    const node = stepRefs.current[String(focusStep)];
+    if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focusStep, execution.id]);
+
+  // Link deste detalhe (inclui ?step quando um passo está focado).
+  const detailPath = `/executions/${execution.id}${focusStep != null ? `?step=${encodeURIComponent(focusStep)}` : ''}`;
 
   return html`
     <div class="flex flex-col h-full">
@@ -108,6 +136,7 @@ function ExecutionDetail({ execution, onBack }) {
             title=${expandSignal.value ? 'Recolher todos os eventos' : 'Expandir todos os eventos'}
           >${expandSignal.value ? 'Recolher tudo' : 'Expandir tudo'}</button>
         ` : null}
+        <${CopyLinkButton} path=${detailPath} variant="icon" title="Copiar link desta execução" />
       </div>
 
       <!-- Timeline -->
@@ -126,8 +155,17 @@ function ExecutionDetail({ execution, onBack }) {
           ${steps.map((step, i) => {
             const colors = STEP_COLORS[step.step_type] || STEP_COLORS.error;
             const isError = step.status === 'error';
+            // id estável do passo (fallback pro índice se o backend não expõe id).
+            const stepId = step.id != null ? step.id : i;
+            const isFocused = focusStep != null && String(focusStep) === String(stepId);
             return html`
-              <div key=${step.id} class="relative mb-4 last:mb-0">
+              <div
+                key=${stepId}
+                ref=${(el) => { if (el) stepRefs.current[String(stepId)] = el; }}
+                onClick=${() => onFocusStep && onFocusStep(stepId)}
+                class="relative mb-4 last:mb-0 rounded cursor-pointer ${isFocused ? 'ring-1 ring-wa-teal bg-wa-hover' : ''}"
+                title="Focar este passo (link direto)"
+              >
                 <!-- Dot -->
                 <div class="absolute -left-6 top-1 w-[18px] h-[18px] rounded-full border-2 ${isError ? 'bg-red-100 border-red-400' : `bg-wa-bg ${colors.border}`}"></div>
                 <!-- Content -->
@@ -159,6 +197,13 @@ function executionIdFromUrl() {
   return m ? parseInt(m[1], 10) : null;
 }
 
+// Passo focado (?step=<id>) da query — string p/ casar com step.id numérico ou
+// índice-fallback. null quando ausente.
+function stepFromUrl() {
+  const v = new URLSearchParams(window.location.search).get('step');
+  return v == null || v === '' ? null : v;
+}
+
 export function Executions() {
   const [executions, setExecutions] = useState([]);
   const [total, setTotal] = useState(0);
@@ -168,6 +213,7 @@ export function Executions() {
   const [filterStatus, setFilterStatus] = useState('');
   const [selected, setSelected] = useState(null);
   const [selectedData, setSelectedData] = useState(null);
+  const [focusStep, setFocusStep] = useState(stepFromUrl());  // ?step do detalhe
   const PAGE_SIZE = 30;
 
   const fetchList = useCallback(async () => {
@@ -185,6 +231,25 @@ export function Executions() {
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
+  // Deep-link da LISTA → query (Plano 24). Só a query: o pathname (/executions
+  // vs /executions/{id}) segue governado pelo pushState/popstate próprio abaixo.
+  // Hidrata filtros/página no mount+back/forward; reflete no replaceState quando
+  // mudam. `page` é 1-based na URL, 0-based no estado.
+  useUrlState({
+    read: () => readParams(window.location.search, LIST_URL_SCHEMA),
+    apply: (s) => {
+      setFilterPhone(s.phone);
+      setFilterStatus(s.status);
+      setPage(Math.max(0, (s.page || 1) - 1));
+    },
+    serialize: () => writeParams({
+      phone: filterPhone,
+      status: filterStatus,
+      page: page + 1,
+    }, LIST_URL_SCHEMA),
+    deps: [filterPhone, filterStatus, page],
+  });
+
   // Auto-refresh every 5s
   useEffect(() => {
     const id = setInterval(fetchList, 5000);
@@ -196,7 +261,12 @@ export function Executions() {
     if (res.ok) {
       setSelectedData(res.data);
       setSelected(id);
-      if (!opts.skipPush) {
+      if (opts.skipPush) {
+        // Aberto pela URL (mount/popstate): honra o ?step que já está no endereço.
+        setFocusStep(stepFromUrl());
+      } else {
+        // Clique numa linha: detalhe limpo, sem passo focado.
+        setFocusStep(null);
         const target = `/executions/${id}`;
         if (window.location.pathname !== target) {
           history.pushState(null, '', target);
@@ -208,11 +278,15 @@ export function Executions() {
   const handleBack = useCallback(() => {
     setSelected(null);
     setSelectedData(null);
-    if (window.location.pathname !== '/executions') {
-      history.pushState(null, '', '/executions');
+    setFocusStep(null);
+    // Volta pra lista preservando os filtros ativos na query (page/phone/status).
+    const qs = writeParams({ phone: filterPhone, status: filterStatus, page: page + 1 }, LIST_URL_SCHEMA);
+    const target = `/executions${qs ? `?${qs}` : ''}`;
+    if (`${window.location.pathname}${window.location.search}` !== target) {
+      history.pushState(null, '', target);
     }
     fetchList();
-  }, [fetchList]);
+  }, [fetchList, filterPhone, filterStatus, page]);
 
   // Open from URL on mount, and sync with browser back/forward via popstate.
   const selectedRef = useRef(selected);
@@ -227,19 +301,38 @@ export function Executions() {
       if (urlId == null) {
         setSelected(null);
         setSelectedData(null);
+        setFocusStep(null);
       } else if (urlId !== selectedRef.current) {
         handleSelect(urlId, { skipPush: true });
       }
+      // ?step vive na query do path do detalhe — ressincroniza no back/forward.
+      setFocusStep(stepFromUrl());
     }
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, [handleSelect]);
 
+  // Reflete o passo focado como ?step na URL do detalhe (replace, sem histórico).
+  // Só age em detalhe (pathname /executions/{id}); preserva o path e mexe só na
+  // query — não briga com o useUrlState da lista (deps/telas distintas).
+  useEffect(() => {
+    if (executionIdFromUrl() == null) return;  // fora do detalhe: nada a refletir
+    const qs = focusStep != null ? `?step=${encodeURIComponent(focusStep)}` : '';
+    const next = `${window.location.pathname}${qs}`;
+    const cur = `${window.location.pathname}${window.location.search}`;
+    if (next !== cur) history.replaceState(null, '', next);
+  }, [focusStep, selected]);
+
   // Detail view
   if (selected && selectedData) {
     return html`
       <div class="h-full bg-wa-bg rounded-xl border border-wa-border shadow-sm overflow-hidden">
-        <${ExecutionDetail} execution=${selectedData} onBack=${handleBack} />
+        <${ExecutionDetail}
+          execution=${selectedData}
+          onBack=${handleBack}
+          focusStep=${focusStep}
+          onFocusStep=${setFocusStep}
+        />
       </div>
     `;
   }

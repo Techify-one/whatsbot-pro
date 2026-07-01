@@ -8,7 +8,7 @@ import { useState } from 'preact/hooks';
 import htm from 'htm';
 // Componente core que renderiza UM atributo personalizado por tipo (text/number/
 // date/list/checkbox/link), dark-mode-safe. Reusado aqui p/ os atributos do core
-// não-espelho (is_system=0) — mesma aparência da aba "Informações da atendimento".
+// não-espelho (is_system=0) — mesma aparência da aba "Informações do atendimento".
 import { CustomAttributeField } from '/static/js/components/contacts/CustomAttributeField.js';
 
 const html = htm.bind(h);
@@ -18,7 +18,7 @@ export function FieldInput({ def, value, onChange }) {
   const t = def.type || 'text';
   if (t === 'textarea') {
     return html`<textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] min-h-[80px]"
-      value=${value || ''} onInput=${(e) => onChange(e.target.value)} />`;
+      value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
   }
   if (t === 'select') {
     return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
@@ -37,15 +37,35 @@ export function FieldInput({ def, value, onChange }) {
         </label>`)}
     </div>`;
   }
+  if (t === 'checkboxes') {
+    // Caixa de seleção configurável: value é sempre uma LISTA. `def.multiple` decide se
+    // marca várias (toggle) ou só uma (marcar troca a anterior — comporta como rádio).
+    const arr = Array.isArray(value) ? value : (value ? [value] : []);
+    const toggle = (o) => {
+      if (def.multiple) onChange(arr.includes(o) ? arr.filter((x) => x !== o) : [...arr, o]);
+      else onChange(arr.includes(o) ? [] : [o]);
+    };
+    return html`<div class="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
+      ${(def.options || []).map((o) => html`
+        <label key=${o} class="flex items-center gap-1.5 text-[14px] text-wa-text cursor-pointer">
+          <input type="checkbox" checked=${arr.includes(o)} onChange=${() => toggle(o)} />
+          ${o}
+        </label>`)}
+    </div>`;
+  }
   if (t === 'checkbox') {
     return html`<label class="flex items-center gap-2 text-[14px] text-wa-text cursor-pointer pt-1">
       <input type="checkbox" checked=${!!value} onChange=${(e) => onChange(e.target.checked)} />
       ${def.label}
     </label>`;
   }
+  if (t === 'date' || t === 'number') {
+    return html`<input type=${t} class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+      value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
+  }
   // text (default)
   return html`<input type="text" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-    value=${value || ''} onInput=${(e) => onChange(e.target.value)} />`;
+    value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
 }
 
 // Bloco "label + campo" (checkbox já tem o label embutido).
@@ -63,12 +83,13 @@ export function LabeledField({ def, value, onChange }) {
 
 function isFilled(def, v) {
   if (def.type === 'checkbox') return true; // bool é sempre "preenchido"
+  if (def.type === 'checkboxes') return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
 // Popup do beforeResolve. Mostra DOIS conjuntos, ambos pré-preenchidos com os valores
 // atuais da atendimento (`initialValues` = conversations.custom_attributes, o que foi salvo
-// na aba "Informações da atendimento"):
+// na aba "Informações do atendimento"):
 //   1. `defs`     — rótulos do protocolo (escopo atendimento: OBS + extras), via FieldInput.
 //   2. `attrDefs` — atributos personalizados do core NÃO-espelho (is_system=0), via o
 //                   CustomAttributeField do core. (Os espelhados do plugin chegam como
@@ -82,9 +103,10 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
     const init = {};
     for (const d of defs) {
       const cur = init0[d.key];
-      init[d.key] = d.type === 'checkbox'
-        ? (cur === true || cur === 'true')
-        : (cur == null ? '' : String(cur));
+      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
+      else if (d.type === 'checkboxes') init[d.key] = Array.isArray(cur)
+        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
+      else init[d.key] = (cur == null ? '' : String(cur));
     }
     return init;
   });
@@ -116,7 +138,7 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
 
         ${defs.length ? html`
           <div>
-            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-wa-teal mb-2">Informações da atendimento</div>` : null}
+            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-wa-teal mb-2">Informações do atendimento</div>` : null}
             <div class="space-y-3">
               ${defs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
                 value=${vals[d.key]}

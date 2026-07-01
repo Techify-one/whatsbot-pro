@@ -1021,13 +1021,17 @@ def register_routes(app, deps):
                 continue
 
             if not reply_in_chat:
-                # AI reply stays in the panel as a private note.
+                # AI reply stays in the panel as a private note. Bind the note to
+                # the SAME channel as the conversation (senão cairia no inbox
+                # 'default' e não roteria no painel — plano 11) and use the row
+                # add_message RETURNS (id/ts/conversation_id) instead of a racy
+                # get_last.
+                note_channel = _channel_for(phone, conversation_id)
                 saved_note = None
                 try:
                     def _save_note(p=part):
-                        contact = agent_handler._get_contact(phone)
-                        contact.add_message("private_note", p)
-                        return message_repo.get_last(contact.id)
+                        contact = agent_handler._get_contact(phone, channel_id=note_channel)
+                        return contact.add_message("private_note", p)
                     saved_note = await asyncio.to_thread(_save_note)
                 except Exception as e:
                     logger.error("[PrivateAI] failed to save private note: %s", e)
@@ -1036,10 +1040,13 @@ def register_routes(app, deps):
                     "content": part,
                     "ts": (saved_note or {}).get("ts", time.time()),
                     "status": None,
+                    "conversation_id": (saved_note or {}).get("conversation_id"),
                 }
-                if saved_note and saved_note.get("_id"):
-                    note_msg["_id"] = saved_note["_id"]
-                await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+                if saved_note and saved_note.get("id"):
+                    note_msg["_id"] = saved_note["id"]
+                await ws_manager.broadcast(
+                    "new_message",
+                    {"phone": phone, "channel_id": note_channel, "message": note_msg})
                 continue
 
             channel_id = _channel_for(phone, conversation_id)
@@ -1115,26 +1122,33 @@ def register_routes(app, deps):
         ai_read = bool(body.get("ai_read", False))
         ai_reply = bool(body.get("ai_reply", True))
 
+        # Bind the note to the conversation's channel (senão cai no inbox 'default'
+        # e não roteia no painel — plano 11).
+        note_channel = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         try:
             def _save():
-                contact = agent_handler._get_contact(phone)
-                contact.add_message("private_note", text)
-                return message_repo.get_last(contact.id)
+                contact = agent_handler._get_contact(phone, channel_id=note_channel)
+                return contact.add_message("private_note", text)
             saved = await asyncio.to_thread(_save)
         except Exception as e:
             logger.error("[Private] Failed to save private message for %s: %s", phone, e)
             return _err(f"Erro ao salvar mensagem privada: {e}", status=500)
 
-        # Carry the DB row id so the panel can delete the note without a reload.
+        # Carry the DB row id (delete without reload) + conversation_id/channel_id
+        # so the panel routes the note to the right thread (plano 11). Uses the row
+        # add_message returned — not a racy get_last.
         note_msg = {
             "role": "private_note",
             "content": text,
             "ts": (saved or {}).get("ts", time.time()),
             "status": None,
+            "conversation_id": (saved or {}).get("conversation_id"),
         }
-        if saved and saved.get("_id"):
-            note_msg["_id"] = saved["_id"]
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+        if saved and saved.get("id"):
+            note_msg["_id"] = saved["id"]
+        await ws_manager.broadcast(
+            "new_message",
+            {"phone": phone, "channel_id": note_channel, "message": note_msg})
 
         if ai_read:
             asyncio.create_task(_run_private_ai(phone, text, reply_in_chat=ai_reply,

@@ -16,16 +16,48 @@ const html = htm.bind(h);
 
 const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
 const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
-const VIEW_KEY = 'whatsbot_protocolos_view';     // id da aba ativa: '__status'|'__atendente'|<id custom>
+const VIEW_KEY = 'whatsbot_protocolos_view';     // id (numérico) da aba ativa; sentinelas legadas '__status'/'__atendente' caem na 1ª aba
 function lsGet(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
 
-// Abas built-in (sempre presentes, não removíveis). As visualizações personalizadas
-// (pessoais/equipe) carregadas do backend aparecem ao lado destas.
-const BUILTIN_VIEWS = [
-  { id: '__status', label: 'Status', group_by: 'status', builtin: true, filters: {} },
-  { id: '__atendente', label: 'Atendente', group_by: 'atendente', builtin: true, filters: {} },
-];
+// Deep-link da aba ativa do Kanban (Plano 24) — ?view=<id>. Padrão MANUAL do plugin
+// (URLSearchParams + replaceState), como o ?detail= já faz; NÃO usa os hooks do core
+// (evita divergência pelo boundary de plugin). Convivem: escrever ?view= preserva o
+// ?detail= corrente e vice-versa.
+// Copia texto p/ o clipboard funcionando também em HTTP/contexto não-seguro (o painel
+// costuma rodar num IP de LAN sem TLS, onde navigator.clipboard não existe) — fallback
+// via execCommand num textarea temporário. Chama onOk() no sucesso.
+function copyText(text, onOk) {
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok && onOk) onOk();
+    } catch (e) { /* clipboard indisponível */ }
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => onOk && onOk()).catch(fallback);
+  } else { fallback(); }
+}
+
+function readUrlParam(key) { try { return new URLSearchParams(location.search).get(key); } catch (e) { return null; } }
+function writeUrlParam(key, value) {
+  try {
+    const p = new URLSearchParams(location.search);
+    if (value == null || value === '') p.delete(key); else p.set(key, String(value));
+    const qs = p.toString();
+    history.replaceState(null, '', `${location.pathname}${qs ? `?${qs}` : ''}`);
+  } catch (e) { /* ignore */ }
+}
+
+// Fallback SÓ de render: garante que o board nunca fique em branco quando não há nenhuma
+// visualização (ex.: todas excluídas). NÃO é uma aba da barra — as abas Status/Atendente
+// agora são views REAIS (seed 010), editáveis/excluíveis como qualquer visualização criada
+// pela interface.
+const FALLBACK_VIEW = { id: '__fallback', group_by: 'status', filters: {} };
 
 function fmtTs(ts) {
   if (!ts) return '—';
@@ -35,6 +67,7 @@ function fmtTs(ts) {
 
 function fmtCell(v, def) {
   if (def.type === 'checkbox') return v ? 'Sim' : 'Não';
+  if (def.type === 'checkboxes') return (Array.isArray(v) && v.length) ? v.join(', ') : '—';
   return (v == null || v === '') ? '—' : String(v);
 }
 
@@ -43,6 +76,7 @@ function fmtCell(v, def) {
 // de obrigatórios do detalhe e pelo guard do drag para "Fechado".
 function isFilledProto(def, v) {
   if (def.type === 'checkbox') return true;
+  if (def.type === 'checkboxes') return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
@@ -231,6 +265,8 @@ function ProtocolosList({ api }) {
   // Visualizações (abas de "Agrupar por"): built-ins + carregadas do backend.
   const [views, setViews] = useState([]);
   const [activeViewId, setActiveViewId] = useState(() => {
+    const u = readUrlParam('view');                   // precedência URL > localStorage
+    if (u) return u;
     const v = lsGet(VIEW_KEY, '');
     if (v) return v;
     const kg = lsGet(KGROUP_KEY, '');                 // migração suave da chave antiga
@@ -250,16 +286,20 @@ function ProtocolosList({ api }) {
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
   const appliedViewRef = useRef(null);               // última aba cujos filtros já foram aplicados
   const setM = (m) => { setMode(m); lsSet(MODE_KEY, m); };
-  const setActiveView = (id) => { setActiveViewId(String(id)); lsSet(VIEW_KEY, String(id)); };
+  // Troca a aba ativa: estado + localStorage (por-device) + reflete ?view=<id> na URL
+  // (replaceState, preservando ?detail=). id vazio limpa o param (ex.: view excluída).
+  const setActiveView = (id) => {
+    setActiveViewId(String(id)); lsSet(VIEW_KEY, String(id)); writeUrlParam('view', id ? String(id) : '');
+  };
 
-  const tabs = useMemo(() => [...BUILTIN_VIEWS, ...views.map((v) => ({ ...v, label: v.name }))], [views]);
+  const tabs = useMemo(() => views.map((v) => ({ ...v, label: v.name })), [views]);
   const activeView = useMemo(
-    () => tabs.find((t) => String(t.id) === String(activeViewId)) || BUILTIN_VIEWS[0],
+    () => tabs.find((t) => String(t.id) === String(activeViewId)) || tabs[0] || FALLBACK_VIEW,
     [tabs, activeViewId]);
   const canTeam = api.services.hasPermission
     ? api.services.hasPermission(currentUser, 'plugin.protocolos.manage_team_views') : true;
-  const canEditView = (v) => !v.builtin
-    && (canTeam || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id)));
+  const canEditView = (v) => canTeam
+    || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id));
   // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
   // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|attr:<key>.
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
@@ -346,7 +386,7 @@ function ProtocolosList({ api }) {
     if (!resolved || appliedViewRef.current === String(activeViewId)) return;
     appliedViewRef.current = String(activeViewId);
     // Origem dos filtros: a preferência do usuário (pessoal x equipe) por aba. Default =
-    // filtros da EQUIPE (a coluna filters compartilhada). Builtin não tem pref/filters → {}.
+    // filtros da EQUIPE (a coluna filters compartilhada). O fallback de render não tem pref/filters → {}.
     const usePersonal = v.pref && v.pref.use_personal;
     const f = (usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {};
     // Só aplica pré-determinados de filtros DISPONÍVEIS nesta aba (available_filters da view;
@@ -412,26 +452,45 @@ function ProtocolosList({ api }) {
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
+  // Id do protocolo atualmente aberto no detalhe (espelha ?detail= na URL). Ref p/ o
+  // sync bidirecional não depender do estado assíncrono e evitar reabrir/refetch em loop.
+  const detailIdRef = useRef(null);
+
   const openDetail = useCallback(async (atid, warn = false) => {
     const r = await getJson(`${apiBase}/protocolos/${atid}`);
     if (r && r.ok) {
       setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este protocolo.' : '');
       setDetail(r.data);
+      // Deep-link (Plano 24): o protocolo aberto vira ?detail=<id> na URL (compartilhável).
+      detailIdRef.current = String(atid);
+      writeUrlParam('detail', String(atid));
     }
   }, [apiBase, getJson]);
 
-  // Deep-link de entrada (Req 1): /attendances?detail=<atid> abre o detalhe daquele
-  // protocolo. Lido no mount E em popstate — é assim que o "Resolver e ir ao protocolo"
-  // (navega com pushState+popstate no extends.js) chega aqui. Limpa o param (replaceState)
-  // p/ não reabrir o detalhe ao navegar de volta.
+  // Fecha o detalhe e limpa o ?detail= (preservando o ?view=).
+  const closeDetail = useCallback(() => {
+    setDetail(null); setDetailWarning('');
+    detailIdRef.current = null;
+    writeUrlParam('detail', '');
+  }, []);
+
+  // Deep-link do protocolo aberto (Plano 24): /attendances?detail=<id> abre e MANTÉM o
+  // param na URL (compartilhável — antes era one-shot). Lido no mount E em popstate (é
+  // assim que o "Resolver e ir ao protocolo" chega, via pushState no extends.js). Sync
+  // bidirecional: param novo → abre; param ausente com detalhe aberto (voltar) → fecha.
+  // No mesmo passo ressincroniza a aba ativa com ?view= (o param vence o localStorage).
   useEffect(() => {
     const readDeep = () => {
-      let id = null;
-      try { id = new URLSearchParams(location.search).get('detail'); } catch (_) { /* ignore */ }
-      if (!id) return;
-      const n = parseInt(id, 10);
-      try { history.replaceState(null, '', '/attendances'); } catch (_) { /* ignore */ }
-      if (!Number.isNaN(n)) openDetail(n);
+      const v = readUrlParam('view');            // ?view= tem precedência (setState idempotente no Preact)
+      if (v) { setActiveViewId(String(v)); lsSet(VIEW_KEY, String(v)); }
+      const id = readUrlParam('detail');
+      if (id) {
+        const n = parseInt(id, 10);
+        if (detailIdRef.current !== String(id) && !Number.isNaN(n)) openDetail(n);
+      } else if (detailIdRef.current != null) {
+        // URL sem ?detail= (ex.: voltar do navegador) → fecha o detalhe aberto.
+        setDetail(null); setDetailWarning(''); detailIdRef.current = null;
+      }
     };
     readDeep();
     window.addEventListener('popstate', readDeep);
@@ -458,7 +517,7 @@ function ProtocolosList({ api }) {
   }, [api, coreAttrDefs, users, roles, canTeam, currentUser, loadViews, activeViewId]);
 
   const removeView = useCallback(async (view) => {
-    if (!view || view.builtin) return;
+    if (!view) return;
     const ok = await api.ui.openModal((close) => html`<${ConfirmDialog} danger=${true} okLabel="Excluir"
       message=${`Excluir a visualização "${view.label || view.name}"?`}
       onOk=${() => close(true)} onCancel=${() => close(false)} />`);
@@ -466,7 +525,7 @@ function ProtocolosList({ api }) {
     try {
       const r = await fetch(`${apiBase}/kanban-views/${view.id}`, { method: 'DELETE', headers: authHeaders() });
       const j = await r.json().catch(() => ({}));
-      if (j && j.ok) { if (String(activeViewId) === String(view.id)) setActiveView('__status'); await loadViews(); }
+      if (j && j.ok) { if (String(activeViewId) === String(view.id)) setActiveView(''); await loadViews(); }
       else setActionMsg({ text: (j && j.error) || 'Falha ao excluir.', error: true });
     } catch (_) { setActionMsg({ text: 'Falha ao excluir a visualização.', error: true }); }
   }, [api, apiBase, authHeaders, activeViewId, loadViews]);
@@ -488,7 +547,7 @@ function ProtocolosList({ api }) {
     }
     const res = await apiPost(`/atendimentos/${openCycle.conversation_id}/resolve`, { fields });
     if (!res || res.ok === false) {
-      setActionMsg({ text: (res && res.error) || 'Falha ao resolver a atendimento.', error: true });
+      setActionMsg({ text: (res && res.error) || 'Falha ao resolver o atendimento.', error: true });
       return false;
     }
     // Fecha a ATENDIMENTO no core (status=closed). O resolve do plugin só encerra o CICLO
@@ -498,7 +557,7 @@ function ProtocolosList({ api }) {
     // do plugin já rodou, então chamamos o status direto. Mantém as duas abas em sincronia.
     const st = await api.services.setConversationStatus(openCycle.conversation_id, 'closed');
     if (st && st.ok === false) {
-      setActionMsg({ text: st.error || 'Falha ao fechar a atendimento.', error: true });
+      setActionMsg({ text: st.error || 'Falha ao fechar o atendimento.', error: true });
       return false;
     }
     const closed = await apiPost(`/protocolos/${atid}/close`);
@@ -516,14 +575,14 @@ function ProtocolosList({ api }) {
   async function finalizeProtocolo(atid) {
     const res = await apiPost(`/protocolos/${atid}/close`);
     if (res && res.ok === false) {
-      if (/atendimento aberta/i.test(res.error || '')) {
+      if (/atendimento abert[ao]/i.test(res.error || '')) {
         const done = await forceResolveAndClose(atid);
-        if (done) { setDetail(null); setDetailWarning(''); await load(); return { ok: true }; }
-        return { ok: false, error: 'Resolva a atendimento aberta para finalizar o protocolo.' };
+        if (done) { closeDetail(); await load(); return { ok: true }; }
+        return { ok: false, error: 'Resolva o atendimento aberto para finalizar o protocolo.' };
       }
       return { ok: false, error: res.error || 'Falha ao finalizar.' };
     }
-    setDetail(null); setDetailWarning(''); await load();
+    closeDetail(); await load();
     return { ok: true };
   }
 
@@ -554,7 +613,7 @@ function ProtocolosList({ api }) {
       const res = await grouping.onDrop(row, colId);
       if (res && res.ok === false) {
         // Fechar barrado por atendimento aberta → força o popup "Resolver atendimento".
-        if (colId === 'fechado' && /atendimento aberta/i.test(res.error || '')) {
+        if (colId === 'fechado' && /atendimento abert[ao]/i.test(res.error || '')) {
           await forceResolveAndClose(row.id);
         } else {
           setActionMsg({ text: res.error || 'Falha ao mover.', error: true });
@@ -629,15 +688,14 @@ function ProtocolosList({ api }) {
           <div key=${t.id} class="inline-flex items-center rounded-lg border overflow-hidden ${String(activeViewId) === String(t.id) ? 'border-wa-teal' : 'border-wa-border'}">
             <button onClick=${() => setActiveView(t.id)}
               class="px-3 py-1 text-[12px] ${String(activeViewId) === String(t.id) ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}"
-              title=${t.scope === 'team' ? 'Visualização de equipe' : (t.builtin ? '' : 'Visualização pessoal')}>
+              title=${t.scope === 'team' ? 'Visualização de equipe' : 'Visualização pessoal'}>
               ${t.label}${t.scope === 'team' ? html`<span class="ml-1 opacity-70">·equipe</span>` : null}
             </button>
-            ${!t.builtin ? html`
-              <button title=${canEditView(t) ? 'Editar' : 'Meus filtros desta aba'} onClick=${() => openViewEditor(t)}
-                class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-wa-text border-l border-wa-border">✎</button>
-              ${canEditView(t) ? html`
-                <button title="Excluir" onClick=${() => removeView(t)}
-                  class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}` : null}
+            <button title=${canEditView(t) ? 'Editar' : 'Meus filtros desta aba'} onClick=${() => openViewEditor(t)}
+              class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-wa-text border-l border-wa-border">✎</button>
+            ${canEditView(t) ? html`
+              <button title="Excluir" onClick=${() => removeView(t)}
+                class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}
           </div>`)}
         <button title="Nova visualização" onClick=${() => openViewEditor(null)}
           class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>
@@ -747,7 +805,7 @@ function ProtocolosList({ api }) {
 
       ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs} attrDefs=${coreAttrDefs}
         protoDefs=${cols} warning=${detailWarning} api=${api}
-        onClose=${() => { setDetail(null); setDetailWarning(''); }}
+        onClose=${closeDetail}
         onChanged=${load} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
 }
@@ -796,15 +854,21 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
     const init = {};
     for (const d of protoDefs) {
       const cur = d.key === 'obs' ? at.obs : (at.fields || {})[d.key];
-      init[d.key] = d.type === 'checkbox'
-        ? (cur === true || cur === 'true')
-        : (cur == null ? '' : String(cur));
+      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
+      else if (d.type === 'checkboxes') init[d.key] = Array.isArray(cur)
+        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
+      else init[d.key] = (cur == null ? '' : String(cur));
     }
     return init;
   });
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Copia o link compartilhável deste protocolo (/attendances?detail=<id>) — plano 24.
+  const copyLink = () => copyText(`${location.origin}/attendances?detail=${at.id}`,
+    () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); });
 
   const missing = protoDefs.filter((d) => d.required && !isFilledProto(d, vals[d.key]));
 
@@ -861,9 +925,15 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-auto">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold text-wa-text">${at.contact_name || at.contact_phone || 'Protocolo'}</h2>
-          <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-xl leading-none">×</button>
+        <div class="flex items-center justify-between mb-3 gap-2">
+          <h2 class="text-base font-semibold text-wa-text truncate">${at.contact_name || at.contact_phone || 'Protocolo'}</h2>
+          <div class="flex items-center gap-1 shrink-0">
+            <button onClick=${copyLink} title="Copiar link deste protocolo"
+              class="px-2 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">
+              ${linkCopied ? '✓ Link copiado' : 'Copiar link'}
+            </button>
+            <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-xl leading-none px-1">×</button>
+          </div>
         </div>
         <div class="text-[12px] text-wa-secondary mb-3">
           Início: ${fmtTs(at.opened_at)}${at.closed_at ? ` · Fim: ${fmtTs(at.closed_at)}` : ''} · ${fechado ? 'Fechado' : 'Aberto'}
@@ -909,7 +979,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
           </div>`}
 
         <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
-        <div class="text-[12px] text-wa-secondary mb-2">Clique numa atendimento para abri-la no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações da atendimento</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
+        <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações do atendimento</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
         <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
           storageKey="whatsbot_proto_atend_cols_modal" onRowClick=${openAtend} />
       </div>
@@ -945,18 +1015,18 @@ function ConfirmDialog({ message, onOk, onCancel, okLabel = 'Confirmar', danger 
 // Nome/Quem pode ver/Agrupar por e os filtros de EQUIPE ficam read-only; só o toggle + os
 // filtros PESSOAIS são editáveis e salvos.
 function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUser, api, onSaved, onCancel }) {
-  const editing = !!(view && !view.builtin && view.id != null);
+  const editing = !!(view && view.id != null);
   // Pode editar os METADADOS + filtros de equipe? Criar (view=null) sempre pode (vira pessoal).
   const canEditMeta = !view ? true
-    : (!view.builtin && (canTeam || (view.scope === 'personal'
-        && (!currentUser || view.owner_user_id === currentUser.id))));
+    : (canTeam || (view.scope === 'personal'
+        && (!currentUser || view.owner_user_id === currentUser.id)));
   const listAttrs = (coreAttrDefs || []).filter((d) => d.type === 'list');
   const initTeam = (view && view.filters) || {};
   const initPersonal = (view && view.pref && view.pref.personal_filters) || {};
   const initUsePersonal = !!(view && view.pref && view.pref.use_personal);
   const initActive = initUsePersonal ? initPersonal : initTeam;  // origem mostrada ao abrir
   const initGroup = () => {
-    if (!view || view.builtin) return (view && view.group_by) || 'status';
+    if (!view) return 'status';
     return view.group_by === 'attr' ? `attr:${view.group_attr_key || ''}` : view.group_by;
   };
   // ACL "Quem pode ver": grupos (roles) + usuários (3 estados: padrão/incluir/excluir).
@@ -966,7 +1036,7 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
   // Equipe LEGADO (view team sem ACL): preservar "todos veem" ao salvar sem selecionar nada.
   const wasLegacyTeamAll = editing && view.scope === 'team' && !initRoleKeys.length && !initInc.length;
 
-  const [name, setName] = useState((view && (view.name || (view.builtin ? '' : ''))) || '');
+  const [name, setName] = useState((view && view.name) || '');
   const [visTab, setVisTab] = useState('grupos');                  // 'grupos' | 'usuarios'
   const [visRoles, setVisRoles] = useState(() => new Set(initRoleKeys.map(String)));
   const [userStates, setUserStates] = useState(() => {

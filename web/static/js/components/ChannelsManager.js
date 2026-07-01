@@ -31,6 +31,9 @@ import {
   getConfig,
 } from '../services/api.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, bool } from '../services/urlState.js';
+import { CopyLinkButton } from '../utils/copyDeepLink.js';
 import { PROVIDERS, aiDefaultsFrom } from './channels/constants.js';
 import { ChannelForm } from './channels/ChannelForm.js';
 import { ChannelEditForm } from './channels/ChannelEditForm.js';
@@ -40,11 +43,26 @@ import { WebhookNotice, TelegramWebhookNotice, PurgeChannelModal } from './chann
 
 const html = htm.bind(h);
 
+// Deep-link do estado da tela (Plano 24) — flags de query sobre o path
+// /channels/{id} (ou /channels/new). `provider` pré-seleciona o form de criação;
+// connect/webhook/telegram (mutuamente exclusivas) reabrem o modal do canal do
+// path. `archived` abre a seção de arquivados. Serialize omite defaults → URL limpa.
+const PROVIDER_KEYS = new Set(['gowa', 'whatsapp_cloud', 'telegram', 'test']);
+const CHANNELS_URL_SCHEMA = [
+  enumStr('provider', ''),   // pré-seleção do form de criação (/channels/new)
+  bool('connect'),           // reabre o QR/conexão do canal do path
+  bool('webhook'),           // reabre o aviso de webhook (whatsapp_cloud)
+  bool('telegram'),          // reabre o aviso do Telegram
+  bool('archived'),          // seção de canais arquivados
+];
+
 export default function ChannelsManager({ initialEntity }) {
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
+  // Provider pré-selecionado no form de criação (deep-link /channels/new?provider=).
+  const [initialProvider, setInitialProvider] = useState('');
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
   const [busyId, setBusyId] = useState('');
@@ -72,16 +90,52 @@ export default function ChannelsManager({ initialEntity }) {
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
-  // Deep-link /channels/<id>: a URL reflete o canal aberto no editor.
+  // Deep-link /channels/<id>: a URL reflete o canal aberto no editor. Também
+  // resolve /channels/new (form de criação, com ?provider=) e as flags de modal
+  // (?connect|?webhook|?telegram=1) sobre um canal existente — lidas do search
+  // aqui porque só neste ponto (ready + lista carregada) o canal do path resolve.
   const pushUrl = useDeepLink({
     tab: 'channels',
     resolve: initialEntity ? { id: initialEntity.id } : null,
     ready: !loading,
     open: (sel) => {
-      if (!sel) { setEditingChannel(null); return; }
+      // Fecha o que estava aberto por deep-link ao sair da entidade.
+      if (!sel) { setEditingChannel(null); setCreating(false); return; }
+      // /channels/new → form de criação (não é um canal real; trate antes do find).
+      if (sel.id === 'new') {
+        const q = readParams(window.location.search, CHANNELS_URL_SCHEMA);
+        if (PROVIDER_KEYS.has(q.provider)) setInitialProvider(q.provider);
+        setEditingChannel(null);
+        setCreateError(''); setError('');
+        setCreating(true);
+        return;
+      }
       const c = channels.find(ch => ch.id === sel.id);
-      if (c) setEditingChannel(c);
+      if (!c) return;
+      setEditingChannel(c);
+      // Flags de modal sobre o canal do path (mutuamente exclusivas: só a 1ª vale).
+      const q = readParams(window.location.search, CHANNELS_URL_SCHEMA);
+      if (q.connect) setConnectFor({ id: c.id, display_name: c.display_name || c.id });
+      else if (q.webhook) setWebhookFor(c.id);
+      else if (q.telegram) setTelegramNotice({ channel_id: c.id, deep_link: true });
     },
+  });
+
+  // Espelha o estado de tela na query (Plano 24). Hidrata só `archived` (as flags
+  // de modal dependem da lista + do canal do path, resolvidas no open do
+  // useDeepLink acima); serialize reflete tudo. replaceState → sem poluir histórico.
+  useUrlState({
+    read: () => readParams(window.location.search, CHANNELS_URL_SCHEMA),
+    apply: (s) => { setShowArchived(s.archived); },
+    serialize: () => writeParams({
+      // provider só faz sentido no path /channels/new (form de criação aberto).
+      provider: creating ? initialProvider : '',
+      connect: !!connectFor,
+      webhook: !!webhookFor,
+      telegram: !!telegramNotice,
+      archived: showArchived,
+    }, CHANNELS_URL_SCHEMA),
+    deps: [creating, initialProvider, connectFor, webhookFor, telegramNotice, showArchived],
   });
 
   useEffect(() => {
@@ -165,6 +219,10 @@ export default function ChannelsManager({ initialEntity }) {
       }
       setCreateBusy(false);
       setCreating(false);
+      setInitialProvider('');
+      // Sai de /channels/new e ancora as flags de modal pós-criação no canal novo
+      // (/channels/{newId}?connect|webhook|telegram=1 via useUrlState).
+      pushUrl(newId ? { id: newId } : null);
       if (payload.provider === 'whatsapp_cloud') setWebhookFor(newId);
       // GOWA: open the QR-connect panel immediately so the user can scan it.
       if (payload.provider === 'gowa') {
@@ -196,6 +254,20 @@ export default function ChannelsManager({ initialEntity }) {
 
   function handleConnect(channel) {
     setConnectFor({ id: channel.id, display_name: channel.display_name || channel.id });
+  }
+
+  // Abre o form de criação e reflete /channels/new na URL (o ?provider= é
+  // acrescentado pelo useUrlState quando initialProvider muda). pushState = entra
+  // no histórico (voltar fecha o form). Fechar volta para /channels.
+  function openCreate() {
+    setCreateError(''); setError('');
+    setCreating(true);
+    pushUrl({ id: 'new' });
+  }
+  function closeCreate() {
+    setCreating(false);
+    setInitialProvider('');
+    pushUrl(null);
   }
 
   function handleEdit(channel) {
@@ -261,7 +333,7 @@ export default function ChannelsManager({ initialEntity }) {
         </p>
         ${!creating ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
-            onClick=${() => { setCreating(true); setCreateError(''); setError(''); }}>+ Adicionar canal</button>
+            onClick=${openCreate}>+ Adicionar canal</button>
         ` : null}
       </div>
 
@@ -277,7 +349,9 @@ export default function ChannelsManager({ initialEntity }) {
 
       ${creating ? html`<${ChannelForm}
         onCreated=${handleCreate}
-        onCancel=${() => setCreating(false)}
+        onCancel=${closeCreate}
+        onProviderChange=${setInitialProvider}
+        initialProvider=${initialProvider}
         busy=${createBusy}
         error=${createError}
         aiDefaults=${aiDefaults}

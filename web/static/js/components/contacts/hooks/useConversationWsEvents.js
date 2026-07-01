@@ -421,8 +421,10 @@ export function useConversationWsEvents(opts) {
       }
     }
 
-    // Skip contact list preview update for transcription, system_notice, tool_call, conversation_event, and error messages
-    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'error') return;
+    // Skip contact list preview update for panel-only roles (transcription,
+    // system_notice, tool_call, conversation_event, private_note, error) — these
+    // never leave the panel, so they must not become a conversation's "last message".
+    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'private_note' || message.role === 'error') return;
 
     setContacts(prev => {
       // Target the row for this exact conversation/channel (not all rows of the phone).

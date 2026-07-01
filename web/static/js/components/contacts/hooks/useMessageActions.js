@@ -12,6 +12,7 @@
 import { useState } from 'preact/hooks';
 import { deleteMessage, reactToMessage, generateImprovement } from '../../../services/api.js';
 import { copyToClipboard } from '../MessageContextMenu.js';
+import { deepLinkUrl } from '../../../utils/copyDeepLink.js';
 
 // The operator's own current reaction on a message (stored under reactor "me").
 export function myReaction(message) {
@@ -79,7 +80,7 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     if (!message || message._id == null) return null;
     const convId = message.conversation_id != null ? message.conversation_id : conversationId;
     if (convId == null) return null;
-    return `${window.location.origin}/conversations/${convId}?message=${message._id}`;
+    return deepLinkUrl(`/conversations/${convId}?message=${message._id}`);
   }
 
   function copyMessageLink(message) {
