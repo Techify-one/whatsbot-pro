@@ -104,7 +104,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
     enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection,
     handleBulkAI, handleBulkArchive, handleBulkTag, handleBulkRemoveAllTags,
-    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread,
+    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread, handleBulkAssign,
   } = bulk;
 
   // Archive toggle (deselect + drop selection mode), split from the list hook's
@@ -241,6 +241,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onBulkPin=${handleBulkPin}
           onBulkMarkRead=${handleBulkMarkRead}
           onBulkMarkUnread=${handleBulkMarkUnread}
+          onBulkAssign=${handleBulkAssign}
+          users=${users}
+          currentUserId=${currentUserId}
         />
       </div>
       <!-- Divisória redimensionável (desktop): arraste p/ redimensionar, clique p/ esconder -->
