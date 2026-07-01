@@ -27,6 +27,44 @@ function isDark() {
   return document.documentElement.classList.contains('dark');
 }
 
+// Heuristic: does this pasted plain text carry markdown markup worth rendering?
+// Covers headings, bold/italic/strike, lists, quotes, links, code, hr and tables.
+function looksLikeMarkdown(t) {
+  if (!t) return false;
+  return /(^|\n)\s{0,3}#{1,6}\s/.test(t)          // # heading
+    || /\*\*[^*\n]+\*\*|__[^_\n]+__/.test(t)        // **bold**
+    || /(^|\n)\s{0,3}[-*+]\s+\S/.test(t)            // - list
+    || /(^|\n)\s{0,3}\d+\.\s+\S/.test(t)            // 1. list
+    || /(^|\n)\s{0,3}>\s/.test(t)                   // > quote
+    || /\[[^\]\n]+\]\([^)\n]+\)/.test(t)            // [link](url)
+    || /`[^`\n]+`|```/.test(t)                      // `code` / ```
+    || /(^|\n)\s*---+\s*(\n|$)|(^|\n)\s*\*\*\*+\s*(\n|$)/.test(t)  // hr
+    || /(^|\n)\s*\|.+\|/.test(t);                   // | table |
+}
+
+// Render a markdown string to HTML using a throwaway Toast UI Viewer, so pasted
+// markdown becomes formatted content (no raw symbols) in the WYSIWYG editor.
+// Returns '' if conversion is unavailable, so the caller can fall back to raw text.
+function markdownToHtml(md) {
+  const factory = window.toastui && window.toastui.Editor && window.toastui.Editor.factory;
+  if (!factory) return '';
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden';
+  document.body.appendChild(holder);
+  let out = '';
+  try {
+    const viewer = factory({ el: holder, viewer: true, initialValue: md, usageStatistics: false });
+    const contents = holder.querySelector('.toastui-editor-contents');
+    out = contents ? contents.innerHTML : '';
+    try { viewer.destroy(); } catch (e) { /* noop */ }
+  } catch (e) {
+    out = '';
+  } finally {
+    holder.remove();
+  }
+  return out;
+}
+
 // Inline SVG icons for the custom undo/redo toolbar buttons. `currentColor` makes
 // them follow the toolbar text color, so light/dark themes work without changes.
 const UNDO_SVG = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
@@ -148,10 +186,15 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
       ],
     });
     editor.on('change', () => {
+      const h = histRef.current;
+      // Programmatic writes (value-sync effect, undo/redo) set `suppress`. They must
+      // NOT push back into the parent form: doing so fights the controlled `value`
+      // prop and, with markdown that doesn't round-trip stably (e.g. `---` next to a
+      // heading), turns into an infinite setMarkdown↔onChange loop that freezes the
+      // tab. Only genuine user edits (suppress=false) propagate up + record history.
+      if (h.suppress) return;
       const md = editor.getMarkdown();
       if (onChangeRef.current) onChangeRef.current(md);
-      const h = histRef.current;
-      if (h.suppress) return; // our own undo/redo/value-sync, not a user edit
       // Debounce so a burst of typing becomes one undo step, not one per key.
       if (h.timer) clearTimeout(h.timer);
       h.timer = setTimeout(() => {
@@ -188,9 +231,49 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
       switchBar.appendChild(toggleBtn);
     }
     refreshButtons();
+
+    // Paste markdown as FORMATTED text (no raw symbols) in WYSIWYG. Toast UI pastes
+    // plain text literally, so a copied markdown prompt would keep its `#`/`**`/`---`.
+    // We detect markdown-looking plain text, convert it to HTML, and re-dispatch a
+    // synthetic HTML paste so ProseMirror inserts it formatted at the cursor. Rich
+    // HTML pastes and markdown mode are left untouched. `synthetic` guards the
+    // re-dispatch from re-entering this same capture-phase handler.
+    let synthetic = false;
+    const onPaste = (e) => {
+      if (synthetic) return;
+      const ed = editorRef.current;
+      if (!ed || ed.isMarkdownMode()) return; // markdown mode: raw paste is correct
+      const cd = e.clipboardData;
+      if (!cd) return;
+      const htmlClip = cd.getData('text/html');
+      if (htmlClip && htmlClip.trim()) return; // real HTML source → let Toast UI handle it
+      const text = cd.getData('text/plain');
+      if (!text || !looksLikeMarkdown(text)) return; // nothing markdown-ish → default paste
+      const html = markdownToHtml(text);
+      if (!html) return; // conversion unavailable → fall back to Toast UI's plain paste
+      e.preventDefault();
+      e.stopPropagation();
+      const pmNode = elRef.current
+        && elRef.current.querySelector('.toastui-editor-ww-container .ProseMirror, .toastui-editor-ww-container [contenteditable="true"]');
+      if (!pmNode) { try { ed.insertText(text); } catch (err) { /* noop */ } return; }
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/html', html);
+        dt.setData('text/plain', text);
+        synthetic = true;
+        pmNode.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      } catch (err) {
+        try { ed.insertText(text); } catch (e2) { /* noop */ }
+      } finally {
+        synthetic = false;
+      }
+    };
+    elRef.current.addEventListener('paste', onPaste, true); // capture: run before Toast UI
+
     return () => {
       const h = histRef.current;
       if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+      if (elRef.current) elRef.current.removeEventListener('paste', onPaste, true);
       try { editor.destroy(); } catch (e) { /* noop */ }
       editorRef.current = null;
     };

@@ -2,6 +2,7 @@ import { h } from 'preact';
 import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
 import { isSystemCardRole } from '../../services/messageView.js';
+import { AudioPlayer } from './AudioPlayer.js';
 
 const html = htm.bind(h);
 
@@ -47,7 +48,11 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu }) {
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
             Mensagem privada
           </span>
-          <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
+          ${(m.media_type === 'audio' && m.media_path) ? html`
+            <div class="min-w-[220px] max-w-[280px] my-[2px]">
+              <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} />
+            </div>
+          ` : html`<span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>`}
           <span class="float-right ml-[8px] mt-[3px] text-[10.5px] leading-[14px] whitespace-nowrap" style="color:#a78bfa;">
             ${pending ? '⏳ ' : (failed ? '⚠ ' : '')}${formatBubbleTime(m.ts)}
           </span>
