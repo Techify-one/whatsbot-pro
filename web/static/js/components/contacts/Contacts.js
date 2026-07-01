@@ -16,7 +16,6 @@ import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
 import { useChannelPicker } from './hooks/useChannelPicker.js';
 import { useConversationWsEvents } from './hooks/useConversationWsEvents.js';
-import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -226,7 +225,6 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           wsConnected=${wsConnected}
           autoReply=${autoReply}
           onToggleAutoReply=${handleToggleAutoReply}
-          canToggleAutoReply=${hasPermission(currentUser, 'settings.manage')}
           selectionMode=${selectionMode}
           selectedKeys=${selectedKeys}
           onEnterSelection=${enterSelection}
