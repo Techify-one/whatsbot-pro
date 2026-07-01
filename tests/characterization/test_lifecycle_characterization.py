@@ -230,7 +230,7 @@ def test_reopen_noop_when_already_open(build_app):
     # CHARACTERIZED BUG: the conversation.reopened BUS event is correctly gated on
     # previous_status == 'closed' (absent here), but the system-notice CARD is NOT
     # — set_status route emits the "status_open" notice unconditionally whenever
-    # status == 'open', so an open→open no-op still writes a "🔄 Conversa reaberta."
+    # status == 'open', so an open→open no-op still writes a "🔄 Atendimento reaberto."
     # lifecycle card (see the notices in this golden). The bus verb and the chat
     # card disagree on the open→open case. B4 should reconcile this when extracting
     # the service layer.

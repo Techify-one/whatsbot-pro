@@ -94,10 +94,10 @@ export function useConversationWsEvents(opts) {
 
   // Real-time: patch a contact row when its conversation changes (assign /
   // resolve / IA). The conversation_* events carry contact_id (plano 10) and
-  // conversation_id (plano 11). Conversa-cêntrico: um contato pode ter várias
+  // conversation_id (plano 11). Atendimento-cêntrico: um contato pode ter várias
   // linhas (uma por canal); casar só por contact_id resolveria/atribuiria TODAS
-  // as conversas do número. Linhas COM conversa casam por conversation_id;
-  // linhas sem conversa (legado) ainda casam por contact_id e adotam a nova.
+  // os atendimentos do número. Linhas COM atendimento casam por conversation_id;
+  // linhas sem atendimento (legado) ainda casam por contact_id e adotam a nova.
   // P19: latest conversation-scope custom-attribute write, forwarded to the open
   // ConversationInfoPanel for live refresh (mirrors contact_info_updated → panel).
   const onConversationChanged = useCallback((name, data) => {
@@ -142,10 +142,10 @@ export function useConversationWsEvents(opts) {
   }, []);
   useWebSocket({ onConversationChanged, onWsConnect });
 
-  // Handle chat presence events (typing/recording indicators). Conversa-cêntrico:
-  // a presença pertence a UMA conversa (o canal GOWA que reportou). Casamos por
+  // Handle chat presence events (typing/recording indicators). Atendimento-cêntrico:
+  // a presença pertence a Um atendimento (o canal GOWA que reportou). Casamos por
   // conversation_id quando o evento o traz (inequívoco), senão por canal::telefone.
-  // Assim só a conversa do canal que emitiu mostra "digitando" — mesmo fechada.
+  // Assim só o atendimento do canal que emitiu mostra "digitando" — mesmo fechada.
   useEffect(() => {
     if (!chatPresence) return;
     const { phone, state, media } = chatPresence;
@@ -371,7 +371,7 @@ export function useConversationWsEvents(opts) {
     scheduleListRefetch();
   }, [conversationCreated]);
 
-  // Handle real-time messages from WebSocket. Conversa-cêntrico routing: a message
+  // Handle real-time messages from WebSocket. Atendimento-cêntrico routing: a message
   // belongs to the OPEN thread by conversation_id when present (operator/save
   // payloads), else by (phone, channel_id) — (phone, channel) uniquely identifies
   // a conversation, so the two channels of one number never cross-contaminate.
@@ -449,8 +449,10 @@ export function useConversationWsEvents(opts) {
       }
     }
 
-    // Skip contact list preview update for transcription, system_notice, tool_call, conversation_event, and error messages
-    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'error') return;
+    // Skip contact list preview update for panel-only roles (transcription,
+    // system_notice, tool_call, conversation_event, private_note, error) — these
+    // never leave the panel, so they must not become a conversation's "last message".
+    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'private_note' || message.role === 'error') return;
 
     setContacts(prev => {
       // Target the row for this exact conversation/channel (not all rows of the phone).

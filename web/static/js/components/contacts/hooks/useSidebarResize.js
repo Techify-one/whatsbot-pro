@@ -10,7 +10,7 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 
 // ── Sidebar resize (barra lateral arrastável) ───────────────────────
-// Largura da lista de conversas: arrastável no desktop e persistida em
+// Largura da lista de atendimentos: arrastável no desktop e persistida em
 // localStorage (mesmo padrão do tema). No mobile a barra é `w-full` e estes
 // valores não se aplicam.
 const SIDEBAR_WIDTH_KEY = 'whatsbot_sidebar_width';

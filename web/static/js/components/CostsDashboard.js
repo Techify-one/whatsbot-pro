@@ -2,8 +2,33 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { getUsageSummary, getUsageByContact, getConfig } from '../services/api.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, str } from '../services/urlState.js';
 
 const html = htm.bind(h);
+
+// Deep-link do estado da tela de custos (Plano 24): período/ordenação/busca na
+// query-string. `start`/`end` (formato YYYY-MM-DDTHH:mm) só saem no período custom
+// e fazem round-trip com os inputs date+time. Serialize omite tudo no default.
+const COSTS_URL_SCHEMA = [
+  enumStr('period', 'all'),   // 24h|3d|7d|30d|all|custom
+  str('start', ''),           // YYYY-MM-DDTHH:mm — só quando period=custom
+  str('end', ''),
+  enumStr('sort', 'cost_usd'),
+  enumStr('order', 'desc'),   // asc|desc (derivado de sortAsc)
+  str('search', ''),
+];
+
+// Junta data (YYYY-MM-DD) + hora (HH:mm) → 'YYYY-MM-DDTHH:mm' (vazio sem data).
+function joinDateTime(date, time) {
+  return date ? `${date}T${time || '00:00'}` : '';
+}
+// Fatia 'YYYY-MM-DDTHH:mm' de volta em [date, time]; usa `defTime` se faltar hora.
+function splitDateTime(value, defTime) {
+  if (!value) return ['', defTime];
+  const [date, time] = value.split('T');
+  return [date || '', time || defTime];
+}
 
 const PERIODS = [
   { key: '24h', label: '24h' },
@@ -88,6 +113,35 @@ export function CostsDashboard() {
       setSortAsc(false);
     }
   }
+
+  // Deep-link (Plano 24): hidrata da URL no mount/back-forward e reflete
+  // período/datas custom/ordenação/busca na query (replaceState). start/end só
+  // entram no período custom; serialize omite o que está no default → URL limpa.
+  useUrlState({
+    read: () => readParams(window.location.search, COSTS_URL_SCHEMA),
+    apply: (s) => {
+      setPeriod(s.period);
+      if (s.period === 'custom') {
+        const [sd, st] = splitDateTime(s.start, '00:00');
+        const [ed, et] = splitDateTime(s.end, '23:59');
+        setCustomStartDate(sd); setCustomStartTime(st);
+        setCustomEndDate(ed); setCustomEndTime(et);
+      }
+      setSortField(s.sort);
+      setSortAsc(s.order === 'asc');
+      setSearch(s.search);
+    },
+    serialize: () => writeParams({
+      period,
+      // start/end só fazem sentido com period=custom (senão omitidos).
+      start: period === 'custom' ? joinDateTime(customStartDate, customStartTime) : '',
+      end: period === 'custom' ? joinDateTime(customEndDate, customEndTime) : '',
+      sort: sortField,
+      order: sortAsc ? 'asc' : 'desc',
+      search,
+    }, COSTS_URL_SCHEMA),
+    deps: [period, customStartDate, customStartTime, customEndDate, customEndTime, sortField, sortAsc, search],
+  });
 
   const filtered = contacts.filter(c => {
     if (!search) return true;

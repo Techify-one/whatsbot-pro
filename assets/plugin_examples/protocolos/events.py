@@ -1,6 +1,6 @@
-"""Event handlers do plugin Atendimentos.
+"""Event handlers do plugin Protocolos.
 
-Cada conversa do atendimento é um CICLO (aberto→resolvido):
+Cada atendimento do protocolo é um CICLO (aberto→resolvido):
 - ``message.saved`` (cliente engajou) abre/continua um ciclo — se o anterior já foi
   resolvido, abre um NOVO (cliente voltou) → as linhas acumulam.
 - ``message.sent`` (operador/IA) só faz bootstrap: cria um ciclo se não houver

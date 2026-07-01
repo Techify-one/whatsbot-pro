@@ -200,7 +200,7 @@ export function Sandbox({ newMessage }) {
         <button
           onClick=${handleClear}
           class="text-[12px] text-wa-secondary hover:text-red-500 border border-wa-border rounded px-[10px] py-[4px] transition-colors"
-        >Limpar conversa</button>
+        >Limpar atendimento</button>
       </div>
 
       <!-- Chat (reuses the contact chat in sandbox mode) -->

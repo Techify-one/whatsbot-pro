@@ -70,5 +70,5 @@ export function LabelChip({ name, color }) {
 }
 
 export function nameOf(convo) {
-  return convo.contact_name || convo.contact_phone || `Conversa #${convo.display_id ?? convo.id}`;
+  return convo.contact_name || convo.contact_phone || `Atendimento #${convo.display_id ?? convo.id}`;
 }

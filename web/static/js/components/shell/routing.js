@@ -69,8 +69,8 @@ export function legacyRedirectTarget(pathname) {
  * @param {{tab:string}|null} ent already-resolved entity deep-link (entityFromPath)
  */
 export function tabFromPathPure(path, pluginScreens, ent) {
-  // Conversa-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
-  // conversa no hub de contatos. (/conversations sem id segue na lista full-page.)
+  // Atendimento-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
+  // atendimento no hub de contatos. (/conversations sem id segue na lista full-page.)
   // /contacts/<id> (detalhe do contato) é resolvido via entityFromPath → 'contatos'.
   if (path.match(/^\/conversations\/\d+$/)) return 'contacts';
   if (path.match(/^\/executions\/\d+$/)) return 'executions';

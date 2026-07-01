@@ -63,7 +63,7 @@ export const DAY_SECONDS = 86400;
 function matchOne(c, dim, value) {
   if (dim === 'channel') return (c.channel_id || 'default') === value;
   if (dim === 'tag') return (c.tags || []).includes(value);           // etiqueta do CONTATO
-  if (dim === 'conv_label') return (c.conv_labels || []).includes(value); // etiqueta da CONVERSA
+  if (dim === 'conv_label') return (c.conv_labels || []).includes(value); // etiqueta do ATENDIMENTO
   // agent
   if (value === 'none') return c.assignee_user_id == null && !c.active_agent_key;
   if (value.startsWith('user:')) return String(c.assignee_user_id) === value.slice(5);
@@ -269,12 +269,12 @@ export function sortContacts(list) {
   });
 }
 
-// ── Conversa-cêntrico (plano 11 D1) ──────────────────────────────
-// Cada linha da sidebar é uma CONVERSA (uma por canal), não um contato. Um número
+// ── Atendimento-cêntrico (plano 11 D1) ──────────────────────────────
+// Cada linha da sidebar é um ATENDIMENTO (uma por canal), não um contato. Um número
 // presente em 2 canais vira 2 linhas distintas — em vez de fundir tudo numa só.
 // Construímos as linhas cruzando os contatos (riqueza: tags/avatar/IA/nome) com as
-// conversas (canal + preview e não-lidas POR CONVERSA). A identidade da linha é a
-// `conversation_id`; contatos sem conversa ainda aparecem como linha única (phone).
+// atendimentos (canal + preview e não-lidas POR ATENDIMENTO). A identidade da linha é a
+// `conversation_id`; contatos sem atendimento ainda aparecem como linha única (phone).
 
 /**
  * Cross the contact list with the conversation list into sidebar rows: one row
@@ -296,7 +296,7 @@ export function buildRows(contacts, conversations) {
   for (const c of contacts) {
     const convs = byContact.get(c.id) || [];
     if (convs.length === 0) {
-      // Contato sem conversa (ex: recém-iniciado pelo "Nova conversa") — linha única
+      // Contato sem atendimento (ex: recém-iniciado pelo "Novo atendimento") — linha única
       // que cai no caminho legado por telefone (channel 'default').
       rows.push({
         ...c, contact_id: c.id, conversation_id: null,
@@ -322,10 +322,10 @@ export function buildRows(contacts, conversations) {
           // key so they don't collide with the contact's `custom_attributes` (spread
           // from `...c` above). Both feed the cattr: filter dimensions.
           conv_custom_attributes: cv.custom_attributes || {},
-          // Etiquetas da CONVERSA (registro próprio, separado das tags do contato em
+          // Etiquetas do ATENDIMENTO (registro próprio, separado das tags do contato em
           // `...c.tags`) — alimentam a dimensão de filtro `conv_label`.
           conv_labels: cv.labels || [],
-          // Preview + não-lidas vêm da CONVERSA (sobrescrevem os agregados do contato).
+          // Preview + não-lidas vêm do ATENDIMENTO (sobrescrevem os agregados do contato).
           last_message: (cv.last_message != null && cv.last_message !== '') ? cv.last_message : c.last_message,
           last_message_role: cv.last_message_role || c.last_message_role,
           last_message_ts: cv.last_message_ts || c.last_message_ts,
@@ -341,7 +341,7 @@ export function buildRows(contacts, conversations) {
 }
 
 /**
- * Shape a /api/conversations/{id}/messages payload into the same object the chat
+ * Shape a /api/atendimentos/{id}/messages payload into the same object the chat
  * already consumes from getContact (full contact + messages), plus channel_id.
  * @param {Record<string, any>} d
  * @returns {Record<string, any>}

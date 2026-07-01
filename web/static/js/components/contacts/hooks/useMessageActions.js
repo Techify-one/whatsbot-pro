@@ -12,6 +12,7 @@
 import { useState } from 'preact/hooks';
 import { deleteMessage, reactToMessage, generateImprovement } from '../../../services/api.js';
 import { copyToClipboard } from '../MessageContextMenu.js';
+import { deepLinkUrl } from '../../../utils/copyDeepLink.js';
 
 // The operator's own current reaction on a message (stored under reactor "me").
 export function myReaction(message) {
@@ -71,15 +72,15 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     copyToClipboard(text);
   }
 
-  // Permalink estilo Chatwoot: âncora na conversa + id interno da mensagem (a mesma
-  // chave que o scroll-to-message usa via data-mid). Prefere a conversa da própria
-  // mensagem; cai no prop da conversa aberta. null quando não há como ancorar (msg
+  // Permalink estilo Chatwoot: âncora no atendimento + id interno da mensagem (a mesma
+  // chave que o scroll-to-message usa via data-mid). Prefere o atendimento da própria
+  // mensagem; cai no prop do atendimento aberto. null quando não há como ancorar (msg
   // sem _id ou pré-plano-11 sem conversation_id na visão mesclada) → item desabilitado.
   function messagePermalink(message) {
     if (!message || message._id == null) return null;
     const convId = message.conversation_id != null ? message.conversation_id : conversationId;
     if (convId == null) return null;
-    return `${window.location.origin}/conversations/${convId}?message=${message._id}`;
+    return deepLinkUrl(`/conversations/${convId}?message=${message._id}`);
   }
 
   function copyMessageLink(message) {

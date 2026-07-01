@@ -3,10 +3,10 @@
 -- da VIEW (decidido por quem edita a visualização), não por-usuário.
 --
 -- JSON array de chaves: status | atendente | q | periodo | attr:<attribute_key> (um por
--- atributo de conversa tipo list). NULL = TODOS os filtros disponíveis (compatibilidade com
+-- atributo de atendimento tipo list). NULL = TODOS os filtros disponíveis (compatibilidade com
 -- as views existentes e default das novas -- inclui atributos criados no futuro).
 --
--- SQL portavel: o migrator valida o prefixo plugin_atendimentos_ e ADD COLUMN roda em
+-- SQL portavel: o migrator valida o prefixo plugin_protocolos_ e ADD COLUMN roda em
 -- SQLite e Postgres. Nao usar ponto-e-virgula nos comentarios (o splitter quebra por ele).
 
-ALTER TABLE plugin_atendimentos_kanban_views ADD COLUMN available_filters TEXT;
+ALTER TABLE plugin_protocolos_kanban_views ADD COLUMN available_filters TEXT;

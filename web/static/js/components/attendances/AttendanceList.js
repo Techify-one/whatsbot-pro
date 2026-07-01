@@ -26,7 +26,7 @@ function ListRow({ convo, assigneeName, currentUserId, currentUser, showChannel,
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex flex-col gap-2">
       <div class="flex items-start gap-3 flex-wrap">
-        <button onClick=${() => onOpenChat(convo)} class="flex-1 min-w-0 text-left group" title="Abrir conversa">
+        <button onClick=${() => onOpenChat(convo)} class="flex-1 min-w-0 text-left group" title="Abrir atendimento">
           <div class="flex items-center gap-1.5 min-w-0">
             ${convo.contact_is_group ? html`<${GroupIcon} />` : null}
             <span class="text-[15px] font-medium text-wa-text truncate group-hover:text-wa-teal transition-colors">${nameOf(convo)}</span>

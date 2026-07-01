@@ -214,7 +214,7 @@ class ContactMemory:
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
-                    reply_to_msg_id: str | None = None):
+                    reply_to_msg_id: str | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
         # tocar webhook.py. plano 25 Fase 2: the resolve is now a shared helper (also
@@ -241,6 +241,12 @@ class ContactMemory:
             self._run_lifecycle_reactions(conversation_id, transition, conv, role)
         # Touch updated_at
         contact_repo.update(self.id)
+        # Return the inserted row (id/ts/conversation_id/…) so callers that need
+        # the freshly-saved message — e.g. broadcasting a private_note with its
+        # conversation_id — use it directly instead of re-reading via
+        # ``message_repo.get_last`` (which returns the contact's LAST row and, in a
+        # burst of concurrent saves, can be a DIFFERENT message → wrong _id/ts).
+        return saved
 
     def ensure_conversation_live(self, role: str = "user") -> int | None:
         """Materialize the atendimento thread at INGEST time (t=0) WITHOUT saving a

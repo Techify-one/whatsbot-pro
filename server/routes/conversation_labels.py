@@ -95,7 +95,7 @@ def register_routes(app, deps):
         return _ok({"deleted": label_id})
 
     # ── Etiquetas de uma conversa ─────────────────────────────────────
-    @app.get("/api/conversations/{conv_id}/labels")
+    @app.get("/api/atendimentos/{conv_id}/labels")
     async def get_conversation_labels(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -103,7 +103,7 @@ def register_routes(app, deps):
         rows = await asyncio.to_thread(label_repo.get_for_conversation, conv_id)
         return _ok({"conversation_id": conv_id, "labels": rows})
 
-    @app.put("/api/conversations/{conv_id}/labels")
+    @app.put("/api/atendimentos/{conv_id}/labels")
     async def set_conversation_labels(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.reply")
         if denied:

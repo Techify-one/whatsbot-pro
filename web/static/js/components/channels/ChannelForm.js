@@ -17,15 +17,20 @@ import { AgentPicker } from './AgentPicker.js';
 
 const html = htm.bind(h);
 
-export function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, availableProviders, requiredCreds }) {
+export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProvider, busy, error, aiDefaults, availableProviders, requiredCreds }) {
   // Only providers whose backing plugin is enabled are offered (GOWA is core and
   // always present). Falls back to the full catalogue while the list is still
   // loading. The badge/label catalogue (PROVIDERS) is unfiltered — existing
   // channels keep their badge even if their provider's plugin is later disabled.
   const providerEntries = Object.entries(PROVIDERS).filter(
     ([key]) => !availableProviders || availableProviders.includes(key));
+  // Pré-seleção via deep-link (/channels/new?provider=…) tem precedência, desde
+  // que o provider exista no catálogo; senão cai no 1º disponível (ou gowa).
   const [provider, setProvider] = useState(
-    () => (availableProviders && availableProviders[0]) || 'gowa');
+    () => (initialProvider && PROVIDERS[initialProvider] && initialProvider)
+      || (availableProviders && availableProviders[0]) || 'gowa');
+  // Reflete o provider escolhido na URL (o pai serializa ?provider=).
+  function pickProvider(p) { setProvider(p); if (onProviderChange) onProviderChange(p); }
   const [displayName, setDisplayName] = useState('');
   // Per-channel AI settings (config.ai), seeded from the current global config.
   const [ai, setAi] = useState(() => aiDefaults || aiDefaultsFrom({}));
@@ -52,6 +57,10 @@ export function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, avai
     })();
     return () => { alive = false; };
   }, []);
+
+  // Reporta o provider inicial ao pai no mount, para a URL (?provider=) refletir
+  // o que está selecionado mesmo quando aberto sem deep-link.
+  useEffect(() => { if (onProviderChange) onProviderChange(provider); }, []);
 
   // O ID do canal é gerado automaticamente pelo backend (o usuário só escolhe o
   // nome de exibição). GOWA reusa o device id; demais providers, "<provider>_<hex>".
@@ -83,7 +92,7 @@ export function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, avai
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Provider</label>
           <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            value=${provider} onChange=${(e) => setProvider(e.target.value)} disabled=${busy}>
+            value=${provider} onChange=${(e) => pickProvider(e.target.value)} disabled=${busy}>
             ${providerEntries.map(([key, meta]) => html`
               <option key=${key} value=${key}>${meta.label}</option>
             `)}
@@ -109,7 +118,7 @@ export function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, avai
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
             <p class="text-[12px] text-wa-secondary mb-2">
-              Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+              Escolha quais tipos de atendimento deste número viram atendimento. Os tipos
               desmarcados são ignorados (não aparecem no painel).
             </p>
             <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
@@ -172,7 +181,7 @@ export function ChannelForm({ onCreated, onCancel, busy, error, aiDefaults, avai
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
           <p class="text-[12px] text-wa-secondary mb-2">
-            Os agentes selecionados veem as conversas deste canal e recebem as mensagens que caírem aqui.
+            Os agentes selecionados veem os atendimentos deste canal e recebem as mensagens que caírem aqui.
             Administradores veem todos os canais.
           </p>
           <${AgentPicker} users=${users} selected=${agentIds} onChange=${setAgentIds} />

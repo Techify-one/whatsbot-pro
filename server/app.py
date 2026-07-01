@@ -542,6 +542,23 @@ def create_app(
         )
         return resp
 
+    @app.middleware("http")
+    async def _legacy_conversation_route_alias(request: Request, call_next):
+        # Compat: as rotas foram renomeadas /api/conversations -> /api/atendimentos
+        # (e /api/contacts/{phone}/conversation -> /atendimento). Reescreve o path
+        # legado para o novo ANTES do roteamento, então bundles/clients antigos que
+        # ainda chamam /api/conversations continuam funcionando.
+        p = request.scope.get("path", "")
+        np = None
+        if p.startswith("/api/conversations"):
+            np = "/api/atendimentos" + p[len("/api/conversations"):]
+        elif p.startswith("/api/contacts/") and p.endswith("/conversation"):
+            np = p[: -len("/conversation")] + "/atendimento"
+        if np is not None:
+            request.scope["path"] = np
+            request.scope["raw_path"] = np.encode("latin-1")
+        return await call_next(request)
+
     # ── Health endpoint (always open, used by Docker healthcheck) ──────
 
     @app.get("/health")

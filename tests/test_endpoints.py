@@ -529,6 +529,14 @@ r = client.get("/api/contacts/5511999990001")
 msgs = r.json()["data"]["messages"]
 private_notes = [m for m in msgs if m.get("role") == "private_note"]
 check("GET /api/contacts -> private_note present", len(private_notes) >= 1)
+# Regressão (C2): a nota retornada/transmitida carrega conversation_id, para o painel
+# conversa-cêntrico rotear ao vivo (sem ele a nota some em canal não-default).
+check("POST /private-message -> carries conversation_id (routing)",
+      "conversation_id" in _pn and _pn.get("conversation_id") == private_notes[-1].get("conversation_id"))
+# Regressão (C4): o _id retornado é o da PRÓPRIA linha inserida (add_message agora
+# retorna a linha), não um get_last racy que pegaria a última msg do contato.
+check("POST /private-message -> _id is the inserted row (no get_last race)",
+      _pn.get("_id") == private_notes[-1].get("_id"))
 check(
     "GET /api/contacts -> private_note status is null",
     private_notes and private_notes[-1].get("status") in (None, ""),
@@ -1530,26 +1538,45 @@ check("delete_plugin_permissions -> keys gone",
       not _rrepo.plugin_permission_keys())
 _urepo.delete(_pu_id)  # cleanup the test user
 
-# ── Atendimentos: Kanban Views (visualizações personalizadas) ──────────────
-section("Atendimentos Kanban Views")
+# ── Protocolos: Kanban Views (visualizações personalizadas) ──────────────
+section("Protocolos Kanban Views")
 import importlib.util as _ilu
 from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
 from plugins.migrator import run_pending_migrations as _run_pending
 
-_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "atendimentos"
+_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "protocolos"
 
 # 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
 _atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
-_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "atendimentos")
-check("atendimentos rbac -> manage_team_views declarada",
+_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "protocolos")
+check("protocolos rbac -> manage_team_views declarada",
       any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
 
-# 2) Aplica as migrations do plugin no DB de teste (cria plugin_atendimentos_* incl. 006).
+# 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
 _atd_manifest = _load_manifest(_atd_dir)
 _run_pending(_atd_manifest, _atd_dir)
 _alogic_spec = _ilu.spec_from_file_location("atendimentos_logic_test", _atd_dir / "logic.py")
 _alogic = _ilu.module_from_spec(_alogic_spec)
 _alogic_spec.loader.exec_module(_alogic)
+
+# 2b) Seed 010: as abas padrão Status/Atendente agora são VIEWS REAIS (equipe, sem owner) —
+# editáveis/excluíveis como qualquer visualização criada pela interface. Roda antes do CRUD
+# abaixo, então só os 2 seeds existem (positions 0 e 1).
+_seeded = _alogic.list_kanban_views(user_id=None)
+_by_gb = {v["group_by"]: v for v in _seeded
+          if v.get("owner_user_id") is None and v.get("scope") == "team"}
+check("seed 010 -> view Status existe", "status" in _by_gb and _by_gb["status"]["name"] == "Status")
+check("seed 010 -> view Atendente existe",
+      "atendente" in _by_gb and _by_gb["atendente"]["name"] == "Atendente")
+check("seed 010 -> Status visível a todos (team legado)",
+      _alogic._view_visible(_by_gb["status"], 12345, set()) is True)
+check("seed 010 -> ordenadas primeiro por position",
+      _by_gb["status"]["position"] == 0 and _by_gb["atendente"]["position"] == 1)
+_su, _sue = _alogic.update_kanban_view(_by_gb["status"]["id"], name="Status renomeado")
+check("seed 010 -> Status editável", _sue is None and _su and _su.get("name") == "Status renomeado")
+_sd, _sde = _alogic.delete_kanban_view(_by_gb["atendente"]["id"])
+check("seed 010 -> Atendente excluível",
+      _sd and _sde is None and _alogic.get_kanban_view(_by_gb["atendente"]["id"]) is None)
 
 # 3) CRUD + validação.
 _v1, _e1 = _alogic.create_kanban_view(name="Por etapa", scope="personal", group_by="attr",
@@ -1581,12 +1608,12 @@ _okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
 check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
 
 # 6) set_conversa_attr: branches de erro (sem e2e de conversa — coberto manualmente).
-_, _esa = _alogic.set_conversa_attr(99999, "etapa", "Proposta")
-check("set_conversa_attr -> atendimento inexistente -> erro", _esa is not None)
+_, _esa = _alogic.set_atendimento_attr(99999, "etapa", "Proposta")
+check("set_atendimento_attr -> protocolo inexistente -> erro", _esa is not None)
 
 # 7) attr_filters: caminho do filtro por atributo aceito sem quebrar (lista vazia/segura).
-_lf = _alogic.list_atendimentos(attr_filters={"etapa": "Proposta"}, limit=50)
-check("list_atendimentos(attr_filters) -> retorna lista", isinstance(_lf, list))
+_lf = _alogic.list_protocolos(attr_filters={"etapa": "Proposta"}, limit=50)
+check("list_protocolos(attr_filters) -> retorna lista", isinstance(_lf, list))
 
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
@@ -1663,22 +1690,66 @@ _alogic.delete_kanban_view(_vinc["id"])
 _alogic.delete_kanban_view(_vp2["id"])
 
 # 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
-_rrepo.upsert_plugin_permission("plugin.atendimentos.manage_team_views",
+_rrepo.upsert_plugin_permission("plugin.protocolos.manage_team_views",
                                 "Criar/editar visualizações de EQUIPE no Kanban",
-                                "atendimentos", "Atendimentos")
+                                "protocolos", "Protocolos")
 _tvu = _urepo.create(email="teamviews@test.com", name="TV",
                      password_hash=_hpa("supersecret"), role_keys=["atendente"])
 _tvu_id = _tvu["id"]
 _tv_req = _types.SimpleNamespace(
     state=_types.SimpleNamespace(user={"id": _tvu_id}),
-    url=_types.SimpleNamespace(path="/api/plugins/atendimentos/kanban-views"))
+    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
 check("manage_team_views -> user SEM perm negado",
-      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is False)
-_urepo.set_custom_permissions(_tvu_id, ["plugin.atendimentos.manage_team_views"])
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is False)
+_urepo.set_custom_permissions(_tvu_id, ["plugin.protocolos.manage_team_views"])
 check("manage_team_views -> user COM perm permitido",
-      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is True)
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is True)
 _urepo.delete(_tvu_id)
-_rrepo.delete_plugin_permissions("atendimentos")
+_rrepo.delete_plugin_permissions("protocolos")
+
+# 9) Tipos de campo NOVOS: número, data, regex (text/textarea/number) e "caixa de seleção"
+# configurável única/múltipla. Testado direto na logic (scope protocolo não sincroniza core).
+_alogic.set_field_defs("protocolo", [
+    {"key": "idade", "label": "Idade", "type": "number"},
+    {"key": "nascimento", "label": "Nascimento", "type": "date"},
+    {"key": "cpf", "label": "CPF", "type": "text", "regex_pattern": r"^\d{11}$", "regex_cue": "11 dígitos"},
+    {"key": "cursos", "label": "Cursos", "type": "checkboxes", "options": ["A", "B", "C"], "multiple": True, "required": True},
+    {"key": "turno", "label": "Turno", "type": "checkboxes", "options": ["Manhã", "Tarde"], "multiple": False},
+])
+_pdefs = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+check("field types -> número/data/checkboxes persistidos",
+      _pdefs.get("idade", {}).get("type") == "number"
+      and _pdefs.get("nascimento", {}).get("type") == "date"
+      and _pdefs.get("cursos", {}).get("type") == "checkboxes"
+      and _pdefs["cursos"].get("multiple") is True)
+check("field types -> regex_pattern/regex_cue persistidos",
+      _pdefs.get("cpf", {}).get("regex_pattern") == r"^\d{11}$"
+      and _pdefs["cpf"].get("regex_cue") == "11 dígitos")
+_, _en = _alogic.normalize_values("protocolo", {"idade": "abc", "cursos": ["A"]})
+check("número inválido -> erro", _en is not None and "número" in _en.lower())
+_cnv, _env = _alogic.normalize_values("protocolo", {"idade": "3,5", "cursos": ["A"]})
+check("número válido (vírgula) -> ok", _env is None)
+_, _ed = _alogic.normalize_values("protocolo", {"nascimento": "2020/01/01", "cursos": ["A"]})
+check("data inválida -> erro", _ed is not None)
+_cdv, _edv = _alogic.normalize_values("protocolo", {"nascimento": "2020-01-01", "cursos": ["A"]})
+check("data válida AAAA-MM-DD -> ok", _edv is None)
+_, _er = _alogic.normalize_values("protocolo", {"cpf": "123", "cursos": ["A"]})
+check("regex não casa -> erro com a dica", _er is not None and "11 dígitos" in _er)
+_, _erok = _alogic.normalize_values("protocolo", {"cpf": "12345678901", "cursos": ["A"]})
+check("regex casa -> ok", _erok is None)
+_cc, _ecc = _alogic.normalize_values("protocolo", {"cursos": ["A", "C"]})
+check("checkboxes múltiplo -> lista de opções", _ecc is None and _cc.get("cursos") == ["A", "C"])
+_, _eci = _alogic.normalize_values("protocolo", {"cursos": ["Z"]})
+check("checkboxes opção inválida -> erro", _eci is not None)
+_cs, _ecs = _alogic.normalize_values("protocolo", {"cursos": ["A"], "turno": ["Manhã", "Tarde"]})
+check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.get("turno") == ["Manhã"])
+_, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
+check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
+check("_missing_required revalida tipo+required no fechamento",
+      _alogic._missing_required("protocolo", {"cursos": [], "obs": ""}) is not None)
+check("_missing_required ok quando preenchido",
+      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": ""}) is None)
+_alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
@@ -2103,7 +2174,7 @@ _sncm.add_message("user", "início")  # cria conversa (+ aviso 'created', autor=
 _snconv = _conv_repo.get_open_for_contact(_sncm.id)
 _sn_phone = _sncm.phone
 check("create -> aviso 'created' no fio",
-      any("iniciada" in c for c in _notices(_snconv["id"])))
+      any("iniciado" in c for c in _notices(_snconv["id"])))
 
 # (a) status close/open -> grupo status, com autor nomeado
 _n = len(_notices(_snconv["id"]))
@@ -2111,8 +2182,8 @@ client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "close
 client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "open"}, headers=_snhdr)
 _after = _notices(_snconv["id"])
 check("status close/open -> 2 avisos", len(_after) - _n == 2)
-check("status_closed -> 'Mgr resolveu'", any("Mgr resolveu a conversa" in c for c in _after[_n:]))
-check("status_open -> 'Mgr reabriu'", any("Mgr reabriu a conversa" in c for c in _after[_n:]))
+check("status_closed -> 'Mgr resolveu'", any("Mgr resolveu o atendimento" in c for c in _after[_n:]))
+check("status_open -> 'Mgr reabriu'", any("Mgr reabriu o atendimento" in c for c in _after[_n:]))
 
 # (b) GATE: grupo status OFF => nada grava
 _sn_cfg.set("system_notice_status", False)
@@ -2140,8 +2211,8 @@ client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": False}, he
 client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": True}, headers=_snhdr)
 _after = _notices(_snconv["id"])
 check("ai off/on -> 3 avisos (ai off + assumiu + ai on)", len(_after) - _n == 3)
-check("ai off -> card 'assumiu a conversa'",
-      any("assumiu a conversa" in c for c in _after[_n:]))
+check("ai off -> card 'assumiu o atendimento'",
+      any("assumiu o atendimento" in c for c in _after[_n:]))
 
 # (e) agent_changed -> grupo ai
 _n = len(_notices(_snconv["id"]))
@@ -2187,8 +2258,8 @@ check("toggle-ai contato -> 1 aviso (grupo ai)", len(_notices(_snconv["id"])) - 
 _conv_repo.set_status(_snconv["id"], "closed")
 _n = len(_notices(_snconv["id"]))
 _sncm.add_message("user", "oi de novo")
-check("auto-reopen -> aviso 'reaberta automaticamente'",
-      any("reaberta automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
+check("auto-reopen -> aviso 'reaberto automaticamente'",
+      any("reaberto automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
 
 # (j2) auto-reabertura pelo atendente: resposta (assistant) numa conversa closed
 _conv_repo.set_status(_snconv["id"], "closed")

@@ -47,6 +47,13 @@ class MemoryLogHandler(logging.Handler):
 class ConnectionManager:
     """Manages active WebSocket connections and broadcasts events."""
 
+    # Per-client send timeout. A broadcast fans out to every socket CONCURRENTLY
+    # (asyncio.gather) so one slow/half-open client can't stall delivery to the
+    # others (head-of-line blocking). A send that exceeds this is treated as a
+    # dead connection and the socket is pruned — bounding worst-case latency to
+    # this timeout instead of the OS TCP timeout (dezenas de segundos).
+    SEND_TIMEOUT = 5.0
+
     def __init__(self):
         self.active: list[WebSocket] = []
 
@@ -60,11 +67,24 @@ class ConnectionManager:
 
     async def broadcast(self, event: str, data: dict):
         message = json.dumps({"event": event, "data": data})
-        for ws in list(self.active):
+        targets = list(self.active)
+        if not targets:
+            return
+
+        async def _send(ws: WebSocket):
+            # Returns the ws to prune on failure/timeout, else None. Never raises.
             try:
-                await ws.send_text(message)
+                await asyncio.wait_for(ws.send_text(message), timeout=self.SEND_TIMEOUT)
+                return None
             except Exception:
-                self.active.remove(ws)
+                return ws
+
+        # Concurrent fan-out: a stuck client is bounded by SEND_TIMEOUT and does
+        # not delay the others. gather never raises (each _send swallows).
+        dead = await asyncio.gather(*(_send(ws) for ws in targets))
+        for ws in dead:
+            if ws is not None:
+                self.disconnect(ws)
 
 
 # ── Messaging State ─────────────────────────────────────────────────────────

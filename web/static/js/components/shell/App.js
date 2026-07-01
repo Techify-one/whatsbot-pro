@@ -100,7 +100,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
   const [lowBalance, setLowBalance] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
   const [initialConversationId, setInitialConversationId] = useState(conversationIdFromPath);
-  // Mensagem-alvo do permalink (?message=<_id>): scroll + destaque ao abrir a conversa.
+  // Mensagem-alvo do permalink (?message=<_id>): scroll + destaque ao abrir o atendimento.
   const [initialScrollMsgId, setInitialScrollMsgId] = useState(scrollMsgFromSearch);
   // Seleção de entidade vinda da URL (deep-link genérico das demais telas).
   const [initialEntity, setInitialEntity] = useState(entityFromPath);

@@ -195,7 +195,7 @@ export function PlusIcon() {
   `;
 }
 
-// "Informações da conversa" trigger in the chat header (plano conversa Onda 2).
+// "Informações do atendimento" trigger in the chat header (plano atendimento Onda 2).
 export function InfoIcon() {
   return html`
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
