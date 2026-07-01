@@ -312,6 +312,19 @@ export async function sendAudio(phone, blob, filename = 'voice.ogg', conversatio
     { audio: named, ..._scopeFields(conversationId, channelId) });
 }
 
+// Private audio note: stays in the panel (never sent to the contact). `aiRead`
+// mirrors the "IA lê" toggle (transcribe + let the AI process it); `aiReply`
+// (only meaningful when aiRead) picks chat reply vs. private note.
+export async function sendPrivateAudio(phone, blob, filename = 'voice.ogg', opts = {}) {
+  const named = blob instanceof File ? blob : new File([blob], filename, { type: blob.type || 'audio/ogg' });
+  const fields = { audio: named };
+  fields.ai_read = opts.aiRead ? 'true' : 'false';
+  fields.ai_reply = (opts.aiReply === false) ? 'false' : 'true';
+  if (opts.conversationId != null) fields.conversation_id = String(opts.conversationId);
+  if (opts.channelId != null) fields.channel_id = String(opts.channelId);
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/private-audio`, fields);
+}
+
 export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
   return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-document`,
     { document: file, caption, ..._scopeFields(conversationId, channelId) });

@@ -1144,6 +1144,139 @@ def register_routes(app, deps):
                     phone, ai_read, ai_reply, text[:80])
         return _ok(note_msg)
 
+    @app.post("/api/contacts/{phone}/private-audio")
+    async def send_private_audio(
+        phone: str,
+        request: Request,
+        audio: UploadFile = File(...),
+        ai_read: str = Form("false"),
+        ai_reply: str = Form("true"),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+    ):
+        """Record an audio note that stays in the panel — never sent to the contact.
+
+        Mirrors ``/private-message`` but for audio. The clip is stored as a
+        panel-only ``private_note`` card (audio player).
+
+        The visible "Transcrição privada" card follows the channel's audio setting
+        (multi-select "Privadas") REGARDLESS of ``ai_read`` — unchecked → no card.
+
+        - ``ai_read=true``  → the AI reads the audio and runs the private-AI flow
+          (transcribing internally when the channel didn't, without showing a
+          card). ``ai_reply`` decides chat reply vs. private note.
+        - ``ai_read=false`` → no AI action; only the channel-gated card (if any).
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
+
+        ai_read_b = str(ai_read).lower() in ("1", "true", "yes", "on")
+        ai_reply_b = str(ai_reply).lower() in ("1", "true", "yes", "on")
+        resolved_channel = _channel_for(phone, conversation_id, channel_id)
+
+        # Persist the clip locally (never hits GOWA — private notes are panel-only).
+        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        content = await audio.read()
+        dest.write_bytes(content)
+        rel_path = f"statics/outbox/{dest.name}"
+
+        # Transcribe up front. ``card_text`` honors the channel setting ("Privadas"
+        # in the multi-select) — source="private", NO force — and drives the visible
+        # "Transcrição privada" card. ``ai_text`` is what the AI reads: "IA lê" forces
+        # a transcription even when the channel wouldn't surface a card.
+        card_text = ""
+        try:
+            card_text = await messaging.maybe_transcribe(
+                "audio", str(dest),
+                phone=phone, source="private",
+                channel_id=resolved_channel)
+        except Exception as e:
+            logger.error("[Private] Audio transcription failed for %s: %s", phone, e)
+        ai_text = ""
+        if ai_read_b:
+            ai_text = card_text
+            if not ai_text:
+                try:
+                    ai_text = await messaging.maybe_transcribe(
+                        "audio", str(dest),
+                        phone=phone, source="private",
+                        channel_id=resolved_channel, force=True)
+                except Exception as e:
+                    logger.error("[Private] Forced transcription failed for %s: %s", phone, e)
+                    ai_text = ""
+
+        # Persist the note with the TRANSCRIPTION as content (fallback "[Áudio]") so
+        # the AI reads the real instruction via the private-note context path —
+        # message_repo injects it as "[Nota privada do operador]: <content>", the
+        # exact route a typed private note takes (run_turn drops the raw text when
+        # save_user_message=False). The card still renders the audio player
+        # (media_type=audio, so the transcription text isn't shown in that bubble).
+        note_text = ai_text or card_text
+        db_content = note_text or "[Áudio]"
+        try:
+            def _save():
+                contact = agent_handler._get_contact(phone)
+                contact.add_message("private_note", db_content,
+                                    media_type="audio", media_path=rel_path)
+                return message_repo.get_last(contact.id)
+            saved = await asyncio.to_thread(_save)
+        except Exception as e:
+            logger.error("[Private] Failed to save private audio for %s: %s", phone, e)
+            return _err(f"Erro ao salvar áudio privado: {e}", status=500)
+
+        # Broadcast/return "[Áudio]" (not the transcription) so the operator's
+        # optimistic bubble dedups cleanly; the player renders from media_path.
+        note_msg = {
+            "role": "private_note",
+            "content": "[Áudio]",
+            "ts": (saved or {}).get("ts", time.time()),
+            "media_type": "audio",
+            "media_path": rel_path,
+            "status": None,
+        }
+        if saved and saved.get("_id"):
+            note_msg["_id"] = saved["_id"]
+        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+
+        # Visible "Transcrição privada" card — only when the channel opted in.
+        if card_text:
+            try:
+                await asyncio.to_thread(
+                    lambda: agent_handler._get_contact(phone).add_message(
+                        "transcription", card_text))
+            except Exception as e:
+                logger.error("[Private] Failed to save transcription for %s: %s", phone, e)
+            await ws_manager.broadcast("new_message", {
+                "phone": phone,
+                "message": {
+                    "role": "transcription",
+                    "content": card_text,
+                    "ts": time.time(),
+                },
+            })
+
+        # "IA lê": run the private-AI flow. The instruction is already in the note
+        # context (db_content), so the turn acts on it exactly like a typed note.
+        if ai_read_b:
+            if ai_text:
+                asyncio.create_task(_run_private_ai(
+                    phone, ai_text, reply_in_chat=ai_reply_b,
+                    conversation_id=conversation_id or None))
+            else:
+                await _emit_send_error(
+                    ws_manager, phone,
+                    "Não foi possível transcrever o áudio para a IA processar.")
+
+        logger.info("[Private] Saved private audio for %s (ai_read=%s, ai_reply=%s, "
+                    "card=%s)", phone, ai_read_b, ai_reply_b, bool(card_text))
+        return _ok(note_msg)
+
     @app.post("/api/contacts/{phone}/retry-send")
     async def retry_send_to_contact(phone: str, body: dict, request: Request):
         """Retry sending a message that previously failed."""

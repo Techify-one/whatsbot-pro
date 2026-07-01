@@ -84,6 +84,26 @@ export function aiDefaultsFrom(cfg) {
   };
 }
 
+// Audio transcription "mode" is a multi-select set of directions to transcribe.
+// Stored in config.ai.audio_transcription_mode. Backward-compatible with the
+// legacy single-value strings ("received"/"sent"/"both"/"off"); the multi-select
+// persists a comma-joined list ("received,sent,private"). Mirrors
+// server/transcription.py:parse_audio_modes so the UI and the gate agree.
+export const AUDIO_MODE_TOKENS = ['received', 'sent', 'private'];
+
+export function parseAudioModes(raw) {
+  if (raw == null) return new Set(['received']);
+  const s = String(raw).trim().toLowerCase();
+  if (s === 'both') return new Set(['received', 'sent']);
+  if (s === '' || s === 'off' || s === 'none') return new Set();
+  return new Set(s.split(',').map((t) => t.trim()).filter((t) => AUDIO_MODE_TOKENS.includes(t)));
+}
+
+export function serializeAudioModes(set) {
+  const ordered = AUDIO_MODE_TOKENS.filter((t) => set.has(t));
+  return ordered.length ? ordered.join(',') : 'off';
+}
+
 // Random URL-safe token, used for the "sugerir" verify-token button.
 export function randomToken(len = 32) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';

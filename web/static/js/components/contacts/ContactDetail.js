@@ -93,6 +93,8 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   const media = useMediaUpload({
     api: _api, phone, conversationId, channelId, sandbox, sessionClosed,
+    mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
+    aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
     setContactData, updateMsgByLocalId, openTemplatePicker,
   });
 
