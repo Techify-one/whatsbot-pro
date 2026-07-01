@@ -45,13 +45,36 @@ export function useConversationWsEvents(opts) {
     pageVisibleRef,
   } = opts;
 
-  const [typingState, setTypingState] = useState({});  // { phone: 'text'|'audio'|null }
-  const [aiRespondingState, setAiRespondingState] = useState({});  // { phone: true } — IA processando
+  const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
+  const [aiRespondingState, setAiRespondingState] = useState({});  // { 'channel::phone': true } — IA processando
   const [convAttrPatch, setConvAttrPatch] = useState(null);
 
   const typingTimers = useRef({});
   const aiTypingTimers = useRef({});
   const convListRefetchTimer = useRef(null);   // debounce for membership-change refetch
+  const listRefetchTimer = useRef(null);       // debounce/coalesce for new-conversation refetch
+  const wsConnectedOnceRef = useRef(false);    // skip the first WS connect (initial fetch covers it)
+
+  // Coalesce every "a conversation not in the list just changed" trigger
+  // (new_message for an unknown row, conversation_created, WS reconnect) into ONE
+  // ref-based refetch shortly after — avoids the stale-closure/side-effect-in-reducer
+  // fetch and the double-fetch race when two events fire together. Uses the stable
+  // refs so a []-dep callback never reads a stale search/handle.
+  const scheduleListRefetch = useCallback(() => {
+    if (listRefetchTimer.current) clearTimeout(listRefetchTimer.current);
+    listRefetchTimer.current = setTimeout(() => {
+      if (fetchContactsRef.current) fetchContactsRef.current(searchRef.current);
+    }, 250);
+  }, []);
+
+  // Resync after a dropped WS connection: events that arrived during the gap are
+  // lost (the bus has no replay), so on RE-connect refetch the list to catch any
+  // conversation that changed while we were offline. Skip the first connect — the
+  // initial fetch already covers it.
+  const onWsConnect = useCallback(() => {
+    if (!wsConnectedOnceRef.current) { wsConnectedOnceRef.current = true; return; }
+    scheduleListRefetch();
+  }, [scheduleListRefetch]);
 
   // Track page visibility — mark selected contact as read when tab becomes visible
   useEffect(() => {
@@ -117,7 +140,7 @@ export function useConversationWsEvents(opts) {
       }
     }
   }, []);
-  useWebSocket({ onConversationChanged });
+  useWebSocket({ onConversationChanged, onWsConnect });
 
   // Handle chat presence events (typing/recording indicators). Conversa-cêntrico:
   // a presença pertence a UMA conversa (o canal GOWA que reportou). Casamos por
@@ -154,18 +177,23 @@ export function useConversationWsEvents(opts) {
     if (!aiTyping) return;
     const { phone, active } = aiTyping;
     if (!phone) return;
+    // Conversa-cêntrico: a IA responde numa conversa de UM canal. O evento traz
+    // {phone, channel_id} (sem conversation_id), então casamos por canal::telefone —
+    // a mesma chave que a sidebar usa por linha. Assim só a conversa do canal que
+    // está processando acende "IA respondendo" (o header e a linha da sidebar).
+    const key = typingKey({ channelId: aiTyping.channel_id, phone });
 
     if (active) {
-      setAiRespondingState(prev => ({ ...prev, [phone]: true }));
+      setAiRespondingState(prev => ({ ...prev, [key]: true }));
       // Defensive auto-clear in case the `active:false` event is missed (e.g. a
       // dropped connection mid-processing), so the hint never sticks forever.
-      clearTimeout(aiTypingTimers.current[phone]);
-      aiTypingTimers.current[phone] = setTimeout(() => {
-        setAiRespondingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      clearTimeout(aiTypingTimers.current[key]);
+      aiTypingTimers.current[key] = setTimeout(() => {
+        setAiRespondingState(prev => { const n = { ...prev }; delete n[key]; return n; });
       }, 60000);
     } else {
-      clearTimeout(aiTypingTimers.current[phone]);
-      setAiRespondingState(prev => { const n = { ...prev }; delete n[phone]; return n; });
+      clearTimeout(aiTypingTimers.current[key]);
+      setAiRespondingState(prev => { const n = { ...prev }; delete n[key]; return n; });
     }
   }, [aiTyping]);
 
@@ -340,7 +368,7 @@ export function useConversationWsEvents(opts) {
   // any reply arrives (plano 11 D1). Events are rare, so no debounce is needed.
   useEffect(() => {
     if (!conversationCreated) return;
-    fetchContacts(search);
+    scheduleListRefetch();
   }, [conversationCreated]);
 
   // Handle real-time messages from WebSocket. Conversa-cêntrico routing: a message
@@ -456,9 +484,11 @@ export function useConversationWsEvents(opts) {
         };
         return sortContacts(updated);
       }
-      // No matching row — likely a brand-new conversation/channel; refetch to
-      // materialise it (a `conversation_created` event also nudges this).
-      fetchContacts(search);
+      // No matching row — likely a brand-new (or deleted-then-recreated) conversation.
+      // Coalesced ref-based refetch materialises it reliably (debounced so it merges
+      // with the sibling `conversation_created` trigger into a single, post-commit
+      // fetch — no stale-closure fetch inside the reducer, no double-fetch race).
+      scheduleListRefetch();
       return prev;
     });
   }, [newMessage]);
