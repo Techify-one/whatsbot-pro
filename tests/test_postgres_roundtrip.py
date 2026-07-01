@@ -75,11 +75,11 @@ def _seed_one_conversation_with_messages(engine) -> tuple[int, int]:
         ci = conn.execute(text("SELECT id FROM contact_inboxes ORDER BY id DESC LIMIT 1")).scalar()
 
         conn.execute(text(
-            "INSERT INTO conversations (display_id, inbox_id, contact_id, contact_inbox_id, status, "
+            "INSERT INTO atendimentos (display_id, inbox_id, contact_id, contact_inbox_id, status, "
             "opened_at, last_activity_at, custom_attributes, created_at, updated_at) "
             "VALUES (90099,:i,:c,:ci,'open',:n,:n,'{}',:n,:n)"
         ), {"i": ib, "c": cid, "ci": ci, "n": now})
-        conv = conn.execute(text("SELECT id FROM conversations WHERE display_id=90099")).scalar()
+        conv = conn.execute(text("SELECT id FROM atendimentos WHERE display_id=90099")).scalar()
 
         for role, body in (("user", "rt hi"), ("assistant", "rt ok")):
             conn.execute(text(
@@ -172,7 +172,7 @@ def test_full_roundtrip_to_postgres(sqlite_source):
 
         # ON DELETE CASCADE fires on Postgres (FK enforced natively).
         with target.begin() as conn:
-            conn.execute(text("DELETE FROM conversations WHERE id = :cv"), {"cv": conv_id})
+            conn.execute(text("DELETE FROM atendimentos WHERE id = :cv"), {"cv": conv_id})
         with target.connect() as conn:
             n_after = conn.execute(
                 text("SELECT COUNT(*) FROM messages WHERE conversation_id = :cv"),
