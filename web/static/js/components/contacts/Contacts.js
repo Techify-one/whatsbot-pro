@@ -215,6 +215,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onSelect=${selectContact}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
+          aiRespondingState=${aiRespondingState}
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
@@ -270,7 +271,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
                 currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
-                aiResponding=${selected && !!aiRespondingState[selected]}
+                aiResponding=${selected && !!aiRespondingState[typingKey({ channelId: selectedChannelId, phone: selected })]}
                 globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}

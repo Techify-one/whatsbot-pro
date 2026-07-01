@@ -450,6 +450,18 @@ class MessagingService:
         settings = self.settings
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
+        # Resolve the open conversation once so each tool_call card routes to the SAME
+        # thread the reply does. The panel matches ``new_message`` by conversation_id
+        # first, then by (phone, channel_id); WITHOUT these two fields a tool_call card
+        # silently misses the open thread on any non-"default" channel (e.g. Telegram),
+        # since ``channel_id`` defaulted to "default" and there was no conversation_id.
+        # Best-effort — a failed resolve just falls back to the phone-only match.
+        conv_id = None
+        try:
+            _conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact.id)
+            conv_id = _conv["id"] if _conv else None
+        except Exception:
+            logger.debug("[ToolCall] conversation resolve failed for %s", phone)
         for tc in tool_calls:
             tool_name = tc.get("tool", "unknown")
             args = tc.get("args", {})
@@ -466,13 +478,13 @@ class MessagingService:
             content = "\n".join(lines)
 
             contact.add_message("tool_call", content)
+            tc_message = {"role": "tool_call", "content": content, "ts": time.time()}
+            if conv_id is not None:
+                tc_message["conversation_id"] = conv_id
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
-                "message": {
-                    "role": "tool_call",
-                    "content": content,
-                    "ts": time.time(),
-                },
+                "channel_id": channel_id,
+                "message": tc_message,
             })
 
         # Live-refresh the open info panel after a custom-attribute write (plano 19).

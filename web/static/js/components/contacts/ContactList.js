@@ -111,7 +111,7 @@ function highlightParts(text, query) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
@@ -462,7 +462,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                       </div>
                     ` : null}
                     <div class="flex justify-between items-center mt-[3px]">
-                      ${typingState && typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })]
+                      ${aiRespondingState && aiRespondingState[typingKey({ channelId: c.channel_id, phone: c.phone })]
+                        ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5">
+                            <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse shrink-0"></span>
+                            <span class="truncate">IA respondendo…</span>
+                          </span>`
+                        : typingState && typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })]
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
                             ${typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
