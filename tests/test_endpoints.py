@@ -1500,6 +1500,156 @@ check("delete_plugin_permissions -> keys gone",
       not _rrepo.plugin_permission_keys())
 _urepo.delete(_pu_id)  # cleanup the test user
 
+# ── Atendimentos: Kanban Views (visualizações personalizadas) ──────────────
+section("Atendimentos Kanban Views")
+import importlib.util as _ilu
+from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
+from plugins.migrator import run_pending_migrations as _run_pending
+
+_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "atendimentos"
+
+# 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
+_atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
+_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "atendimentos")
+check("atendimentos rbac -> manage_team_views declarada",
+      any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
+
+# 2) Aplica as migrations do plugin no DB de teste (cria plugin_atendimentos_* incl. 006).
+_atd_manifest = _load_manifest(_atd_dir)
+_run_pending(_atd_manifest, _atd_dir)
+_alogic_spec = _ilu.spec_from_file_location("atendimentos_logic_test", _atd_dir / "logic.py")
+_alogic = _ilu.module_from_spec(_alogic_spec)
+_alogic_spec.loader.exec_module(_alogic)
+
+# 3) CRUD + validação.
+_v1, _e1 = _alogic.create_kanban_view(name="Por etapa", scope="personal", group_by="attr",
+                                      group_attr_key="etapa", filters={"status": "aberto"},
+                                      owner_user_id=101)
+check("create view pessoal -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
+check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
+_v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
+                                      group_date_mode="mes", owner_user_id=101)
+check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
+_, _ev_attr = _alogic.create_kanban_view(name="x", group_by="attr", group_attr_key="", owner_user_id=1)
+check("validação: attr sem key -> erro", _ev_attr is not None)
+_, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
+check("validação: data mode inválido -> erro", _ev_date is not None)
+_, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
+check("validação: nome vazio -> erro", _ev_name is not None)
+
+# 4) list_kanban_views: pessoal do user + TODAS as de equipe.
+_ids101 = {v["id"] for v in _alogic.list_kanban_views(user_id=101)}
+_ids999 = {v["id"] for v in _alogic.list_kanban_views(user_id=999)}
+check("list user 101 -> vê pessoal + equipe", {_v1["id"], _v2["id"]} <= _ids101)
+check("list user 999 -> vê equipe, NÃO vê pessoal de 101",
+      _v2["id"] in _ids999 and _v1["id"] not in _ids999)
+
+# 5) update + delete.
+_vu, _eu = _alogic.update_kanban_view(_v1["id"], name="Por etapa v2")
+check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") == "Por etapa v2")
+_okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
+check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
+
+# 6) set_conversa_attr: branches de erro (sem e2e de conversa — coberto manualmente).
+_, _esa = _alogic.set_conversa_attr(99999, "etapa", "Proposta")
+check("set_conversa_attr -> atendimento inexistente -> erro", _esa is not None)
+
+# 7) attr_filters: caminho do filtro por atributo aceito sem quebrar (lista vazia/segura).
+_lf = _alogic.list_atendimentos(attr_filters={"etapa": "Proposta"}, limit=50)
+check("list_atendimentos(attr_filters) -> retorna lista", isinstance(_lf, list))
+
+# 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
+_p0 = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref ausente -> default equipe",
+      _p0 == {"use_personal": False, "personal_filters": {}})
+_p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
+                                    personal_filters={"status": "fechado"})
+check("upsert pref -> retorna pessoal",
+      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"}})
+_p1r = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref persistida -> personal_filters round-trip",
+      _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
+_p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
+check("upsert parcial -> flip use_personal mantém filters",
+      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"}})
+_p999 = _alogic.get_user_view_pref(_v2["id"], 999)
+check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}})
+_alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
+_lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
+_lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
+check("list anexa pref do chamador 101",
+      _lv101.get(_v2["id"], {}).get("use_personal") is True)
+check("list anexa pref default p/ 999",
+      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}})
+check("get_user_view_pref(uid=None) -> default equipe",
+      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}})
+_vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
+                                       group_by="status", owner_user_id=101)
+_alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
+_alogic.delete_kanban_view(_vp["id"])
+check("delete_kanban_view -> prefs limpas",
+      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}})
+
+# 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
+check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
+_va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
+                                       available_filters=["status", "attr:curso"], owner_user_id=101)
+check("create available_filters -> round-trip lista",
+      _eva is None and _va.get("available_filters") == ["status", "attr:curso"])
+_vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
+check("update sem available_filters -> mantém lista (sentinela)",
+      _vau.get("available_filters") == ["status", "attr:curso"])
+_vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
+check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
+_vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
+check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
+_alogic.delete_kanban_view(_va["id"])
+
+# 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
+_vacl, _eacl = _alogic.create_kanban_view(
+    name="Só atendentes", group_by="status",
+    visibility_roles=["atendente"], visibility_users_exclude=[500], owner_user_id=101)
+check("create ACL -> scope derivado team", _eacl is None and _vacl.get("scope") == "team")
+check("create ACL -> roles round-trip", _vacl.get("visibility_roles") == ["atendente"])
+check("create ACL -> exclude round-trip", _vacl.get("visibility_users_exclude") == [500])
+check("ACL: criador sempre vê", _alogic._view_visible(_vacl, 101, set()) is True)
+check("ACL: atendente (do grupo) vê", _alogic._view_visible(_vacl, 300, {"atendente"}) is True)
+check("ACL: atendente EXCLUÍDO não vê", _alogic._view_visible(_vacl, 500, {"atendente"}) is False)
+check("ACL: gestor (fora do grupo) não vê", _alogic._view_visible(_vacl, 300, {"gestor"}) is False)
+check("ACL: admin vê tudo", _alogic._view_visible(_vacl, 900, {"admin"}) is True)
+_vinc, _ = _alogic.create_kanban_view(name="Incluir fulano", group_by="status",
+                                      visibility_users_include=[700], owner_user_id=101)
+check("ACL: usuário incluído vê (sem papel)", _alogic._view_visible(_vinc, 700, set()) is True)
+check("ACL: não incluído/sem grupo não vê", _alogic._view_visible(_vinc, 701, set()) is False)
+_vp2, _ = _alogic.create_kanban_view(name="Priv", group_by="status", owner_user_id=101)
+check("sem ACL -> scope personal", _vp2.get("scope") == "personal")
+check("personal: outro não vê", _alogic._view_visible(_vp2, 800, {"atendente"}) is False)
+_ids_at = {v["id"] for v in _alogic.list_kanban_views(user_id=300, role_keys={"atendente"})}
+check("list(atendente) inclui view de atendentes", _vacl["id"] in _ids_at)
+_ids_ex = {v["id"] for v in _alogic.list_kanban_views(user_id=500, role_keys={"atendente"})}
+check("list(atendente excluído) não inclui", _vacl["id"] not in _ids_ex)
+_alogic.delete_kanban_view(_vacl["id"])
+_alogic.delete_kanban_view(_vinc["id"])
+_alogic.delete_kanban_view(_vp2["id"])
+
+# 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
+_rrepo.upsert_plugin_permission("plugin.atendimentos.manage_team_views",
+                                "Criar/editar visualizações de EQUIPE no Kanban",
+                                "atendimentos", "Atendimentos")
+_tvu = _urepo.create(email="teamviews@test.com", name="TV",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_tvu_id = _tvu["id"]
+_tv_req = _types.SimpleNamespace(
+    state=_types.SimpleNamespace(user={"id": _tvu_id}),
+    url=_types.SimpleNamespace(path="/api/plugins/atendimentos/kanban-views"))
+check("manage_team_views -> user SEM perm negado",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is False)
+_urepo.set_custom_permissions(_tvu_id, ["plugin.atendimentos.manage_team_views"])
+check("manage_team_views -> user COM perm permitido",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.atendimentos.manage_team_views")) is True)
+_urepo.delete(_tvu_id)
+_rrepo.delete_plugin_permissions("atendimentos")
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════

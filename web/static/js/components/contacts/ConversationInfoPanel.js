@@ -130,6 +130,22 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   // raw rows (assign/status) omit the channel fields, so we keep prev's enrichment.
   const mergeConv = (c) => setConv(prev => (prev ? { ...prev, ...c } : c));
 
+  // Payload de custom_attributes p/ salvar: TODOS os atributos definidos, mandando `null`
+  // para os que ficaram vazios (limpos). É necessário porque o backend faz MERGE
+  // (set_values): uma chave AUSENTE do payload mantém o valor antigo — então limpar um
+  // campo apenas removendo a chave de `convValues` o fazia reverter (e a re-sync via
+  // `convAttrPatch` trazia o valor antigo de volta à UI). `null` remove a chave de fato;
+  // demais valores sobrescrevem. (vazio→null, NÃO ''→ pois '' é rejeitado por tipos como
+  // select/list na validação do backend.)
+  const buildConvAttrsPayload = () => {
+    const payload = {};
+    for (const def of convDefs) {
+      const v = convValues[def.attribute_key];
+      payload[def.attribute_key] = (v === undefined || v === null || v === '') ? null : v;
+    }
+    return payload;
+  };
+
   async function toggleStatus() {
     if (!conv || busy) return;
     const closing = conv.status === 'open';
@@ -157,7 +173,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
         // Persist pending attribute edits first; abort the close if it fails
         // (e.g. regex validation) so nothing is silently lost. The saved values also
         // pre-fill the plugin's resolve popup (it reads conv.custom_attributes).
-        const saveRes = await updateConversationInfo(conv.id, { custom_attributes: convValues });
+        const saveRes = await updateConversationInfo(conv.id, { custom_attributes: buildConvAttrsPayload() });
         if (!(saveRes && saveRes.ok)) return;
         if (saveRes.data && saveRes.data.conversation) {
           mergeConv(saveRes.data.conversation);
@@ -187,7 +203,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
     if (!conv) return;
     setSaving(true);
     try {
-      const res = await updateConversationInfo(conv.id, { custom_attributes: convValues });
+      const res = await updateConversationInfo(conv.id, { custom_attributes: buildConvAttrsPayload() });
       if (res && res.ok && res.data && res.data.conversation) mergeConv(res.data.conversation);
     } catch (e) {
       console.error('Failed to save conversation attributes:', e);
