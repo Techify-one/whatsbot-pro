@@ -111,7 +111,7 @@ function highlightParts(text, query) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply, canToggleAutoReply = true,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
@@ -282,31 +282,6 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
-          ${canToggleAutoReply ? html`
-          <button
-            onClick=${() => {
-              const msg = autoReply
-                ? 'Deseja DESATIVAR a IA para responder mensagens?'
-                : 'Deseja ATIVAR a IA para responder mensagens?';
-              if (confirm(msg) && onToggleAutoReply) {
-                onToggleAutoReply(!autoReply);
-              }
-            }}
-            class="flex items-center gap-[5px] rounded-full px-[10px] py-[4px] text-[11px] font-semibold cursor-pointer transition-colors ${autoReply ? 'bg-green-500/25 text-green-300 hover:bg-green-500/35' : 'bg-red-500/25 text-red-300 hover:bg-red-500/35'}"
-            title=${autoReply ? 'IA ativada globalmente — clique para desativar' : 'IA desativada globalmente — clique para ativar'}
-          >
-            <span class="inline-block w-[6px] h-[6px] rounded-full ${autoReply ? 'bg-green-400' : 'bg-red-400'}"></span>
-            ${autoReply ? 'IA Ativada' : 'IA Desativada'}
-          </button>
-          ` : html`
-          <span
-            class="flex items-center gap-[5px] rounded-full px-[10px] py-[4px] text-[11px] font-semibold ${autoReply ? 'bg-green-500/25 text-green-300' : 'bg-red-500/25 text-red-300'}"
-            title="IA global (somente leitura)"
-          >
-            <span class="inline-block w-[6px] h-[6px] rounded-full ${autoReply ? 'bg-green-400' : 'bg-red-400'}"></span>
-            ${autoReply ? 'IA Ativada' : 'IA Desativada'}
-          </span>
-          `}
         </div>
         <div class="flex items-center gap-2">
           ${wsConnected === false ? html`
