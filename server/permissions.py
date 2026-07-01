@@ -27,6 +27,10 @@ ROLE_DEFAULTS = {
         "conversation.resolve", "contact.read", "contact.write", "channel.manage",
         "settings.manage", "plugins.manage", "billing.manage", "agent.manage",
         "quickreply.manage", "template.create", "template.delete", "audit.read",
+        # Plano 24 — gestor recebe as 9 novas (database.manage fica admin-only)
+        "contact.delete", "conversation.delete", "tag.manage",
+        "conversation_label.manage", "sandbox.use", "usage.read",
+        "custom_attribute.manage", "execution.read", "execution.delete",
     },
     "atendente": {
         "conversation.read", "conversation.reply", "conversation.resolve",

@@ -49,17 +49,29 @@ class GOWAChannel(Channel):
             self._manager.stop()
 
     def status(self) -> dict:
-        connected = bool(self._manager and self._manager.is_running)
-        logged_in = False
-        own_phone = ""
+        """Live status of this channel's **device** (plano 27 D1).
+
+        ``connected``/``logged_in`` come straight from the GOWA ``/app/status``
+        of *this* device via ``connection_state()`` — no longer derived from the
+        subprocess (``manager.is_running``), which since plano 13 is spawned by
+        the plugin and never sets ``gowa_manager._managed`` (so it read False for
+        every channel, showing "Desconectado" even for a working number).
+        """
         try:
-            logged_in = bool(self._client and self._client.is_connected())
-            if logged_in:
+            st = self._client.connection_state() if self._client else {}
+        except Exception as e:  # noqa: BLE001
+            return {"connected": False, "logged_in": False, "needs_qr": False,
+                    "own_phone": "", "error": str(e)}
+        connected = bool(st.get("connected"))
+        logged_in = bool(st.get("logged_in"))
+        own_phone = ""
+        if logged_in:
+            try:
                 own_phone = self._client.get_own_number() or ""
-        except Exception:
-            pass
+            except Exception:  # noqa: BLE001
+                pass
         return {"connected": connected, "logged_in": logged_in,
-                "needs_qr": connected and not logged_in,
+                "needs_qr": not logged_in,
                 "own_phone": own_phone, "error": None}
 
     def get_qr(self) -> bytes | None:
@@ -83,7 +95,39 @@ class GOWAChannel(Channel):
             self._client.ensure_device()
         except Exception as e:  # noqa: BLE001
             logger.debug("GOWAChannel.get_qr: ensure_device failed: %s", e)
-        return self._client.get_qr_code()
+
+        # Decide QR vs reconnect vs logout+relogin from the real device state
+        # (plano 27 F2.2) instead of blindly emitting a QR.
+        try:
+            st = self._client.connection_state()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("GOWAChannel.get_qr: connection_state failed: %s", e)
+            st = {}
+        if st.get("connected"):
+            # Socket already alive — nothing to do; the poll will close the QR UI.
+            return None
+        if st.get("logged_in"):
+            # Session exists but the socket dropped — reconnect, don't show a QR.
+            try:
+                self._client.reconnect()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("GOWAChannel.get_qr: reconnect failed: %s", e)
+            return None
+
+        # Not logged in → normal QR flow.
+        png = self._client.get_qr_code()
+        if png:
+            return png
+        # Stale/stuck session: device unpaired yet /app/login refuses a QR. As a
+        # last resort clear the credential (logout) and retry once. Only reached
+        # when we already know the device is neither connected nor logged in, so
+        # logout can't nuke a live session. Defensive — never breaks the endpoint.
+        try:
+            self._client.logout()
+            return self._client.get_qr_code()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("GOWAChannel.get_qr: logout+relogin failed: %s", e)
+            return None
 
     # Deprecated alias (plano 23 Fase C4). ``get_qr`` is canonical; ``qr`` stays
     # for one wave so any caller still on the old name (and any third-party
@@ -98,6 +142,29 @@ class GOWAChannel(Channel):
                 "GOWAChannel.qr() is deprecated; use get_qr() — the alias will "
                 "be removed in a future release.")
         return self.get_qr()
+
+    # ── Session (per-channel reconnect / logout) ─────────────────────
+    def reconnect(self) -> dict:
+        """Reconnect this channel's device socket (plano 27). Acts on the right
+        device via this channel's own client — not the singleton."""
+        if self._client is None:
+            return {"ok": False, "error": "cliente GOWA indisponível"}
+        try:
+            self._client.reconnect()
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
+    def logout(self) -> dict:
+        """Log this channel's device out of WhatsApp (plano 27). Clears the
+        session so the next connect asks for a fresh QR."""
+        if self._client is None:
+            return {"ok": False, "error": "cliente GOWA indisponível"}
+        try:
+            self._client.logout()
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
     # ── Outbound (delegates to the existing client) ──────────────────
     def send_text(self, chat_id: str, text: str, *, reply_to=None,

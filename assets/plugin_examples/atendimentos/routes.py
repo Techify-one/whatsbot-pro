@@ -120,7 +120,7 @@ async def update_fields(atid: int, body: dict, request: Request):
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/close", dependencies=[plugin_permission("edit")])
+@router.post("/atendimentos/{atid}/close", dependencies=[plugin_permission("resolve")])
 async def close_atendimento(atid: int, request: Request):
     uid, name = _atendente(request)
     at, err = logic.close_atendimento(atid, assignee_user_id=uid, assignee_name=name)
@@ -135,7 +135,7 @@ async def close_atendimento(atid: int, request: Request):
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/reopen", dependencies=[plugin_permission("edit")])
+@router.post("/atendimentos/{atid}/reopen", dependencies=[plugin_permission("resolve")])
 async def reopen_atendimento(atid: int):
     at, err = logic.reopen_atendimento(atid)
     if err:
@@ -143,7 +143,7 @@ async def reopen_atendimento(atid: int):
     return {"ok": True, "data": at}
 
 
-@router.post("/atendimentos/{atid}/assign", dependencies=[plugin_permission("edit")])
+@router.post("/atendimentos/{atid}/assign", dependencies=[plugin_permission("assign")])
 async def assign_atendimento(atid: int, body: dict):
     """Define/limpa o atendente do atendimento (drag-and-drop do kanban por atendente)."""
     auid = (body or {}).get("assignee_user_id")
@@ -288,7 +288,7 @@ async def set_my_view_pref(vid: int, body: dict, request: Request):
 
 # ── Vínculo / resolução de conversa ───────────────────────────────────────────
 
-@router.post("/conversas/{conversation_id}/resolve", dependencies=[plugin_permission("edit")])
+@router.post("/conversas/{conversation_id}/resolve", dependencies=[plugin_permission("resolve")])
 async def resolve_conversa(conversation_id: int, body: dict, request: Request):
     uid, name = _atendente(request)
     link, err = logic.resolve_conversa(
@@ -313,7 +313,7 @@ async def get_field_defs(scope: str = "conversa"):
     return {"ok": True, "data": {"scope": scope, "defs": logic.get_field_defs(scope)}}
 
 
-@router.put("/field-defs", dependencies=[plugin_permission("edit")])
+@router.put("/field-defs", dependencies=[plugin_permission("config")])
 async def set_field_defs(body: dict):
     scope = (body or {}).get("scope")
     try:
@@ -330,6 +330,6 @@ async def get_protocol_config():
     return {"ok": True, "data": logic.get_protocol_config()}
 
 
-@router.put("/protocol-config", dependencies=[plugin_permission("edit")])
+@router.put("/protocol-config", dependencies=[plugin_permission("config")])
 async def set_protocol_config(body: dict):
     return {"ok": True, "data": logic.set_protocol_config(body or {})}

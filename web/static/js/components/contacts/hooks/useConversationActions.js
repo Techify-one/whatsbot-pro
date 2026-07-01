@@ -36,6 +36,7 @@ export function useConversationActions({
   const [globalTags, setGlobalTags] = useState({});
   // Identity + users for the "assign attendant" submenu (degrade gracefully on 403).
   const [currentUserId, setCurrentUserId] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);   // full user (permissions[]) for P48 hides
   const [users, setUsers] = useState([]);
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
@@ -213,7 +214,10 @@ export function useConversationActions({
   // All best-effort; degrade silently if forbidden.
   useEffect(() => {
     getMe().then(res => {
-      if (res && res.ok && res.data && res.data.user) setCurrentUserId(res.data.user.id);
+      if (res && res.ok && res.data && res.data.user) {
+        setCurrentUserId(res.data.user.id);
+        setCurrentUser(res.data.user);
+      }
     }).catch(() => {});
     getAssignableAgents().then(res => {
       if (res && res.ok && res.data) {
@@ -250,7 +254,7 @@ export function useConversationActions({
 
   return {
     globalTags, setGlobalTags,
-    currentUserId, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi,
     ctxMenu, setCtxMenu, ctxConv, setCtxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,

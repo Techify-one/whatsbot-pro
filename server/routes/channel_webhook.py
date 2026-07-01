@@ -29,6 +29,7 @@ from db.repositories import (channel_repo, channel_credential_repo, message_repo
                              contact_repo, conversation_repo, inbox_repo)
 from agent import group_mentions
 from plugins.events import emit_with_filter, apply_filter
+from server.authz import permission_denied
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -350,4 +351,8 @@ def register_routes(app, deps):
 
     @app.get("/api/channel-webhook-payloads")
     async def recent_payloads(request: Request, limit: int = 20):
+        # Twin of /webhook-payloads: leaks raw bodies/phones/base64 — gate it.
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         return _ok(_RECENT[-max(1, min(limit, _RECENT_CAP)):])

@@ -4,12 +4,13 @@ import asyncio
 import logging
 import time
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from db.repositories import contact_repo, conversation_repo
 from plugins.events import emit as emit_event, emit_with_filter, apply_filter
 from server import system_notices
 from server.authz import current_user
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -19,12 +20,15 @@ def register_routes(app, deps):
     agent_handler = deps.agent_handler
     ws_manager = deps.ws_manager
 
+    install_exception_handlers(app)
+
     @app.get("/api/tags")
     async def list_tags():
         """Return all global tags."""
         return _ok(agent_handler.tag_registry.all())
 
-    @app.post("/api/tags")
+    @app.post("/api/tags",
+              dependencies=[Depends(require_permission("tag.manage"))])
     async def create_tag(request: Request):
         """Create a new global tag."""
         body = await request.json()
@@ -42,7 +46,8 @@ def register_routes(app, deps):
         await emit_with_filter("tag.created", {"name": name, "color": color, "ts": time.time()})
         return _ok({"name": name, "color": color})
 
-    @app.put("/api/tags/{name}")
+    @app.put("/api/tags/{name}",
+             dependencies=[Depends(require_permission("tag.manage"))])
     async def update_tag(name: str, request: Request):
         """Update a global tag (rename and/or change color)."""
         body = await request.json()
@@ -74,7 +79,8 @@ def register_routes(app, deps):
         })
         return _ok({"name": final_name, "color": tag_data["color"] if tag_data else color})
 
-    @app.delete("/api/tags/{name}")
+    @app.delete("/api/tags/{name}",
+                dependencies=[Depends(require_permission("tag.manage"))])
     async def delete_tag(name: str):
         """Delete a global tag and remove it from all contacts."""
         old_tag = agent_handler.tag_registry.get(name)   # snapshot for the audit "before"
@@ -92,7 +98,8 @@ def register_routes(app, deps):
         })
         return _ok({"deleted": name})
 
-    @app.put("/api/contacts/{phone}/tags")
+    @app.put("/api/contacts/{phone}/tags",
+             dependencies=[Depends(require_permission("contact.write"))])
     async def set_contact_tags(phone: str, request: Request):
         """Set the tags for a specific contact."""
         body = await request.json()

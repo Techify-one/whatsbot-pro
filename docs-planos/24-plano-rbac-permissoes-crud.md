@@ -1,10 +1,34 @@
 # Plano 24 — RBAC: maximizar permissões (CRUD) na tela de Cargos
 
-> **Status:** PLANEJAMENTO. Nada implementado. Este documento é só o plano.
+> **Status:** ✅ IMPLEMENTADO (2026-07-01). Fases 0–5 completas — catálogo + migration
+> `0032_more_permissions`, backend enforce (gaps + reatribuições), split limpo do plugin
+> `atendimentos`, hides de frontend (P48) e testes (966 verdes em SQLite; migration validada
+> em Postgres). Histórico do plano abaixo preservado para referência.
+> **Revisado/reajustado em 2026-07-01** (auditoria multi-agente de re-validação contra o código
+> atual — ver §0). O plano segue válido; os ajustes de drift foram incorporados.
 > **Origem:** maximizar as permissões da tela `/users/roles/*` (ex.: esconder o ícone
 > "Informações do contato", "Fechar atendimento" vindo do plugin, excluir/editar contatos…).
 > **Método:** auditoria multi-agente de **todas** as rotas backend (`server/routes/*`) e
 > ações de UI (`web/static/js/components/*`) — 144 candidatos triados + verificação manual.
+
+## 0. Reajustes de 2026-07-01 (drift desde a escrita) — LER PRIMEIRO
+
+Re-validação contra o código atual confirmou que a estrutura e as decisões do plano continuam
+corretas, mas houve drift. **Antes de implementar, aplique estes ajustes** (já refletidos nas
+seções abaixo):
+
+1. **Head de migration mudou: `0027` → `0031`.** Surgiram 4 migrations depois do plano
+   (`0028_default_contact_attrs`, `0029_cpf_not_system`, `0030_ai_agent_inline_prompt`,
+   `0031_ai_agent_prompt_history`). O nome `0028` **já está tomado**. A nova migration é
+   **`20260701_0032_more_permissions.py`** com `down_revision="0031_ai_agent_prompt_history"`.
+2. **Plugin `atendimentos` já tem 3 chaves, não 2.** Foi adicionada `manage_team_views` no merge
+   de Kanban views. O plugin foi **refatorado**: `panel.js` **não existe mais** — as affordances
+   de fechar/reabrir/atribuir viraram **drag no Kanban** em `atendimentos_tab.js`. Ver §4.3 reescrita.
+3. **Plugin `atendimentos` agora é git-tracked em `assets/plugin_examples/atendimentos/`** (idêntico
+   à cópia `storages/plugins/atendimentos/`). **Edite a cópia tracked** — senão não versiona.
+4. **Superfícies novas (Kanban views CRUD + `ConversationLabelEditor.js`)** — ver §4.4.
+5. **Números de linha derraparam** em vários arquivos. As refs `arquivo:linha` deste plano são
+   **aproximadas** — localize por nome de função/rota (grep), não pela linha literal.
 
 ## Decisões do usuário (2026-06-29)
 
@@ -87,8 +111,8 @@ nulo ⇒ chave descartada em silêncio). `admin` (`'*'`) nunca precisa de grant.
 
 | Chave | Label (pt-BR) | Grupo | Default | Enforce backend (chave FINAL) | Hide frontend |
 |---|---|---|---|---|---|
-| `contact.delete` | Excluir contato (e todas as conversas) | `contact` | gestor | `contacts.py:615` `delete_contact` (era `contact.write`) | `ContactInfoPanel.js:461-472` "Apagar contato" |
-| `conversation.delete` | Excluir conversa (apaga histórico) | `conversation` | gestor | `conversations.py:391` `DELETE /api/conversations/{id}` (era `conversation.resolve`) | `ContextMenu.js:260-277` "Apagar conversa" |
+| `contact.delete` | Excluir contato (e todas as conversas) | `contact` | gestor | `contacts.py` `delete_contact` (~ln 640; era `contact.write`) | `ContactInfoPanel.js` (~ln 455-466) "Apagar contato" |
+| `conversation.delete` | Excluir conversa (apaga histórico) | `conversation` | gestor | `conversations.py` `DELETE /api/conversations/{id}` (~ln 384; era `conversation.resolve`) | `ContextMenu.js` (~ln 260-277) "Apagar conversa" |
 | `tag.manage` | Criar/editar/excluir etiquetas (de contato) | `tag` | gestor | `tags.py:28/46/78` create/update/delete (**ungated**) | gerenciador de tags globais |
 | `conversation_label.manage` | Criar/editar/excluir etiquetas de conversa | `conversation_label` | gestor | `conversation_labels.py:46/63/82` (**ungated**) | gerenciador de etiquetas de conversa |
 | `sandbox.use` | Usar o chat de teste (sandbox) | `sandbox` | gestor | `sandbox.py:127/160/223/281/344` (**todos ungated**) | `GearMenu.js` entrada + rota SPA `/sandbox` |
@@ -138,7 +162,7 @@ nulo ⇒ chave descartada em silêncio). `admin` (`'*'`) nunca precisa de grant.
 | `ContextMenu.js:230-243` + `attendances/AttendanceList.js:49-52` | `conversation.resolve` | "Marcar resolvida"/"Reabrir" inline. |
 | `ContextMenu.js:163-228` + `AssigneePicker.js:91-156` + `AttendanceList.js:53-60` | `conversation.assign` | Submenu Atribuir, dropdown `AssigneePicker` (render incondicional hoje), atribuir inline. |
 | `ContactDetail.js:258-268` + `Contacts.js:298-309` | `conversation.read` | Ícone/painel "Informações da conversa". |
-| `GearMenu.js:124-135` | `billing.manage` | Link externo "Saldo e Recargar". |
+| `shell/GearMenu.js` (~ln 127-138) | `billing.manage` | Link externo "Saldo e Recargar" (hoje só condicional a `accountUrl`, sem gate). |
 | `Contacts.js:226-227/169-174` | `settings.manage` | Interruptor **global** da IA (`auto_reply`). |
 | `Composer.js:279-298` | `quickreply.manage` | Picker de respostas rápidas in-composer (some junto se o Composer for escondido). |
 | tela Usage / Execuções / Banco / campos personalizados | `usage.read` / `execution.read` / `database.manage` / `custom_attribute.manage` | Esconder as entradas no `GearMenu` + render das telas pelas chaves novas. |
@@ -148,29 +172,42 @@ nulo ⇒ chave descartada em silêncio). `admin` (`'*'`) nunca precisa de grant.
 > `hasPermission`), `AssigneePicker.js`, `attendances/AttendanceList.js`. Threadar `user` como
 > prop de `Contacts.js`/`Attendances.js` (que já chamam `getMe()`). Referência: `ConversationHeaderActions.js:40,53`.
 
-### 4.3 — Plugin `atendimentos` — split LIMPO (opção b)
+### 4.3 — Plugin `atendimentos` — split LIMPO (opção b)  ⟵ REESCRITO 2026-07-01
 
-Hoje: 2 chaves (`view`, `edit`), com `edit` cobrindo tudo que muda. **Ninguém tem `edit`
-concedido** (plugin perms começam admin-only; gestor está desmarcado no print) ⇒ o split
-**não quebra ninguém**. Vamos direto às chaves finais:
+> **Editar a cópia git-tracked:** o plugin vive em **`assets/plugin_examples/atendimentos/`**
+> (versionado) e é espelhado em `storages/plugins/atendimentos/` (idêntico, runtime). **Todas as
+> edições de `plugin.yaml`/`routes.py`/`static/*.js` vão na cópia `assets/plugin_examples/`.**
+
+**Estado ATUAL (não mais 2 chaves):** o plugin já tem **3 chaves** — `view`, `edit` e
+`manage_team_views` (esta última adicionada no merge de Kanban views). `edit` ainda cobre tudo
+que muda no atendimento. **Ninguém tem `edit`/`manage_team_views` concedido por padrão** (plugin
+perms nascem admin-only) ⇒ o split **não quebra ninguém**. Vamos direto às chaves finais
+(mantendo as 3 existentes + 4 novas):
 
 ```yaml
-# storages/plugins/atendimentos/plugin.yaml → rbac.permissions
-- { key: view,    label: "Ver atendimentos e histórico" }            # existente
-- { key: edit,    label: "Editar campos/observações do atendimento" } # existente (escopo reduzido)
-- { key: resolve, label: "Fechar/reabrir atendimento e resolver conversa" }  # NOVO
-- { key: assign,  label: "Atribuir/reatribuir atendimentos" }         # NOVO
-- { key: config,  label: "Configurar campos e avaliação do plugin" }  # NOVO
-- { key: delete,  label: "Excluir atendimentos" }                     # NOVO (reservado: sem rota ainda)
+# assets/plugin_examples/atendimentos/plugin.yaml → rbac.permissions
+- { key: view,              label: "Ver atendimentos" }                          # existente
+- { key: edit,              label: "Editar campos/observações do atendimento" }  # existente (escopo reduzido)
+- { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" } # existente (NÃO mexer)
+- { key: resolve,           label: "Fechar/reabrir atendimento e resolver conversa" }  # NOVO
+- { key: assign,            label: "Atribuir/reatribuir atendimentos" }          # NOVO
+- { key: config,            label: "Configurar campos e avaliação do plugin" }   # NOVO
+- { key: delete,            label: "Excluir atendimentos" }                      # NOVO (reservado: sem rota ainda)
 ```
 
-| Chave | Rotas (`storages/plugins/atendimentos/routes.py`) — chave FINAL | Frontend |
+> ⚠️ **`panel.js` não existe mais** — o plugin foi refatorado para Kanban. As affordances de
+> fechar/reabrir/atribuir são **drag entre colunas** em `static/atendimentos_tab.js`, sem hide no
+> frontend (o gate é 100% backend; o drop falha se o usuário não tiver a permissão). Números de
+> linha abaixo são aproximados — localize por nome de rota/função.
+
+| Chave | Rotas (`assets/plugin_examples/atendimentos/routes.py`) — chave FINAL | Frontend |
 |---|---|---|
-| `view` | `:34`,`:45`,`:53`,`:130`,`:139`,`:156` (mantêm) | render da tab/painel |
-| `edit` | `:61` `/ensure`, `:74` `/fields` (mantêm `edit`) | `panel.js` Salvar/Iniciar |
-| `resolve` | `:84` `/close` (**Fechar**), `:98` `/reopen`, `:120` `/conversas/{id}/resolve` (eram `edit`) | `panel.js:179-182` Fechar/Reabrir; `atendimentos_tab.js:204-205` drop kanban; popup `resolve_form.js` via `extends.js:30` |
-| `assign` | `:106` `/assign` (era `edit`) | `atendimentos_tab.js:195-198` drop "por atendente" |
-| `config` | `:144` `/field-defs` PUT, `:161` `/protocol-config` PUT (eram `edit`) | `plugin.yaml` screen `atendimentos-config` `requires: edit`→`config`; `config.js:29` `can('edit')`→`can('config')` |
+| `view` | list/get atendimento, `/roles`, `/kanban-views` GET, `/conversas/{id}/anchor`, `/field-defs` GET, `/protocol-config` GET (mantêm) | render da tab/painel |
+| `edit` | `/contacts/{id}/atendimento/ensure`, `/atendimentos/{id}/fields` PUT, `/atendimentos/{id}/set-attr` (mantêm `edit`) | Salvar/Iniciar; drag "por atributo" |
+| `resolve` | `/atendimentos/{id}/close` (**Fechar**), `/atendimentos/{id}/reopen`, `/conversas/{id}/resolve` (eram `edit`) | drag close/reopen no Kanban (`atendimentos_tab.js` ~ln 193-194); popup `resolve_form.js` via `extends.js` |
+| `assign` | `/atendimentos/{id}/assign` (era `edit`) | drag "por atendente" (`atendimentos_tab.js` ~ln 117-120) |
+| `config` | `/field-defs` PUT, `/protocol-config` PUT (eram `edit`) | screen `atendimentos-config` `requires:` `edit`→`config`; `config.js` (~ln 29) `can('edit')`→`can('config')` |
+| `manage_team_views` | `/kanban-views` POST/PUT/DELETE — **já gated** (base `view` + check inline `_gate_view_write`) | `atendimentos_tab.js` `canTeam`/`canEditView` (já usa) — **NÃO mexer** |
 | `delete` | _(reservado — sem rota DELETE; declarar p/ aparecer no picker)_ | botão futuro via `can('delete')` |
 
 > **Sem fallback:** as rotas trocam direto `edit`→chave-fina (não "edit OR resolve"). Depois do
@@ -178,6 +215,13 @@ concedido** (plugin perms começam admin-only; gestor está desmarcado no print)
 > **Default de grant:** plugin perms **não** têm `ROLE_DEFAULTS` — nascem admin-only. Se quiser
 > que `gestor` já receba `resolve`/`assign`/`config`, isso é feito **na UI de Cargos** (ou um
 > seed manual), não no catálogo core.
+
+### 4.4 — Superfícies NOVAS (pós-merge Kanban views) — decisões
+
+| Superfície | Onde | Estado atual | Decisão para este plano |
+|---|---|---|---|
+| **Kanban views CRUD** | `atendimentos/routes.py` `POST/PUT/DELETE /kanban-views` + `PUT /kanban-views/{id}/my-pref` | Gated: base `view` + `_gate_view_write` (view de EQUIPE exige `manage_team_views`; PESSOAL exige ownership OU `manage_team_views`) | **Manter como está.** É a única superfície RBAC já bem-feita. `create_kanban_view` (POST) tem só `view` de base ⇒ qualquer um com leitura cria view **pessoal** — **aceito por design** (view pessoal é inócua; compartilhar vira EQUIPE e cai no `manage_team_views`). Documentado aqui para não "corrigir" por engano. |
+| **`ConversationLabelEditor.js`** | `web/static/js/components/ConversationLabelEditor.js` | Self-contained, sem `hasPermission`; expõe criar/editar etiqueta de conversa inline | **É o alvo concreto do hide por `conversation_label.manage`** (§4.1). Threadar `currentUser` + import `hasPermission` (entra na Fase 0). O CRUD **global** (registry) é `conversation_labels.py` POST/PUT/DELETE — ungated hoje, gate em Fase 2. A associação por-conversa (`PUT /conversations/{id}/labels`) **já** é `conversation.reply` — não é alvo. |
 
 ---
 
@@ -191,9 +235,10 @@ concedido** (plugin perms começam admin-only; gestor está desmarcado no print)
    adicionar `admin`. (Documenta política; **não** semeia o DB — sincronizar à mão com a migration.)
 3. **Migration Alembic (OBRIGATÓRIA)** — copiar o padrão idempotente de
    [20260620_0021_template_permissions.py](../db/alembic/versions/20260620_0021_template_permissions.py).
-   `down_revision = "0027_messages_conversation_fk"` (**head atual confirmado**). Insert da key se
-   ausente + grant aos roles se ausente. Tabela `permissions` core: só `key`+`description`
-   (não setar `plugin_id`/`group_label`). `init_db()` roda `alembic upgrade head` no boot ⇒ **restart**.
+   `down_revision = "0031_ai_agent_prompt_history"` (**head atual confirmado em 2026-07-01** — NÃO
+   é mais `0027`). Insert da key se ausente + grant aos roles se ausente. Tabela `permissions` core:
+   só `key`+`description` (não setar `plugin_id`/`group_label`). `init_db()` roda
+   `alembic upgrade head` no boot ⇒ **restart**.
 4. **`PermissionPicker.js`** — geralmente **nada**: agrupa pelo prefixo antes do `.`; prefixo novo
    vira seção nova automática. (Opcional: marcar inerte em `INERT_PERMISSIONS`.)
 5. **Enforce backend** — `dependencies=[Depends(require_permission("x"))]` (preferido) ou inline
@@ -218,16 +263,24 @@ concedido** (plugin perms começam admin-only; gestor está desmarcado no print)
 ## 6. Plano faseado (estado-alvo limpo)
 
 ### Fase 0 — Plumbing de frontend (pré-requisito de todos os hides)
-- Threadar `currentUser` para `ContactDetail.js`, `ContextMenu.js`, `ContactInfoPanel.js`,
-  `AssigneePicker.js`, `attendances/AttendanceList.js` (prop de `Contacts.js`/`Attendances.js`).
+- **Threadar `currentUser` de fato** (não recebem identidade hoje): `ContactDetail.js`,
+  `ContactInfoPanel.js`, `Composer.js`, `ConversationLabelEditor.js`. `ContextMenu.js` já recebe
+  `{currentUserId}` mas precisa do **user completo** (com `permissions[]`) para `hasPermission`.
+- **Já carregam identidade — falta só o check `hasPermission`** (menos trabalho que o previsto):
+  `ConversationInfoPanel.js` (já importa `hasPermission` e gateia resolve/reopen),
+  `AssigneePicker.js` (faz `getMe()` interno) e `attendances/AttendanceList.js` (recebe
+  `{currentUserId}`). Para esses, basta adicionar os checks nas affordances, não re-threadar user.
 - `ContactInfoPanel.js`: adicionar `import { hasPermission }`. Sem mudança de backend.
+- **Referência de padrão correto:** `ConversationHeaderActions.js` e `shell/GearMenu.js` (usam
+  `getMe()` + `hasPermission` e já gateiam suas ações).
 
 ### Fase 1 — Catálogo + migration (TODAS as 10 chaves de uma vez) ⟵ vem antes do enforce
 - `domain/permission_catalog.py`: 10 tuplas novas.
 - `server/permissions.py` `ROLE_DEFAULTS`: grant das 9 a `gestor` (`database.manage` fica
   **admin-only** — não entra em nenhum role).
-- Migration `20260629_0028_more_permissions.py` (`down_revision="0027_messages_conversation_fk"`)
-  no padrão idempotente do `0021`: insert das 10 + grant ao `gestor` das 9.
+- Migration `20260701_0032_more_permissions.py` (`down_revision="0031_ai_agent_prompt_history"` —
+  head atual; `0028` já está tomado por `default_contact_attrs`) no padrão idempotente do `0021`:
+  insert das 10 + grant ao `gestor` das 9.
 - **Restart** do worker (migration roda no boot). Após isso, **todas as chaves finais existem**.
 
 ### Fase 2 — Backend enforce (chaves FINAIS, sem stopgap)
@@ -259,12 +312,15 @@ concedido** (plugin perms começam admin-only; gestor está desmarcado no print)
   entrada Sandbox + rota SPA (`sandbox.use`).
 
 ### Fase 4 — Plugin `atendimentos` (split limpo)
-- `plugin.yaml`: adicionar `resolve`/`assign`/`config`/`delete` (manter `view`/`edit`).
-- `routes.py`: trocar gates direto — close/reopen/resolve → `resolve`; assign → `assign`;
-  field-defs/protocol PUT → `config`. `ensure`/`fields` mantêm `edit`.
-- Frontend: `panel.js` `canResolve`; `atendimentos_tab.js` threadar `can`, gatear drag
-  (close/reopen→`resolve`, assign→`assign`); `config.js` `can('edit')`→`can('config')`;
-  screen `atendimentos-config` `requires: edit`→`config`.
+- **Editar a cópia git-tracked** `assets/plugin_examples/atendimentos/` (não só `storages/`).
+- `plugin.yaml`: adicionar `resolve`/`assign`/`config`/`delete` (manter `view`/`edit`/**`manage_team_views`**).
+- `routes.py`: trocar gates direto — close/reopen/`conversas/{id}/resolve` → `resolve`; assign →
+  `assign`; field-defs/protocol PUT → `config`. `ensure`/`fields`/`set-attr` mantêm `edit`.
+  **NÃO tocar** nas rotas `/kanban-views*` (já gated por `manage_team_views` + `_gate_view_write`).
+- Frontend: `atendimentos_tab.js` gatear drag (close/reopen→`resolve`, assign→`assign`) — o gate
+  hoje é só backend; opcionalmente esconder/desabilitar o drop sem permissão; `config.js`
+  (~ln 29) `can('edit')`→`can('config')`; screen `atendimentos-config` `requires: edit`→`config`.
+  (`panel.js` não existe mais — ver §4.3.)
 - Toggle/restart do plugin para materializar as rows. (Re-marcar as chaves nos cargos via UI.)
 
 ### Fase 5 — Testes + validação
@@ -306,7 +362,7 @@ grant da migration.
 - Enforce: `server/authz.py`, `server/deps.py`
 - Data: `db/repositories/rbac_repo.py`
 - API: `server/routes/{users,roles,auth}.py`
-- Migration template: `db/alembic/versions/20260620_0021_template_permissions.py` (head: `0027_messages_conversation_fk`)
+- Migration template: `db/alembic/versions/20260620_0021_template_permissions.py` (**head atual: `0031_ai_agent_prompt_history`** — a nova migration é `0032_more_permissions`)
 - Frontend: `web/static/js/utils/permissions.js`, `components/{PermissionPicker,RolesManager,UsersManager}.js`, `services/api.js`
 - Plugin RBAC: `plugins/{manifest,rbac,context}.py`, `components/{PluginScreen,shell/GearMenu}.js`
 - Plugin atendimentos: `storages/plugins/atendimentos/{plugin.yaml,routes.py,static/*.js}`

@@ -106,7 +106,11 @@ def register_routes(app, deps):
         return _ok({"message": "Configurações salvas!"})
 
     @app.post("/api/config/test-key")
-    async def test_api_key(body: dict):
+    async def test_api_key(body: dict, request: Request):
+        # Auto-saves the api_key on success ⇒ a disguised write; gate like PUT /config.
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         api_key = body.get("api_key", "").strip()
         if not api_key:
             return _err("Insira uma API key primeiro.")

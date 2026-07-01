@@ -20,7 +20,7 @@ def register_routes(app, deps):
         status: str | None = None,
     ):
         """List executions with pagination."""
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "execution.read")
         if denied:
             return denied
         items = await asyncio.to_thread(
@@ -32,7 +32,7 @@ def register_routes(app, deps):
     @app.get("/api/executions/{execution_id}")
     async def get_execution(execution_id: int, request: Request):
         """Get execution details with all steps."""
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "execution.read")
         if denied:
             return denied
         result = await asyncio.to_thread(execution_repo.get_by_id, execution_id)
@@ -43,7 +43,7 @@ def register_routes(app, deps):
     @app.delete("/api/executions")
     async def cleanup_executions(request: Request, days: int = 30):
         """Delete executions older than N days."""
-        denied = permission_denied(request, "settings.manage")
+        denied = permission_denied(request, "execution.delete")
         if denied:
             return denied
         import time

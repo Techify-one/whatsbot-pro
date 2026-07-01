@@ -100,6 +100,10 @@ mock_gowa_client.delete_message = MagicMock(return_value=None)
 mock_gowa_client.react_to_message = MagicMock(return_value=None)
 mock_gowa_client.reconnect = MagicMock(return_value=None)
 mock_gowa_client.logout = MagicMock(return_value=None)
+# plano 27: connection_state must be stubbed — a bare MagicMock is truthy and
+# would make status()/get_qr_code() read "connected" everywhere.
+mock_gowa_client.connection_state = MagicMock(
+    return_value={"connected": False, "logged_in": False})
 mock_gowa_client.get_own_number = MagicMock(return_value="5511999990001")
 # Lookups parse_gowa_inbound makes via the client (return concrete values, not
 # bare MagicMocks, so contact.save() doesn't try to persist a Mock — plano 13).
@@ -1149,8 +1153,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 18 permissions", _perm_count == 18)
-check("RBAC seed -> role_permissions populated (gestor 15 + atendente 5)", _rp_count == 20)
+check("RBAC seed -> 28 permissions", _perm_count == 28)
+check("RBAC seed -> role_permissions populated (gestor 24 + atendente 5)", _rp_count == 29)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1189,7 +1193,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 18 permissions", len([p for p in _perms if p != "*"]) == 18)
+check("admin me -> all 28 permissions", len([p for p in _perms if p != "*"]) == 28)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -1207,7 +1211,7 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 15 perms, no '*'", "*" not in _gperms and len(_gperms) == 15)
+check("gestor resolver -> 24 perms, no '*'", "*" not in _gperms and len(_gperms) == 24)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1216,8 +1220,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 18 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 18)
+check("GET /api/roles -> 3 roles + 28 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 28)
 
 r = client.get("/api/users")
 check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
@@ -1324,6 +1328,32 @@ check("POST /api/quick-replies (no quickreply.manage) -> 403", r.status_code == 
 r = client.put("/api/contacts/5511999/info", json={"name": "x"}, headers=_chdr)
 check("PUT /api/contacts/{p}/info (no contact.write) -> 403", r.status_code == 403)
 
+# ── Plano 24: new CRUD gates (custom user has neither) ─────────────
+r = client.post("/api/tags", json={"name": "z", "color": "#fff"}, headers=_chdr)
+check("POST /api/tags (no tag.manage) -> 403", r.status_code == 403)
+r = client.delete("/api/tags/qualquer", headers=_chdr)
+check("DELETE /api/tags/{n} (no tag.manage) -> 403", r.status_code == 403)
+r = client.post("/api/conversation-labels", json={"name": "z"}, headers=_chdr)
+check("POST /api/conversation-labels (no conversation_label.manage) -> 403", r.status_code == 403)
+r = client.post("/api/sandbox/send", json={"phone": "5511999", "message": "oi"}, headers=_chdr)
+check("POST /api/sandbox/send (no sandbox.use) -> 403", r.status_code == 403)
+r = client.get("/api/usage/summary", headers=_chdr)
+check("GET /api/usage/summary (no usage.read) -> 403", r.status_code == 403)
+r = client.get("/api/executions", headers=_chdr)
+check("GET /api/executions (no execution.read) -> 403", r.status_code == 403)
+r = client.delete("/api/executions", headers=_chdr)
+check("DELETE /api/executions (no execution.delete) -> 403", r.status_code == 403)
+r = client.delete("/api/contacts/5511999", headers=_chdr)
+check("DELETE /api/contacts/{p} (no contact.delete) -> 403", r.status_code == 403)
+r = client.delete("/api/conversations/999999", headers=_chdr)
+check("DELETE /api/conversations/{id} (no conversation.delete) -> 403", r.status_code == 403)
+r = client.post("/api/custom-attributes", json={"attribute_key": "z", "display_name": "Z"}, headers=_chdr)
+check("POST /api/custom-attributes (no custom_attribute.manage) -> 403", r.status_code == 403)
+r = client.get("/api/admin/database", headers=_chdr)
+check("GET /api/admin/database (no database.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents", headers=_chdr)
+check("GET /api/ai/agents (no agent.manage) -> 403", r.status_code == 403)
+
 # ── Switching modes + last-admin guard ────────────────────────────
 r = client.put(f"/api/users/{_cu_id}", json={
     "custom_permissions": False, "roles": ["atendente"]})
@@ -1346,9 +1376,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 15)
-check("GET /api/roles -> admin shows all 18",
-      len(_by_key["admin"]["permission_keys"]) == 18)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 24)
+check("GET /api/roles -> admin shows all 28",
+      len(_by_key["admin"]["permission_keys"]) == 28)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1402,7 +1432,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 15 perms", len(_rrepo.get_role_permissions("gestor")) == 15)
+check("gestor restored to 24 perms", len(_rrepo.get_role_permissions("gestor")) == 24)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio

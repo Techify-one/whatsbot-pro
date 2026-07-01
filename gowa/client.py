@@ -190,7 +190,14 @@ class GOWAClient:
         return self._request("GET", "/app/status")
 
     def is_connected(self) -> bool:
-        """Check if WhatsApp is connected."""
+        """Check if WhatsApp is connected.
+
+        NOTE (plano 27 / D2): this **conflates** the two GOWA states — it returns
+        ``is_logged_in`` OR ``is_connected`` (the OR is the legacy "any liveness"
+        semantics that hot paths like ``server/background.py`` rely on). For the
+        two states **separated** (socket vs paired session), use
+        :meth:`connection_state`.
+        """
         status = self.get_status()
         if not status:
             return False
@@ -198,6 +205,31 @@ class GOWAClient:
         if isinstance(results, dict):
             return results.get("is_logged_in", results.get("is_connected", False))
         return False
+
+    def connection_state(self) -> dict:
+        """Return the two GOWA connection states **separated** (plano 27).
+
+        - ``connected`` ← ``is_connected`` from ``/app/status`` (the device's
+          websocket is alive).
+        - ``logged_in`` ← ``is_logged_in`` (a WhatsApp session is paired).
+
+        Unlike :meth:`is_connected`, these are never OR-ed. Any failure (no
+        device, GOWA down, malformed payload) yields both ``False`` — callers
+        can treat that as "nothing to report".
+        """
+        try:
+            if not self._device_ready:
+                self.ensure_device()
+            status = self.get_status()
+            results = status.get("results", status.get("data", status)) if status else None
+            if isinstance(results, dict):
+                return {
+                    "connected": bool(results.get("is_connected", False)),
+                    "logged_in": bool(results.get("is_logged_in", False)),
+                }
+        except Exception as e:  # noqa: BLE001
+            logger.debug("connection_state failed: %s", e)
+        return {"connected": False, "logged_in": False}
 
     def get_own_number(self) -> str:
         """Best-effort: the connected account's own phone number (digits only).
@@ -273,8 +305,11 @@ class GOWAClient:
         """
         if not self._device_ready:
             self.ensure_device()
-        # Skip if already connected
-        if self.is_connected():
+        # Skip only when the socket is actually alive (plano 27 D3). A paired
+        # but offline device (logged_in && !connected) must NOT short-circuit the
+        # QR — that was the old ``is_connected()`` conflation swallowing QR for a
+        # device with a stale session.
+        if self.connection_state().get("connected"):
             logger.debug("get_qr_code: already connected, skipping.")
             return None
         result = self._request("GET", "/app/login")

@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactInfo, updateContactTags, createTag, getCustomAttributes } from '../../services/api.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
@@ -18,7 +19,11 @@ const TAG_COLORS = [
 // custom attributes, observations. Conversation status/assignment/labels/
 // attributes live in ConversationInfoPanel.
 
-export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
+export function ContactInfoPanel({ phone, currentUser = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
+  // P48: editing controls are gated by contact.write; the destructive delete by
+  // contact.delete. Permissive with no user identity (open/legacy install).
+  const canWrite = hasPermission(currentUser, 'contact.write');
+  const canDelete = hasPermission(currentUser, 'contact.delete');
   // Only Nome stays a fixed field — Email/Profissão/Empresa/Endereço are now
   // custom attributes (seeded defaults), rendered in the attributes section below.
   const [form, setForm] = useState({ name: '', observations: [] });
@@ -240,7 +245,8 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                     value=${form[f.key]}
                     onInput=${(e) => setField(f.key, e.target.value)}
                     placeholder=${f.placeholder}
-                    class="flex-1 bg-wa-panel text-wa-text text-[15px] rounded-[8px] px-3 py-2 border border-wa-border outline-none placeholder-wa-secondary focus:border-wa-iconActive transition-colors"
+                    readonly=${!canWrite}
+                    class="flex-1 bg-wa-panel text-wa-text text-[15px] rounded-[8px] px-3 py-2 border border-wa-border outline-none placeholder-wa-secondary focus:border-wa-iconActive transition-colors ${!canWrite ? 'opacity-70' : ''}"
                   />
                 </div>
               </div>
@@ -263,12 +269,12 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                         style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
                       >
                         ${tagName}
-                        <button
+                        ${canWrite ? html`<button
                           type="button"
                           onClick=${() => removeTagFromContact(tagName)}
                           class="ml-[1px] hover:opacity-70 leading-none text-[14px]"
                           title="Remover tag"
-                        >\u00d7</button>
+                        >\u00d7</button>` : null}
                       </span>
                     `;
                   })}
@@ -276,6 +282,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
               ` : null}
 
               <!-- Tag search / add dropdown -->
+              ${canWrite ? html`
               <div class="relative" ref=${tagDropdownRef}>
                 <input
                   type="text"
@@ -370,6 +377,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                   </div>
                 ` : null}
               </div>
+              ` : null}
             </div>
 
             <!-- Custom attributes (plano 05) — "Dados do contato" group. -->
@@ -404,17 +412,18 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                 ${form.observations.map((obs, i) => html`
                   <div key=${i} class="flex items-start gap-2 bg-wa-panel rounded-[8px] px-3 py-2 border border-wa-border group">
                     <span class="flex-1 text-wa-text text-[14px] break-words">${obs}</span>
-                    <button
+                    ${canWrite ? html`<button
                       type="button"
                       onClick=${() => removeObservation(i)}
                       class="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity"
                       title="Remover"
                     >
                       <${TrashIcon} />
-                    </button>
+                    </button>` : null}
                   </div>
                 `)}
                 <!-- Add new observation -->
+                ${canWrite ? html`
                 <div class="flex items-center gap-2">
                   <input
                     type="text"
@@ -433,6 +442,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
                     <${PlusIcon} />
                   </button>
                 </div>
+                ` : null}
               </div>
             </div>
           </div>
@@ -445,6 +455,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
               ${error}
             </div>
           ` : null}
+          ${canWrite ? html`
           <button
             onClick=${handleSave}
             disabled=${saving}
@@ -452,7 +463,8 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
           >
             ${saving ? 'Salvando...' : 'Salvar'}
           </button>
-          ${onDeleteContact ? html`
+          ` : null}
+          ${onDeleteContact && canDelete ? html`
             <button
               type="button"
               onClick=${() => {

@@ -378,3 +378,30 @@ def register_routes(app, deps):
             return Response(status_code=204)
         return Response(content=result, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+    async def _channel_session(channel_id: str, request: Request, action: str):
+        """Shared handler for reconnect/logout (plano 27 F3.2)."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        fn = svc.reconnect if action == "reconnect" else svc.logout
+        result = await fn(deps, row)
+        if result == "not_gowa":
+            return _err("Ação disponível apenas para canais GOWA.", 400)
+        if result == "unavailable":
+            return _err("Canal GOWA indisponível.", 503)
+        result = result or {}
+        if not result.get("ok"):
+            return _err(result.get("error") or "Falha na ação.", 502)
+        return _ok({"message": "ok"})
+
+    @app.post("/api/channels/{channel_id}/reconnect")
+    async def channel_reconnect(channel_id: str, request: Request):
+        return await _channel_session(channel_id, request, "reconnect")
+
+    @app.post("/api/channels/{channel_id}/logout")
+    async def channel_logout(channel_id: str, request: Request):
+        return await _channel_session(channel_id, request, "logout")

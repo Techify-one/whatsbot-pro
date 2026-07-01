@@ -104,9 +104,9 @@ _CASES = [
     ("ai_engine", "agent.manage", "put",  "/api/ai/agents/some_agent",
      {"display_name": "x", "prompt_key": "p"}),
     ("ai_engine", "agent.manage", "post", "/api/ai/restart", {}),
-    # admin.py — key "settings.manage"
-    ("admin", "settings.manage", "get",  "/api/admin/database", None),
-    ("admin", "settings.manage", "get",  "/api/admin/migrate-to-postgres/status", None),
+    # admin.py — key "database.manage" (moved from settings.manage in plano 24)
+    ("admin", "database.manage", "get",  "/api/admin/database", None),
+    ("admin", "database.manage", "get",  "/api/admin/migrate-to-postgres/status", None),
     # plugins.py — key "plugins.manage"
     ("plugins", "plugins.manage", "post", "/api/plugins/restart", {}),
     ("plugins", "plugins.manage", "post", "/api/plugins/some_plugin/enable", {}),

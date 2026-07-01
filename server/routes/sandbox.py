@@ -11,9 +11,10 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import File, Form, UploadFile
+from fastapi import Depends, File, Form, UploadFile
 
 from db.repositories import config_repo
+from server.deps import require_permission, install_exception_handlers
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
 from server.helpers import _ok, _err, parse_split_reply
 
@@ -30,6 +31,8 @@ def register_routes(app, deps):
     state = deps.state
     settings = deps.settings
     statics_outbox_dir = deps.statics_outbox_dir
+
+    install_exception_handlers(app)
 
     async def _broadcast_user_message(phone: str, content: str, *,
                                       media_type: str | None = None,
@@ -123,7 +126,8 @@ def register_routes(app, deps):
         dest.write_bytes(content)
         return f"statics/outbox/{dest.name}"
 
-    @app.post("/api/sandbox/send")
+    @app.post("/api/sandbox/send",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send(body: dict):
         """Process a text message through the agent pipeline (local, no GOWA)."""
         phone = (body.get("phone") or "").strip()
@@ -156,7 +160,8 @@ def register_routes(app, deps):
         logger.info("[Sandbox] Reply to %s: %s", phone, (replies[0] if replies else "")[:80])
         return _ok({"reply": "\n".join(replies), "replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-image")
+    @app.post("/api/sandbox/send-image",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_image(
         phone: str = Form(...),
         caption: str = Form(""),
@@ -219,7 +224,8 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-audio")
+    @app.post("/api/sandbox/send-audio",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_audio(
         phone: str = Form(...),
         audio: UploadFile = File(...),
@@ -277,7 +283,8 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-document")
+    @app.post("/api/sandbox/send-document",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_document(
         phone: str = Form(...),
         caption: str = Form(""),
@@ -340,7 +347,8 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/clear")
+    @app.post("/api/sandbox/clear",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_clear(body: dict):
         """Clear conversation history for a sandbox phone number."""
         phone = (body.get("phone") or "").strip()

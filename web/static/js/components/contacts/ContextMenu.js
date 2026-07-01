@@ -2,13 +2,18 @@ import { h } from 'preact';
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactTags } from '../../services/api.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { TagPicker } from './TagPicker.js';
 
 const html = htm.bind(h);
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, currentUser = null, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
+  // P48 (hide, don't disable): each affordance is gated by the permission that
+  // its backend call actually enforces. `can` is permissive with no user
+  // identity (open/legacy install) — see hasPermission.
+  const can = (p) => hasPermission(currentUser, p);
   const ref = useRef(null);
   const [showTags, setShowTags] = useState(false);
   const [showAssign, setShowAssign] = useState(false);
@@ -26,7 +31,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
   const canAct = !!(conv && conv.id != null) && !convLoading;
   // Hide the whole assign section in legacy single-password mode (no identity and
   // no listable users) — assignment is meaningless there.
-  const showAssignSection = currentUserId != null || userList.length > 0;
+  const showAssignSection = (currentUserId != null || userList.length > 0) && can('conversation.assign');
   const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
   const assignee = assigneeId != null ? userList.find(u => u.id === assigneeId) : null;
   const assigneeLabel = assigneeId != null ? (assignee ? userName(assignee) : `#${assigneeId}`) : null;
@@ -81,7 +86,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[200px] max-h-[85vh] overflow-y-auto wa-scrollbar"
       style="left:${left}px;top:${top}px"
     >
-      ${canAct ? html`
+      ${canAct && can('conversation.reply') ? html`
       <button
         onClick=${() => { onToggleAI(conv.id, !conv.ai_active); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -95,6 +100,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         ${conv.ai_active ? 'Desativar IA' : 'Ativar IA'}
       </button>
       ` : null}
+      ${can('contact.write') ? html`
       <button
         onClick=${() => { onEditContact(phone); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -104,7 +110,8 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         </svg>
         Editar Contato
       </button>
-      ${isUnread ? html`
+      ` : null}
+      ${can('conversation.reply') ? (isUnread ? html`
         <button
           onClick=${() => { onMarkRead(phone); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -124,9 +131,10 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           </svg>
           Marcar como não lida
         </button>
-      `}
+      `) : null}
 
       <!-- Pin / Unpin -->
+      ${can('contact.write') ? html`
       <button
         onClick=${() => { onPin && onPin(phone, !isPinned); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -136,8 +144,10 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         </svg>
         ${isPinned ? 'Desafixar conversa' : 'Fixar conversa'}
       </button>
+      ` : null}
 
       <!-- Tags toggle -->
+      ${can('contact.write') ? html`
       <button
         onClick=${() => setShowTags(prev => !prev)}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -158,6 +168,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           onToggle=${toggleTag}
           onCreateTag=${onCreateTag}
         />
+      ` : null}
       ` : null}
 
       <!-- Conversation: assign attendant (submenu) -->
@@ -228,6 +239,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       ` : null}
 
       <!-- Conversation: resolve / reopen -->
+      ${can('conversation.resolve') ? html`
       <button
         disabled=${!canAct}
         onClick=${() => { if (canAct && onResolveConversation) onResolveConversation(conv.id, isOpen ? 'closed' : 'open'); }}
@@ -241,6 +253,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           ${convLoading ? 'Carregando...' : 'Marcar como resolvida'}
         `}
       </button>
+      ` : null}
 
       ${convError ? html`
         <div class="px-4 py-[6px] text-[12px] text-red-400">${convError}</div>
@@ -248,6 +261,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
 
       <!-- Archive / Delete separator -->
       <div class="border-t border-wa-border">
+        ${can('contact.write') ? html`
         <button
           onClick=${() => { onArchive(phone, !isArchived); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -257,7 +271,8 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           </svg>
           ${isArchived ? 'Desarquivar' : 'Arquivar'}
         </button>
-        ${canAct ? html`
+        ` : null}
+        ${canAct && can('conversation.delete') ? html`
         <button
           onClick=${() => {
             if (!confirmDeleteConv) {

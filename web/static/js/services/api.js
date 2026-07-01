@@ -605,6 +605,24 @@ export async function telegramChannelStatus(channelId) {
   return request('GET', `/api/plugins/telegram/status?channel_id=${encodeURIComponent(channelId)}`);
 }
 
+// WhatsApp Cloud plugin (plano 26): saúde do webhook. Lê o que a Meta tem
+// configurado e compara com a URL que ESTA instância espera (origin + path com
+// o channel_id). Retorna {configured_url, expected_url, match, can_set, reason}.
+export async function cloudWebhookStatus(channelId, expectedUrl) {
+  return request('GET', '/api/plugins/whatsapp_cloud/webhook-status'
+    + `?channel_id=${encodeURIComponent(channelId)}`
+    + `&expected_url=${encodeURIComponent(expectedUrl)}`);
+}
+// Aponta o webhook (override no nível da WABA) de volta pra ESTA instância.
+// Re-lê após o set e devolve {match, configured_url}.
+export async function cloudSetWebhook(channelId, url) {
+  return request('POST', '/api/plugins/whatsapp_cloud/set-webhook', { channel_id: channelId, url });
+}
+// Remove o override de webhook da WABA (volta pro webhook do App).
+export async function cloudDeleteWebhook(channelId) {
+  return request('POST', '/api/plugins/whatsapp_cloud/delete-webhook', { channel_id: channelId });
+}
+
 // body: {display_name?, enabled?, config?, credentials?:{key:value}}
 export async function updateChannel(id, payload) {
   return request('PUT', `/api/channels/${encodeURIComponent(id)}`, payload);
@@ -643,6 +661,18 @@ export async function setChannelMembers(id, userIds) {
 // {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
+// Reconnect a GOWA channel's device socket (plano 27) — acts on the right
+// device. Distinct from the legacy singleton reconnect()/logout() above.
+export async function channelReconnect(id) {
+  return request('POST', `/api/channels/${encodeURIComponent(id)}/reconnect`);
+}
+
+// Log a GOWA channel's device out of WhatsApp (plano 27) — clears the session
+// so the next connect asks for a fresh QR.
+export async function channelLogout(id) {
+  return request('POST', `/api/channels/${encodeURIComponent(id)}/logout`);
 }
 
 // GOWA login QR for a channel's device. Returns an object-URL string for the

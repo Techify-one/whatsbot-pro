@@ -16,6 +16,7 @@ import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
 import { useChannelPicker } from './hooks/useChannelPicker.js';
 import { useConversationWsEvents } from './hooks/useConversationWsEvents.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -86,7 +87,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   });
   const {
     globalTags, setGlobalTags,
-    currentUserId, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi,
     ctxMenu, setCtxMenu, ctxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
@@ -225,6 +226,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           wsConnected=${wsConnected}
           autoReply=${autoReply}
           onToggleAutoReply=${handleToggleAutoReply}
+          canToggleAutoReply=${hasPermission(currentUser, 'settings.manage')}
           selectionMode=${selectionMode}
           selectedKeys=${selectedKeys}
           onEnterSelection=${enterSelection}
@@ -268,6 +270,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 contact=${contactData}
                 onAvatarClick=${() => selected && setOpenPanel('contact')}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
+                currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
                 aiResponding=${selected && !!aiRespondingState[selected]}
                 globalTags=${globalTags}
@@ -279,6 +282,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           ${openPanel === 'contact' && selected ? html`
             <${ContactInfoPanel}
               phone=${selected}
+              currentUser=${currentUser}
               info=${info}
               contactTags=${contactData && contactData.tags || []}
               globalTags=${globalTags}
@@ -340,6 +344,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           convError=${ctxConv.error}
           users=${users}
           currentUserId=${currentUserId}
+          currentUser=${currentUser}
           onAssignConversation=${handleAssignConversation}
           onResolveConversation=${handleResolveConversation}
           onToggleAI=${handleToggleAI}
