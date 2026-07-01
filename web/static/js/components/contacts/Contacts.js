@@ -40,9 +40,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
-  // Canal escolhido no picker para uma conversa NOVA ainda sem conversa naquele
+  // Canal escolhido no picker para um atendimento Novo ainda sem atendimento naquele
   // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
-  // ao canal certo (multicanal), em vez de fundir/abrir a conversa de outro canal.
+  // ao canal certo (multicanal), em vez de fundir/abrir o atendimento de outro canal.
   const newConvChannelRef = useRef(null);
 
   // ── Sidebar geometry (self-contained) ──────────────────────────────

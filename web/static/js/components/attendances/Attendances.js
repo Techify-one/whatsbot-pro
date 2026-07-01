@@ -1,6 +1,6 @@
 // Tela "Atendimentos" (container). Toggle Lista|Kanban; o kanban agrupa de forma
 // configurável (atendente / etapa / etiqueta / status). Reaproveita as funções de
-// conversa do api.js e os eventos WS já existentes; o drag-and-drop é otimista
+// atendimento do api.js e os eventos WS já existentes; o drag-and-drop é otimista
 // com rollback. Abrir um card navega para o chat (/conversations/<id>).
 import { h } from 'preact';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
@@ -41,10 +41,10 @@ export function Attendances() {
   const [currentUser, setCurrentUser] = useState(null);
   const [agents, setAgents] = useState({ users: [], ai_agents: [] });
   const [labels, setLabels] = useState([]);          // [{id,name,color}]
-  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de conversa type=list
+  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de atendimento type=list
   const [stageAttrKey, setStageAttrKey] = useState(() => lsGet(STAGE_KEY, ''));
 
-  // label_names por conversa (hidratado sob demanda no modo etiqueta).
+  // label_names por atendimento (hidratado sob demanda no modo etiqueta).
   const [labelsByConv, setLabelsByConv] = useState({});
 
   // ── Lookups derivados ────────────────────────────────────────────
@@ -100,7 +100,7 @@ export function Attendances() {
     }).catch(() => {});
   }, []);
 
-  // ── Fetch das conversas ──────────────────────────────────────────
+  // ── Fetch dos atendimentos ──────────────────────────────────────────
   const fetchConversations = useCallback(async () => {
     setLoading(true); setError('');
     try {
@@ -127,7 +127,7 @@ export function Attendances() {
     return () => { alive = false; };
   }, [mode, conversations, labelsByConv]);
 
-  // Mescla label_names hidratados nas conversas (para grouping.columnIdOf e chips).
+  // Mescla label_names hidratados nos atendimentos (para grouping.columnIdOf e chips).
   const conversationsForBoard = useMemo(() => {
     if (mode !== 'label') return conversations;
     return conversations.map(c => c.label_names != null ? c : { ...c, label_names: labelsByConv[c.id] || [] });
@@ -211,7 +211,7 @@ export function Attendances() {
 
   // ── Navegação: abrir o chat ──────────────────────────────────────
   const openChat = useCallback((convo) => {
-    // /contacts/{id} agora é o detalhe do contato; o hub abre só por conversa.
+    // /contacts/{id} agora é o detalhe do contato; o hub abre só por atendimento.
     if (convo.id == null) return;
     history.pushState(null, '', `/conversations/${convo.id}`);
     window.dispatchEvent(new PopStateEvent('popstate'));

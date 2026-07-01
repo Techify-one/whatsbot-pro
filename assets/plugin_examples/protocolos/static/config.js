@@ -1,6 +1,6 @@
-// Tela de configuração (screen config:true) do plugin Atendimentos. Três abas:
-//  - "Atendimento" e "Resolver conversa": field-builder dos rótulos (fixos + extras).
-//  - "Avaliação": os 2 links (título+link) enviados ao FINALIZAR o atendimento
+// Tela de configuração (screen config:true) do plugin Protocolos. Três abas:
+//  - "Protocolo" e "Resolver atendimento": field-builder dos rótulos (fixos + extras).
+//  - "Avaliação": os 2 links (título+link) enviados ao FINALIZAR o protocolo
 //    (1 normal → WhatsApp, 1 privado → painel), com assignee_id + id_protocol na URL.
 // Field-builder salva via PUT /field-defs; a aba Avaliação via PUT /protocol-config.
 // Remover e Salvar pedem confirmação. Renderizada dentro do modal "Configurar".
@@ -17,17 +17,17 @@ const TYPES = [
   ['radio', 'Opções (rádio)'], ['checkbox', 'Caixa (sim/não)'],
 ];
 // Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
-const TABS = [['atendimento', 'Atendimento'], ['conversa', 'Resolver conversa'], ['avaliacao', 'Avaliação']];
-const FIELD_TABS = ['atendimento', 'conversa'];
+const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação']];
+const FIELD_TABS = ['protocolo', 'atendimento'];
 
 function slug(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'campo';
 }
 
-export default function AtendimentosConfig({ apiBase = '/api/plugins/atendimentos', can }) {
+export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', can }) {
   const canEdit = !can || can('edit');
-  const [tab, setTab] = useState('atendimento'); // 'atendimento' | 'conversa' | 'avaliacao'
+  const [tab, setTab] = useState('protocolo'); // 'protocolo' | 'atendimento' | 'avaliacao'
   const [defs, setDefs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState('');
@@ -127,7 +127,7 @@ export default function AtendimentosConfig({ apiBase = '/api/plugins/atendimento
       <p class="text-[13px] text-wa-secondary">
         O rótulo <b>fixo</b> Observações não pode ser removido (ID, Atendente, Início e Fim
         são preenchidos automaticamente, não são rótulos). Crie rótulos <b>extras</b> (texto,
-        seleção, etc.); os do <b>Atendimento</b> e os de <b>Resolver conversa</b> são
+        seleção, etc.); os do <b>Protocolo</b> e os de <b>Resolver atendimento</b> são
         armazenados separadamente. Um campo <b>Obrigatório</b> deve estar sempre preenchido
         para fechar/resolver (caixas de seleção são exceção). Apagar um rótulo extra o some do
         menu e do histórico — o dado fica recuperável apenas pelo banco.
@@ -195,7 +195,7 @@ export default function AtendimentosConfig({ apiBase = '/api/plugins/atendimento
   const avaliacao = html`
     <div class="space-y-3">
       <p class="text-[12px] text-wa-secondary">
-        Ao <b>finalizar</b> um atendimento, envia 2 mensagens ao contato: a <b>normal</b> vai ao
+        Ao <b>finalizar</b> um protocolo, envia 2 mensagens ao contato: a <b>normal</b> vai ao
         WhatsApp e a <b>privada</b> fica só no painel. Em ambos os links são adicionados, como
         parâmetros de URL, o id do atendente (<b>assignee_id</b>) e um id de protocolo único
         gerado no envio (<b>id_protocol</b>).
@@ -212,7 +212,7 @@ export default function AtendimentosConfig({ apiBase = '/api/plugins/atendimento
             <div>
               <label class="block text-[12px] text-wa-secondary mb-1">Título</label>
               <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" type="text"
-                placeholder=${k === 'normal' ? 'AVALIE NOSSO ATENDIMENTO' : 'AVALIAÇÃO INTERNA DE CLIENTE'}
+                placeholder=${k === 'normal' ? 'AVALIE NOSSO PROTOCOLO' : 'AVALIAÇÃO INTERNA DE CLIENTE'}
                 value=${proto[k].title} disabled=${!canEdit}
                 onInput=${(e) => setProto((p) => ({ ...p, [k]: { ...p[k], title: e.target.value } }))} />
             </div>

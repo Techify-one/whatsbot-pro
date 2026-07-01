@@ -68,9 +68,9 @@ function statusBadge(status) {
   return { label: s, cls: 'bg-wa-hover text-wa-secondary' };
 }
 
-// `conversationId` → conversa existente (modo padrão). Quando ausente e `channelId`
-// + `phone` são passados, opera em modo CHANNEL (plano 21): iniciar conversa nova
-// pela "Nova conversa" usa as rotas channel-scoped (ainda não há conversa).
+// `conversationId` → atendimento existente (modo padrão). Quando ausente e `channelId`
+// + `phone` são passados, opera em modo CHANNEL (plano 21): iniciar atendimento novo
+// pela "Novo atendimento" usa as rotas channel-scoped (ainda não há atendimento).
 export function TemplatePicker({ conversationId, channelId, phone, onClose, onSent }) {
   const channelMode = conversationId == null && !!channelId;
   const [loading, setLoading] = useState(true);

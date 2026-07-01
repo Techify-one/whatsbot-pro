@@ -165,7 +165,7 @@ function UserForm({ editing, roleDefs, permCatalog, inboxes = [], onSubmit, onCa
             <label class="block text-[12px] text-wa-secondary mb-1">Caixas de entrada</label>
             <p class="text-[12px] text-wa-secondary mb-1.5">
               As caixas que este usuário vê e atende — restringe leitura e envio às caixas marcadas.
-              Qualquer papel com a permissão "Ler conversas de qualquer inbox" (ex.: Administrador)
+              Qualquer papel com a permissão "Ler atendimentos de qualquer inbox" (ex.: Administrador)
               ignora esta seleção e acessa todas.
             </p>
             <div class="flex flex-col gap-1.5">

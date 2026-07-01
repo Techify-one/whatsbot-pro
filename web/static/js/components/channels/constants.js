@@ -43,12 +43,12 @@ export const credLabel = (k) => CRED_LABELS[k] || k;
 // config (config.allowed_jid_types) and mirror channels/jid.py on the backend.
 // The user never sees the JID — only the friendly label.
 export const JID_TYPES = [
-  { key: 'person', label: 'Pessoa (contato)', hint: 'Conversas individuais com contatos.' },
+  { key: 'person', label: 'Pessoa (contato)', hint: 'Atendimentos individuais com contatos.' },
   { key: 'person_lid', label: 'Pessoa (modo privacidade)', hint: 'Contatos que ocultam o número (modo privacidade).' },
   { key: 'group', label: 'Grupo / Comunidade', hint: 'Mensagens de grupos e comunidades.' },
   { key: 'newsletter', label: 'Canal', hint: 'Publicações de Canais do WhatsApp.' },
   { key: 'broadcast', label: 'Status / Transmissão', hint: 'Status e listas de transmissão.' },
-  { key: 'bot', label: 'Bot (Meta AI etc.)', hint: 'Conversas com bots como o Meta AI.' },
+  { key: 'bot', label: 'Bot (Meta AI etc.)', hint: 'Atendimentos com bots como o Meta AI.' },
 ];
 export const DEFAULT_JID_TYPES = ['person', 'person_lid', 'group'];
 

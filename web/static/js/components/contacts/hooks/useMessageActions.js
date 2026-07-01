@@ -71,9 +71,9 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     copyToClipboard(text);
   }
 
-  // Permalink estilo Chatwoot: âncora na conversa + id interno da mensagem (a mesma
-  // chave que o scroll-to-message usa via data-mid). Prefere a conversa da própria
-  // mensagem; cai no prop da conversa aberta. null quando não há como ancorar (msg
+  // Permalink estilo Chatwoot: âncora no atendimento + id interno da mensagem (a mesma
+  // chave que o scroll-to-message usa via data-mid). Prefere o atendimento da própria
+  // mensagem; cai no prop do atendimento aberto. null quando não há como ancorar (msg
   // sem _id ou pré-plano-11 sem conversation_id na visão mesclada) → item desabilitado.
   function messagePermalink(message) {
     if (!message || message._id == null) return null;

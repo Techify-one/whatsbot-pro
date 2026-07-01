@@ -64,7 +64,7 @@ export function AssigneePicker({ conv, onChange }) {
 
   if (!conv) {
     return html`
-      <div class="text-[13px] text-wa-secondary">Sem conversa ativa para atribuir.</div>
+      <div class="text-[13px] text-wa-secondary">Sem atendimento ativo para atribuir.</div>
     `;
   }
 

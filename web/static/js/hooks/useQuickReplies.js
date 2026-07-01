@@ -4,7 +4,7 @@ import { getQuickReplies } from '../services/api.js';
 // Hook das respostas rápidas (plano 04): carrega a lista global e recarrega quando
 // a tela de gerenciamento emite `whatsbot:quick-replies-changed`. Expõe
 // `getCandidates(query)` para o autocomplete do "/" no compositor (espelha a lógica
-// inline do ContactDetail, agora reutilizável — usado também na Nova conversa).
+// inline do ContactDetail, agora reutilizável — usado também na Novo atendimento).
 export function useQuickReplies() {
   const [quickReplies, setQuickReplies] = useState([]);
 

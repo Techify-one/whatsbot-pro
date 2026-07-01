@@ -112,7 +112,7 @@ export function ConversationLabelEditor({ conversationId }) {
 
   return html`
     <div>
-      <label class="text-wa-iconActive text-[13px] font-semibold block mb-1.5">Etiquetas da conversa</label>
+      <label class="text-wa-iconActive text-[13px] font-semibold block mb-1.5">Etiquetas do atendimento</label>
 
       ${selected.length > 0 ? html`
         <div class="flex flex-wrap gap-[5px] mb-2">
