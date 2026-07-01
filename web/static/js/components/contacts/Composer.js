@@ -90,6 +90,24 @@ export function Composer({
             onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmPendingMedia(); } }}
           />
         ` : ''}
+        ${(pendingMedia.type === 'audio' && mode === 'private') ? html`
+          <div class="flex items-center gap-[16px] flex-wrap justify-center">
+            <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA processa o áudio como instrução.">
+              <input type="checkbox" class="sr-only peer" checked=${aiReadPrivate}
+                onChange=${e => setAiReadPrivate(e.target.checked)} />
+              <div class="relative w-[28px] h-[16px] bg-gray-500 rounded-full peer-checked:bg-violet-500 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-[12px] after:w-[12px] after:transition-transform peer-checked:after:translate-x-[12px]"></div>
+              <span class="text-[13px] text-wa-secondary">IA lê</span>
+            </label>
+            ${aiReadPrivate ? html`
+              <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA responde no chat do contato. Quando desligado, a resposta fica apenas como nota privada.">
+                <input type="checkbox" class="sr-only peer" checked=${aiReplyInChat}
+                  onChange=${e => setAiReplyInChat(e.target.checked)} />
+                <div class="relative w-[28px] h-[16px] bg-gray-500 rounded-full peer-checked:bg-violet-500 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-[12px] after:w-[12px] after:transition-transform peer-checked:after:translate-x-[12px]"></div>
+                <span class="text-[13px] text-wa-secondary">IA responde no chat</span>
+              </label>
+            ` : ''}
+          </div>
+        ` : ''}
         <div class="flex gap-[12px]">
           <button
             type="button"
@@ -319,9 +337,11 @@ export function Composer({
           >
             <${SendIcon} />
           </button>
-        ` : mode === 'private' ? '' : html`
-          <button type="button" class="p-[8px] shrink-0 text-wa-icon ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
-            disabled=${sessionClosed} onClick=${handleMicClick}>
+        ` : html`
+          <button type="button"
+            title=${mode === 'private' ? 'Gravar áudio privado (só no painel)' : 'Gravar áudio'}
+            class="p-[8px] shrink-0 ${mode === 'private' ? 'text-violet-400' : 'text-wa-icon'} ${(sessionClosed && mode !== 'private') ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+            disabled=${sessionClosed && mode !== 'private'} onClick=${handleMicClick}>
             <${MicIcon} />
           </button>
         `}

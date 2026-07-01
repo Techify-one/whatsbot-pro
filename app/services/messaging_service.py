@@ -620,12 +620,13 @@ class MessagingService:
         path: str,
         *,
         phone: str,
-        source: str,                # "batch" | "echo" | "group_no_mention"
+        source: str,                # "batch" | "echo" | "operator" | "private" | "group_no_mention"
         is_group: bool = False,
         group_jid: str | None = None,
         file_name: str = "",        # document only — original filename
         mimetype: str = "",         # document only — best-effort mime hint
         channel_id: str = "default",
+        force: bool = False,        # bypass the config gate (still honors plugin should_run)
     ) -> str:
         """Inbound-path wrapper around the shared transcription helper.
 
@@ -640,7 +641,7 @@ class MessagingService:
             settings=ai_settings.view(channel_id, self.settings),
             agent_handler=self.agent_handler,
             phone=phone, source=source, is_group=is_group, group_jid=group_jid,
-            file_name=file_name, mimetype=mimetype,
+            file_name=file_name, mimetype=mimetype, force=force,
         )
 
     # ── Typing-Aware Orchestrator ─────────────────────────────────────────────

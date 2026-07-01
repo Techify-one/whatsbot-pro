@@ -26,6 +26,40 @@ _MEDIA_PREFIX = {
 }
 
 
+# Audio transcription "mode" is a multi-select set drawn from these tokens: which
+# message directions get transcribed. Inbound → "received"; outbound (echo from the
+# phone / operator send) → "sent"; operator-recorded private note → "private".
+_AUDIO_MODE_TOKENS = ("received", "sent", "private")
+
+
+def parse_audio_modes(raw) -> set[str]:
+    """Parse ``audio_transcription_mode`` into a set of {received, sent, private}.
+
+    Backward-compatible with the legacy single-value strings so old channel
+    overrides and the global config keep working unchanged:
+
+    - ``None`` (key unset) → ``{"received"}`` (legacy default);
+    - ``""``/``"off"``/``"none"`` → ``set()`` (transcription off);
+    - ``"received"`` / ``"sent"`` → that single token;
+    - ``"both"`` → ``{"received", "sent"}``;
+    - a comma-joined list (``"received,sent,private"``) → the parsed set.
+
+    A list/tuple/set is accepted too. Unknown tokens are dropped.
+    """
+    if raw is None:
+        return {"received"}
+    if isinstance(raw, (list, tuple, set)):
+        tokens = [str(t).strip().lower() for t in raw]
+    else:
+        s = str(raw).strip().lower()
+        if s == "both":
+            return {"received", "sent"}
+        if s in ("", "off", "none"):
+            return set()
+        tokens = [t.strip() for t in s.split(",")]
+    return {t for t in tokens if t in _AUDIO_MODE_TOKENS}
+
+
 def format_media_content(media_kind: str, transcription: str, text: str = "") -> str:
     """Combine an existing text body with a media transcription/description.
 
@@ -54,11 +88,12 @@ async def maybe_transcribe(
     settings,
     agent_handler,
     phone: str,
-    source: str,                # "batch" | "echo" | "operator" | "group_no_mention"
+    source: str,                # "batch" | "echo" | "operator" | "private" | "group_no_mention"
     is_group: bool = False,
     group_jid: str | None = None,
     file_name: str = "",        # document only — original filename
     mimetype: str = "",         # document only — best-effort mime hint
+    force: bool = False,        # bypass the config gate (still honors plugin should_run)
 ) -> str:
     """Run audio transcription / image description / document reading.
 
@@ -66,16 +101,24 @@ async def maybe_transcribe(
     (config gate or plugin brake), failed, or yielded nothing. Plugins can only
     *narrow* the policy, never widen it.
 
-    Audio is gated by ``audio_transcription_mode`` (received|sent|both): inbound
-    sources count as "received"; outbound sources (``echo`` = sent from the phone,
-    ``operator`` = sent from the panel) count as "sent".
+    Audio is gated by ``audio_transcription_mode``, a multi-select set of
+    {received, sent, private}: inbound sources count as "received"; outbound
+    sources (``echo`` = sent from the phone, ``operator`` = sent from the panel)
+    count as "sent"; ``private`` = an operator-recorded private audio note.
+    ``force=True`` bypasses this gate (e.g. the AI must read a private audio
+    regardless of the channel's transcription setting) but still lets a plugin
+    ``filter.transcription.should_run`` veto.
     """
-    if media_kind == "audio":
-        audio_mode = settings.get("audio_transcription_mode", "received")
-        is_outbound = source in ("echo", "operator")
-        allow = (is_outbound and audio_mode in ("sent", "both")) or (
-            (not is_outbound) and audio_mode in ("received", "both")
-        )
+    if force:
+        allow = True
+    elif media_kind == "audio":
+        modes = parse_audio_modes(settings.get("audio_transcription_mode", "received"))
+        if source in ("echo", "operator"):
+            allow = "sent" in modes
+        elif source == "private":
+            allow = "private" in modes
+        else:
+            allow = "received" in modes
     elif media_kind == "document":
         allow = bool(settings.get("document_transcription_enabled", True))
     else:  # image

@@ -9,6 +9,7 @@
 // Behavior-preserving: same optimistic-message shapes (sandbox vs operator),
 // same blob/object-URL handling, same `session_window_closed` steering.
 import { useState, useRef, useEffect } from 'preact/hooks';
+import { sendPrivateAudio } from '../../../services/api.js';
 
 /**
  * @param {Object} opts
@@ -18,12 +19,16 @@ import { useState, useRef, useEffect } from 'preact/hooks';
  * @param {any} opts.channelId
  * @param {boolean} opts.sandbox
  * @param {boolean} opts.sessionClosed - 24h window closed (WhatsApp Cloud).
+ * @param {string} opts.mode - composer mode ('reply' | 'private'); drives private-audio.
+ * @param {boolean} opts.aiReadPrivate - "IA lê" toggle (private mode only).
+ * @param {boolean} opts.aiReplyInChat - "IA responde no chat" toggle (private mode only).
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useMediaUpload({
   api, phone, conversationId, channelId, sandbox, sessionClosed,
+  mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
   setContactData, updateMsgByLocalId, openTemplatePicker,
 }) {
   const [sending, setSending] = useState(false);
@@ -113,8 +118,11 @@ export function useMediaUpload({
 
   async function confirmPendingMedia() {
     if (!pendingMedia || sending) return;
+    // Private audio note stays in the panel — never sent to the contact — so it
+    // bypasses the 24h-window gate entirely.
+    const isPrivateAudio = pendingMedia.type === 'audio' && mode === 'private';
     // 24h window closed (WhatsApp Cloud): media also requires a template.
-    if (sessionClosed) {
+    if (sessionClosed && !isPrivateAudio) {
       cancelPendingMedia();
       openTemplatePicker();
       return;
@@ -147,6 +155,14 @@ export function useMediaUpload({
       optimistic = { ...base, content: docContent,
                      media_type: 'document', media_path: localUrl };
       sendPromise = api.sendDocument(phone, media.file, caption, conversationId, channelId);
+    } else if (isPrivateAudio) {
+      // Panel-only audio note (role private_note). "IA lê" / "IA responde no chat"
+      // toggles ride along so the backend can transcribe + optionally run the AI.
+      optimistic = { role: 'private_note', content: '[Áudio]',
+                     media_type: 'audio', media_path: localUrl, status: null };
+      sendPromise = sendPrivateAudio(phone, media.blob, media.filename, {
+        aiRead: aiReadPrivate, aiReply: aiReplyInChat, conversationId, channelId,
+      });
     } else {
       optimistic = { ...base, content: '[Áudio]', media_type: 'audio', media_path: localUrl };
       sendPromise = api.sendAudio(phone, media.blob, media.filename, conversationId, channelId);
@@ -160,12 +176,19 @@ export function useMediaUpload({
     } : prev);
     try {
       const res = await sendPromise;
-      updateMsgByLocalId(localId, () => sandbox
-        ? { _status: res.ok ? null : 'failed' }
-        : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
-      if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
-          && conversationId != null) {
-        openTemplatePicker();
+      if (isPrivateAudio) {
+        updateMsgByLocalId(localId, () => ({
+          _status: res.ok ? null : 'failed',
+          ...(res.ok && res.data && res.data._id ? { _id: res.data._id } : {}),
+        }));
+      } else {
+        updateMsgByLocalId(localId, () => sandbox
+          ? { _status: res.ok ? null : 'failed' }
+          : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+        if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
+            && conversationId != null) {
+          openTemplatePicker();
+        }
       }
     } catch (err) {
       console.error('Send media error:', err);
