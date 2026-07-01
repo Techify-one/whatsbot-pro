@@ -45,10 +45,10 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
 
-  // Só entram na sidebar conversas com mensagem real trocada (last_message_ts > 0,
+  // Só entram na sidebar atendimentos com mensagem real trocada (last_message_ts > 0,
   // que já exclui eventos painel-only). Um contato recém-criado sem mensagem — ex:
   // recriado pela importação de chats do GOWA, ou aberto pelo modal sem enviar nada
-  // — não deve poluir a lista. A conversa atualmente ABERTA fica visível mesmo sem
+  // — não deve poluir a lista. O atendimento atualmente ABERTA fica visível mesmo sem
   // mensagem, pra não sumir enquanto o operador digita a 1ª mensagem.
   const activeContacts = useMemo(() => {
     const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);

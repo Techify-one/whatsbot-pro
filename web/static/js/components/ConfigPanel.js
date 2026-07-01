@@ -56,12 +56,12 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     try {
       const res = await markAllUnread();
       if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como não lida(s).`);
+        onNotify(`${res.data?.count ?? 0} atendimento(s) marcado(s) como não lido(s).`);
       } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
+        onNotify(res.error || 'Erro ao marcar atendimentos.');
       }
     } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
+      onNotify('Erro de conexão ao marcar atendimentos.');
     } finally {
       setMarkingAllUnread(false);
       setConfirmUnreadAll(false);
@@ -73,12 +73,12 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     try {
       const res = await markAllRead();
       if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como lida(s).`);
+        onNotify(`${res.data?.count ?? 0} atendimento(s) marcado(s) como lido(s).`);
       } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
+        onNotify(res.error || 'Erro ao marcar atendimentos.');
       }
     } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
+      onNotify('Erro de conexão ao marcar atendimentos.');
     } finally {
       setMarkingAllRead(false);
       setConfirmReadAll(false);
@@ -123,14 +123,14 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   return html`
     <div class="flex flex-col gap-4 flex-1">
 
-      <!-- Section: Marcar conversas -->
-      <${Section} title="Marcar conversas">
+      <!-- Section: Marcar atendimentos -->
+      <${Section} title="Marcar atendimentos">
         <!-- Mark all read / unread -->
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para uma conversa específica, use o botão direito sobre o contato na lista.</span>
+          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para um atendimento específica, use o botão direito sobre o contato na lista.</span>
           ${confirmUnreadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como não lidas?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODAS os atendimentos como não lidas?</span>
               <span class="text-xs text-amber-700">Reacende o indicador verde em todos os contatos do painel. Não afeta o WhatsApp do celular.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -149,7 +149,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             </div>
           ` : confirmReadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como lidas?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODAS os atendimentos como lidas?</span>
               <span class="text-xs text-amber-700">Remove o indicador verde de não lido de todos os contatos do painel.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -186,7 +186,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <!-- Section: Avisos de sistema no chat (plano 12) -->
       <${Section} title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
-          Registra no fio da conversa, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
+          Registra no fio do atendimento, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas os atendimentos — nada é gravado nem exibido.
         </span>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -220,9 +220,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
               onChange=${(e) => setSystemNoticeConvLabels(e.target.checked)}
               class="w-4 h-4 rounded border-wa-border accent-wa-teal"
             />
-            Etiquetas da conversa
+            Etiquetas do atendimento
           </label>
-          <span class="text-xs text-wa-secondary">Adicionar ou remover etiquetas de uma conversa.</span>
+          <span class="text-xs text-wa-secondary">Adicionar ou remover etiquetas de um atendimento.</span>
         </div>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -234,7 +234,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
             Status e arquivo
           </label>
-          <span class="text-xs text-wa-secondary">Resolver, reabrir (inclusive automática ao receber mensagem), arquivar e iniciar conversa.</span>
+          <span class="text-xs text-wa-secondary">Resolver, reabrir (inclusive automática ao receber mensagem), arquivar e iniciar atendimento.</span>
         </div>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">

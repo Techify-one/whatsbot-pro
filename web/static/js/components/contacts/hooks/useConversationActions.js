@@ -154,7 +154,7 @@ export function useConversationActions({
     if (res && res.ok && res.data && res.data.conversation) {
       patchCtxConv({ assignee_user_id: res.data.conversation.assignee_user_id });
     } else {
-      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir atendimento.' }));
     }
   }, [patchCtxConv]);
 
@@ -228,16 +228,16 @@ export function useConversationActions({
 
   // Resolve the contact's conversation whenever the context menu opens, so the
   // menu can show the current assignee and the resolve/reopen state. include_closed
-  // so a resolved thread still resolves (lets us show "Reabrir conversa").
+  // so a resolved thread still resolves (lets us show "Reabrir atendimento").
   useEffect(() => {
     if (!ctxMenu || !ctxMenu.phone) { setCtxConv({ loading: false, conv: null }); return; }
     const phone = ctxMenu.phone;
     const convId = ctxMenu.conversationId;
     let alive = true;
     setCtxConv({ loading: true, conv: null });
-    // Conversa-cêntrico: a linha clicada conhece sua conversa — carrega ELA por id.
-    // getContactConversation(phone) resolveria só uma das conversas do número e o
-    // menu agiria no canal errado (resolver/reabrir afetaria a conversa errada).
+    // Atendimento-cêntrico: a linha clicada conhece seu atendimento — carrega ELA por id.
+    // getContactConversation(phone) resolveria só uma dos atendimentos do número e o
+    // menu agiria no canal errado (resolver/reabrir afetaria o atendimento errada).
     const fetch = convId != null
       ? getConversation(convId)
       : getContactConversation(phone, { includeClosed: true });

@@ -1,5 +1,5 @@
 // Kanban de atendimentos. Monta as colunas a partir do objeto `grouping`, agrupa
-// as conversas por coluna e gerencia o realce da coluna-alvo no drag-and-drop.
+// os atendimentos por coluna e gerencia o realce da coluna-alvo no drag-and-drop.
 import { h } from 'preact';
 import { useState, useMemo } from 'preact/hooks';
 import htm from 'htm';
@@ -16,7 +16,7 @@ export function AttendanceBoard({
 
   const columns = useMemo(() => grouping.columns(), [grouping]);
 
-  // Agrupa as conversas por coluna; card cujo id de coluna não existe cai na 1ª.
+  // Agrupa os atendimentos por coluna; card cujo id de coluna não existe cai na 1ª.
   const cardsByCol = useMemo(() => {
     const ids = new Set(columns.map(c => c.id));
     const map = {};

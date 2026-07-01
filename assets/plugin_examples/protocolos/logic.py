@@ -1,24 +1,24 @@
-"""Núcleo do plugin Atendimentos (auto-contido, sem imports de irmãos).
+"""Núcleo do plugin Protocolos (auto-contido, sem imports de irmãos).
 
 Concentra TODA a lógica de dados + regras para que ``events.py`` / ``filters.py``
 / ``routes.py`` sejam casca fina. Importa só absoluto (``plugins.context``,
 ``db.repositories``, SQLAlchemy), então é importável standalone nos testes.
 
 Conceito:
-- **Atendimento** (``plugin_atendimentos_atendimentos``) agrupa N conversas de UM
+- **Protocolo** (``plugin_protocolos_protocolos``) agrupa N atendimentos de UM
   contato; no máximo 1 ABERTO por contato (índice único parcial). Ciclo próprio
-  (aberto/fechado), independente do status da conversa.
-- **Vínculo / conversa-ciclo** (``plugin_atendimentos_conversas``) liga uma conversa
-  do core ao atendimento — é o "informações_conversa_atendimento" do diagrama.
+  (aberto/fechado), independente do status da atendimento.
+- **Vínculo / atendimento-ciclo** (``plugin_protocolos_atendimentos``) liga uma atendimento
+  do core ao protocolo — é o "informações_atendimento_protocolo" do diagrama.
 - **Rótulo FIXO** (OBS) + Início/Fim/Atendente/ID: Início/Fim/Atendente/ID vêm das
-  colunas (``started_at``/``ended_at``/``assignee_name``/``atendimento_id``); OBS é um
+  colunas (``started_at``/``ended_at``/``assignee_name``/``protocolo_id``); OBS é um
   rótulo semeado no core (is_system) cujo VALOR é roteado para a coluna ``obs``.
-- **DEFINIÇÕES dos rótulos** (conversa + atendimento): vivem no CORE, em
+- **DEFINIÇÕES dos rótulos** (atendimento + protocolo): vivem no CORE, em
   ``custom_attribute_definitions`` (escopos ``conversation``/``attendance``) — criadas/
   editadas na tela "Atributos Personalizados". O plugin só CONSOME via ``get_field_defs``
   (mapeando tipo e usando ``attribute_key`` como ``id``/``def_id``).
-- **VALORES dos rótulos EXTRAS**: normalizados em ``plugin_atendimentos_campos_extras``
-  (conversa) / ``plugin_atendimentos_atendimento_extras`` (atendimento) — UMA linha por
+- **VALORES dos rótulos EXTRAS**: normalizados em ``plugin_protocolos_campos_extras``
+  (atendimento) / ``plugin_protocolos_protocolo_extras`` (protocolo) — UMA linha por
   dono + def, com um JSON ``{type, name, label, value}``, chaveada por ``def_id`` (=
   ``attribute_key``). Soft-delete da def no core some da UI; a linha PERMANECE na tabela
   do plugin (recuperável só pelo banco, ver ``_visible_extras``).
@@ -42,9 +42,9 @@ from db.tables import conversations as _conversations_tbl
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_ID = "atendimentos"
-SCOPES = ("atendimento", "conversa")
-EXTRA_SCOPES = ("atendimento", "conversa")  # ambos têm rótulos extras
+PLUGIN_ID = "protocolos"
+SCOPES = ("protocolo", "atendimento")
+EXTRA_SCOPES = ("protocolo", "atendimento")  # ambos têm rótulos extras
 FIELD_TYPES = {"text", "textarea", "select", "radio", "checkbox"}
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,48}$")
 _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
@@ -55,24 +55,24 @@ _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
 
 # Visualizações personalizadas do Kanban (abas de "Agrupar por"). Nome interno (não vem
 # de input) → seguro em f-string SQL.
-_VIEWS_TABLE = "plugin_atendimentos_kanban_views"
+_VIEWS_TABLE = "plugin_protocolos_kanban_views"
 # Preferência POR-USUÁRIO e POR-VISUALIZAÇÃO dos filtros pré-determinados (pessoal x equipe).
-_PREFS_TABLE = "plugin_atendimentos_user_view_prefs"
+_PREFS_TABLE = "plugin_protocolos_user_view_prefs"
 # Sentinela p/ "não informado" no update (distingue de None=todos os filtros, []=nenhum).
 _UNSET = object()
 _VIEW_GROUP_BY = {"status", "atendente", "data", "attr"}
 _VIEW_SCOPES = {"personal", "team"}
 _VIEW_DATE_MODES = {"dia", "faixas", "mes"}
 # Teto interno de varredura ao filtrar por atributo (o filtro é em Python, antes do corte
-# final) — limita o custo quando a aba usa filtro por atributo de conversa.
+# final) — limita o custo quando a aba usa filtro por atributo de atendimento.
 _ATTR_SCAN_CAP = 2000
 
-# Tabela de valores de extras por escopo — SEPARADAS: os extras do atendimento e os
-# da conversa vivem em tabelas distintas, chaveadas pelo seu próprio dono (atendimento_id
-# vs conversa-ciclo id). Nomes internos (não vêm de input) → seguro em f-string SQL.
+# Tabela de valores de extras por escopo — SEPARADAS: os extras do protocolo e os
+# da atendimento vivem em tabelas distintas, chaveadas pelo seu próprio dono (protocolo_id
+# vs atendimento-ciclo id). Nomes internos (não vêm de input) → seguro em f-string SQL.
 _EXTRAS_TABLE = {
-    "atendimento": ("plugin_atendimentos_atendimento_extras", "atendimento_id"),
-    "conversa": ("plugin_atendimentos_campos_extras", "conversa_id"),
+    "protocolo": ("plugin_protocolos_protocolo_extras", "protocolo_id"),
+    "atendimento": ("plugin_protocolos_campos_extras", "atendimento_id"),
 }
 
 
@@ -85,11 +85,11 @@ def now() -> float:
 # Início e Fim NÃO são rótulos — vêm automáticos nas colunas (PK/FK, opened_at/started_at,
 # closed_at/ended_at, assignee_name do operador) e seguem exibidos no cabeçalho/tabela.
 FIXED_FIELD_DEFS = {
-    "atendimento": [
+    "protocolo": [
         {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
          "options": [], "required": False, "fixed": True, "readonly": False},
     ],
-    "conversa": [
+    "atendimento": [
         {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
          "options": [], "required": False, "fixed": True, "readonly": False},
     ],
@@ -101,20 +101,20 @@ FIXED_KEYS = {scope: {d["key"] for d in defs} for scope, defs in FIXED_FIELD_DEF
 # Extras default por escopo. Valem até o operador editar na tela de config.
 # (As Observações de cada escopo são o rótulo FIXO OBS, não extras.)
 DEFAULT_EXTRA_DEFS = {
-    "atendimento": [
+    "protocolo": [
         {"id": "def_motivo_abertura", "key": "motivo_abertura", "label": "Motivo de abertura",
          "type": "select",
          "options": ["Entrou em contato", "Dúvida", "Reclamação", "Outro"], "required": False},
-        {"id": "def_resultado", "key": "resultado", "label": "Resultado do atendimento",
+        {"id": "def_resultado", "key": "resultado", "label": "Resultado do protocolo",
          "type": "select",
          "options": ["Interessado em contratar", "Suporte comercial",
-                     "Não houve atendimento", "Sem retorno"], "required": False},
-        {"id": "def_tipo", "key": "tipo", "label": "Tipo atendimento", "type": "radio",
+                     "Não houve protocolo", "Sem retorno"], "required": False},
+        {"id": "def_tipo", "key": "tipo", "label": "Tipo protocolo", "type": "radio",
          "options": ["Suporte", "Comercial"], "required": False},
         {"id": "def_curso_interesse", "key": "curso_interesse", "label": "Curso de interesse",
          "type": "checkbox", "options": [], "required": False},
     ],
-    "conversa": [
+    "atendimento": [
         {"id": "def_resultado", "key": "resultado", "label": "Resultado", "type": "select",
          "options": ["Resolvido", "Pendente", "Sem retorno"], "required": True},
     ],
@@ -148,7 +148,7 @@ def get_fixed_defs(scope: str) -> list[dict]:
 
 def get_extra_defs(scope: str) -> list[dict]:
     """Definições dos rótulos EXTRAS do escopo (default se nunca configurado).
-    As DEFINIÇÕES vivem no config do plugin (``plugin.atendimentos.field_defs_<scope>``)."""
+    As DEFINIÇÕES vivem no config do plugin (``plugin.protocolos.field_defs_<scope>``)."""
     if scope not in EXTRA_SCOPES:
         return []
     raw = config_repo.get(_defs_key(scope), None)
@@ -230,8 +230,8 @@ def set_field_defs(scope: str, defs: list) -> list[dict]:
         seen_ids.add(nd["id"])
         out.append(nd)
     config_repo.set(_defs_key(scope), out)
-    if scope == "conversa":
-        sync_core_conversa_defs()  # mantém os atributos de conversa do core em dia
+    if scope == "atendimento":
+        sync_core_atendimento_defs()  # mantém os atributos de atendimento do core em dia
     return get_field_defs(scope)
 
 
@@ -285,7 +285,7 @@ def _missing_required(scope: str, eff: dict) -> str | None:
     return None
 
 
-# ── Campos EXTRAS (valores normalizados, 1 linha por conversa-ciclo + def) ────
+# ── Campos EXTRAS (valores normalizados, 1 linha por atendimento-ciclo + def) ────
 
 def _extra_value_type(ftype: str) -> str:
     """Tipo de VALOR no JSON (fiel ao diagrama: string/boolean)."""
@@ -347,28 +347,28 @@ def _visible_extras(scope: str, owner_ids: list[int]) -> dict[int, dict]:
 
 # ── Mapeamento de linhas ──────────────────────────────────────────────────────
 
-def _atend_dict(row, extras: dict | None = None) -> dict:
+def _proto_dict(row, extras: dict | None = None) -> dict:
+    d = dict(row)
+    d["obs"] = d.get("obs") or ""
+    if extras is None:
+        extras = _visible_extras("protocolo", [d["id"]]).get(d["id"], {})
+    d["fields"] = extras  # só extras (do protocolo) com def atual (key → value)
+    return d
+
+
+def _atendimento_dict(row, extras: dict | None = None) -> dict:
     d = dict(row)
     d["obs"] = d.get("obs") or ""
     if extras is None:
         extras = _visible_extras("atendimento", [d["id"]]).get(d["id"], {})
-    d["fields"] = extras  # só extras (do atendimento) com def atual (key → value)
-    return d
-
-
-def _conversa_dict(row, extras: dict | None = None) -> dict:
-    d = dict(row)
-    d["obs"] = d.get("obs") or ""
-    if extras is None:
-        extras = _visible_extras("conversa", [d["id"]]).get(d["id"], {})
-    d["fields"] = extras  # só extras (da conversa) com def atual (key → value)
+    d["fields"] = extras  # só extras (da atendimento) com def atual (key → value)
     return d
 
 
 # ── Espelho no core (conversations.custom_attributes) ─────────────────────────
-# Além das tabelas do plugin, os campos EDITÁVEIS de resolução da conversa são
-# espelhados em ``conversations.custom_attributes`` do core — integra conversa↔
-# atendimento, fica queryável/filtrável pelo core e SOBREVIVE se o plugin desativar
+# Além das tabelas do plugin, os campos EDITÁVEIS de resolução da atendimento são
+# espelhados em ``conversations.custom_attributes`` do core — integra atendimento↔
+# protocolo, fica queryável/filtrável pelo core e SOBREVIVE se o plugin desativar
 # (herdado do ext_demo). As chaves são registradas como definições de atributo
 # (``applies_to="conversation"``) p/ aparecerem no painel de info. Desligável via o
 # setting ``mirror_custom_attributes``.
@@ -387,74 +387,74 @@ def _mirror_value(d: dict, value):
     return "" if value is None else str(value)
 
 
-def sync_core_conversa_defs() -> None:
-    """Registra (idempotente) as defs EDITÁVEIS da conversa como atributos de conversa
+def sync_core_atendimento_defs() -> None:
+    """Registra (idempotente) as defs EDITÁVEIS da atendimento como atributos de atendimento
     no core, p/ os valores espelhados aparecerem/serem editáveis no painel de info.
     ``ensure_system_definition`` é no-op se a def já existe (respeita edição/remoção do
     usuário) — best-effort, nunca quebra o fluxo de resolução."""
     try:
-        for i, d in enumerate(get_field_defs("conversa")):
+        for i, d in enumerate(get_field_defs("atendimento")):
             if d.get("readonly"):
                 continue
             custom_attribute_repo.ensure_system_definition(
                 attribute_key=d["key"], display_name=d.get("label") or d["key"],
                 type=_core_attr_type(d.get("type")), applies_to="conversation", position=i)
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: sync_core_conversa_defs falhou: %s", e)
+        logger.debug("protocolos: sync_core_atendimento_defs falhou: %s", e)
 
 
-def mirror_conversa_to_core(conversation_id: int, clean: dict) -> None:
+def mirror_atendimento_to_core(conversation_id: int, clean: dict) -> None:
     """Espelha os valores limpos da resolução (obs + extras editáveis) em
     ``conversations.custom_attributes`` (merge). Best-effort; respeita o toggle."""
     try:
         if not config_repo.get(_MIRROR_FLAG, True):
             return
-        defs = {d["key"]: d for d in get_field_defs("conversa") if not d.get("readonly")}
+        defs = {d["key"]: d for d in get_field_defs("atendimento") if not d.get("readonly")}
         partial = {k: _mirror_value(defs[k], v)
                    for k, v in (clean or {}).items() if k in defs}
         if not partial:
             return
-        sync_core_conversa_defs()  # garante que as chaves existam como atributos
+        sync_core_atendimento_defs()  # garante que as chaves existam como atributos
         custom_attribute_repo.set_values(_conversations_tbl, int(conversation_id), partial)
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: mirror_conversa_to_core falhou: %s", e)
+        logger.debug("protocolos: mirror_atendimento_to_core falhou: %s", e)
 
 
-# ── Atendimento: leitura/criação ──────────────────────────────────────────────
+# ── Protocolo: leitura/criação ──────────────────────────────────────────────
 
-def _select_open_atendimento(contact_id: int) -> dict | None:
+def _select_open_protocolo(contact_id: int) -> dict | None:
     with make_plugin_db() as conn:
         row = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_atendimentos "
+            text("SELECT * FROM plugin_protocolos_protocolos "
                  "WHERE contact_id = :cid AND status = 'aberto' "
                  "ORDER BY opened_at DESC"),
             {"cid": contact_id},
         ).mappings().first()
-    return _atend_dict(row) if row else None
+    return _proto_dict(row) if row else None
 
 
-def get_open_atendimento_for_contact(contact_id: int) -> dict | None:
-    return _select_open_atendimento(contact_id)
+def get_open_protocolo_for_contact(contact_id: int) -> dict | None:
+    return _select_open_protocolo(contact_id)
 
 
-def get_atendimento(atid: int) -> dict | None:
+def get_protocolo(atid: int) -> dict | None:
     with make_plugin_db() as conn:
         row = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_atendimentos WHERE id = :id"),
+            text("SELECT * FROM plugin_protocolos_protocolos WHERE id = :id"),
             {"id": atid},
         ).mappings().first()
-    return _atend_dict(row) if row else None
+    return _proto_dict(row) if row else None
 
 
-def ensure_atendimento_for_contact(contact_id: int, phone: str = "", name: str = "",
+def ensure_protocolo_for_contact(contact_id: int, phone: str = "", name: str = "",
                                    conversation_id: int | None = None,
                                    announce_open: bool = False) -> dict:
-    """Get-or-create do atendimento ABERTO do contato (race-safe via índice parcial).
+    """Get-or-create do protocolo ABERTO do contato (race-safe via índice parcial).
 
-    Quando ``announce_open`` e ESTA chamada criou o atendimento, grava UMA nota privada
+    Quando ``announce_open`` e ESTA chamada criou o protocolo, grava UMA nota privada
     marcando a abertura com um ID pesquisável (ver ``_write_open_note``). Quem perde a
-    corrida (re-seleciona o existente) não grava → idempotente, 1 nota por atendimento."""
-    existing = _select_open_atendimento(contact_id)
+    corrida (re-seleciona o existente) não grava → idempotente, 1 nota por protocolo."""
+    existing = _select_open_protocolo(contact_id)
     if existing:
         return existing
     ts = now()
@@ -462,7 +462,7 @@ def ensure_atendimento_for_contact(contact_id: int, phone: str = "", name: str =
     try:
         with make_plugin_db() as conn:
             conn.execute(
-                text("INSERT INTO plugin_atendimentos_atendimentos "
+                text("INSERT INTO plugin_protocolos_protocolos "
                      "(contact_id, contact_phone, contact_name, status, fields, "
                      " opened_at, created_at, updated_at) "
                      "VALUES (:cid, :phone, :name, 'aberto', '{}', :ts, :ts, :ts)"),
@@ -471,21 +471,21 @@ def ensure_atendimento_for_contact(contact_id: int, phone: str = "", name: str =
         created = True
     except IntegrityError:
         pass  # perdeu a corrida → o vencedor já existe; re-seleciona abaixo
-    at = _select_open_atendimento(contact_id)
+    at = _select_open_protocolo(contact_id)
     if created and at and announce_open:
         _write_open_note(at, conversation_id)
-        # Card de sistema "Atendimento aberto" no fio da conversa (igual ao de resolver
-        # conversa). Só na CRIAÇÃO real (não em re-seleção do existente nem no backfill).
-        _emit_atend_notice("atendimento_opened", conversation_id=conversation_id,
+        # Card de sistema "Protocolo aberto" no fio da atendimento (igual ao de resolver
+        # atendimento). Só na CRIAÇÃO real (não em re-seleção do existente nem no backfill).
+        _emit_proto_notice("protocolo_opened", conversation_id=conversation_id,
                            contact_id=at.get("contact_id"),
                            phone=at.get("contact_phone") or None)
     return at
 
 
 def _write_open_note(at: dict, conversation_id: int | None) -> None:
-    """Nota PRIVADA (painel-only, NÃO vai ao cliente) marcando a ABERTURA do atendimento
+    """Nota PRIVADA (painel-only, NÃO vai ao cliente) marcando a ABERTURA do protocolo
     com um ID pesquisável e não-editável pela interface:
-    ``ATD-AAAAMMDD-HHMMSS-<id_conversa>`` (data/hora da abertura + id da conversa que
+    ``ATD-AAAAMMDD-HHMMSS-<id_atendimento>`` (data/hora da abertura + id da atendimento que
     disparou). Best-effort: qualquer falha só loga em debug."""
     try:
         from plugins.context import get_deps
@@ -502,7 +502,7 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
         lt = time.localtime(float((at or {}).get("opened_at") or now()))
         atd_id = (f"ATD-{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}-"
                   f"{lt.tm_hour:02d}{lt.tm_min:02d}{lt.tm_sec:02d}-{conversation_id or 0}")
-        text_p = f"🔖 Atendimento aberto · {atd_id}"
+        text_p = f"🔖 Protocolo aberto · {atd_id}"
         channel_id = _channel_for_contact(contact_id)
         cm = agent_handler._get_contact(phone, channel_id=channel_id)
         cm.add_message("private_note", text_p)
@@ -513,47 +513,47 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
             note["_id"] = saved["_id"]
         broadcast("new_message", {"phone": phone, "message": note})
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: nota de abertura falhou: %s", e)
+        logger.debug("protocolos: nota de abertura falhou: %s", e)
 
 
-# ── Avisos de sistema no fio da conversa (cards conversation_event) ───────────
-# Marca a ABERTURA e a FINALIZAÇÃO do atendimento como cards de sistema no chat —
-# mesmo visual dos avisos de resolver/reabrir CONVERSA (plano 12). O plugin REGISTRA
+# ── Avisos de sistema no fio da atendimento (cards conversation_event) ───────────
+# Marca a ABERTURA e a FINALIZAÇÃO do protocolo como cards de sistema no chat —
+# mesmo visual dos avisos de resolver/reabrir ATENDIMENTO (plano 12). O plugin REGISTRA
 # seu próprio grupo + tipos no registry do core (``server.system_notices``) via
 # ``plugins.context.register_notice*`` — SEM dar patch no core. Gate por config
-# namespaceada do plugin (``plugin.atendimentos.system_notice_lifecycle``, default ON).
+# namespaceada do plugin (``plugin.protocolos.system_notice_lifecycle``, default ON).
 # Late import do ``server``: logic.py segue importável standalone nos testes.
 
-_NOTICE_GROUP = "atendimento_lifecycle"
+_NOTICE_GROUP = "protocolo_lifecycle"
 _NOTICE_CONFIG_KEY = f"plugin.{PLUGIN_ID}.system_notice_lifecycle"
 
 
-def _f_atendimento_opened(actor=None, **_) -> str:
-    return f"📂 {actor} abriu o atendimento." if actor else "📂 Atendimento aberto."
+def _f_protocolo_opened(actor=None, **_) -> str:
+    return f"📂 {actor} abriu o protocolo." if actor else "📂 Protocolo aberto."
 
 
-def _f_atendimento_closed(actor=None, **_) -> str:
-    return f"🏁 {actor} finalizou o atendimento." if actor else "🏁 Atendimento finalizado."
+def _f_protocolo_closed(actor=None, **_) -> str:
+    return f"🏁 {actor} finalizou o protocolo." if actor else "🏁 Protocolo finalizado."
 
 
 def register_system_notices() -> None:
-    """Registra (idempotente) o grupo + os 2 tipos de aviso do atendimento no core.
+    """Registra (idempotente) o grupo + os 2 tipos de aviso do protocolo no core.
     Best-effort: falha (ex.: ``server`` ausente nos testes) nunca quebra o startup."""
     try:
         from plugins.context import register_notice_group, register_notice
-        register_notice_group(_NOTICE_GROUP, "Atendimento (abrir/finalizar)",
+        register_notice_group(_NOTICE_GROUP, "Protocolo (abrir/finalizar)",
                               config_key=_NOTICE_CONFIG_KEY, default=True)
-        register_notice("atendimento_opened", _NOTICE_GROUP, _f_atendimento_opened)
-        register_notice("atendimento_closed", _NOTICE_GROUP, _f_atendimento_closed)
+        register_notice("protocolo_opened", _NOTICE_GROUP, _f_protocolo_opened)
+        register_notice("protocolo_closed", _NOTICE_GROUP, _f_protocolo_closed)
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: register_system_notices falhou: %s", e)
+        logger.debug("protocolos: register_system_notices falhou: %s", e)
 
 
-def _emit_atend_notice(event_type: str, *, conversation_id: int | None = None,
+def _emit_proto_notice(event_type: str, *, conversation_id: int | None = None,
                        contact_id: int | None = None, phone: str | None = None,
                        actor: str | None = None) -> None:
-    """Emite um card ``conversation_event`` no fio da conversa (gate de config no core).
-    Com ``conversation_id`` ancora naquela conversa; senão resolve a do contato
+    """Emite um card ``conversation_event`` no fio da atendimento (gate de config no core).
+    Com ``conversation_id`` ancora naquela atendimento; senão resolve a do contato
     (aberta→última). Best-effort: nunca levanta (um aviso jamais quebra a ação)."""
     try:
         from server import system_notices
@@ -565,24 +565,24 @@ def _emit_atend_notice(event_type: str, *, conversation_id: int | None = None,
             system_notices.emit_for_contact(
                 event_type=event_type, contact_id=contact_id, phone=phone, actor=actor)
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: emitir aviso %s falhou: %s", event_type, e)
+        logger.debug("protocolos: emitir aviso %s falhou: %s", event_type, e)
 
 
-def update_atendimento_fields(atid: int, values: dict, assignee_user_id: int | None = None,
+def update_protocolo_fields(atid: int, values: dict, assignee_user_id: int | None = None,
                               assignee_name: str = "") -> tuple[dict | None, str | None]:
-    at = get_atendimento(atid)
+    at = get_protocolo(atid)
     if not at:
-        return None, "Atendimento não encontrado."
-    # OBS vai na coluna fixa; os demais rótulos extras vão na tabela do atendimento.
+        return None, "Protocolo não encontrado."
+    # OBS vai na coluna fixa; os demais rótulos extras vão na tabela do protocolo.
     # Salvar parcial é permitido (required só é exigido ao FECHAR) → mescla com o atual.
     merged = {**(at.get("fields") or {}), "obs": at.get("obs") or "", **(values or {})}
-    clean, _err = normalize_values("atendimento", merged)
+    clean, _err = normalize_values("protocolo", merged)
     obs_val = str(clean.get("obs") or "")
-    extra_defs = get_extra_defs("atendimento")
+    extra_defs = get_extra_defs("protocolo")
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
-            text("UPDATE plugin_atendimentos_atendimentos SET obs = :obs, "
+            text("UPDATE plugin_protocolos_protocolos SET obs = :obs, "
                  "assignee_user_id = COALESCE(:auid, assignee_user_id), "
                  "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END, "
                  "updated_at = :ts WHERE id = :id"),
@@ -591,44 +591,44 @@ def update_atendimento_fields(atid: int, values: dict, assignee_user_id: int | N
         )
         for d in extra_defs:
             if d["key"] in clean:
-                upsert_extra(conn, "atendimento", atid, d, clean[d["key"]])
+                upsert_extra(conn, "protocolo", atid, d, clean[d["key"]])
     _broadcast_changed(at["contact_id"], atid)
-    return get_atendimento(atid), None
+    return get_protocolo(atid), None
 
 
-def _open_cycles_of_atendimento(atid: int) -> list[dict]:
-    """Ciclos (conversas) ABERTOS (ended_at NULL) deste atendimento."""
+def _open_cycles_of_protocolo(atid: int) -> list[dict]:
+    """Ciclos (atendimentos) ABERTOS (ended_at NULL) deste protocolo."""
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_conversas "
-                 "WHERE atendimento_id = :id AND ended_at IS NULL "
+            text("SELECT * FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id = :id AND ended_at IS NULL "
                  "ORDER BY started_at DESC, id DESC"),
             {"id": atid},
         ).mappings().all()
     return [dict(r) for r in rows]
 
 
-def close_atendimento(atid: int, assignee_user_id: int | None = None,
+def close_protocolo(atid: int, assignee_user_id: int | None = None,
                       assignee_name: str = "") -> tuple[dict | None, str | None]:
-    at = get_atendimento(atid)
+    at = get_protocolo(atid)
     if not at:
-        return None, "Atendimento não encontrado."
+        return None, "Protocolo não encontrado."
     if at["status"] == "fechado":
         return at, None
-    # Só finaliza quando a ÚLTIMA conversa do atendimento estiver resolvida: se há ciclo
-    # aberto, força resolver antes (a UI abre o popup "Resolver conversa"). HTTP 400.
-    if _open_cycles_of_atendimento(atid):
-        return None, ("Existe uma conversa aberta neste atendimento — "
+    # Só finaliza quando a ÚLTIMA atendimento do protocolo estiver resolvida: se há ciclo
+    # aberto, força resolver antes (a UI abre o popup "Resolver atendimento"). HTTP 400.
+    if _open_cycles_of_protocolo(atid):
+        return None, ("Existe uma atendimento aberta neste protocolo — "
                       "resolva-a antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
     # está salvo (a UI grava os campos antes de fechar).
-    err = _missing_required("atendimento", _effective_values("atendimento", at))
+    err = _missing_required("protocolo", _effective_values("protocolo", at))
     if err:
         return None, err
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
-            text("UPDATE plugin_atendimentos_atendimentos SET status = 'fechado', "
+            text("UPDATE plugin_protocolos_protocolos SET status = 'fechado', "
                  "closed_at = :ts, updated_at = :ts, "
                  "assignee_user_id = COALESCE(:auid, assignee_user_id), "
                  "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END "
@@ -636,107 +636,107 @@ def close_atendimento(atid: int, assignee_user_id: int | None = None,
             {"ts": ts, "auid": assignee_user_id, "aname": assignee_name or "", "id": atid},
         )
     _broadcast_changed(at["contact_id"], atid)
-    # Card de sistema "Atendimento finalizado" no fio da conversa (resolve a conversa do
+    # Card de sistema "Protocolo finalizado" no fio da atendimento (resolve a atendimento do
     # contato: aberta→última). Autor = operador que finalizou, quando houver.
-    _emit_atend_notice("atendimento_closed", contact_id=at.get("contact_id"),
+    _emit_proto_notice("protocolo_closed", contact_id=at.get("contact_id"),
                        phone=at.get("contact_phone") or None, actor=(assignee_name or None))
-    return get_atendimento(atid), None
+    return get_protocolo(atid), None
 
 
-def reopen_atendimento(atid: int) -> tuple[dict | None, str | None]:
-    at = get_atendimento(atid)
+def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
+    at = get_protocolo(atid)
     if not at:
-        return None, "Atendimento não encontrado."
+        return None, "Protocolo não encontrado."
     if at["status"] == "aberto":
         return at, None
-    other = _select_open_atendimento(at["contact_id"])
+    other = _select_open_protocolo(at["contact_id"])
     if other:
-        return None, "Já existe um atendimento aberto para este contato."
+        return None, "Já existe um protocolo aberto para este contato."
     ts = now()
     try:
         with make_plugin_db() as conn:
             conn.execute(
-                text("UPDATE plugin_atendimentos_atendimentos SET status = 'aberto', "
+                text("UPDATE plugin_protocolos_protocolos SET status = 'aberto', "
                      "closed_at = NULL, updated_at = :ts WHERE id = :id"),
                 {"ts": ts, "id": atid},
             )
     except IntegrityError:
-        return None, "Já existe um atendimento aberto para este contato."
+        return None, "Já existe um protocolo aberto para este contato."
     _broadcast_changed(at["contact_id"], atid)
-    return get_atendimento(atid), None
+    return get_protocolo(atid), None
 
 
-def _conversation_ids_of_atendimento(atid: int) -> list[int]:
-    """conversation_ids (distintos) das conversas-ciclo deste atendimento."""
+def _conversation_ids_of_protocolo(atid: int) -> list[int]:
+    """conversation_ids (distintos) das atendimentos-ciclo deste protocolo."""
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text("SELECT DISTINCT conversation_id FROM plugin_atendimentos_conversas "
-                 "WHERE atendimento_id = :id AND conversation_id IS NOT NULL"),
+            text("SELECT DISTINCT conversation_id FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id = :id AND conversation_id IS NOT NULL"),
             {"id": atid},
         ).all()
     return [int(r[0]) for r in rows]
 
 
-def _propagate_assignee_to_conversations(conv_ids: list[int],
+def _propagate_assignee_to_conversations(atend_ids: list[int],
                                          assignee_user_id: int | None) -> None:
-    """Espelha o atendente do atendimento nas CONVERSAS do core (``assignee_user_id``)
-    — é o que aparece na lista de conversas e no painel "Agente atribuído". Emite o
+    """Espelha o atendente do protocolo nas ATENDIMENTOS do core (``assignee_user_id``)
+    — é o que aparece na lista de atendimentos e no painel "Agente atribuído". Emite o
     MESMO evento WS do core (``conversation_assigned``) p/ atualização ao vivo, com o
     payload que o frontend espera. Best-effort: uma falha nunca quebra a atribuição."""
-    for cid in conv_ids:
+    for cid in atend_ids:
         try:
-            conv = conversation_repo.set_assignee(cid, assignee_user_id)
-            if not conv:
+            atend = conversation_repo.set_assignee(cid, assignee_user_id)
+            if not atend:
                 continue
             broadcast("conversation_assigned", {
-                "conversation_id": conv.get("id"),
-                "display_id": conv.get("display_id"),
-                "contact_id": conv.get("contact_id"),
-                "status": conv.get("status"),
-                "assignee_user_id": conv.get("assignee_user_id"),
-                "active_agent_key": conv.get("active_agent_key"),
-                "ai_active": conv.get("ai_active"),
-                "is_archived": conv.get("is_archived"),
-                "inbox_id": conv.get("inbox_id"),
+                "conversation_id": atend.get("id"),
+                "display_id": atend.get("display_id"),
+                "contact_id": atend.get("contact_id"),
+                "status": atend.get("status"),
+                "assignee_user_id": atend.get("assignee_user_id"),
+                "active_agent_key": atend.get("active_agent_key"),
+                "ai_active": atend.get("ai_active"),
+                "is_archived": atend.get("is_archived"),
+                "inbox_id": atend.get("inbox_id"),
                 "ts": now(),
             })
         except Exception as e:  # noqa: BLE001
-            logger.debug("atendimentos: propagar assignee p/ conversa %s falhou: %s", cid, e)
+            logger.debug("protocolos: propagar assignee p/ atendimento %s falhou: %s", cid, e)
 
 
-def assign_atendimento(atid: int, assignee_user_id: int | None,
+def assign_protocolo(atid: int, assignee_user_id: int | None,
                        assignee_name: str = "") -> tuple[dict | None, str | None]:
-    """Define o atendente do atendimento (sobrescreve; ``None`` = remove atribuição) E
-    PROPAGA para as conversas do core (assignee_user_id) — senão a mudança não aparece
-    na lista/painel de conversas. Usado pelo drag-and-drop do kanban "por atendente".
-    Diferente de ``update_atendimento_fields``, aqui o assignee é gravado direto (sem
+    """Define o atendente do protocolo (sobrescreve; ``None`` = remove atribuição) E
+    PROPAGA para as atendimentos do core (assignee_user_id) — senão a mudança não aparece
+    na lista/painel de atendimentos. Usado pelo drag-and-drop do kanban "por atendente".
+    Diferente de ``update_protocolo_fields``, aqui o assignee é gravado direto (sem
     COALESCE), para permitir LIMPAR a atribuição."""
-    at = get_atendimento(atid)
+    at = get_protocolo(atid)
     if not at:
-        return None, "Atendimento não encontrado."
+        return None, "Protocolo não encontrado."
     name = assignee_name or "" if assignee_user_id is not None else ""
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
-            text("UPDATE plugin_atendimentos_atendimentos SET assignee_user_id = :auid, "
+            text("UPDATE plugin_protocolos_protocolos SET assignee_user_id = :auid, "
                  "assignee_name = :aname, updated_at = :ts WHERE id = :id"),
             {"auid": assignee_user_id, "aname": name, "ts": ts, "id": atid},
         )
-    # Espelha nas conversas do core (fora da conn do plugin).
-    _propagate_assignee_to_conversations(_conversation_ids_of_atendimento(atid), assignee_user_id)
+    # Espelha nas atendimentos do core (fora da conn do plugin).
+    _propagate_assignee_to_conversations(_conversation_ids_of_protocolo(atid), assignee_user_id)
     _broadcast_changed(at["contact_id"], atid)
-    return get_atendimento(atid), None
+    return get_protocolo(atid), None
 
 
-def _hydrate_atendimentos(rows) -> list[dict]:
-    """Batch: extras do atendimento + rótulos/atributos da última conversa (evita N+1)."""
-    extras = _visible_extras("atendimento", [r["id"] for r in rows])
-    out = [_atend_dict(r, extras.get(r["id"], {})) for r in rows]
-    _attach_latest_conversa(out)  # conversa_fields + conversa_attrs (última conversa)
+def _hydrate_protocolos(rows) -> list[dict]:
+    """Batch: extras do protocolo + rótulos/atributos da última atendimento (evita N+1)."""
+    extras = _visible_extras("protocolo", [r["id"] for r in rows])
+    out = [_proto_dict(r, extras.get(r["id"], {})) for r in rows]
+    _attach_latest_atendimento(out)  # atendimento_fields + atendimento_attrs (última atendimento)
     return out
 
 
-def list_atendimentos(*, status: str | None = None, assignee_user_id: int | None = None,
+def list_protocolos(*, status: str | None = None, assignee_user_id: int | None = None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
                       attr_filters: dict | None = None,
@@ -763,35 +763,35 @@ def list_atendimentos(*, status: str | None = None, assignee_user_id: int | None
     if opened_to is not None:
         where.append("opened_at <= :oto")
         params["oto"] = float(opened_to)
-    base = ("SELECT * FROM plugin_atendimentos_atendimentos WHERE " + " AND ".join(where)
+    base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
             + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
 
-    # Filtro por atributo de CONVERSA (valor na última conversa). Como o valor não vive nas
-    # colunas do atendimento, filtra-se em Python ANTES do corte: varre um teto interno,
-    # atribui conversa_attrs e só então aplica offset/limit (caro só quando a aba usa este
+    # Filtro por atributo de ATENDIMENTO (valor na última atendimento). Como o valor não vive nas
+    # colunas do protocolo, filtra-se em Python ANTES do corte: varre um teto interno,
+    # atribui atendimento_attrs e só então aplica offset/limit (caro só quando a aba usa este
     # filtro — caminho normal continua com LIMIT/OFFSET no SQL).
     af = {k: v for k, v in (attr_filters or {}).items() if k and _KEY_RE.match(k)}
     if af:
         with make_plugin_db() as conn:
             rows = conn.execute(text(base + " LIMIT :scan"),
                                 {**params, "scan": _ATTR_SCAN_CAP}).mappings().all()
-        out = _hydrate_atendimentos(rows)
+        out = _hydrate_protocolos(rows)
         out = [a for a in out
-               if all(str((a.get("conversa_attrs") or {}).get(k, "")) == str(v)
+               if all(str((a.get("atendimento_attrs") or {}).get(k, "")) == str(v)
                       for k, v in af.items())]
         return out[off:off + lim]
 
     with make_plugin_db() as conn:
         rows = conn.execute(text(base + " LIMIT :limit OFFSET :offset"),
                             {**params, "limit": lim, "offset": off}).mappings().all()
-    return _hydrate_atendimentos(rows)
+    return _hydrate_protocolos(rows)
 
 
-def _conversation_core_attrs(conv_ids: list[int]) -> dict[int, dict]:
-    """{conversation_id: {key: value}} dos ATRIBUTOS PERSONALIZADOS do core (escopo conversa)
+def _conversation_core_attrs(atend_ids: list[int]) -> dict[int, dict]:
+    """{conversation_id: {key: value}} dos ATRIBUTOS PERSONALIZADOS do core (escopo atendimento)
     que NÃO são espelho do plugin — i.e., defs com is_system=0 (criadas na tela do core).
     Lê de ``conversations.custom_attributes``. Batch (evita N+1)."""
-    ids = [int(c) for c in (conv_ids or []) if c]
+    ids = [int(c) for c in (atend_ids or []) if c]
     if not ids:
         return {}
     try:
@@ -817,40 +817,40 @@ def _conversation_core_attrs(conv_ids: list[int]) -> dict[int, dict]:
     return out
 
 
-def _attach_latest_conversa(items: list[dict]) -> None:
-    """Anexa a cada atendimento os valores da ÚLTIMA conversa (ciclo mais recente):
-    ``conversa_fields`` (rótulos do plugin do escopo conversa — obs + extras) e
-    ``conversa_attrs`` (atributos personalizados do core — is_system=0). Tudo batch."""
+def _attach_latest_atendimento(items: list[dict]) -> None:
+    """Anexa a cada protocolo os valores da ÚLTIMA atendimento (ciclo mais recente):
+    ``atendimento_fields`` (rótulos do plugin do escopo atendimento — obs + extras) e
+    ``atendimento_attrs`` (atributos personalizados do core — is_system=0). Tudo batch."""
     if not items:
         return
     atids = [a["id"] for a in items]
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text("SELECT atendimento_id, id, conversation_id, obs FROM plugin_atendimentos_conversas "
-                 "WHERE atendimento_id IN :ids ORDER BY started_at DESC, id DESC")
+            text("SELECT protocolo_id, id, conversation_id, obs FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id IN :ids ORDER BY started_at DESC, id DESC")
             .bindparams(bindparam("ids", expanding=True)),
             {"ids": atids},
         ).mappings().all()
     latest: dict[int, dict] = {}
     for r in rows:
-        latest.setdefault(int(r["atendimento_id"]), dict(r))  # 1º = mais recente (ordem desc)
-    conv_extras = _visible_extras("conversa", [r["id"] for r in latest.values()])
+        latest.setdefault(int(r["protocolo_id"]), dict(r))  # 1º = mais recente (ordem desc)
+    atend_extras = _visible_extras("atendimento", [r["id"] for r in latest.values()])
     core_attrs = _conversation_core_attrs([r["conversation_id"] for r in latest.values()])
     for a in items:
         lc = latest.get(a["id"])
         if not lc:
-            a["conversa_fields"] = {}
-            a["conversa_attrs"] = {}
+            a["atendimento_fields"] = {}
+            a["atendimento_attrs"] = {}
             continue
-        cf = dict(conv_extras.get(lc["id"], {}))
+        cf = dict(atend_extras.get(lc["id"], {}))
         if lc.get("obs"):
             cf["obs"] = lc["obs"]
-        a["conversa_fields"] = cf
-        a["conversa_attrs"] = core_attrs.get(lc["conversation_id"], {}) if lc.get("conversation_id") else {}
+        a["atendimento_fields"] = cf
+        a["atendimento_attrs"] = core_attrs.get(lc["conversation_id"], {}) if lc.get("conversation_id") else {}
 
 
 # ── Visualizações personalizadas do Kanban (abas de "Agrupar por") ────────────
-# CRUD puro sobre plugin_atendimentos_kanban_views. O GATE (pessoal x equipe, ownership)
+# CRUD puro sobre plugin_protocolos_kanban_views. O GATE (pessoal x equipe, ownership)
 # vive na rota (precisa do request p/ checar manage_team_views) — aqui só valida o shape.
 
 def _avail_list(s):
@@ -1171,57 +1171,57 @@ def upsert_user_view_pref(view_id: int, user_id: int | None, *, use_personal=Non
     return {"use_personal": up, "personal_filters": pf}
 
 
-def set_conversa_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:
+def set_atendimento_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:
     """Drag no kanban por atributo: grava ``key`` = ``value`` em
-    ``conversations.custom_attributes`` da ÚLTIMA conversa (ciclo mais recente) do
-    atendimento. ``value`` None/"" remove a chave (cai na coluna "Sem valor"). Espelha o
-    padrão de ``mirror_conversa_to_core`` (set_values direto). Retorna o atendimento com
-    ``conversa_attrs`` já recarregado."""
+    ``conversations.custom_attributes`` da ÚLTIMA atendimento (ciclo mais recente) do
+    protocolo. ``value`` None/"" remove a chave (cai na coluna "Sem valor"). Espelha o
+    padrão de ``mirror_atendimento_to_core`` (set_values direto). Retorna o protocolo com
+    ``atendimento_attrs`` já recarregado."""
     if not _KEY_RE.match(key or ""):
         return None, "Atributo inválido."
-    at = get_atendimento(atid)
+    at = get_protocolo(atid)
     if not at:
-        return None, "Atendimento não encontrado."
+        return None, "Protocolo não encontrado."
     with make_plugin_db() as conn:
         row = conn.execute(
-            text("SELECT conversation_id FROM plugin_atendimentos_conversas "
-                 "WHERE atendimento_id = :aid AND conversation_id IS NOT NULL "
+            text("SELECT conversation_id FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id = :aid AND conversation_id IS NOT NULL "
                  "ORDER BY started_at DESC, id DESC LIMIT 1"),
             {"aid": int(atid)},
         ).mappings().first()
-    conv_id = row["conversation_id"] if row else None
-    if not conv_id:
-        return None, "Este atendimento ainda não tem conversa vinculada."
+    atend_id = row["conversation_id"] if row else None
+    if not atend_id:
+        return None, "Este protocolo ainda não tem atendimento vinculada."
     v = None if value in (None, "") else str(value)
     try:
-        custom_attribute_repo.set_values(_conversations_tbl, int(conv_id), {key: v})
+        custom_attribute_repo.set_values(_conversations_tbl, int(atend_id), {key: v})
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos: set_conversa_attr falhou: %s", e)
+        logger.debug("protocolos: set_atendimento_attr falhou: %s", e)
         return None, "Falha ao gravar o atributo."
     _broadcast_changed(at.get("contact_id"), atid)
-    out = [get_atendimento(atid)]
-    _attach_latest_conversa(out)
+    out = [get_protocolo(atid)]
+    _attach_latest_atendimento(out)
     return out[0], None
 
 
-# ── Conversas do atendimento = CICLOS (aberto→resolvido) ──────────────────────
-# Cada linha de plugin_atendimentos_conversas é UM ciclo de atendimento de uma
-# conversa: nasce quando o cliente engaja (inbound) e fecha quando o operador
+# ── Atendimentos do protocolo = CICLOS (aberto→resolvido) ──────────────────────
+# Cada linha de plugin_protocolos_atendimentos é UM ciclo de protocolo de uma
+# atendimento: nasce quando o cliente engaja (inbound) e fecha quando o operador
 # resolve (ended_at + OBS/extras). O cliente voltar depois inicia um ciclo NOVO no
-# mesmo atendimento → várias linhas acumulam. `ended_at IS NULL` = ciclo aberto.
+# mesmo protocolo → várias linhas acumulam. `ended_at IS NULL` = ciclo aberto.
 
-def list_conversas(atid: int) -> list[dict]:
+def list_atendimentos(atid: int) -> list[dict]:
     with make_plugin_db() as conn:
         rows = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_conversas "
-                 "WHERE atendimento_id = :id ORDER BY started_at ASC, id ASC"),
+            text("SELECT * FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id = :id ORDER BY started_at ASC, id ASC"),
             {"id": atid},
         ).mappings().all()
-    extras = _visible_extras("conversa", [r["id"] for r in rows])  # batch (evita N+1)
-    out = [_conversa_dict(r, extras.get(r["id"], {})) for r in rows]
+    extras = _visible_extras("atendimento", [r["id"] for r in rows])  # batch (evita N+1)
+    out = [_atendimento_dict(r, extras.get(r["id"], {})) for r in rows]
     # Anexa os ATRIBUTOS PERSONALIZADOS do core (is_system=0) de CADA ciclo (lidos de
     # conversations.custom_attributes pelo conversation_id). A tabela de detalhe os mostra
-    # numa coluna própria, separados das informações da conversa. Batch (evita N+1).
+    # numa coluna própria, separados das informações da atendimento. Batch (evita N+1).
     core_attrs = _conversation_core_attrs([c.get("conversation_id") for c in out])
     for c in out:
         cid = c.get("conversation_id")
@@ -1229,125 +1229,125 @@ def list_conversas(atid: int) -> list[dict]:
     return out
 
 
-def cycle_anchor(conversa_id: int) -> dict:
-    """Deep-link de scroll: devolve a conversa (thread) do ciclo + o ``_id`` (=
+def cycle_anchor(atendimento_id: int) -> dict:
+    """Deep-link de scroll: devolve a atendimento (thread) do ciclo + o ``_id`` (=
     ``messages.id``, é o ``data-mid`` do chat) da PRIMEIRA mensagem a partir do
     ``started_at`` do ciclo — alvo do permalink ``/conversations/<id>?message=<_id>``.
-    ``message_id`` é None se a conversa não tiver mensagens. SELECT em ``messages`` do
+    ``message_id`` é None se a atendimento não tiver mensagens. SELECT em ``messages`` do
     core na mesma conexão (mesmo banco)."""
     with make_plugin_db() as conn:
         cyc = conn.execute(
-            text("SELECT conversation_id, started_at FROM plugin_atendimentos_conversas "
+            text("SELECT conversation_id, started_at FROM plugin_protocolos_atendimentos "
                  "WHERE id = :id"),
-            {"id": conversa_id},
+            {"id": atendimento_id},
         ).mappings().first()
         if not cyc or cyc["conversation_id"] is None:
             return {"conversation_id": None, "message_id": None}
-        conv_id = int(cyc["conversation_id"])
+        atend_id = int(cyc["conversation_id"])
         started = float(cyc["started_at"] or 0)
         row = conn.execute(
             text("SELECT id FROM messages WHERE conversation_id = :cid AND ts >= :ts "
                  "ORDER BY ts ASC, id ASC LIMIT 1"),
-            {"cid": conv_id, "ts": started},
+            {"cid": atend_id, "ts": started},
         ).first()
-        if row is None:  # started_at após a última msg (raro) → cai na última da conversa
+        if row is None:  # started_at após a última msg (raro) → cai na última da atendimento
             row = conn.execute(
                 text("SELECT id FROM messages WHERE conversation_id = :cid "
                      "ORDER BY ts DESC, id DESC LIMIT 1"),
-                {"cid": conv_id},
+                {"cid": atend_id},
             ).first()
-    return {"conversation_id": conv_id, "message_id": (row[0] if row else None)}
+    return {"conversation_id": atend_id, "message_id": (row[0] if row else None)}
 
 
 def get_latest_cycle(conversation_id: int) -> dict | None:
-    """O ciclo mais recente de uma conversa (o que está sendo resolvido/ativo)."""
+    """O ciclo mais recente de uma atendimento (o que está sendo resolvido/ativo)."""
     with make_plugin_db() as conn:
         row = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_conversas "
+            text("SELECT * FROM plugin_protocolos_atendimentos "
                  "WHERE conversation_id = :cid ORDER BY started_at DESC, id DESC"),
             {"cid": conversation_id},
         ).mappings().first()
-    return _conversa_dict(row) if row else None
+    return _atendimento_dict(row) if row else None
 
 
-def get_open_cycle(conversation_id: int, atendimento_id: int) -> dict | None:
-    """O ciclo ABERTO (ended_at NULL) da conversa neste atendimento, se houver."""
+def get_open_cycle(conversation_id: int, protocolo_id: int) -> dict | None:
+    """O ciclo ABERTO (ended_at NULL) da atendimento neste protocolo, se houver."""
     with make_plugin_db() as conn:
         row = conn.execute(
-            text("SELECT * FROM plugin_atendimentos_conversas "
-                 "WHERE conversation_id = :cid AND atendimento_id = :aid "
+            text("SELECT * FROM plugin_protocolos_atendimentos "
+                 "WHERE conversation_id = :cid AND protocolo_id = :aid "
                  "AND ended_at IS NULL ORDER BY started_at DESC, id DESC"),
-            {"cid": conversation_id, "aid": atendimento_id},
+            {"cid": conversation_id, "aid": protocolo_id},
         ).mappings().first()
-    return _conversa_dict(row) if row else None
+    return _atendimento_dict(row) if row else None
 
 
-def _count_cycles(conversation_id: int, atendimento_id: int) -> int:
+def _count_cycles(conversation_id: int, protocolo_id: int) -> int:
     with make_plugin_db() as conn:
         return conn.execute(
-            text("SELECT COUNT(*) FROM plugin_atendimentos_conversas "
-                 "WHERE conversation_id = :cid AND atendimento_id = :aid"),
-            {"cid": conversation_id, "aid": atendimento_id},
+            text("SELECT COUNT(*) FROM plugin_protocolos_atendimentos "
+                 "WHERE conversation_id = :cid AND protocolo_id = :aid"),
+            {"cid": conversation_id, "aid": protocolo_id},
         ).scalar() or 0
 
 
-def _insert_cycle(conversation_id: int, contact_id: int, atendimento_id: int,
+def _insert_cycle(conversation_id: int, contact_id: int, protocolo_id: int,
                   assignee_name: str = "") -> dict:
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
-            text("INSERT INTO plugin_atendimentos_conversas "
-                 "(atendimento_id, conversation_id, contact_id, assignee_name, "
+            text("INSERT INTO plugin_protocolos_atendimentos "
+                 "(protocolo_id, conversation_id, contact_id, assignee_name, "
                  " fields, started_at, created_at, updated_at) "
                  "VALUES (:aid, :cid, :ctid, :aname, '{}', :ts, :ts, :ts)"),
-            {"aid": atendimento_id, "cid": conversation_id, "ctid": contact_id,
+            {"aid": protocolo_id, "cid": conversation_id, "ctid": contact_id,
              "aname": assignee_name or "", "ts": ts},
         )
-    return get_open_cycle(conversation_id, atendimento_id)
+    return get_open_cycle(conversation_id, protocolo_id)
 
 
-def ensure_open_cycle(conversation_id: int, contact_id: int, atendimento_id: int,
+def ensure_open_cycle(conversation_id: int, contact_id: int, protocolo_id: int,
                       assignee_name: str = "") -> dict:
-    """Ciclo aberto da conversa neste atendimento; cria um NOVO se não houver
+    """Ciclo aberto da atendimento neste protocolo; cria um NOVO se não houver
     (o último foi resolvido ou nunca existiu) — é isso que acumula as linhas."""
-    cur = get_open_cycle(conversation_id, atendimento_id)
+    cur = get_open_cycle(conversation_id, protocolo_id)
     if cur:
         return cur
-    return _insert_cycle(conversation_id, contact_id, atendimento_id, assignee_name)
+    return _insert_cycle(conversation_id, contact_id, protocolo_id, assignee_name)
 
 
-def ensure_cycle_exists(conversation_id: int, contact_id: int, atendimento_id: int) -> dict | None:
+def ensure_cycle_exists(conversation_id: int, contact_id: int, protocolo_id: int) -> dict | None:
     """Bootstrap (saída do operador): cria um ciclo SÓ se não houver NENHUM neste
-    atendimento — nunca abre um ciclo novo logo após uma resolução."""
-    if _count_cycles(conversation_id, atendimento_id) > 0:
+    protocolo — nunca abre um ciclo novo logo após uma resolução."""
+    if _count_cycles(conversation_id, protocolo_id) > 0:
         return None
-    return _insert_cycle(conversation_id, contact_id, atendimento_id)
+    return _insert_cycle(conversation_id, contact_id, protocolo_id)
 
 
-def resolve_conversa(conversation_id: int, values: dict, assignee_name: str = "",
+def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str = "",
                      assignee_user_id: int | None = None) -> tuple[dict | None, str | None]:
-    """Fecha o ciclo ABERTO da conversa (Fim + OBS + extras). Cria+fecha um se não houver.
+    """Fecha o ciclo ABERTO da atendimento (Fim + OBS + extras). Cria+fecha um se não houver.
     OBS vai na coluna fixa; cada rótulo extra vai numa linha de campos_extras. Grava o
     AGENTE que resolveu (assignee_user_id + assignee_name) no ciclo."""
-    conv = conversation_repo.get(conversation_id)
-    if not conv:
-        return None, "Conversa não encontrada."
-    contact_id = conv["contact_id"]
+    atend = conversation_repo.get(conversation_id)
+    if not atend:
+        return None, "Atendimento não encontrada."
+    contact_id = atend["contact_id"]
     contact = contact_repo.get(contact_id) or {}
-    at = ensure_atendimento_for_contact(
+    at = ensure_protocolo_for_contact(
         contact_id, phone=contact.get("phone", ""), name=_contact_name(contact),
         conversation_id=conversation_id, announce_open=True)
     cycle = (get_open_cycle(conversation_id, at["id"])
              or ensure_open_cycle(conversation_id, contact_id, at["id"], assignee_name))
-    clean, err = normalize_values("conversa", values)
+    clean, err = normalize_values("atendimento", values)
     if err:
         return None, err
     ts = now()
     obs_val = str(clean.get("obs") or "")
-    extra_defs = get_extra_defs("conversa")
+    extra_defs = get_extra_defs("atendimento")
     with make_plugin_db() as conn:
         conn.execute(
-            text("UPDATE plugin_atendimentos_conversas SET obs = :obs, ended_at = :ts, "
+            text("UPDATE plugin_protocolos_atendimentos SET obs = :obs, ended_at = :ts, "
                  "assignee_user_id = COALESCE(:auid, assignee_user_id), "
                  "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END, "
                  "updated_at = :ts WHERE id = :id"),
@@ -1356,10 +1356,10 @@ def resolve_conversa(conversation_id: int, values: dict, assignee_name: str = ""
         )
         for d in extra_defs:
             if d["key"] in clean:
-                upsert_extra(conn, "conversa", cycle["id"], d, clean[d["key"]])
+                upsert_extra(conn, "atendimento", cycle["id"], d, clean[d["key"]])
     # Espelha os mesmos campos no core (conversations.custom_attributes) — integra
-    # conversa↔atendimento e sobrevive se o plugin for desativado.
-    mirror_conversa_to_core(conversation_id, clean)
+    # atendimento↔protocolo e sobrevive se o plugin for desativado.
+    mirror_atendimento_to_core(conversation_id, clean)
     _broadcast_changed(contact_id, at["id"])
     return get_latest_cycle(conversation_id), None
 
@@ -1371,7 +1371,7 @@ def _contact_name(contact: dict) -> str:
 
 
 def _resolve_target(payload: dict):
-    """(contact, conv) do contato do payload, ou (None, None) se inaplicável.
+    """(contact, atend) do contato do payload, ou (None, None) se inaplicável.
 
     Sync (o bus roda em ``asyncio.to_thread``). Pula grupos e respeita o toggle.
     """
@@ -1379,62 +1379,62 @@ def _resolve_target(payload: dict):
     if not config_repo.get(f"plugin.{PLUGIN_ID}.auto_link", True):
         return None, None
     if payload.get("is_group"):
-        return None, None  # atendimentos são por-contato (1:1)
+        return None, None  # protocolos são por-contato (1:1)
     phone = payload.get("phone")
     if not phone:
         return None, None
     contact = contact_repo.get_by_phone(phone)
     if not contact:
         return None, None
-    conv = (conversation_repo.get_open_for_contact(contact["id"])
+    atend = (conversation_repo.get_open_for_contact(contact["id"])
             or conversation_repo.get_latest_for_contact(contact["id"]))
-    return (contact, conv) if conv else (None, None)
+    return (contact, atend) if atend else (None, None)
 
 
 def on_inbound(ctx, payload: dict) -> None:
-    """``message.saved`` (cliente engajou) → garante atendimento aberto + ciclo
+    """``message.saved`` (cliente engajou) → garante protocolo aberto + ciclo
     ABERTO. Se o último ciclo foi resolvido, abre um NOVO (cliente voltou)."""
     try:
-        contact, conv = _resolve_target(payload)
-        if not conv:
+        contact, atend = _resolve_target(payload)
+        if not atend:
             return
-        at = ensure_atendimento_for_contact(
+        at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
-            conversation_id=conv["id"], announce_open=True)
-        ensure_open_cycle(conv["id"], contact["id"], at["id"])
+            conversation_id=atend["id"], announce_open=True)
+        ensure_open_cycle(atend["id"], contact["id"], at["id"])
     except Exception as e:  # noqa: BLE001 — um handler que falha nunca quebra o pipeline
-        logger.debug("atendimentos.on_inbound falhou: %s", e)
+        logger.debug("protocolos.on_inbound falhou: %s", e)
 
 
 def on_outbound(ctx, payload: dict) -> None:
-    """``message.sent`` (operador/IA) → garante atendimento + ciclo de bootstrap,
+    """``message.sent`` (operador/IA) → garante protocolo + ciclo de bootstrap,
     mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma)."""
     try:
-        contact, conv = _resolve_target(payload)
-        if not conv:
+        contact, atend = _resolve_target(payload)
+        if not atend:
             return
-        at = ensure_atendimento_for_contact(
+        at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
-            conversation_id=conv["id"], announce_open=True)
-        ensure_cycle_exists(conv["id"], contact["id"], at["id"])
+            conversation_id=atend["id"], announce_open=True)
+        ensure_cycle_exists(atend["id"], contact["id"], at["id"])
     except Exception as e:  # noqa: BLE001
-        logger.debug("atendimentos.on_outbound falhou: %s", e)
+        logger.debug("protocolos.on_outbound falhou: %s", e)
 
 
 def on_startup(ctx, payload: dict) -> None:
     """``app.startup`` → backfills one-time idempotentes + registro dos atributos de
-    conversa no core + registro dos avisos de sistema do atendimento. Boot nunca quebra
+    atendimento no core + registro dos avisos de sistema do protocolo. Boot nunca quebra
     por causa daqui (tudo defensivo)."""
-    register_system_notices()  # grupo + tipos de aviso (abrir/finalizar atendimento)
+    register_system_notices()  # grupo + tipos de aviso (abrir/finalizar protocolo)
     try:
         _maybe_backfill()  # blob `fields` legado → tabelas normalizadas
     except Exception as e:  # noqa: BLE001
-        logger.warning("atendimentos: backfill no startup falhou (segue sem migrar): %s", e)
+        logger.warning("protocolos: backfill no startup falhou (segue sem migrar): %s", e)
     try:
-        _maybe_backfill_custom_attrs()  # custom_attributes do ext_demo → Atendimentos
+        _maybe_backfill_custom_attrs()  # custom_attributes do ext_demo → Protocolos
     except Exception as e:  # noqa: BLE001
-        logger.warning("atendimentos: backfill de custom_attributes falhou: %s", e)
-    sync_core_conversa_defs()  # atributos de conversa do core p/ os campos espelhados
+        logger.warning("protocolos: backfill de custom_attributes falhou: %s", e)
+    sync_core_atendimento_defs()  # atributos de atendimento do core p/ os campos espelhados
 
 
 # ── Backfill (blob `fields` legado → tabela normalizada) ──────────────────────
@@ -1477,30 +1477,30 @@ def _maybe_backfill() -> None:
     if config_repo.get(_BACKFILL_FLAG, False):
         return
     # Garante ids estáveis nas defs extras atuais dos dois escopos.
-    a_by_key = {d["key"]: d for d in set_field_defs("atendimento", get_extra_defs("atendimento"))
+    a_by_key = {d["key"]: d for d in set_field_defs("protocolo", get_extra_defs("protocolo"))
                 if not d.get("fixed")}
-    c_by_key = {d["key"]: d for d in set_field_defs("conversa", get_extra_defs("conversa"))
+    c_by_key = {d["key"]: d for d in set_field_defs("atendimento", get_extra_defs("atendimento"))
                 if not d.get("fixed")}
     ts = now()
     with make_plugin_db() as conn:
         crows = conn.execute(
-            text("SELECT id, fields FROM plugin_atendimentos_conversas")).mappings().all()
+            text("SELECT id, fields FROM plugin_protocolos_atendimentos")).mappings().all()
         for r in crows:
-            _backfill_blob(conn, "conversa", r["id"], _safe_json(r["fields"]),
-                           c_by_key, "plugin_atendimentos_conversas", ts)
-        arows = conn.execute(
-            text("SELECT id, fields FROM plugin_atendimentos_atendimentos")).mappings().all()
-        for r in arows:
             _backfill_blob(conn, "atendimento", r["id"], _safe_json(r["fields"]),
-                           a_by_key, "plugin_atendimentos_atendimentos", ts)
+                           c_by_key, "plugin_protocolos_atendimentos", ts)
+        arows = conn.execute(
+            text("SELECT id, fields FROM plugin_protocolos_protocolos")).mappings().all()
+        for r in arows:
+            _backfill_blob(conn, "protocolo", r["id"], _safe_json(r["fields"]),
+                           a_by_key, "plugin_protocolos_protocolos", ts)
     config_repo.set(_BACKFILL_FLAG, True)
-    logger.info("atendimentos: backfill de campos extras concluído")
+    logger.info("protocolos: backfill de campos extras concluído")
 
 
-# ── Backfill dos dados do ext_demo (conversations.custom_attributes → Atendimentos) ──
-# O ext_demo gravava os campos de "Resolver conversa" (CSV, default motivo,observacao)
+# ── Backfill dos dados do ext_demo (conversations.custom_attributes → Protocolos) ──
+# O ext_demo gravava os campos de "Resolver atendimento" (CSV, default motivo,observacao)
 # direto no core (conversations.custom_attributes). Ao aposentar o ext_demo, migramos
-# esses valores para as tabelas do Atendimentos (obs + extras da conversa), UMA vez.
+# esses valores para as tabelas do Protocolos (obs + extras da atendimento), UMA vez.
 
 def _ext_demo_resolve_keys() -> list[str]:
     """Chaves que o ext_demo gravava em custom_attributes (CSV das settings dele)."""
@@ -1510,8 +1510,8 @@ def _ext_demo_resolve_keys() -> list[str]:
 
 def _maybe_backfill_custom_attrs() -> None:
     """One-time: migra os valores que o ext_demo gravou em conversations.custom_attributes
-    para as tabelas do Atendimentos. SÓ as chaves do ext_demo são migradas (não outros
-    atributos do core). observacao/observacoes → coluna obs; demais → extras da conversa
+    para as tabelas do Protocolos. SÓ as chaves do ext_demo são migradas (não outros
+    atributos do core). observacao/observacoes → coluna obs; demais → extras da atendimento
     (garantindo a def antes, p/ não virar órfã). Idempotente: ON CONFLICT DO NOTHING +
     guard de obs vazio (em _backfill_blob) + flag no config."""
     if config_repo.get(_CA_BACKFILL_FLAG, False):
@@ -1520,16 +1520,16 @@ def _maybe_backfill_custom_attrs() -> None:
     if not keys:
         config_repo.set(_CA_BACKFILL_FLAG, True)
         return
-    # Garante que as chaves não-obs existam como defs extras da conversa (senão o
+    # Garante que as chaves não-obs existam como defs extras da atendimento (senão o
     # _backfill_blob as gravaria com def_id órfão, e nunca apareceriam na UI).
     obs_like = {"observacao", "observacoes"}
-    cur = get_extra_defs("conversa")
+    cur = get_extra_defs("atendimento")
     have = {d["key"] for d in cur}
     additions = [{"key": k, "label": k, "type": "text"}
                  for k in keys if k not in obs_like and k not in have and _KEY_RE.match(k)]
     if additions:
-        set_field_defs("conversa", cur + additions)
-    c_by_key = {d["key"]: d for d in get_extra_defs("conversa")}
+        set_field_defs("atendimento", cur + additions)
+    c_by_key = {d["key"]: d for d in get_extra_defs("atendimento")}
     ts = now()
     with make_plugin_db() as conn:
         rows = conn.execute(
@@ -1543,24 +1543,24 @@ def _maybe_backfill_custom_attrs() -> None:
         sub = {k: v for k, v in attrs.items() if k in keys}
         if sub:
             candidates.append((r["id"], r["contact_id"], sub))
-    for conv_id, contact_id, sub in candidates:
+    for atend_id, contact_id, sub in candidates:
         try:
             contact = contact_repo.get(contact_id) or {}
-            at = ensure_atendimento_for_contact(
+            at = ensure_protocolo_for_contact(
                 contact_id, phone=contact.get("phone", ""), name=_contact_name(contact))
-            cycle = (get_latest_cycle(conv_id)
-                     or ensure_open_cycle(conv_id, contact_id, at["id"]))
+            cycle = (get_latest_cycle(atend_id)
+                     or ensure_open_cycle(atend_id, contact_id, at["id"]))
             with make_plugin_db() as conn:
-                _backfill_blob(conn, "conversa", cycle["id"], sub, c_by_key,
-                               "plugin_atendimentos_conversas", ts)
-        except Exception as e:  # noqa: BLE001 — uma conversa que falha não trava o resto
-            logger.debug("atendimentos: backfill CA da conversa %s falhou: %s", conv_id, e)
+                _backfill_blob(conn, "atendimento", cycle["id"], sub, c_by_key,
+                               "plugin_protocolos_atendimentos", ts)
+        except Exception as e:  # noqa: BLE001 — uma atendimento que falha não trava o resto
+            logger.debug("protocolos: backfill CA da atendimento %s falhou: %s", atend_id, e)
     config_repo.set(_CA_BACKFILL_FLAG, True)
-    logger.info("atendimentos: backfill de custom_attributes concluído (%d conversas)",
+    logger.info("protocolos: backfill de custom_attributes concluído (%d atendimentos)",
                 len(candidates))
 
 
-# ── Mensagens de protocolo/avaliação ao FINALIZAR o atendimento ───────────────
+# ── Mensagens de protocolo/avaliação ao FINALIZAR o protocolo ───────────────
 # Config (tela do plugin): 2 itens {título, link} — o "normal" vai ao WhatsApp e o
 # "privado" vira nota privada (painel-only). Em ambos os links são adicionados, como
 # query params, o id do atendente (assignee_id) e um id de protocolo único gerado no
@@ -1615,12 +1615,12 @@ def _append_query(url: str, params: dict) -> str:
 
 
 def _channel_for_contact(contact_id) -> str:
-    """Canal da conversa mais recente do contato (fallback 'default')."""
+    """Canal da atendimento mais recente do contato (fallback 'default')."""
     try:
-        conv = (conversation_repo.get_open_for_contact(contact_id)
+        atend = (conversation_repo.get_open_for_contact(contact_id)
                 or conversation_repo.get_latest_for_contact(contact_id))
-        if conv:
-            full = conversation_repo.get_with_channel(conv["id"])
+        if atend:
+            full = conversation_repo.get_with_channel(atend["id"])
             if full and full.get("channel_id"):
                 return full["channel_id"]
     except Exception:  # noqa: BLE001
@@ -1634,7 +1634,7 @@ def _compose_message(title: str, link: str, params: dict) -> str:
 
 
 def send_protocol_on_close(at: dict) -> None:
-    """Ao FINALIZAR o atendimento: envia o link normal (WhatsApp) + o link privado
+    """Ao FINALIZAR o protocolo: envia o link normal (WhatsApp) + o link privado
     (nota privada), cada um com assignee_id + id_protocol na URL. Best-effort: nunca
     levanta. No-op se desativado, sem links, ou sem runtime (testes)."""
     try:
@@ -1672,16 +1672,16 @@ def send_protocol_on_close(at: dict) -> None:
                     msg_id=mid, channel_id=channel_id)
                 broadcast("new_message", {"phone": phone, "message": msg})
             except Exception as e:  # noqa: BLE001
-                logger.warning("atendimentos: falha ao enviar link de protocolo: %s", e)
+                logger.warning("protocolos: falha ao enviar link de protocolo: %s", e)
 
         # 2) Link privado → nota privada (painel-only, NÃO vai ao WhatsApp).
         if priv.get("link"):
             text_p = _compose_message(priv.get("title") or "", priv["link"], params)
             try:
                 # MESMO channel_id do link normal — senão a nota privada cairia no
-                # inbox "default" (ContactMemory resolve a conversa POR inbox) e abriria
-                # uma conversa nova em OUTRO canal. Os dois links têm que ir na mesma
-                # conversa do mesmo canal.
+                # inbox "default" (ContactMemory resolve a atendimento POR inbox) e abriria
+                # uma atendimento nova em OUTRO canal. Os dois links têm que ir na mesma
+                # atendimento do mesmo canal.
                 cm = agent_handler._get_contact(phone, channel_id=channel_id)
                 cm.add_message("private_note", text_p)
                 saved = message_repo.get_last(cm.id)
@@ -1691,9 +1691,9 @@ def send_protocol_on_close(at: dict) -> None:
                     note["_id"] = saved["_id"]
                 broadcast("new_message", {"phone": phone, "message": note})
             except Exception as e:  # noqa: BLE001
-                logger.warning("atendimentos: falha ao salvar nota privada de protocolo: %s", e)
+                logger.warning("protocolos: falha ao salvar nota privada de protocolo: %s", e)
     except Exception as e:  # noqa: BLE001
-        logger.warning("atendimentos: send_protocol_on_close falhou: %s", e)
+        logger.warning("protocolos: send_protocol_on_close falhou: %s", e)
 
 
 # ── Enforcement no backend (filter.conversation.before_status) ────────────────
@@ -1703,13 +1703,13 @@ def _check_before_status(payload: dict):
         return payload  # só fechar é gated; reabrir nunca
     if not config_repo.get(f"plugin.{PLUGIN_ID}.enforce_backend", True):
         return payload
-    if not any(d.get("required") for d in get_field_defs("conversa")):
+    if not any(d.get("required") for d in get_field_defs("atendimento")):
         return payload
     cid = payload.get("conversation_id")
     cycle = get_latest_cycle(cid)
-    err = _missing_required("conversa", _effective_values("conversa", cycle or {}))
+    err = _missing_required("atendimento", _effective_values("atendimento", cycle or {}))
     if err:
-        logger.info("atendimentos: recusando fechar conversa %s — %s", cid, err)
+        logger.info("protocolos: recusando fechar atendimento %s — %s", cid, err)
         return None  # → HTTP 403
     return payload
 
@@ -1724,6 +1724,6 @@ async def before_status(ctx, payload):
 
 # ── Util ──────────────────────────────────────────────────────────────────────
 
-def _broadcast_changed(contact_id: int | None, atendimento_id: int | None) -> None:
-    broadcast("plugin_atendimentos_changed",
-              {"contact_id": contact_id, "atendimento_id": atendimento_id})
+def _broadcast_changed(contact_id: int | None, protocolo_id: int | None) -> None:
+    broadcast("plugin_protocolos_changed",
+              {"contact_id": contact_id, "protocolo_id": protocolo_id})

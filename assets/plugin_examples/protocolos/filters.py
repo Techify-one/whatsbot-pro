@@ -1,7 +1,7 @@
-"""Filters do plugin Atendimentos.
+"""Filters do plugin Protocolos.
 
-``filter.conversation.before_status``: recusa fechar a conversa (HTTP 403) se os
-campos OBRIGATÓRIOS de resolução (escopo ``conversa``) não estiverem gravados no
+``filter.conversation.before_status``: recusa fechar a atendimento (HTTP 403) se os
+campos OBRIGATÓRIOS de resolução (escopo ``atendimento``) não estiverem gravados no
 vínculo. Pareia com o popup do frontend, que grava os campos ANTES de chamar
 ``/status`` — então o caminho normal passa e uma chamada direta à API é barrada.
 Desligável via setting ``enforce_backend``. Reabrir nunca é bloqueado.

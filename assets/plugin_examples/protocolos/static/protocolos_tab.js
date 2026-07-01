@@ -1,22 +1,22 @@
-// Override da aba "Atendimentos". Aba dedicada à entidade ATENDIMENTO:
+// Override da aba "Protocolos". Aba dedicada à entidade PROTOCOLO:
 //  - Lista (colunas ordenáveis por clique) OU Kanban (agrupado por Status ou Atendente,
 //    com drag-and-drop que ALTERA o estado: soltar numa coluna fecha/reabre ou atribui).
 //  - Filtros: status, busca por cliente e PERÍODO de criação (intervalo + presets).
-//  - Abrir um atendimento → detalhe; clicar numa de suas conversas → vai EXATAMENTE
-//    àquele ponto da conversa no chat (?message=<_id>).
-// Desativar o plugin → a aba volta 100% ao Atendimentos nativo.
+//  - Abrir um protocolo → detalhe; clicar numa de suas atendimentos → vai EXATAMENTE
+//    àquele ponto da atendimento no chat (?message=<_id>).
+// Desativar o plugin → a aba volta 100% ao Protocolos nativo.
 
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { ConversasTable } from '/plugins/atendimentos/static/conversas_table.js';
-import { ResolveForm, LabeledField } from '/plugins/atendimentos/static/resolve_form.js';
+import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
+import { ResolveForm, LabeledField } from '/plugins/protocolos/static/resolve_form.js';
 
 const html = htm.bind(h);
 
-const MODE_KEY = 'whatsbot_atendimentos_mode';    // 'lista' | 'kanban'
-const KGROUP_KEY = 'whatsbot_atendimentos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
-const VIEW_KEY = 'whatsbot_atendimentos_view';     // id da aba ativa: '__status'|'__atendente'|<id custom>
+const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
+const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
+const VIEW_KEY = 'whatsbot_protocolos_view';     // id da aba ativa: '__status'|'__atendente'|<id custom>
 function lsGet(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
 
@@ -38,10 +38,10 @@ function fmtCell(v, def) {
   return (v == null || v === '') ? '—' : String(v);
 }
 
-// Campo do atendimento "preenchido"? checkbox sempre conta como preenchido (consistente
+// Campo do protocolo "preenchido"? checkbox sempre conta como preenchido (consistente
 // com o backend _missing_required e com o isFilled do popup de resolver). Usado pelo gate
 // de obrigatórios do detalhe e pelo guard do drag para "Fechado".
-function isFilledAtend(def, v) {
+function isFilledProto(def, v) {
   if (def.type === 'checkbox') return true;
   return String(v == null ? '' : v).trim() !== '';
 }
@@ -56,9 +56,9 @@ function ymd(date) {
 function dayStartEpoch(s) { if (!s) return null; const d = new Date(`${s}T00:00:00`); return Number.isNaN(d) ? null : Math.floor(d.getTime() / 1000); }
 function dayEndEpoch(s) { if (!s) return null; const d = new Date(`${s}T23:59:59`); return Number.isNaN(d) ? null : Math.floor(d.getTime() / 1000); }
 
-// Abre EXATAMENTE a conversa (thread) no hub de chat — mesmo primitivo do kanban
+// Abre EXATAMENTE a atendimento (thread) no hub de chat — mesmo primitivo do kanban
 // nativo (history.pushState + popstate). Com `messageId`, usa o permalink de mensagem
-// (?message=<_id>) p/ rolar ATÉ aquele ponto da conversa (estilo busca).
+// (?message=<_id>) p/ rolar ATÉ aquele ponto da atendimento (estilo busca).
 function openConversation(conversationId, messageId = null) {
   if (conversationId == null) return;
   const qs = messageId != null ? `?message=${messageId}` : '';
@@ -112,9 +112,9 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
                 ...users.map((u) => ({ id: `u:${u.id}`, label: u.name || `Usuário #${u.id}` }))],
       columnIdOf: (r) => (r.assignee_user_id != null ? `u:${r.assignee_user_id}` : '__none__'),
       confirmText: (r, col) => (col === '__none__'
-        ? `Remover a atribuição do atendimento de ${cliente(r)}?`
-        : `Atribuir o atendimento de ${cliente(r)} a ${nameOf(col)}?`),
-      onDrop: (r, col) => apiPost(`/atendimentos/${r.id}/assign`, {
+        ? `Remover a atribuição do protocolo de ${cliente(r)}?`
+        : `Atribuir o protocolo de ${cliente(r)} a ${nameOf(col)}?`),
+      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/assign`, {
         assignee_user_id: col === '__none__' ? null : +col.slice(2),
         assignee_name: col === '__none__' ? '' : nameOf(col),
       }),
@@ -173,11 +173,11 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
     return {
       columns: [{ id: '__none__', label: 'Sem valor' },
                 ...opts.map((o) => ({ id: `o:${o}`, label: o }))],
-      columnIdOf: (r) => { const v = (r.conversa_attrs || {})[key]; return (v != null && v !== '') ? `o:${v}` : '__none__'; },
+      columnIdOf: (r) => { const v = (r.atendimento_attrs || {})[key]; return (v != null && v !== '') ? `o:${v}` : '__none__'; },
       confirmText: (r, col) => (col === '__none__'
-        ? `Limpar "${def.label}" da última conversa de ${cliente(r)}?`
-        : `Definir "${def.label}" = "${col.slice(2)}" na última conversa de ${cliente(r)}?`),
-      onDrop: (r, col) => apiPost(`/atendimentos/${r.id}/set-attr`, {
+        ? `Limpar "${def.label}" da última atendimento de ${cliente(r)}?`
+        : `Definir "${def.label}" = "${col.slice(2)}" na última atendimento de ${cliente(r)}?`),
+      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/set-attr`, {
         key, value: col === '__none__' ? null : col.slice(2),
       }),
     };
@@ -188,14 +188,14 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
     columns: [{ id: 'aberto', label: 'Aberto' }, { id: 'fechado', label: 'Fechado' }],
     columnIdOf: (r) => (r.status === 'fechado' ? 'fechado' : 'aberto'),
     confirmText: (r, col) => (col === 'fechado'
-      ? `Finalizar o atendimento de ${cliente(r)}?`
-      : `Reabrir o atendimento de ${cliente(r)}?`),
+      ? `Finalizar o protocolo de ${cliente(r)}?`
+      : `Reabrir o protocolo de ${cliente(r)}?`),
     onDrop: (r, col) => (col === 'fechado'
-      ? apiPost(`/atendimentos/${r.id}/close`) : apiPost(`/atendimentos/${r.id}/reopen`)),
+      ? apiPost(`/protocolos/${r.id}/close`) : apiPost(`/protocolos/${r.id}/reopen`)),
   };
 }
 
-export function AtendimentosTab({ api, setTab }) {
+export function ProtocolosTab({ api, setTab }) {
   return html`
     <div>
       <div class="flex items-center gap-2 mb-3">
@@ -204,20 +204,20 @@ export function AtendimentosTab({ api, setTab }) {
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
           Voltar
         </button>` : null}
-        <h1 class="text-lg font-semibold text-wa-text">Atendimentos</h1>
+        <h1 class="text-lg font-semibold text-wa-text">Protocolos</h1>
       </div>
-      <${AtendimentosList} api=${api} />
+      <${ProtocolosList} api=${api} />
     </div>`;
 }
 
-function AtendimentosList({ api }) {
+function ProtocolosList({ api }) {
   const apiBase = api.apiBase;
   const { authHeaders } = api.services;
 
-  const [cols, setCols] = useState([]);          // TODAS as defs do atendimento (OBS fixo + extras, com `required`)
-  const [convDefs, setConvDefs] = useState([]);  // defs de "Resolver conversa" (sub-tabela do detalhe)
-  const [convResolveDefs, setConvResolveDefs] = useState([]); // conversa: obs+extras editáveis (popup)
-  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo personalizado do core (escopo conversa, não-sistema)
+  const [cols, setCols] = useState([]);          // TODAS as defs do protocolo (OBS fixo + extras, com `required`)
+  const [atendDefs, setAtendDefs] = useState([]);  // defs de "Resolver atendimento" (sub-tabela do detalhe)
+  const [atendResolveDefs, setAtendResolveDefs] = useState([]); // atendimento: obs+extras editáveis (popup)
+  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo personalizado do core (escopo atendimento, não-sistema)
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
@@ -240,13 +240,13 @@ function AtendimentosList({ api }) {
     try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); } catch (e) { return null; }
   });
   const [assigneeFilter, setAssigneeFilter] = useState(null);  // filtro por atendente (da aba)
-  const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de conversa (da aba)
+  const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);            // grupos de permissão (p/ "Quem pode ver")
   const [actionMsg, setActionMsg] = useState(null);  // {text, error}
-  const [detail, setDetail] = useState(null);        // {atendimento, conversas}
+  const [detail, setDetail] = useState(null);        // {protocolo, atendimentos}
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
   const appliedViewRef = useRef(null);               // última aba cujos filtros já foram aplicados
   const setM = (m) => { setMode(m); lsSet(MODE_KEY, m); };
@@ -257,7 +257,7 @@ function AtendimentosList({ api }) {
     () => tabs.find((t) => String(t.id) === String(activeViewId)) || BUILTIN_VIEWS[0],
     [tabs, activeViewId]);
   const canTeam = api.services.hasPermission
-    ? api.services.hasPermission(currentUser, 'plugin.atendimentos.manage_team_views') : true;
+    ? api.services.hasPermission(currentUser, 'plugin.protocolos.manage_team_views') : true;
   const canEditView = (v) => !v.builtin
     && (canTeam || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id)));
   // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
@@ -265,7 +265,7 @@ function AtendimentosList({ api }) {
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
   const availFilter = (key) => !availArr || availArr.includes(key);
 
-  const dragRef = useRef(null);     // atendimento sendo arrastado
+  const dragRef = useRef(null);     // protocolo sendo arrastado
   const draggedRef = useRef(false); // distingue clique de arrasto
   const [dropCol, setDropCol] = useState(null);
 
@@ -295,18 +295,18 @@ function AtendimentosList({ api }) {
       if (assigneeFilter != null) params.set('assignee_user_id', String(assigneeFilter));
       if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
       const [dd, cd, ca, ll] = await Promise.all([
+        getJson(`${apiBase}/field-defs?scope=protocolo`),
         getJson(`${apiBase}/field-defs?scope=atendimento`),
-        getJson(`${apiBase}/field-defs?scope=conversa`),
         getJson('/api/custom-attributes?applies_to=conversation'),  // atributos do CORE
-        getJson(`${apiBase}/atendimentos?${params.toString()}`),
+        getJson(`${apiBase}/protocolos?${params.toString()}`),
       ]);
-      // TODAS as defs do atendimento (OBS fixo + extras, com `required`) — alimentam o
+      // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
       // form editável do detalhe e o gate de obrigatórios (drag p/ "Fechado"). Sem filtrar.
       setCols((dd && dd.ok && dd.data && dd.data.defs) || []);
-      const convAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
-      setConvDefs(convAll.filter((d) => !d.fixed));
-      setConvResolveDefs(convAll.filter((d) => !d.readonly)); // p/ o popup "Resolver conversa"
-      // Atributo personalizado = def do core (escopo conversa) que NÃO é espelho do plugin (is_system=0).
+      const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
+      setAtendDefs(atendAll.filter((d) => !d.fixed));
+      setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
+      // Atributo personalizado = def do core (escopo atendimento) que NÃO é espelho do plugin (is_system=0).
       setCoreAttrDefs(((ca && ca.ok && ca.data) || [])
         .filter((d) => !d.is_system)
         .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
@@ -389,7 +389,7 @@ function AtendimentosList({ api }) {
     let ws;
     try {
       ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_atendimentos_changed') { load(); loadViews(); } } catch (_) { /* ignore */ } };
+      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_protocolos_changed') { load(); loadViews(); } } catch (_) { /* ignore */ } };
     } catch (_) { /* ignore */ }
     return () => { try { ws && ws.close(); } catch (_) { /* ignore */ } };
   }, [load, loadViews]);
@@ -413,15 +413,15 @@ function AtendimentosList({ api }) {
   };
 
   const openDetail = useCallback(async (atid, warn = false) => {
-    const r = await getJson(`${apiBase}/atendimentos/${atid}`);
+    const r = await getJson(`${apiBase}/protocolos/${atid}`);
     if (r && r.ok) {
-      setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este atendimento.' : '');
+      setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este protocolo.' : '');
       setDetail(r.data);
     }
   }, [apiBase, getJson]);
 
   // Deep-link de entrada (Req 1): /attendances?detail=<atid> abre o detalhe daquele
-  // atendimento. Lido no mount E em popstate — é assim que o "Resolver e ir ao atendimento"
+  // protocolo. Lido no mount E em popstate — é assim que o "Resolver e ir ao protocolo"
   // (navega com pushState+popstate no extends.js) chega aqui. Limpa o param (replaceState)
   // p/ não reabrir o detalhe ao navegar de volta.
   useEffect(() => {
@@ -471,37 +471,37 @@ function AtendimentosList({ api }) {
     } catch (_) { setActionMsg({ text: 'Falha ao excluir a visualização.', error: true }); }
   }, [api, apiBase, authHeaders, activeViewId, loadViews]);
 
-  // Resolve a conversa do ciclo aberto do atendimento (popup) e finaliza. Usado quando
-  // o backend recusa o fechamento por haver conversa aberta. Retorna true se finalizou.
+  // Resolve a atendimento do ciclo aberto do protocolo (popup) e finaliza. Usado quando
+  // o backend recusa o fechamento por haver atendimento aberta. Retorna true se finalizou.
   async function forceResolveAndClose(atid) {
-    const r = await getJson(`${apiBase}/atendimentos/${atid}`);
-    const conversas = (r && r.ok && r.data && r.data.conversas) || [];
-    const openCycle = conversas.find((c) => !c.ended_at && c.conversation_id);
+    const r = await getJson(`${apiBase}/protocolos/${atid}`);
+    const atendimentos = (r && r.ok && r.data && r.data.atendimentos) || [];
+    const openCycle = atendimentos.find((c) => !c.ended_at && c.conversation_id);
     if (!openCycle) return false; // nada aberto → mantém o erro original
     let fields = {};
-    if (convResolveDefs.length) {
+    if (atendResolveDefs.length) {
       const picked = await api.ui.openModal((close) => html`
-        <${ResolveForm} defs=${convResolveDefs} conv=${{ id: openCycle.conversation_id }}
+        <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return false; // cancelou → não finaliza
       fields = picked.fields || {}; // onOk devolve { fields, custom_attributes, goTo }
     }
-    const res = await apiPost(`/conversas/${openCycle.conversation_id}/resolve`, { fields });
+    const res = await apiPost(`/atendimentos/${openCycle.conversation_id}/resolve`, { fields });
     if (!res || res.ok === false) {
-      setActionMsg({ text: (res && res.error) || 'Falha ao resolver a conversa.', error: true });
+      setActionMsg({ text: (res && res.error) || 'Falha ao resolver a atendimento.', error: true });
       return false;
     }
-    // Fecha a CONVERSA no core (status=closed). O resolve do plugin só encerra o CICLO
-    // (ended_at) — sem este passo a conversa segue ABERTA na aba de conversa (o header
-    // fica em "Resolver" em vez de "Reabrir"). É o MESMO 2º passo que a aba de conversa
+    // Fecha a ATENDIMENTO no core (status=closed). O resolve do plugin só encerra o CICLO
+    // (ended_at) — sem este passo a atendimento segue ABERTA na aba de atendimento (o header
+    // fica em "Resolver" em vez de "Reabrir"). É o MESMO 2º passo que a aba de atendimento
     // faz após o beforeResolve (resolveConversation → setConversationStatus); aqui o popup
     // do plugin já rodou, então chamamos o status direto. Mantém as duas abas em sincronia.
     const st = await api.services.setConversationStatus(openCycle.conversation_id, 'closed');
     if (st && st.ok === false) {
-      setActionMsg({ text: st.error || 'Falha ao fechar a conversa.', error: true });
+      setActionMsg({ text: st.error || 'Falha ao fechar a atendimento.', error: true });
       return false;
     }
-    const closed = await apiPost(`/atendimentos/${atid}/close`);
+    const closed = await apiPost(`/protocolos/${atid}/close`);
     if (closed && closed.ok === false) {
       setActionMsg({ text: closed.error || 'Falha ao finalizar.', error: true });
       return false;
@@ -509,17 +509,17 @@ function AtendimentosList({ api }) {
     return true;
   }
 
-  // Finaliza o atendimento a partir do detalhe (Req 3/4). Se o backend recusar por haver
-  // conversa aberta, abre o popup "Resolver conversa" (forceResolveAndClose) e finaliza
+  // Finaliza o protocolo a partir do detalhe (Req 3/4). Se o backend recusar por haver
+  // atendimento aberta, abre o popup "Resolver atendimento" (forceResolveAndClose) e finaliza
   // depois. Sucesso → fecha o modal + recarrega. Outro erro → devolve {ok:false,error}
   // p/ o DetailModal exibir inline.
-  async function finalizeAtendimento(atid) {
-    const res = await apiPost(`/atendimentos/${atid}/close`);
+  async function finalizeProtocolo(atid) {
+    const res = await apiPost(`/protocolos/${atid}/close`);
     if (res && res.ok === false) {
-      if (/conversa aberta/i.test(res.error || '')) {
+      if (/atendimento aberta/i.test(res.error || '')) {
         const done = await forceResolveAndClose(atid);
         if (done) { setDetail(null); setDetailWarning(''); await load(); return { ok: true }; }
-        return { ok: false, error: 'Resolva a conversa aberta para finalizar o atendimento.' };
+        return { ok: false, error: 'Resolva a atendimento aberta para finalizar o protocolo.' };
       }
       return { ok: false, error: res.error || 'Falha ao finalizar.' };
     }
@@ -527,11 +527,11 @@ function AtendimentosList({ api }) {
     return { ok: true };
   }
 
-  // Obrigatórios do ATENDIMENTO faltando (mesma regra do backend _missing_required):
+  // Obrigatórios do PROTOCOLO faltando (mesma regra do backend _missing_required):
   // OBS (coluna) + extras das defs `required`; checkbox sempre conta como preenchido.
-  function missingRequiredAtend(row) {
+  function missingRequiredProto(row) {
     const eff = { obs: (row && row.obs) || '', ...((row && row.fields) || {}) };
-    return cols.some((d) => d.required && !isFilledAtend(d, eff[d.key]));
+    return cols.some((d) => d.required && !isFilledProto(d, eff[d.key]));
   }
 
   async function applyDrop(row, colId) {
@@ -544,30 +544,30 @@ function AtendimentosList({ api }) {
     const ok = await api.ui.openModal((close) => html`<${ConfirmDialog} message=${msg}
       onOk=${() => close(true)} onCancel=${() => close(false)} />`);
     if (!ok) return;
-    // Req 5: soltar em "Fechado" sem os obrigatórios do atendimento → abre o detalhe
-    //        daquele atendimento com um aviso e NÃO fecha.
-    if (colId === 'fechado' && missingRequiredAtend(row)) {
+    // Req 5: soltar em "Fechado" sem os obrigatórios do protocolo → abre o detalhe
+    //        daquele protocolo com um aviso e NÃO fecha.
+    if (colId === 'fechado' && missingRequiredProto(row)) {
       openDetail(row.id, true);
       return;
     }
     try {
       const res = await grouping.onDrop(row, colId);
       if (res && res.ok === false) {
-        // Fechar barrado por conversa aberta → força o popup "Resolver conversa".
-        if (colId === 'fechado' && /conversa aberta/i.test(res.error || '')) {
+        // Fechar barrado por atendimento aberta → força o popup "Resolver atendimento".
+        if (colId === 'fechado' && /atendimento aberta/i.test(res.error || '')) {
           await forceResolveAndClose(row.id);
         } else {
           setActionMsg({ text: res.error || 'Falha ao mover.', error: true });
         }
       }
-    } catch (_) { setActionMsg({ text: 'Falha ao mover o atendimento.', error: true }); }
+    } catch (_) { setActionMsg({ text: 'Falha ao mover o protocolo.', error: true }); }
     await load();
   }
 
   // ── Lista: colunas data-driven (ordenáveis) ──────────────────────────────────
-  // Só os dados PRÓPRIOS do atendimento. Os rótulos do plugin e os atributos
-  // personalizados NÃO aparecem aqui — eles vivem no DETALHE de cada atendimento
-  // (modal), junto da conversa a que pertencem.
+  // Só os dados PRÓPRIOS do protocolo. Os rótulos do plugin e os atributos
+  // personalizados NÃO aparecem aqui — eles vivem no DETALHE de cada protocolo
+  // (modal), junto da atendimento a que pertencem.
   const allCols = useMemo(() => [
     { key: 'cliente', label: 'Cliente', nowrap: true,
       get: (r) => (r.contact_name || r.contact_phone || '').toLowerCase(),
@@ -742,20 +742,20 @@ function AtendimentosList({ api }) {
       ${mode === 'kanban' ? tabBar : null}
 
       ${loading ? html`<div class="text-[13px] text-wa-secondary p-4">Carregando…</div>`
-        : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum atendimento.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
+        : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
         : mode === 'kanban' ? kanbanView : listaView}
 
-      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${convDefs} attrDefs=${coreAttrDefs}
-        atendDefs=${cols} warning=${detailWarning} api=${api}
+      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs} attrDefs=${coreAttrDefs}
+        protoDefs=${cols} warning=${detailWarning} api=${api}
         onClose=${() => { setDetail(null); setDetailWarning(''); }}
-        onChanged=${load} onFinalize=${finalizeAtendimento} />` : null}
+        onChanged=${load} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
 }
 
 // Card do kanban: draggable (altera estado ao soltar) + clique abre o detalhe. A CAPA
-// mostra só os dados próprios do atendimento (cliente, datas, atendente, status) — os
+// mostra só os dados próprios do protocolo (cliente, datas, atendente, status) — os
 // rótulos do plugin e os atributos personalizados ficam no DETALHE (modal), junto da
-// conversa a que pertencem.
+// atendimento a que pertencem.
 function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = true }) {
   return html`
     <div draggable=${canDrag}
@@ -779,22 +779,22 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
     </div>`;
 }
 
-// Detalhe do atendimento. Topo = form EDITÁVEL dos campos do atendimento (OBS fixo +
+// Detalhe do protocolo. Topo = form EDITÁVEL dos campos do protocolo (OBS fixo +
 // extras, normais e obrigatórios), pré-preenchido; "Salvar" persiste parcial (fechar
-// depois) e "Finalizar atendimento" só habilita com os obrigatórios preenchidos. Se o
-// atendimento já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
-// conversas (histórico, read-only) fica abaixo.
-function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warning = '',
+// depois) e "Finalizar protocolo" só habilita com os obrigatórios preenchidos. Se o
+// protocolo já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
+// atendimentos (histórico, read-only) fica abaixo.
+function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warning = '',
                       api, onClose, onChanged, onFinalize }) {
-  const at = data.atendimento || {};
-  const conversas = data.conversas || [];
+  const at = data.protocolo || {};
+  const atendimentos = data.atendimentos || [];
   const fechado = at.status === 'fechado';
 
-  // Estado local dos campos do atendimento, pré-preenchido (OBS na coluna obs; extras em
+  // Estado local dos campos do protocolo, pré-preenchido (OBS na coluna obs; extras em
   // at.fields). Editável enquanto aberto; serve de fonte também p/ a visão read-only.
   const [vals, setVals] = useState(() => {
     const init = {};
-    for (const d of atendDefs) {
+    for (const d of protoDefs) {
       const cur = d.key === 'obs' ? at.obs : (at.fields || {})[d.key];
       init[d.key] = d.type === 'checkbox'
         ? (cur === true || cur === 'true')
@@ -806,10 +806,10 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
 
-  const missing = atendDefs.filter((d) => d.required && !isFilledAtend(d, vals[d.key]));
+  const missing = protoDefs.filter((d) => d.required && !isFilledProto(d, vals[d.key]));
 
-  // PUT parcial dos campos do atendimento (obrigatório só é exigido ao FECHAR).
-  const putFields = () => fetch(`${api.apiBase}/atendimentos/${at.id}/fields`, {
+  // PUT parcial dos campos do protocolo (obrigatório só é exigido ao FECHAR).
+  const putFields = () => fetch(`${api.apiBase}/protocolos/${at.id}/fields`, {
     method: 'PUT',
     headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: vals }),
@@ -836,33 +836,33 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
     if (res && res.ok === false) { setMsg({ text: res.error || 'Falha ao finalizar.', error: true }); setFinalizing(false); }
   };
 
-  // Clicar numa conversa (ciclo) → resolve a âncora (1ª mensagem do ciclo) no backend
+  // Clicar numa atendimento (ciclo) → resolve a âncora (1ª mensagem do ciclo) no backend
   // e abre o chat rolando ATÉ aquele ponto exato (permalink ?message=<_id>). Se a
-  // âncora falhar, abre a conversa mesmo assim (sem o scroll fino).
-  const openConv = async (c) => {
+  // âncora falhar, abre a atendimento mesmo assim (sem o scroll fino).
+  const openAtend = async (c) => {
     if (!c) return;
-    let convId = c.conversation_id;
+    let atendId = c.conversation_id;
     let msgId = null;
     try {
-      const r = await fetch(`${api.apiBase}/conversas/${c.id}/anchor`, { headers: api.services.authHeaders() });
+      const r = await fetch(`${api.apiBase}/atendimentos/${c.id}/anchor`, { headers: api.services.authHeaders() });
       const d = await r.json();
       if (d && d.ok && d.data) {
-        if (d.data.conversation_id != null) convId = d.data.conversation_id;
+        if (d.data.conversation_id != null) atendId = d.data.conversation_id;
         if (d.data.message_id != null) msgId = d.data.message_id;
       }
-    } catch (_) { /* fallback: abre a conversa sem âncora de mensagem */ }
+    } catch (_) { /* fallback: abre a atendimento sem âncora de mensagem */ }
     onClose();
-    openConversation(convId, msgId);
+    openConversation(atendId, msgId);
   };
 
-  // Visão read-only (atendimento fechado): só os campos com valor (checkbox sempre exibe).
-  const readOnlyInfo = atendDefs.filter((d) => d.type === 'checkbox' || isFilledAtend(d, vals[d.key]));
+  // Visão read-only (protocolo fechado): só os campos com valor (checkbox sempre exibe).
+  const readOnlyInfo = protoDefs.filter((d) => d.type === 'checkbox' || isFilledProto(d, vals[d.key]));
 
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-auto">
         <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold text-wa-text">${at.contact_name || at.contact_phone || 'Atendimento'}</h2>
+          <h2 class="text-base font-semibold text-wa-text">${at.contact_name || at.contact_phone || 'Protocolo'}</h2>
           <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-xl leading-none">×</button>
         </div>
         <div class="text-[12px] text-wa-secondary mb-3">
@@ -876,7 +876,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
 
         ${fechado ? html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
-            <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do atendimento</div>
+            <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do protocolo</div>
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
                 ${readOnlyInfo.map((d) => html`<div key=${d.key}>
@@ -886,9 +886,9 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
           </div>`
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
-            <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do atendimento</div>
+            <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
             <div class="space-y-3">
-              ${atendDefs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
+              ${protoDefs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
                 value=${vals[d.key]}
                 onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
             </div>
@@ -904,14 +904,14 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
                 ${saving ? 'Salvando…' : 'Salvar'}</button>
               <button onClick=${finalize} disabled=${missing.length > 0 || finalizing || saving}
                 class="flex-1 px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[14px] font-medium">
-                ${finalizing ? 'Finalizando…' : 'Finalizar atendimento'}</button>
+                ${finalizing ? 'Finalizando…' : 'Finalizar protocolo'}</button>
             </div>
           </div>`}
 
-        <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Conversas</div>
-        <div class="text-[12px] text-wa-secondary mb-2">Clique numa conversa para abri-la no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações da conversa</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
-        <${ConversasTable} conversas=${conversas} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
-          storageKey="whatsbot_atend_conv_cols_modal" onRowClick=${openConv} />
+        <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
+        <div class="text-[12px] text-wa-secondary mb-2">Clique numa atendimento para abri-la no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações da atendimento</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
+        <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
+          storageKey="whatsbot_proto_atend_cols_modal" onRowClick=${openAtend} />
       </div>
     </div>`;
 }
@@ -1274,4 +1274,4 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
     </div>`;
 }
 
-export default AtendimentosTab;
+export default ProtocolosTab;

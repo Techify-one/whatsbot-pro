@@ -115,7 +115,7 @@ messages = Table(
     # plano 01: thread de atendimento. Aditivo e nullable (contact_id permanece).
     # FK por nome (conversations é definida adiante).
     Column("conversation_id", Integer,
-           ForeignKey("conversations.id", ondelete="CASCADE")),
+           ForeignKey("atendimentos.id", ondelete="CASCADE")),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
@@ -378,8 +378,8 @@ inbox_members = Table(
 )
 Index("idx_inbox_members_user", inbox_members.c.user_id)
 
-conversations = Table(
-    "conversations",
+atendimentos = Table(
+    "atendimentos",                                             # RENOMEADA de "conversations" (nomenclatura Atendimento)
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("display_id", Integer, nullable=False),              # sequencial humano (P6)
@@ -401,18 +401,18 @@ conversations = Table(
     Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
-    UniqueConstraint("display_id", name="uq_conv_display_id"),
+    UniqueConstraint("display_id", name="uq_conv_display_id"),   # nome do constraint mantido (interno, convergente c/ live)
 )
-Index("idx_conv_inbox_status", conversations.c.inbox_id, conversations.c.status)
-Index("idx_conv_assignee_status", conversations.c.assignee_user_id, conversations.c.status)
-Index("idx_conv_contact", conversations.c.contact_id)
-Index("idx_conv_contact_inbox", conversations.c.contact_inbox_id)
-Index("idx_conv_last_activity", conversations.c.last_activity_at)
-Index("idx_conv_archived", conversations.c.is_archived)
+Index("idx_atend_inbox_status", atendimentos.c.inbox_id, atendimentos.c.status)
+Index("idx_atend_assignee_status", atendimentos.c.assignee_user_id, atendimentos.c.status)
+Index("idx_atend_contact", atendimentos.c.contact_id)
+Index("idx_atend_contact_inbox", atendimentos.c.contact_inbox_id)
+Index("idx_atend_last_activity", atendimentos.c.last_activity_at)
+Index("idx_atend_archived", atendimentos.c.is_archived)
 
 # Contador atômico de display_id (P6) — INSERT/UPDATE na mesma transação do create.
-conversation_counters = Table(
-    "conversation_counters",
+atendimento_counters = Table(
+    "atendimento_counters",                                     # RENOMEADA de "conversation_counters"
     metadata,
     Column("name", Text, primary_key=True),
     Column("next_value", Integer, nullable=False, server_default="1"),
@@ -422,8 +422,8 @@ conversation_counters = Table(
 # Etiquetas de conversa (estilo Chatwoot labels) — registro GLOBAL próprio, SEPARADO
 # das tags de contato (tags/contact_tags). Decisão Thiago: etiquetas pertencem à
 # conversa, não ao contato. Atribuição N:N via conversation_label_links.
-conversation_labels = Table(
-    "conversation_labels",
+atendimento_labels = Table(
+    "atendimento_labels",                                      # RENOMEADA de "conversation_labels"
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False, unique=True),
@@ -432,15 +432,15 @@ conversation_labels = Table(
     Column("created_at", Float, nullable=False),
 )
 
-conversation_label_links = Table(
-    "conversation_label_links",
+atendimento_label_links = Table(
+    "atendimento_label_links",                                 # RENOMEADA de "conversation_label_links"
     metadata,
-    Column("conversation_id", Integer,
-           ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+    Column("conversation_id", Integer,                         # coluna CONGELADA (contrato do plugin)
+           ForeignKey("atendimentos.id", ondelete="CASCADE"), primary_key=True),
     Column("label_id", Integer,
-           ForeignKey("conversation_labels.id", ondelete="CASCADE"), primary_key=True),
+           ForeignKey("atendimento_labels.id", ondelete="CASCADE"), primary_key=True),
 )
-Index("idx_conv_label_links_label", conversation_label_links.c.label_id)
+Index("idx_atend_label_links_label", atendimento_label_links.c.label_id)
 
 
 unread_msg_ids = Table(
@@ -698,8 +698,8 @@ Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
 # or more inbox filter presets. ``user_id`` is NULL for legacy single-password
 # sessions (no user identity) → those presets are shared on that install. ``spec``
 # is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
-saved_conversation_filters = Table(
-    "saved_conversation_filters",
+saved_atendimento_filters = Table(
+    "saved_atendimento_filters",                               # RENOMEADA de "saved_conversation_filters"
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
@@ -709,8 +709,20 @@ saved_conversation_filters = Table(
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
-Index("idx_saved_filters_user", saved_conversation_filters.c.user_id,
-      saved_conversation_filters.c.position)
+Index("idx_saved_filters_user", saved_atendimento_filters.c.user_id,
+      saved_atendimento_filters.c.position)
+
+# ── Compat aliases (renomeação Conversa→Atendimento) ────────────────────────
+# O nome físico da tabela e a variável passaram a ser ``atendimento*``. O plugin
+# ``protocolos`` (ex-atendimentos) e todo o código legado importam ``conversation*``
+# de ``db.tables``; estes aliases apontam para o MESMO objeto Table, mantendo tudo
+# funcionando sem tocar em ~1100 referências. A coluna ``conversation_id`` e o role
+# ``conversation_event`` permanecem congelados (contrato persistido/plugin).
+conversations = atendimentos
+conversation_counters = atendimento_counters
+conversation_labels = atendimento_labels
+conversation_label_links = atendimento_label_links
+saved_conversation_filters = saved_atendimento_filters
 
 
 # Set of core table names — used by the SQLite → Postgres migration helper to

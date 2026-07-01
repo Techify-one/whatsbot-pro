@@ -36,7 +36,7 @@
 /**
  * Whether a conversation event targets a given row.
  *
- * Conversa-cêntrico: a contact can own several rows (one per channel). Rows that
+ * Atendimento-cêntrico: a contact can own several rows (one per channel). Rows that
  * already have a `conversation_id` match by it (so assigning/resolving one
  * channel doesn't touch the others). A legacy contact-only row (no
  * conversation yet) still matches by `contact_id` and will adopt the new one.

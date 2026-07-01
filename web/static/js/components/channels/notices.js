@@ -145,7 +145,7 @@ export function PurgeChannelModal({ channel, onCancel, onConfirm }) {
         </p>
         <p class="text-[13px] text-red-600 mb-5">
           Esta ação é permanente e não pode ser desfeita: o canal e todo o
-          histórico de conversas da inbox serão apagados.
+          histórico de atendimentos da inbox serão apagados.
         </p>
         <div class="flex justify-end gap-2">
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"

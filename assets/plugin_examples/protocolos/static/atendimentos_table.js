@@ -1,8 +1,8 @@
-// Tabela de "Conversas" (ciclos) do atendimento, com COLUNAS DINÂMICAS + filtro.
+// Tabela de "Atendimentos" (ciclos) do protocolo, com COLUNAS DINÂMICAS + filtro.
 //
 // Colunas em DOIS grupos, com cabeçalho de grupo p/ deixar CLARO a origem de cada coluna:
-//  - "Informações da conversa": fixos (Início/Fim/Atendente/Observações) + rótulos do
-//    plugin (escopo conversa, lidos de `c.fields`), NA ORDEM da config.
+//  - "Informações da atendimento": fixos (Início/Fim/Atendente/Observações) + rótulos do
+//    plugin (escopo atendimento, lidos de `c.fields`), NA ORDEM da config.
 //  - "Atributos personalizados": atributos do core (is_system=0, lidos de `c.attrs`).
 // Rótulos/atributos apagados NÃO aparecem: o backend só devolve em `c.fields`/`c.attrs` os
 // valores cujo rótulo/atributo ainda existe; aqui renderizamos só as defs recebidas.
@@ -24,28 +24,28 @@ function fmtTs(ts) {
 function lsGet(k) { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
 
-// Grupos de colunas (origem clara). 'conversa' = info + rótulos da conversa; 'atributo' =
+// Grupos de colunas (origem clara). 'atendimento' = info + rótulos da atendimento; 'atributo' =
 // atributo personalizado do core. A ordem aqui é a ordem dos grupos na tabela.
 const GROUPS = [
-  { id: 'conversa', label: 'Informações da conversa' },
+  { id: 'atendimento', label: 'Informações da atendimento' },
   { id: 'atributo', label: 'Atributos personalizados' },
 ];
 
 const BASE = [
-  { key: '__inicio', label: 'Início', base: true, group: 'conversa' },
-  { key: '__fim', label: 'Fim', base: true, group: 'conversa' },
-  { key: '__atendente', label: 'Atendente', base: true, group: 'conversa' },
-  { key: '__obs', label: 'Observações', base: true, group: 'conversa' },
+  { key: '__inicio', label: 'Início', base: true, group: 'atendimento' },
+  { key: '__fim', label: 'Fim', base: true, group: 'atendimento' },
+  { key: '__atendente', label: 'Atendente', base: true, group: 'atendimento' },
+  { key: '__obs', label: 'Observações', base: true, group: 'atendimento' },
 ];
 
-export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
-                                storageKey = 'whatsbot_atend_cols',
+export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs = [],
+                                storageKey = 'whatsbot_proto_cols',
                                 defaultHidden = {}, showFilter = true,
                                 startField = 'started_at', endField = 'ended_at',
                                 onRowClick = null,
-                                emptyText = 'Nenhuma conversa vinculada ainda.' }) {
-  // Conjunto de colunas: fixos (group 'conversa') + rótulos EXTRAS do plugin (group
-  // 'conversa', lidos de c.fields) + atributos do core (group 'atributo', lidos de
+                                emptyText = 'Nenhuma atendimento vinculada ainda.' }) {
+  // Conjunto de colunas: fixos (group 'atendimento') + rótulos EXTRAS do plugin (group
+  // 'atendimento', lidos de c.fields) + atributos do core (group 'atributo', lidos de
   // c.attrs). Defs fixas que cheguem em fieldDefs são ignoradas (já cobertas pela base).
   const cols = useMemo(() => {
     const out = [...BASE];
@@ -53,7 +53,7 @@ export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
     for (const d of (fieldDefs || [])) {
       if (d && d.key && !d.fixed && !seen.has(d.key)) {
         seen.add(d.key);
-        out.push({ key: d.key, label: d.label || d.key, type: d.type, group: 'conversa', src: 'fields' });
+        out.push({ key: d.key, label: d.label || d.key, type: d.type, group: 'atendimento', src: 'fields' });
       }
     }
     for (const d of (attrDefs || [])) {
@@ -81,13 +81,13 @@ export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
 
   const visCols = cols.filter((c) => visible(c.key));
   // Grupos visíveis (ordem fixa, só os com ≥1 coluna). Com >1 grupo, o cabeçalho ganha
-  // uma linha de grupo (Informações da conversa | Atributos personalizados).
+  // uma linha de grupo (Informações da atendimento | Atributos personalizados).
   const visGroups = GROUPS
     .map((g) => ({ ...g, cols: visCols.filter((c) => c.group === g.id) }))
     .filter((g) => g.cols.length);
   const showGroupHeader = visGroups.length > 1;
   // Colunas achatadas na ordem dos grupos; marca a 1ª de cada grupo (≠ 1º) p/ um separador
-  // visual (borda à esquerda) entre "conversa" e "atributos".
+  // visual (borda à esquerda) entre "atendimento" e "atributos".
   const flatCols = visGroups.flatMap((g, gi) => g.cols.map((c, ci) => ({ ...c, _sep: gi > 0 && ci === 0 })));
 
   function cell(c, col) {
@@ -130,7 +130,7 @@ export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
             </div>` : null}
         </div>` : null}
 
-      ${(conversas || []).length === 0
+      ${(atendimentos || []).length === 0
         ? html`<div class="text-[12px] text-wa-secondary">${emptyText}</div>`
         : flatCols.length === 0
         ? html`<div class="text-[12px] text-wa-secondary">Nenhuma coluna selecionada.</div>`
@@ -149,9 +149,9 @@ export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
               </tr>
             </thead>
             <tbody>
-              ${conversas.map((c) => html`<tr key=${c.id}
+              ${atendimentos.map((c) => html`<tr key=${c.id}
                 onClick=${onRowClick ? () => onRowClick(c) : undefined}
-                title=${onRowClick ? 'Abrir esta conversa' : undefined}
+                title=${onRowClick ? 'Abrir esta atendimento' : undefined}
                 class="border-t border-wa-border text-wa-text align-top ${onRowClick ? 'cursor-pointer hover:bg-wa-hover' : ''}">
                 ${flatCols.map((col) => html`<td key=${col.key}
                   class="py-1 pr-2 ${col._sep ? 'border-l border-wa-border pl-2' : ''} ${(col.key === '__inicio' || col.key === '__fim') ? 'whitespace-nowrap' : ''}">${cell(c, col)}</td>`)}
@@ -162,4 +162,4 @@ export function ConversasTable({ conversas = [], fieldDefs = [], attrDefs = [],
     </div>`;
 }
 
-export default ConversasTable;
+export default AtendimentosTable;

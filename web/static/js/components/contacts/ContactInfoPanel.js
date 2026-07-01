@@ -14,7 +14,7 @@ const TAG_COLORS = [
 ];
 
 // ── Contact Info Panel (WhatsApp Web style slide-in) ─────────────
-// Contact-scoped only (plano conversa Onda 2): identity, contact tags, contact
+// Contact-scoped only (plano atendimento Onda 2): identity, contact tags, contact
 // custom attributes, observations. Conversation status/assignment/labels/
 // attributes live in ConversationInfoPanel.
 
@@ -227,6 +227,8 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
             ${isGroup
               ? html`<div class="text-wa-secondary text-[14px] mt-0.5">Grupo</div>`
               : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
+            <!-- Conversa (o todo): rótulo do nível topo da hierarquia — o histórico completo com este contato. -->
+            <div class="text-wa-secondary/80 text-[11px] mt-2 uppercase tracking-wide">Conversa · histórico completo</div>
           </div>
 
           <!-- Fields -->
@@ -461,7 +463,7 @@ export function ContactInfoPanel({ phone, info, contactTags, globalTags, onGloba
               }}
               class="w-full mt-2 text-[14px] font-medium py-2.5 rounded-[8px] ${confirmDelete ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors"
             >
-              ${confirmDelete ? 'Confirmar exclusão? Apaga TODAS as conversas' : 'Apagar contato'}
+              ${confirmDelete ? 'Confirmar exclusão? Apaga TODAS os atendimentos' : 'Apagar contato'}
             </button>
           ` : null}
         </div>

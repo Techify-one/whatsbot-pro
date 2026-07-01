@@ -54,9 +54,9 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const isAutoName = !isGroup && rawName && rawName.startsWith('~');
   const displayName = isGroup ? (contact.group_name || phone) : (rawName ? rawName.replace(/^~/, '') : phone);
   // Template support (Frente C): capability flag from the conversation payload — ou,
-  // ao iniciar uma conversa NOVA pela caixa de entrada escolhida (plano 21), do
+  // ao iniciar um atendimento Novo pela caixa de entrada escolhida (plano 21), do
   // payload channel-scoped do getContact (ainda sem conversationId). O TemplatePicker
-  // opera em "channel mode" (channelId + phone) quando não há conversa.
+  // opera em "channel mode" (channelId + phone) quando não há atendimento.
   // sessionClosed → a janela de texto livre de 24h expirou (ou nunca abriu, no caso de
   // um número novo no Cloud), então só um template pode sair.
   const templatesSupported = !sandbox && !!(contact && contact.templates_supported);
@@ -229,7 +229,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             : html`<${DefaultAvatar} size=${40} avatarUrl=${avatarUrl(phone, contact && contact.avatar_v)} />`
           }
         </div>
-        <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick}>
+        <div class="flex-1 min-w-0 cursor-pointer" onClick=${onAvatarClick} title=${'Conversa com ' + displayName}>
           <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
             <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
               const tagInfo = globalTags && globalTags[tagName];
@@ -255,13 +255,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
         <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} onOpenConversationInfo=${onOpenConversationInfo} onOpenContactInfo=${onAvatarClick} contactInfo=${info} />
 
-        <!-- Informações da conversa (Onda 2): abre o painel lateral da conversa. -->
+        <!-- Informações do atendimento (Onda 2): abre o painel lateral do atendimento. -->
         ${!sandbox && onOpenConversationInfo ? html`
           <button
             type="button"
             onClick=${onOpenConversationInfo}
             class="shrink-0 ml-1 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
-            title="Informações da conversa"
+            title="Informações do atendimento"
           >
             <${InfoIcon} />
           </button>

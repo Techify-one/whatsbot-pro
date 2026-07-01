@@ -4,7 +4,7 @@
 //   - saved-filters bookmark → popover: apply / rename / delete named presets
 //   - save (disk) icon → "Salvar filtro" dialog (only when a filter is active)
 //   - clear (X) icon → reset all filters (only when a filter is active)
-//   - RIGHT icon (tune) → modal "Filtrar conversas" estilo Chatwoot: construtor de
+//   - RIGHT icon (tune) → modal "Filtrar atendimentos" estilo Chatwoot: construtor de
 //     filtros (Canais / Agente / Etiqueta / Última atividade) + Ordenar por
 //   - assignment tabs (Minhas / Não atribuídas / Todas) com contagem ao vivo
 //   - active-preset chip (canto): mostra qual filtro salvo está em uso
@@ -39,7 +39,7 @@ const SORT_OPTIONS = [
 // Each active filter dimension renders as its own chip with an individual ✕, so the
 // operator can drop one filter without reopening a dropdown/modal. Labels reuse the
 // same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
-const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
+const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta do contato', conv_label: 'Etiqueta do atendimento', activity: 'Atividade' };
 
 function _channelLabel(channels, value) {
   const ch = (channels || []).find(c => String(c.id) === String(value));
@@ -58,7 +58,7 @@ function _agentLabel(agentsUsers, agentsAi, value) {
   return value;
 }
 // Rótulo amigável do chip para uma dimensão de atributo personalizado
-// (cattr:<scope>:<key>): "Contato · Plano" / "Conversa · Plano" pra desambiguar
+// (cattr:<scope>:<key>): "Contato · Plano" / "Atendimento · Plano" pra desambiguar
 // quando o mesmo key existe nos dois escopos. Usa as defs carregadas para o nome.
 function _cattrLabel(cl, attrDefs) {
   const m = String(cl.dim).match(/^cattr:(contact|conversation):(.+)$/);
@@ -66,7 +66,7 @@ function _cattrLabel(cl, attrDefs) {
   const scope = m[1], key = m[2];
   const def = (attrDefs || []).find(d => d.attribute_key === key && d.applies_to === scope);
   const name = def ? (def.display_name || key) : key;
-  const prefix = scope === 'contact' ? 'Contato · ' : 'Conversa · ';
+  const prefix = scope === 'contact' ? 'Contato · ' : 'Atendimento · ';
   return prefix + name;
 }
 function advClauseLabel(cl, channels, agentsUsers, agentsAi, attrDefs) {
@@ -237,8 +237,8 @@ export function ConversationFilterBar({
   // dinâmicas no construtor. Recarrega ao ouvir o evento global de mudança.
   const [contactAttrDefs, setContactAttrDefs] = useState([]);
   const [convAttrDefs, setConvAttrDefs] = useState([]);
-  // Etiquetas da conversa (registro próprio, separado das tags de contato) → opções
-  // da dimensão "Etiqueta da conversa". Recarrega ao abrir o modal avançado.
+  // Etiquetas do atendimento (registro próprio, separado das tags de contato) → opções
+  // da dimensão "Etiqueta do atendimento". Recarrega ao abrir o modal avançado.
   const [convLabelNames, setConvLabelNames] = useState([]);
   useEffect(() => {
     let alive = true;
@@ -251,7 +251,7 @@ export function ConversationFilterBar({
     window.addEventListener('whatsbot:custom-attributes-changed', load);
     return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
   }, []);
-  // Refresca as etiquetas da conversa toda vez que o modal avançado abre (o registro
+  // Refresca as etiquetas do atendimento todo vez que o modal avançado abre (o registro
   // pode ter mudado em outra tela desde o load inicial).
   useEffect(() => {
     if (!advOpen) return;
@@ -324,7 +324,7 @@ export function ConversationFilterBar({
             class="flex items-center gap-1.5 text-[13px] font-medium text-wa-text hover:bg-wa-hover rounded-md px-2 py-1 transition-colors"
             title="Filtrar por status"
           >
-            <span class="text-wa-secondary font-normal">Conversas</span>
+            <span class="text-wa-secondary font-normal">Atendimentos</span>
             <span class="px-2 py-0.5 rounded-full text-[12px] bg-wa-teal/15 text-wa-teal">${STATUS_LABELS[statusFilter] || 'Abertas'}</span>
             <${ChevronDown} />
           </button>

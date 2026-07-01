@@ -212,7 +212,7 @@ export default function ChannelsManager({ initialEntity }) {
   }
 
   async function handleDelete(channel) {
-    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de conversas é preservado e pode ser restaurado depois.`)) return;
+    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de atendimentos é preservado e pode ser restaurado depois.`)) return;
     setBusyId(channel.id); setError('');
     const res = await deleteChannel(channel.id);
     setBusyId('');
