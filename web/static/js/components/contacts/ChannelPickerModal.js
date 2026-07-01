@@ -20,7 +20,7 @@ function formatPhone(p) {
   return p.startsWith('+') ? p : `+${p}`;
 }
 
-// Popup de escolha da caixa de entrada por onde iniciar uma conversa nova.
+// Popup de escolha da caixa de entrada por onde iniciar um atendimento novo.
 // `channels` já vem filtrado pelo backend (somente conectadas + logadas).
 // Clicar numa caixa chama onPick(channel); a 1ª mensagem é roteada por ela.
 export function ChannelPickerModal({ phoneDisplay, channels = [], onPick, onClose }) {
@@ -40,7 +40,7 @@ export function ChannelPickerModal({ phoneDisplay, channels = [], onPick, onClos
 
         <h2 class="text-base font-semibold text-wa-text mb-1">Escolha a caixa de entrada</h2>
         <p class="text-sm text-wa-secondary mb-4">
-          Iniciar conversa com <span class="text-wa-text font-medium">${phoneDisplay}</span> por:
+          Iniciar atendimento com <span class="text-wa-text font-medium">${phoneDisplay}</span> por:
         </p>
 
         ${channels.length === 0 ? html`

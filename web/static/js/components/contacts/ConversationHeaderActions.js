@@ -15,6 +15,7 @@ import {
   setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
@@ -82,9 +83,9 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
   }, []);
 
-  // Resolve the open conversation. Conversa-cêntrico (plano 11 D1): quando o chat
-  // sabe a conversa aberta (um canal), carrega ELA por id — getContactConversation
-  // resolveria só uma das conversas do número e mostraria ações do canal errado.
+  // Resolve the open conversation. Atendimento-cêntrico (plano 11 D1): quando o chat
+  // sabe o atendimento aberto (um canal), carrega ELA por id — getContactConversation
+  // resolveria só uma dos atendimentos do número e mostraria ações do canal errado.
   const load = useCallback(() => {
     if (sandbox) { setConv(null); return; }
     if (conversationId != null) {
@@ -179,13 +180,17 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
+      <!-- Copiar link do atendimento (permalink /conversations/<id>) — plano 24 -->
+      ${!sandbox && conversationId != null ? html`
+        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link do atendimento" />
+      ` : null}
       <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
         <button
           disabled=${busy}
           onClick=${onStatusClick}
           class=${btn}
-          title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
+          title=${isOpen ? 'Encerrar atendimento' : 'Reabrir atendimento'}
         >
           ${isOpen ? 'Resolver' : 'Reabrir'}
         </button>
@@ -195,7 +200,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
         </span>
       `}
 
-      <!-- Atribuir a mim / responsável (somente em conversas abertas) -->
+      <!-- Atribuir a mim / responsável (somente em atendimentos abertos) -->
       ${isOpen && can('conversation.assign') ? html`
         ${assignedToMe
           ? html`
@@ -207,7 +212,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
               disabled=${busy}
               onClick=${() => run(() => assignMeConversation(conv.id))}
               class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50 whitespace-nowrap"
-              title="Assumir esta conversa"
+              title="Assumir este atendimento"
             >
               Atribuir a mim
             </button>`}

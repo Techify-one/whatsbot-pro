@@ -1,7 +1,7 @@
 // Tela "Contatos" (full-page) — lista todos os contatos em ordem alfabética,
 // com busca, "Ver detalhes" (painel editável com todos os atributos, incluindo
-// os personalizados), "Iniciar conversa" (abre o chat no hub de conversas) e
-// importar/exportar contatos via CSV. Acessível pelo menu da lista de conversas.
+// os personalizados), "Iniciar atendimento" (abre o chat no hub de atendimentos) e
+// importar/exportar contatos via CSV. Acessível pelo menu da lista de atendimentos.
 //
 // Deep-link: abrir o detalhe reflete na URL como /contacts/{id} (id do contato);
 // back/forward reabre/fecha o painel. A lista em si fica em /contacts.
@@ -13,6 +13,8 @@ import { avatarUrl } from './contacts/utils.js';
 import { ContactInfoPanel } from './contacts/ContactInfoPanel.js';
 import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, str, json } from '../services/urlState.js';
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
@@ -151,7 +153,7 @@ function NewContactModal({ onClose, onCreated }) {
 }
 
 // ── Painel de detalhes (editável) ─────────────────────────────────────────
-// Reusa o ContactInfoPanel do hub de conversas (mesma UX, atributos personalizados,
+// Reusa o ContactInfoPanel do hub de atendimentos (mesma UX, atributos personalizados,
 // tags, observações, exclusão) dentro de um overlay full-screen.
 function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose, onSaved, onDeleted, onStartConversation }) {
   const [data, setData] = useState(null);
@@ -195,21 +197,28 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
             onDeleteContact=${() => onDeleted(contact)}
           />
         `}
-        <!-- Ação "Iniciar conversa" flutuante (o ContactInfoPanel não a tem) -->
+        <!-- Ação "Iniciar atendimento" flutuante (o ContactInfoPanel não a tem) -->
         ${!loading && !contact.is_group ? html`
           <button
             onClick=${() => onStartConversation(contact)}
-            title="Iniciar conversa"
+            title="Iniciar atendimento"
             class="fixed bottom-6 right-6 lg:right-[424px] z-[121] flex items-center gap-2 bg-wa-teal text-white text-[14px] font-medium px-4 py-3 rounded-full shadow-lg hover:opacity-90 transition-opacity"
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-            Iniciar conversa
+            Iniciar atendimento
           </button>
         ` : null}
       </div>
     </div>
   `;
 }
+
+// Deep-link do estado da lista de contatos (Plano 24): busca + filtro avançado
+// na query legível. `adv` guarda só as cláusulas (JSON), omitido quando vazio.
+const CONTACTS_URL_SCHEMA = [
+  str('search', ''),
+  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
+];
 
 // ── Tela principal ───────────────────────────────────────────────────────
 export default function ContactsListScreen({ initialEntity = null }) {
@@ -226,11 +235,26 @@ export default function ContactsListScreen({ initialEntity = null }) {
   const [showImport, setShowImport] = useState(false); // modal de importação
   const [importError, setImportError] = useState(null); // erro dentro do modal
   const fileInputRef = useRef(null);
-  // Filtros (espelham o "Filtrar conversas", mas só refletem nos contatos).
+  // Filtros (espelham o "Filtrar atendimentos", mas só refletem nos contatos).
   const [advFilters, setAdvFilters] = useState([]); // [{ id, dim, op, value }]
   const [showFilters, setShowFilters] = useState(false); // dropdown do construtor
   const [contactAttrDefs, setContactAttrDefs] = useState([]); // atributos de contato (dinâmicos)
   const filterRef = useRef(null);
+
+  // Deep-link do estado da lista → URL (Plano 24). Busca + filtro avançado na
+  // query legível; hidrata no mount/back-forward, reflete ao mudar (replaceState).
+  useUrlState({
+    read: () => readParams(window.location.search, CONTACTS_URL_SCHEMA),
+    apply: (s) => {
+      setSearch(s.search);
+      setAdvFilters(Array.isArray(s.adv) ? s.adv.map((f, i) => ({ ...f, id: `u${i}` })) : []);
+    },
+    serialize: () => writeParams({
+      search,
+      adv: (advFilters || []).map(({ id, ...rest }) => rest),
+    }, CONTACTS_URL_SCHEMA),
+    deps: [search, advFilters],
+  });
 
   function reload() {
     setLoading(true);
@@ -411,8 +435,8 @@ export default function ContactsListScreen({ initialEntity = null }) {
   const start = (safePage - 1) * PAGE_SIZE;
   const pageItems = filtered.slice(start, start + PAGE_SIZE);
 
-  // Abre o chat do contato no hub. Resolve a conversa ativa (se houver) e navega
-  // por /conversations/{id}; sem conversa ainda, cai na raiz do hub.
+  // Abre o chat do contato no hub. Resolve o atendimento ativo (se houver) e navega
+  // por /conversations/{id}; sem atendimento ainda, cai na raiz do hub.
   async function startConversation(contact) {
     closeDetail();
     try {
@@ -591,10 +615,10 @@ export default function ContactsListScreen({ initialEntity = null }) {
                 ` : null}
               </div>
 
-              <!-- Iniciar conversa -->
+              <!-- Iniciar atendimento -->
               <button
                 onClick=${() => startConversation(c)}
-                title="Iniciar conversa"
+                title="Iniciar atendimento"
                 class="w-[38px] h-[38px] rounded-full flex items-center justify-center text-wa-teal hover:bg-wa-teal/10 transition-colors shrink-0"
               >
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>

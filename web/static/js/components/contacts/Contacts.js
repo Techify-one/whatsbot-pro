@@ -1,6 +1,8 @@
 import { h } from 'preact';
-import { useRef, useCallback, useEffect } from 'preact/hooks';
+import { useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
 import { ContactList, typingKey } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -18,6 +20,26 @@ import { useChannelPicker } from './hooks/useChannelPicker.js';
 import { useConversationWsEvents } from './hooks/useConversationWsEvents.js';
 
 const html = htm.bind(h);
+
+// Deep-link do estado da lista (Plano 24) — filtros/busca/ordenação/painel na
+// query-string legível. `adv` guarda só as cláusulas do filtro avançado (JSON),
+// omitido quando vazio. Serialize omite tudo que está no default → URL limpa.
+const HUB_URL_SCHEMA = [
+  enumStr('status', 'open'),        // open|closed|all
+  enumStr('assignment', 'all'),     // all|mine|unassigned
+  enumStr('sort', 'activity'),      // activity|oldest|unread
+  str('search', ''),
+  bool('archived'),
+  list('tags'),
+  str('panel', ''),                 // ''|contact|conversation
+  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
+];
+const HUB_URL_KEYS = HUB_URL_SCHEMA.map((f) => f.key);
+// A URL traz algum filtro do hub? (decide a precedência URL > preset salvo).
+const hubUrlHasParams = (search) => {
+  const p = new URLSearchParams(search || '');
+  return HUB_URL_KEYS.some((k) => p.has(k));
+};
 
 // ── Main Component (conversation hub container) ──────────────────────
 //
@@ -40,9 +62,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
-  // Canal escolhido no picker para uma conversa NOVA ainda sem conversa naquele
+  // Canal escolhido no picker para um atendimento Novo ainda sem atendimento naquele
   // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
-  // ao canal certo (multicanal), em vez de fundir/abrir a conversa de outro canal.
+  // ao canal certo (multicanal), em vez de fundir/abrir o atendimento de outro canal.
   const newConvChannelRef = useRef(null);
 
   // ── Sidebar geometry (self-contained) ──────────────────────────────
@@ -118,8 +140,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   useEffect(() => { setSelectionMode(false); setSelectedKeys([]); }, [showArchived]);
 
   // ── Filters + saved presets + derived sidebar list ──────────────────
+  // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
+  // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
+  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search), []);
   const filters = useConversationFilters({
     contacts, selected, selectedConvId, currentUserId, displayedRef,
+    skipStoredPreset: hasUrlFilters,
   });
   const {
     statusFilter, setStatusFilter,
@@ -132,6 +158,36 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     renameSavedFilter, removeSavedFilter, clearAllFilters,
     tabCounts, displayedContacts,
   } = filters;
+
+  // Deep-link do estado da lista → URL (Plano 24). Hidrata da URL no mount e no
+  // back/forward; reflete filtros/busca/ordenação/painel na query (replaceState,
+  // sem poluir histórico). Serialize omite defaults → link limpo quando nada mexeu.
+  useUrlState({
+    read: () => readParams(window.location.search, HUB_URL_SCHEMA),
+    apply: (s) => {
+      setStatusFilter(s.status);
+      setAssignmentTab(s.assignment);
+      setSortBy(s.sort);
+      setSearch(s.search);
+      setShowArchived(s.archived);
+      setTagFilter(s.tags);
+      setOpenPanel(s.panel || null);
+      // Re-seed clause ids p/ o diálogo avançado editar sem colisão.
+      setAdvFilters(Array.isArray(s.adv) ? s.adv.map((f, i) => ({ ...f, id: `u${i}` })) : []);
+    },
+    serialize: () => writeParams({
+      status: statusFilter,
+      assignment: assignmentTab,
+      sort: sortBy,
+      search,
+      archived: showArchived,
+      tags: tagFilter,
+      panel: openPanel || '',
+      // Descarta o id efêmero das cláusulas p/ a URL ficar estável.
+      adv: (advFilters || []).map(({ id, ...rest }) => rest),
+    }, HUB_URL_SCHEMA),
+    deps: [statusFilter, assignmentTab, sortBy, search, showArchived, tagFilter, openPanel, advFilters],
+  });
 
   // ── New-conversation / channel picker ───────────────────────────────
   const picker = useChannelPicker({ selectContact, fetchContacts, setSearch, newConvChannelRef });

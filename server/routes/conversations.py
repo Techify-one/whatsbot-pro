@@ -88,7 +88,7 @@ def register_routes(app, deps):
             except Exception as e:
                 logger.debug("[ReadReceipt] conv %s/%s failed: %s", phone, mid, e)
 
-    @app.get("/api/conversations")
+    @app.get("/api/atendimentos")
     async def list_conversations(request: Request, status: str | None = None,
                                  inbox_id: int | None = None,
                                  assignee_user_id: int | None = None,
@@ -105,7 +105,7 @@ def register_routes(app, deps):
             inbox_ids=visible_inbox_ids(request), limit=limit, offset=offset)
         return _ok({"conversations": rows})
 
-    @app.get("/api/conversations/filter-schema")
+    @app.get("/api/atendimentos/filter-schema")
     async def filter_schema(request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -113,7 +113,7 @@ def register_routes(app, deps):
         defs = await asyncio.to_thread(custom_attribute_repo.list_filterable, "conversation")
         return _ok({"dimensions": conv_filters.available_dimensions(defs)})
 
-    @app.get("/api/conversations/filter")
+    @app.get("/api/atendimentos/filter")
     async def filter_get(request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -121,7 +121,7 @@ def register_routes(app, deps):
         params = dict(request.query_params)
         return await _run_filter(request, None, params=params)
 
-    @app.post("/api/conversations/filter")
+    @app.post("/api/atendimentos/filter")
     async def filter_post(body: dict, request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -145,7 +145,7 @@ def register_routes(app, deps):
             inbox_ids=visible_inbox_ids(request), limit=spec.limit, offset=spec.offset)
         return _ok({"conversations": rows, "count": len(rows)})
 
-    @app.get("/api/conversations/assignable-agents")
+    @app.get("/api/atendimentos/assignable-agents")
     async def assignable_agents(request: Request):
         """Agents that can take a conversation (plano 10): human users + AI agents,
         in one list for the unified assignee picker. Gated by conversation.read so
@@ -167,7 +167,7 @@ def register_routes(app, deps):
         ]
         return _ok({"users": human_list, "ai_agents": ai_list})
 
-    @app.get("/api/conversations/{conv_id}")
+    @app.get("/api/atendimentos/{conv_id}")
     async def get_conversation(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -181,7 +181,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.get("/api/conversations/{conv_id}/messages")
+    @app.get("/api/atendimentos/{conv_id}/messages")
     async def conversation_messages(conv_id: int, request: Request, mark_read: bool = True):
         """Messages of ONE conversation (conversa-cêntrico, plano 11 D1).
 
@@ -236,7 +236,7 @@ def register_routes(app, deps):
             "session_open": outbound.session_open(channel_id, last_inbound_ts),
         })
 
-    @app.post("/api/conversations/{conv_id}/status")
+    @app.post("/api/atendimentos/{conv_id}/status")
     async def set_status(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.resolve")
         if denied:
@@ -261,7 +261,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.post("/api/conversations/{conv_id}/assign")
+    @app.post("/api/atendimentos/{conv_id}/assign")
     async def assign(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.assign")
         if denied:
@@ -282,7 +282,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.post("/api/conversations/{conv_id}/assign-me")
+    @app.post("/api/atendimentos/{conv_id}/assign-me")
     async def assign_me(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.assign")
         if denied:
@@ -299,7 +299,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.post("/api/conversations/{conv_id}/agent")
+    @app.post("/api/atendimentos/{conv_id}/agent")
     async def set_agent(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -314,7 +314,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.post("/api/conversations/{conv_id}/assign-agent")
+    @app.post("/api/atendimentos/{conv_id}/assign-agent")
     async def assign_agent(conv_id: int, body: dict, request: Request):
         """Unified assignment (plano 10): route to a human OR an AI agent.
 
@@ -359,7 +359,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.post("/api/conversations/{conv_id}/ai")
+    @app.post("/api/atendimentos/{conv_id}/ai")
     async def set_ai(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -380,7 +380,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.delete("/api/conversations/{conv_id}")
+    @app.delete("/api/atendimentos/{conv_id}")
     async def delete_conversation(conv_id: int, request: Request):
         """Hard-delete a single conversation/thread (plano 16, ação A).
 
@@ -410,7 +410,7 @@ def register_routes(app, deps):
         return _ok({"message": "Conversa apagada.", "conversation_id": conv_id,
                     "contact_id": conv.get("contact_id")})
 
-    @app.post("/api/conversations/{conv_id}/archive")
+    @app.post("/api/atendimentos/{conv_id}/archive")
     async def archive(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.resolve")
         if denied:
@@ -425,7 +425,7 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
-    @app.put("/api/conversations/{conv_id}/info")
+    @app.put("/api/atendimentos/{conv_id}/info")
     async def update_info(conv_id: int, body: dict, request: Request):
         """Update conversation custom_attributes (FF5). Validates keys against the
         conversation attribute definitions; unknown keys are rejected."""
@@ -476,7 +476,7 @@ def register_routes(app, deps):
             actor_id=actor_id, actor_name=actor_name)
         return _ok({"conversation": conv})
 
-    @app.get("/api/conversations/{conv_id}/templates")
+    @app.get("/api/atendimentos/{conv_id}/templates")
     async def conversation_templates(conv_id: int, request: Request):
         """Templates for the picker (Frente C). Channel-aware: resolves the
         conversation's channel and returns ``{supported, templates, can_create,
@@ -500,7 +500,7 @@ def register_routes(app, deps):
         return _ok({"supported": True, "templates": templates,
                     "can_create": can_create, "can_delete": can_delete})
 
-    @app.post("/api/conversations/{conv_id}/send-template")
+    @app.post("/api/atendimentos/{conv_id}/send-template")
     async def send_conversation_template(conv_id: int, body: dict, request: Request):
         """Send an approved template through the conversation's channel (Frente C).
 
@@ -562,7 +562,7 @@ def register_routes(app, deps):
 
     _TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
 
-    @app.post("/api/conversations/{conv_id}/templates")
+    @app.post("/api/atendimentos/{conv_id}/templates")
     async def create_conversation_template(conv_id: int, body: dict, request: Request):
         """Create a template on the conversation's channel (gated ``template.create``).
 
@@ -612,7 +612,7 @@ def register_routes(app, deps):
             "category": result.get("category"), "name": name,
         })
 
-    @app.delete("/api/conversations/{conv_id}/templates/{name}")
+    @app.delete("/api/atendimentos/{conv_id}/templates/{name}")
     async def delete_conversation_template(conv_id: int, name: str, request: Request):
         """Delete a template (all language versions) on the conversation's channel
         (gated ``template.delete``)."""
@@ -633,7 +633,7 @@ def register_routes(app, deps):
             return _err(f"Falha ao apagar template: {result.get('error')}", status=502)
         return _ok({"message": "Template apagado.", "name": name})
 
-    @app.get("/api/contacts/{phone}/conversation")
+    @app.get("/api/contacts/{phone}/atendimento")
     async def contact_conversation(phone: str, request: Request,
                                    include_closed: bool = False):
         """Resolve the conversation for a contact by phone — feeds the chat header
