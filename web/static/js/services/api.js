@@ -181,9 +181,9 @@ export async function getUnreadCount() {
 }
 
 // `channelId` escopa o thread ao canal escolhido (multicanal): ao abrir uma
-// conversa NOVA pela caixa de entrada selecionada, antes de existir uma conversa
+// atendimento Novo pela caixa de entrada selecionada, antes de existir um atendimento
 // nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
-// nunca cai na conversa de outro canal do mesmo número.
+// nunca cai no atendimento de outro canal do mesmo número.
 export async function getContact(phone, markRead = true, channelId = null) {
   const params = [];
   if (!markRead) params.push('mark_read=false');
@@ -192,12 +192,12 @@ export async function getContact(phone, markRead = true, channelId = null) {
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
-// Conversa-cêntrico (plano 11 D1): carrega a thread de UMA conversa (um canal),
+// Atendimento-cêntrico (plano 11 D1): carrega a thread de Um atendimento (um canal),
 // sem fundir os canais do mesmo número. Retorna {conversation, contact, messages,
-// channel_id, avatar_v}. markRead=false não zera o badge daquela conversa.
+// channel_id, avatar_v}. markRead=false não zera o badge daquela atendimento.
 export async function getConversationMessages(convId, markRead = true) {
   const qs = markRead ? '' : '?mark_read=false';
-  return request('GET', `/api/conversations/${convId}/messages${qs}`);
+  return request('GET', `/api/atendimentos/${convId}/messages${qs}`);
 }
 
 export async function deleteContact(phone) {
@@ -212,11 +212,11 @@ export async function pinContact(phone, pinned) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/pin`, { pinned });
 }
 
-// conversationId (plano 11 D1) roteia o envio pelo CANAL daquela conversa via
+// conversationId (plano 11 D1) roteia o envio pelo CANAL daquela atendimento via
 // OutboundRouter; ausente cai no 'default' (GOWA), preservando o legado.
-// channelId roteia o envio quando a conversa AINDA não existe (1ª mensagem de uma
-// conversa nova iniciada pelo picker de caixa de entrada). Quando há conversationId,
-// o backend ignora channelId e usa o canal da conversa.
+// channelId roteia o envio quando o atendimento AINDA não existe (1ª mensagem de uma
+// atendimento novo iniciada pelo picker de caixa de entrada). Quando há conversationId,
+// o backend ignora channelId e usa o canal do atendimento.
 export async function sendMessage(phone, message, replyTo = null, conversationId = null, channelId = null) {
   const body = { message };
   if (replyTo) body.reply_to = replyTo;
@@ -337,7 +337,7 @@ export async function sendPresence(phone, action = 'start', conversationId = nul
 }
 
 // create=false apenas valida o número sem materializar o contato (usado pela
-// verificação ao vivo do modal "Nova conversa" — o contato só nasce no envio).
+// verificação ao vivo do modal "Novo atendimento" — o contato só nasce no envio).
 // channelId roteia a verificação pelo canal escolhido: só o GOWA consulta o
 // WhatsApp; Cloud API/Telegram não verificam antes de enviar (assumem válido).
 export async function checkPhone(phone, create = true, channelId = null) {
@@ -379,11 +379,11 @@ export async function listConversations(params = {}) {
     clean[k] = v;
   }
   const qs = new URLSearchParams(clean).toString();
-  return request('GET', `/api/conversations${qs ? '?' + qs : ''}`);
+  return request('GET', `/api/atendimentos${qs ? '?' + qs : ''}`);
 }
 
 export async function getConversation(id) {
-  return request('GET', `/api/conversations/${id}`);
+  return request('GET', `/api/atendimentos/${id}`);
 }
 
 // ── Saved conversation filters (presets nomeados, por usuário) ──────
@@ -423,39 +423,39 @@ export async function filterConversations(params = {}) {
     }
   }
   const qs = parts.join('&');
-  return request('GET', `/api/conversations/filter${qs ? '?' + qs : ''}`);
+  return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`);
 }
 
 export async function setConversationStatus(id, status) {
-  return request('POST', `/api/conversations/${id}/status`, { status });
+  return request('POST', `/api/atendimentos/${id}/status`, { status });
 }
 
 export async function assignConversation(id, assigneeUserId) {
-  return request('POST', `/api/conversations/${id}/assign`, {
+  return request('POST', `/api/atendimentos/${id}/assign`, {
     assignee_user_id: assigneeUserId == null ? null : assigneeUserId,
   });
 }
 
 export async function archiveConversation(id, archived) {
-  return request('POST', `/api/conversations/${id}/archive`, { archived });
+  return request('POST', `/api/atendimentos/${id}/archive`, { archived });
 }
 
 // Hard-delete a single conversation/thread (plano 16). Keeps the contact and its
 // other conversations; only this thread + its messages are removed.
 export async function deleteConversation(id) {
-  return request('DELETE', `/api/conversations/${id}`);
+  return request('DELETE', `/api/atendimentos/${id}`);
 }
 
 // Assume the conversation for the current user (plano 10 Onda 0). No body — the
 // server resolves "me" from the authenticated session.
 export async function assignMeConversation(id) {
-  return request('POST', `/api/conversations/${id}/assign-me`, {});
+  return request('POST', `/api/atendimentos/${id}/assign-me`, {});
 }
 
 // Toggle the conversation-level AI (ai_active) — distinct from the contact-level
 // toggle. Drives the chat-header IA switch (FF3).
 export async function setConversationAi(id, active) {
-  return request('POST', `/api/conversations/${id}/ai`, { active });
+  return request('POST', `/api/atendimentos/${id}/ai`, { active });
 }
 
 // Resolve the conversation for a contact by phone (feeds the chat header and the
@@ -464,13 +464,13 @@ export async function setConversationAi(id, active) {
 // (lets the menu show its assignee and a "reopen" action).
 export async function getContactConversation(phone, { includeClosed = false } = {}) {
   const qs = includeClosed ? '?include_closed=true' : '';
-  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/conversation${qs}`);
+  return request('GET', `/api/contacts/${encodeURIComponent(phone)}/atendimento${qs}`);
 }
 
 // Agents that can take a conversation (plano 10): {users:[...], ai_agents:[...]}.
 // Gated by conversation.read so attendants (not only admins) can transfer.
 export async function getAssignableAgents() {
-  return request('GET', '/api/conversations/assignable-agents');
+  return request('GET', '/api/atendimentos/assignable-agents');
 }
 
 // Unified assignment (plano 10): route a conversation to a human or an AI agent.
@@ -479,17 +479,17 @@ export async function assignAgent(id, { kind, userId = null, agentKey = null } =
   const body = { kind };
   if (kind === 'user') body.user_id = userId;
   if (kind === 'ai') body.agent_key = agentKey;
-  return request('POST', `/api/conversations/${id}/assign-agent`, body);
+  return request('POST', `/api/atendimentos/${id}/assign-agent`, body);
 }
 
 // Update a conversation's custom_attributes (FF5). Server validates keys against
 // the conversation attribute definitions.
 export async function updateConversationInfo(id, body) {
-  return request('PUT', `/api/conversations/${id}/info`, body);
+  return request('PUT', `/api/atendimentos/${id}/info`, body);
 }
 
 // ── Conversation labels (Onda 3) ──────────────────────────────────
-// Etiquetas próprias da conversa (registro global + atribuição por conversa),
+// Etiquetas próprias do atendimento (registro global + atribuição por atendimento),
 // separadas das tags de contato.
 
 export async function getConversationLabels() {
@@ -510,43 +510,43 @@ export async function deleteConversationLabel(id) {
 
 // Labels currently attached to ONE conversation: {conversation_id, labels:[...]}.
 export async function getConversationLabelsFor(convId) {
-  return request('GET', `/api/conversations/${convId}/labels`);
+  return request('GET', `/api/atendimentos/${convId}/labels`);
 }
 
 // Replace a conversation's labels (snapshot of names).
 export async function updateConversationLabels(convId, labels) {
-  return request('PUT', `/api/conversations/${convId}/labels`, { labels });
+  return request('PUT', `/api/atendimentos/${convId}/labels`, { labels });
 }
 
 // ── Templates (Cloud API, Frente C) ───────────────────────────────
 // Channel-aware: returns {supported, templates}. Only channels with the
 // `templates` capability (WhatsApp Cloud) return supported=true.
 export async function getConversationTemplates(convId) {
-  return request('GET', `/api/conversations/${convId}/templates`);
+  return request('GET', `/api/atendimentos/${convId}/templates`);
 }
 
 // body: {template_name, language?, components?, preview_text?}
 export async function sendConversationTemplate(convId, payload) {
-  return request('POST', `/api/conversations/${convId}/send-template`, payload);
+  return request('POST', `/api/atendimentos/${convId}/send-template`, payload);
 }
 
 // Create a template (WhatsApp Cloud) — gated by template.create.
 // body: {name, category?, language?, body_text, header_text?, footer_text?,
 //        body_examples?, header_examples?}
 export async function createConversationTemplate(convId, payload) {
-  return request('POST', `/api/conversations/${convId}/templates`, payload);
+  return request('POST', `/api/atendimentos/${convId}/templates`, payload);
 }
 
 // Delete a template (all languages) by name — gated by template.delete.
 export async function deleteConversationTemplate(convId, name) {
-  return request('DELETE', `/api/conversations/${convId}/templates/${encodeURIComponent(name)}`);
+  return request('DELETE', `/api/atendimentos/${convId}/templates/${encodeURIComponent(name)}`);
 }
 
-// ── Templates / janela 24h ao iniciar conversa (plano 21) ─────────────
-// Versões CHANNEL-scoped (sem conversa ainda): a "Nova conversa" precisa saber a
-// janela e listar/enviar templates antes que a conversa exista.
+// ── Templates / janela 24h ao iniciar atendimento (plano 21) ─────────────
+// Versões CHANNEL-scoped (sem atendimento ainda): a "Novo atendimento" precisa saber a
+// janela e listar/enviar templates antes que o atendimento exista.
 
-// Estado da janela de 24h para iniciar uma conversa em `channelId` com `phone`.
+// Estado da janela de 24h para iniciar um atendimento em `channelId` com `phone`.
 // Retorna {templates_supported, session_open, has_conversation, conversation_id, last_inbound_ts}.
 export async function getChannelSessionState(channelId, phone) {
   return request('GET', `/api/channels/${encodeURIComponent(channelId)}/session-state?phone=${encodeURIComponent(phone)}`);
@@ -557,7 +557,7 @@ export async function getChannelTemplates(channelId) {
   return request('GET', `/api/channels/${encodeURIComponent(channelId)}/templates`);
 }
 
-// Envia um template aprovado para `phone` via `channelId` (cria a conversa).
+// Envia um template aprovado para `phone` via `channelId` (cria o atendimento).
 // body: {phone, template_name, language?, components?, preview_text?}
 export async function sendChannelTemplate(channelId, payload) {
   return request('POST', `/api/channels/${encodeURIComponent(channelId)}/send-template`, payload);
@@ -593,7 +593,7 @@ export async function restoreChannel(id) {
 }
 
 // Canais conectados (connected + logged_in + enabled) que um operador pode usar
-// para iniciar uma conversa nova. Mais leve e com menos privilégio que listChannels
+// para iniciar um atendimento novo. Mais leve e com menos privilégio que listChannels
 // (gated por conversation.reply, sem credenciais). Itens: {id, provider, display_name, own_phone}.
 export async function listConnectedChannels() {
   return request('GET', '/api/channels/connected');

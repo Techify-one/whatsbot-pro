@@ -102,7 +102,7 @@ export function useConversationSelection({
     if (row.conversation_id != null) {
       history.pushState(null, '', `/conversations/${row.conversation_id}`);
     } else {
-      // Sem conversa ainda: a seleção fica no estado; /contacts/{id} agora é a tela
+      // Sem atendimento ainda: a seleção fica no estado; /contacts/{id} agora é a tela
       // de detalhe do contato (não o hub), então a URL volta pra raiz do hub.
       history.pushState(null, '', '/');
     }
@@ -121,14 +121,14 @@ export function useConversationSelection({
         setSelectedConvId(row.conversation_id);
         setSelectedChannelId(row.channel_id || 'default');
       } else {
-        // Conversa fora da sidebar (ex: além do limite ou arquivada) — abre direto
+        // Atendimento fora da sidebar (ex: além do limite ou arquivada) — abre direto
         // por id; o load deriva o telefone/canal da resposta do endpoint.
         setSelected(null);
         setSelectedConvId(initialConversationId);
       }
-      // Permalink (?message=<_id>): foca a mensagem assim que a conversa renderiza.
+      // Permalink (?message=<_id>): foca a mensagem assim que o atendimento renderiza.
       // Lido no momento da resolução e consumido uma vez (onScrolledToMsg limpa);
-      // a conversa carrega TODAS as mensagens, então o alvo está sempre no DOM.
+      // o atendimento carrega TODAS as mensagens, então o alvo está sempre no DOM.
       if (initialScrollMsgId != null) setScrollToMsg(initialScrollMsgId);
       lastResolvedConvId.current = initialConversationId;
       lastResolvedId.current = null;
@@ -158,7 +158,7 @@ export function useConversationSelection({
     }
   }, [initialContactId, initialConversationId, contacts, loading]);
 
-  // Load chat detail when the open thread changes. Conversa-cêntrico: prefer the
+  // Load chat detail when the open thread changes. Atendimento-cêntrico: prefer the
   // per-conversation endpoint (scoped to one channel); fall back to the legacy
   // per-contact endpoint for rows without a conversation.
   useEffect(() => {
@@ -183,9 +183,9 @@ export function useConversationSelection({
       ));
     }
     const convId = selectedConvId;
-    // Conversa nova sem conversation_id ainda: escopa o getContact ao canal
+    // Atendimento novo sem conversation_id ainda: escopa o getContact ao canal
     // escolhido no picker (lido-e-zerado aqui), para não fundir os canais nem
-    // abrir a conversa de outro canal do mesmo número (multicanal).
+    // abrir o atendimento de outro canal do mesmo número (multicanal).
     const newConvChannel = newConvChannelRef.current;
     newConvChannelRef.current = null;
     const loader = convId != null

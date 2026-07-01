@@ -8,7 +8,7 @@ import { GROUP_MODES } from './grouping.js';
 const html = htm.bind(h);
 
 export function GroupBySelector({ mode, onMode, stageAttrs, stageAttrKey, onStageAttr }) {
-  // 'stage' só faz sentido se existir ao menos um atributo de conversa tipo lista.
+  // 'stage' só faz sentido se existir ao menos um atributo de atendimento tipo lista.
   const modes = GROUP_MODES.filter(m => m.id !== 'stage' || (stageAttrs && stageAttrs.length > 0));
 
   return html`

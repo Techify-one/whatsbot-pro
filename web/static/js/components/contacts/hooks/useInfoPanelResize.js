@@ -1,13 +1,13 @@
 // @ts-check
 //
 // Info-panel resize hook — controla a largura de um painel ancorado à direita
-// (ex.: "Informações da conversa"). Mesmo padrão do `useSidebarResize`, mas:
+// (ex.: "Informações do atendimento"). Mesmo padrão do `useSidebarResize`, mas:
 //   • a alça fica na BORDA ESQUERDA do painel (o painel desliza pela direita),
 //     então arrastar p/ a esquerda ALARGA — o delta é subtraído (`startWidth - dx`);
 //   • não há colapsar-no-clique: o painel já tem seu próprio botão de fechar, então
 //     a alça serve só para redimensionar;
 //   • o máximo é DINÂMICO: o painel pode crescer até quase cobrir toda a área de
-//     conversa, deixando só uma fresta (`minVisible`). Medimos a largura real do
+//     atendimento, deixando só uma fresta (`minVisible`). Medimos a largura real do
 //     container (via `containerRef`) a cada arraste/resize, então nunca estoura a
 //     área disponível em telas menores.
 // A largura é persistida por-dispositivo em localStorage (igual ao tema) e só é
@@ -15,7 +15,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'preact/hooks';
 
 const DEFAULT_MIN_WIDTH = 320;     // abaixo disso os campos do form ficam apertados
-const DEFAULT_MIN_VISIBLE = 48;    // fresta da conversa preservada à esquerda do painel
+const DEFAULT_MIN_VISIBLE = 48;    // fresta do atendimento preservada à esquerda do painel
 const FALLBACK_MAX_WIDTH = 720;    // teto até o container poder ser medido (1º paint)
 const HARD_CAP = 4000;             // sanidade p/ valores absurdos vindos do storage
 const DEFAULT_WIDTH = 400;         // = o `lg:w-[400px]` original
@@ -44,7 +44,7 @@ export function useInfoPanelResize(opts = {}) {
   const FALLBACK_MAX = opts.max ?? FALLBACK_MAX_WIDTH;
   const DEFAULT = opts.defaultWidth ?? DEFAULT_WIDTH;
 
-  // Máximo dinâmico: quase toda a largura da área de conversa (container − fresta).
+  // Máximo dinâmico: quase toda a largura da área de atendimento (container − fresta).
   // Sem container medível ainda (1º render) → cai no teto de fallback.
   const maxWidth = useCallback(() => {
     let measured = 0;
@@ -121,7 +121,7 @@ export function useInfoPanelResize(opts = {}) {
     if (!st) return;
     // Alça na borda esquerda de um painel ancorado à direita: arrastar p/ a esquerda
     // (dx < 0) alarga, então subtraímos o delta. Clamp contra o máximo medido AO VIVO
-    // p/ nunca passar da área de conversa.
+    // p/ nunca passar da área de atendimento.
     const dx = e.clientX - st.startX;
     setDesired(Math.max(MIN, Math.min(maxWidth(), Math.round(st.startWidth - dx))));
   }, [MIN, maxWidth]);

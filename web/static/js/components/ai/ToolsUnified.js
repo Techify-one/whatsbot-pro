@@ -23,10 +23,19 @@ import {
   rollbackTool,
 } from '../../services/api.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, bool, str } from '../../services/urlState.js';
 import { EditModal } from '../ToolsManager.js';
 import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
 
 const html = htm.bind(h);
+
+// Deep-link (Plano 24): ?q= reflete a busca (replace); ?history=1 é aditivo ao
+// path /ai/tools/{name} (o path é dono do editor aberto; a flag abre o histórico).
+const TOOLS_URL_SCHEMA = [
+  str('q', ''),      // ?q=<termo> → filtro de busca
+  bool('history'),   // ?history=1 → modal de histórico da tool code-in-DB
+];
 
 // In-app confirmation modal (substitui o confirm() nativo do navegador). Estilo
 // alinhado ao HistoryModal/EditModal, legível no modo escuro (classes wa-*).
@@ -161,6 +170,36 @@ export default function ToolsUnified({ initialEntity }) {
   useEffect(() => {
     if (!didMountRef.current) { didMountRef.current = true; return; }
     pushUrl(editName ? { sub: 'tools', id: editName } : { sub: 'tools' });
+  }, [editName]);
+
+  // Deep-link da query (Plano 24): hidrata busca (?q) no mount/popstate e reflete
+  // no URL (replace); ?history=1 é aditivo ao path — reabre o histórico contra a
+  // tool nomeada no path (editName) via openHistory (carrega historyRows).
+  useUrlState({
+    read: () => readParams(window.location.search, TOOLS_URL_SCHEMA),
+    apply: (s) => {
+      setQuery(s.q);
+      if (s.history) {
+        const row = rows.find((r) => r.name === (editName || (historyFor && historyFor.name)));
+        if (row && row.isCode && !historyFor) openHistory(row);
+      } else if (historyFor) setHistoryFor(null);
+    },
+    serialize: () => writeParams({
+      q: query,
+      history: !!historyFor,
+    }, TOOLS_URL_SCHEMA),
+    deps: [query, historyFor],
+  });
+  // Corrida de montagem: o path (editName) só resolve depois da lista carregar.
+  // Quando resolver, reabre o histórico pedido pela URL uma única vez.
+  const histHydratedRef = useRef(false);
+  useEffect(() => {
+    if (histHydratedRef.current || !editName) return;
+    histHydratedRef.current = true;
+    const s = readParams(window.location.search, TOOLS_URL_SCHEMA);
+    if (!s.history || historyFor) return;
+    const row = rows.find((r) => r.name === editName);
+    if (row && row.isCode) openHistory(row);
   }, [editName]);
 
   // ---- Toggle (Ativa) -------------------------------------------------------

@@ -19,10 +19,10 @@ import { useInfoPanelResize } from './hooks/useInfoPanelResize.js';
 
 const html = htm.bind(h);
 
-// ── Conversation Info Panel (plano conversa Onda 2) ──────────────────────────
+// ── Conversation Info Panel (plano atendimento Onda 2) ──────────────────────────
 // The conversation-scoped counterpart of ContactInfoPanel: status, assignment,
 // conversation labels (Onda 3), conversation custom attributes and read-only
-// metadata. Opened from the "Informações da conversa" (ℹ️) button in the chat
+// metadata. Opened from the "Informações do atendimento" (ℹ️) button in the chat
 // header; the contact photo/name still opens ContactInfoPanel. Dark-mode-safe.
 
 const PROVIDER_LABELS = {
@@ -53,10 +53,10 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
   const [highlightAttrs, setHighlightAttrs] = useState(false);
   const attrsRef = useRef(null);
-  const panelRootRef = useRef(null);   // overlay que delimita a área de conversa
+  const panelRootRef = useRef(null);   // overlay que delimita a área de atendimento
 
   // Largura arrastável do painel (desktop), persistida por-dispositivo. O máximo é
-  // dinâmico: pode crescer até quase cobrir toda a conversa (medida via panelRootRef).
+  // dinâmico: pode crescer até quase cobrir toda o atendimento (medida via panelRootRef).
   const { width, isResizing, isDesktop, startResize } = useInfoPanelResize({
     storageKey: 'whatsbot_conv_info_panel_width',
     containerRef: panelRootRef,
@@ -239,7 +239,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             <${CloseIcon} />
           </button>
           <span class="text-white text-[16px] font-medium">
-            Informações da conversa${conv && conv.display_id != null ? html` <span class="opacity-80">#${conv.display_id}</span>` : null}
+            Informações do atendimento${conv && conv.display_id != null ? html` <span class="opacity-80">#${conv.display_id}</span>` : null}
           </span>
         </div>
 
@@ -248,7 +248,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
           ${loading ? html`<div class="px-6 py-8 text-wa-secondary text-[14px]">Carregando…</div>` : null}
           ${!loading && !conv ? html`
             <div class="px-6 py-8 text-wa-secondary text-[14px] text-center">
-              Nenhuma conversa para este contato ainda.
+              Nenhum atendimento para este contato ainda.
             </div>
           ` : null}
           ${!loading && conv ? html`
@@ -275,17 +275,17 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             </div>
             ` : null}
 
-            <!-- Etiquetas da conversa (Onda 3) -->
+            <!-- Etiquetas do atendimento (Onda 3) -->
             ${canReply ? html`
             <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
               <${ConversationLabelEditor} conversationId=${conv.id} currentUser=${user} />
             </div>
             ` : null}
 
-            <!-- Atributos da conversa -->
+            <!-- Atributos do atendimento -->
             ${canReply && convDefs.length > 0 ? html`
               <div ref=${attrsRef} class="bg-wa-bg px-6 py-4 border-b border-wa-border transition-all duration-300 ${highlightAttrs ? 'ring-2 ring-inset ring-red-500' : ''}">
-                <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados desta conversa</div>
+                <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados deste atendimento</div>
                 <div class="space-y-4">
                   ${convDefs.map(def => html`
                     <${CustomAttributeField}
@@ -309,7 +309,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             ` : null}
 
             <!-- Ponto de extensão: um plugin pode injetar uma seção dentro do painel
-                 da conversa (ex.: "Atendimento atual"). Renderiza nada quando vazio,
+                 do atendimento (ex.: "Atendimento atual"). Renderiza nada quando vazio,
                  então é inerte sem plugin (camada de extensão de frontend). -->
             <${Slot} name="conversation.info.panel" ctx=${{ conv, contact: contactInfo, user }} />
 

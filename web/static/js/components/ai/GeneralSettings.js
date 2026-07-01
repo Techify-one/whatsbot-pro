@@ -17,7 +17,7 @@ const html = htm.bind(h);
 
 export default function GeneralSettings() {
   const [config, setConfig] = useState(null);
-  // Interruptor GLOBAL da IA (checado antes do toggle por canal e por conversa).
+  // Interruptor GLOBAL da IA (checado antes do toggle por canal e por atendimento).
   const [autoReply, setAutoReply] = useState(true);
   // API
   const [apiKey, setApiKey] = useState('');

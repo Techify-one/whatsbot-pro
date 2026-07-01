@@ -1,7 +1,7 @@
-// Required custom attributes (P05) — gate de resolução de conversa.
+// Required custom attributes (P05) — gate de resolução de atendimento.
 //
-// Atributos de conversa marcados como "Obrigatório preencher" (def.required)
-// precisam ter um valor antes de a conversa ser resolvida. Este helper compara
+// Atributos de atendimento marcados como "Obrigatório preencher" (def.required)
+// precisam ter um valor antes de o atendimento ser resolvido. Este helper compara
 // as definições com os valores atuais e devolve as definições ainda em falta,
 // para o chamador exibir o modal e abrir o painel de preenchimento.
 

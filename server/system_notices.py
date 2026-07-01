@@ -75,24 +75,24 @@ def _f_assigned(actor=None, target=None, **_) -> str:
     tgt = _q(target) or "alguém"
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} atribuiu a conversa para {tgt}.",
-        f"🧑‍💼 Conversa atribuída para {tgt}.",
+        f"🧑‍💼 {actor} atribuiu o atendimento para {tgt}.",
+        f"🧑‍💼 Atendimento atribuído para {tgt}.",
     )
 
 
 def _f_assigned_me(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} assumiu a conversa.",
-        "🧑‍💼 Conversa assumida.",
+        f"🧑‍💼 {actor} assumiu o atendimento.",
+        "🧑‍💼 Atendimento assumido.",
     )
 
 
 def _f_unassigned(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} removeu a atribuição da conversa.",
-        "🧑‍💼 Atribuição da conversa removida.",
+        f"🧑‍💼 {actor} removeu a atribuição do atendimento.",
+        "🧑‍💼 Atribuição do atendimento removida.",
     )
 
 
@@ -115,63 +115,63 @@ def _f_tag_removed(actor=None, tag=None, **_) -> str:
 def _f_conv_label_added(actor=None, label=None, **_) -> str:
     return _with_actor(
         actor,
-        f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" à conversa.',
-        f'🏷️ Etiqueta "{_q(label)}" adicionada à conversa.',
+        f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" ao atendimento.',
+        f'🏷️ Etiqueta "{_q(label)}" adicionada ao atendimento.',
     )
 
 
 def _f_conv_label_removed(actor=None, label=None, **_) -> str:
     return _with_actor(
         actor,
-        f'🏷️ {actor} removeu a etiqueta "{_q(label)}" da conversa.',
-        f'🏷️ Etiqueta "{_q(label)}" removida da conversa.',
+        f'🏷️ {actor} removeu a etiqueta "{_q(label)}" do atendimento.',
+        f'🏷️ Etiqueta "{_q(label)}" removida do atendimento.',
     )
 
 
 def _f_status_closed(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"✅ {actor} resolveu a conversa.",
-        "✅ Conversa resolvida.",
+        f"✅ {actor} resolveu o atendimento.",
+        "✅ Atendimento resolvido.",
     )
 
 
 def _f_status_open(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🔄 {actor} reabriu a conversa.",
-        "🔄 Conversa reaberta.",
+        f"🔄 {actor} reabriu o atendimento.",
+        "🔄 Atendimento reaberto.",
     )
 
 
 def _f_status_reopened_auto(**_) -> str:
-    return "🔄 Conversa reaberta automaticamente (cliente enviou mensagem)."
+    return "🔄 Atendimento reaberto automaticamente (cliente enviou mensagem)."
 
 
 def _f_status_reopened_auto_agent(**_) -> str:
-    return "🔄 Conversa reaberta automaticamente (resposta enviada)."
+    return "🔄 Atendimento reaberto automaticamente (resposta enviada)."
 
 
 def _f_archived(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🗄️ {actor} arquivou a conversa.",
-        "🗄️ Conversa arquivada.",
+        f"🗄️ {actor} arquivou o atendimento.",
+        "🗄️ Atendimento arquivado.",
     )
 
 
 def _f_unarchived(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🗄️ {actor} desarquivou a conversa.",
-        "🗄️ Conversa desarquivada.",
+        f"🗄️ {actor} desarquivou o atendimento.",
+        "🗄️ Atendimento desarquivado.",
     )
 
 
 def _f_created(display_id=None, **_) -> str:
     if display_id:
-        return f"💬 Conversa #{display_id} iniciada."
-    return "💬 Conversa iniciada."
+        return f"💬 Atendimento #{display_id} iniciado."
+    return "💬 Atendimento iniciado."
 
 
 def _f_ai_on(actor=None, **_) -> str:
@@ -208,8 +208,8 @@ def _f_attribute_set(actor=None, attribute=None, value=None, count=None, **_) ->
     if count and count > 1:
         return _with_actor(
             actor,
-            f"📋 {actor} atualizou {count} atributos da conversa.",
-            f"📋 {count} atributos da conversa atualizados.",
+            f"📋 {actor} atualizou {count} atributos do atendimento.",
+            f"📋 {count} atributos do atendimento atualizados.",
         )
     return _with_actor(
         actor,
@@ -269,7 +269,7 @@ def _seed_core_notices() -> None:
     # Grupos (config_key auto-derivado = system_notice_<key>, exceto onde diverge).
     register_notice_group("assignment", "Atribuição")
     register_notice_group("tags", "Tags")
-    register_notice_group("conv_labels", "Etiquetas da conversa")
+    register_notice_group("conv_labels", "Etiquetas do atendimento")
     register_notice_group("status", "Status e arquivo")
     register_notice_group("ai", "IA e atributos")
     # Tipos -> (grupo, formatter).
@@ -369,13 +369,24 @@ def has_event(conversation_id: int, event_type: str) -> bool:
         return False
 
 
-def resolve_conversation_for_contact(contact_id: int) -> dict | None:
+def resolve_conversation_for_contact(contact_id: int,
+                                     inbox_id: int | None = None) -> dict | None:
     """Resolve the contact's conversation to anchor a notice on (open → latest).
 
     Prefers the contact's OPEN conversation; falls back to the most recent one
     (events like "fechada" leave the conversation closed). Returns ``None`` when
-    the contact has no conversation. Best-effort — never raises."""
+    the contact has no conversation. Best-effort — never raises.
+
+    ``inbox_id`` restringe a resolução àquela caixa (plano 11): num contato com
+    conversas em vários canais, o caminho contact-scoped fundiria os canais e
+    ancoraria o aviso na thread errada. Quando informado, usa as variantes
+    ``*_for_contact_inbox``; ausente mantém o comportamento contact-scoped legado."""
     try:
+        if inbox_id is not None:
+            conv = conversation_repo.get_open_for_contact_inbox(contact_id, inbox_id)
+            if conv is None:
+                conv = conversation_repo.get_latest_for_contact_inbox(contact_id, inbox_id)
+            return conv
         conv = conversation_repo.get_open_for_contact(contact_id)
         if conv is None:
             conv = conversation_repo.get_latest_for_contact(contact_id)
@@ -387,15 +398,17 @@ def resolve_conversation_for_contact(contact_id: int) -> dict | None:
 
 
 def emit_for_contact(*, event_type: str, contact_id: int, phone: str | None = None,
-                     **ctx) -> dict | None:
+                     inbox_id: int | None = None, **ctx) -> dict | None:
     """Resolve the contact's conversation (open → latest) and emit a notice on it.
 
     Convenience over :func:`emit_conversation_notice` for call sites that only
     have a contact: it resolves the anchor conversation, emits the notice, and
     returns the resolved conversation (so the caller can chain further per-conv
     actions). Returns ``None`` when no conversation exists (nothing emitted).
-    Never raises — a failed notice never breaks the action."""
-    conv = resolve_conversation_for_contact(contact_id)
+    Never raises — a failed notice never breaks the action. ``inbox_id`` restringe
+    a resolução à caixa daquele canal (multicanal — ver
+    :func:`resolve_conversation_for_contact`)."""
+    conv = resolve_conversation_for_contact(contact_id, inbox_id)
     if conv is None:
         return None
     emit_conversation_notice(

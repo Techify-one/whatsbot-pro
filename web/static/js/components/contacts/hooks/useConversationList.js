@@ -51,7 +51,7 @@ export function useConversationList({ onUnreadChange }) {
     return seen.size > 1;
   }, [contacts]);
 
-  // Canais presentes nas conversas carregadas → opções do filtro "Canais". Derivado
+  // Canais presentes nos atendimentos carregadas → opções do filtro "Canais". Derivado
   // das próprias linhas (mostra exatamente os canais em uso, sem fetch extra).
   const channelOptions = useMemo(() => {
     const map = new Map();

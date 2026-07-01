@@ -1,31 +1,63 @@
-// Override da aba "Atendimentos". Aba dedicada à entidade ATENDIMENTO:
+// Override da aba "Protocolos". Aba dedicada à entidade PROTOCOLO:
 //  - Lista (colunas ordenáveis por clique) OU Kanban (agrupado por Status ou Atendente,
 //    com drag-and-drop que ALTERA o estado: soltar numa coluna fecha/reabre ou atribui).
 //  - Filtros: status, busca por cliente e PERÍODO de criação (intervalo + presets).
-//  - Abrir um atendimento → detalhe; clicar numa de suas conversas → vai EXATAMENTE
-//    àquele ponto da conversa no chat (?message=<_id>).
-// Desativar o plugin → a aba volta 100% ao Atendimentos nativo.
+//  - Abrir um protocolo → detalhe; clicar numa de suas atendimentos → vai EXATAMENTE
+//    àquele ponto da atendimento no chat (?message=<_id>).
+// Desativar o plugin → a aba volta 100% ao Protocolos nativo.
 
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { ConversasTable } from '/plugins/atendimentos/static/conversas_table.js';
-import { ResolveForm, LabeledField } from '/plugins/atendimentos/static/resolve_form.js';
+import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
+import { ResolveForm, LabeledField } from '/plugins/protocolos/static/resolve_form.js';
 
 const html = htm.bind(h);
 
-const MODE_KEY = 'whatsbot_atendimentos_mode';    // 'lista' | 'kanban'
-const KGROUP_KEY = 'whatsbot_atendimentos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
-const VIEW_KEY = 'whatsbot_atendimentos_view';     // id da aba ativa: '__status'|'__atendente'|<id custom>
+const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
+const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
+const VIEW_KEY = 'whatsbot_protocolos_view';     // id (numérico) da aba ativa; sentinelas legadas '__status'/'__atendente' caem na 1ª aba
 function lsGet(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
 
-// Abas built-in (sempre presentes, não removíveis). As visualizações personalizadas
-// (pessoais/equipe) carregadas do backend aparecem ao lado destas.
-const BUILTIN_VIEWS = [
-  { id: '__status', label: 'Status', group_by: 'status', builtin: true, filters: {} },
-  { id: '__atendente', label: 'Atendente', group_by: 'atendente', builtin: true, filters: {} },
-];
+// Deep-link da aba ativa do Kanban (Plano 24) — ?view=<id>. Padrão MANUAL do plugin
+// (URLSearchParams + replaceState), como o ?detail= já faz; NÃO usa os hooks do core
+// (evita divergência pelo boundary de plugin). Convivem: escrever ?view= preserva o
+// ?detail= corrente e vice-versa.
+// Copia texto p/ o clipboard funcionando também em HTTP/contexto não-seguro (o painel
+// costuma rodar num IP de LAN sem TLS, onde navigator.clipboard não existe) — fallback
+// via execCommand num textarea temporário. Chama onOk() no sucesso.
+function copyText(text, onOk) {
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok && onOk) onOk();
+    } catch (e) { /* clipboard indisponível */ }
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => onOk && onOk()).catch(fallback);
+  } else { fallback(); }
+}
+
+function readUrlParam(key) { try { return new URLSearchParams(location.search).get(key); } catch (e) { return null; } }
+function writeUrlParam(key, value) {
+  try {
+    const p = new URLSearchParams(location.search);
+    if (value == null || value === '') p.delete(key); else p.set(key, String(value));
+    const qs = p.toString();
+    history.replaceState(null, '', `${location.pathname}${qs ? `?${qs}` : ''}`);
+  } catch (e) { /* ignore */ }
+}
+
+// Fallback SÓ de render: garante que o board nunca fique em branco quando não há nenhuma
+// visualização (ex.: todas excluídas). NÃO é uma aba da barra — as abas Status/Atendente
+// agora são views REAIS (seed 010), editáveis/excluíveis como qualquer visualização criada
+// pela interface.
+const FALLBACK_VIEW = { id: '__fallback', group_by: 'status', filters: {} };
 
 function fmtTs(ts) {
   if (!ts) return '—';
@@ -35,14 +67,16 @@ function fmtTs(ts) {
 
 function fmtCell(v, def) {
   if (def.type === 'checkbox') return v ? 'Sim' : 'Não';
+  if (def.type === 'checkboxes') return (Array.isArray(v) && v.length) ? v.join(', ') : '—';
   return (v == null || v === '') ? '—' : String(v);
 }
 
-// Campo do atendimento "preenchido"? checkbox sempre conta como preenchido (consistente
+// Campo do protocolo "preenchido"? checkbox sempre conta como preenchido (consistente
 // com o backend _missing_required e com o isFilled do popup de resolver). Usado pelo gate
 // de obrigatórios do detalhe e pelo guard do drag para "Fechado".
-function isFilledAtend(def, v) {
+function isFilledProto(def, v) {
   if (def.type === 'checkbox') return true;
+  if (def.type === 'checkboxes') return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
@@ -56,9 +90,9 @@ function ymd(date) {
 function dayStartEpoch(s) { if (!s) return null; const d = new Date(`${s}T00:00:00`); return Number.isNaN(d) ? null : Math.floor(d.getTime() / 1000); }
 function dayEndEpoch(s) { if (!s) return null; const d = new Date(`${s}T23:59:59`); return Number.isNaN(d) ? null : Math.floor(d.getTime() / 1000); }
 
-// Abre EXATAMENTE a conversa (thread) no hub de chat — mesmo primitivo do kanban
+// Abre EXATAMENTE a atendimento (thread) no hub de chat — mesmo primitivo do kanban
 // nativo (history.pushState + popstate). Com `messageId`, usa o permalink de mensagem
-// (?message=<_id>) p/ rolar ATÉ aquele ponto da conversa (estilo busca).
+// (?message=<_id>) p/ rolar ATÉ aquele ponto da atendimento (estilo busca).
 function openConversation(conversationId, messageId = null) {
   if (conversationId == null) return;
   const qs = messageId != null ? `?message=${messageId}` : '';
@@ -112,9 +146,9 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
                 ...users.map((u) => ({ id: `u:${u.id}`, label: u.name || `Usuário #${u.id}` }))],
       columnIdOf: (r) => (r.assignee_user_id != null ? `u:${r.assignee_user_id}` : '__none__'),
       confirmText: (r, col) => (col === '__none__'
-        ? `Remover a atribuição do atendimento de ${cliente(r)}?`
-        : `Atribuir o atendimento de ${cliente(r)} a ${nameOf(col)}?`),
-      onDrop: (r, col) => apiPost(`/atendimentos/${r.id}/assign`, {
+        ? `Remover a atribuição do protocolo de ${cliente(r)}?`
+        : `Atribuir o protocolo de ${cliente(r)} a ${nameOf(col)}?`),
+      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/assign`, {
         assignee_user_id: col === '__none__' ? null : +col.slice(2),
         assignee_name: col === '__none__' ? '' : nameOf(col),
       }),
@@ -173,11 +207,11 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
     return {
       columns: [{ id: '__none__', label: 'Sem valor' },
                 ...opts.map((o) => ({ id: `o:${o}`, label: o }))],
-      columnIdOf: (r) => { const v = (r.conversa_attrs || {})[key]; return (v != null && v !== '') ? `o:${v}` : '__none__'; },
+      columnIdOf: (r) => { const v = (r.atendimento_attrs || {})[key]; return (v != null && v !== '') ? `o:${v}` : '__none__'; },
       confirmText: (r, col) => (col === '__none__'
-        ? `Limpar "${def.label}" da última conversa de ${cliente(r)}?`
-        : `Definir "${def.label}" = "${col.slice(2)}" na última conversa de ${cliente(r)}?`),
-      onDrop: (r, col) => apiPost(`/atendimentos/${r.id}/set-attr`, {
+        ? `Limpar "${def.label}" da última atendimento de ${cliente(r)}?`
+        : `Definir "${def.label}" = "${col.slice(2)}" na última atendimento de ${cliente(r)}?`),
+      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/set-attr`, {
         key, value: col === '__none__' ? null : col.slice(2),
       }),
     };
@@ -188,14 +222,14 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
     columns: [{ id: 'aberto', label: 'Aberto' }, { id: 'fechado', label: 'Fechado' }],
     columnIdOf: (r) => (r.status === 'fechado' ? 'fechado' : 'aberto'),
     confirmText: (r, col) => (col === 'fechado'
-      ? `Finalizar o atendimento de ${cliente(r)}?`
-      : `Reabrir o atendimento de ${cliente(r)}?`),
+      ? `Finalizar o protocolo de ${cliente(r)}?`
+      : `Reabrir o protocolo de ${cliente(r)}?`),
     onDrop: (r, col) => (col === 'fechado'
-      ? apiPost(`/atendimentos/${r.id}/close`) : apiPost(`/atendimentos/${r.id}/reopen`)),
+      ? apiPost(`/protocolos/${r.id}/close`) : apiPost(`/protocolos/${r.id}/reopen`)),
   };
 }
 
-export function AtendimentosTab({ api, setTab }) {
+export function ProtocolosTab({ api, setTab }) {
   return html`
     <div>
       <div class="flex items-center gap-2 mb-3">
@@ -204,20 +238,20 @@ export function AtendimentosTab({ api, setTab }) {
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
           Voltar
         </button>` : null}
-        <h1 class="text-lg font-semibold text-wa-text">Atendimentos</h1>
+        <h1 class="text-lg font-semibold text-wa-text">Protocolos</h1>
       </div>
-      <${AtendimentosList} api=${api} />
+      <${ProtocolosList} api=${api} />
     </div>`;
 }
 
-function AtendimentosList({ api }) {
+function ProtocolosList({ api }) {
   const apiBase = api.apiBase;
   const { authHeaders } = api.services;
 
-  const [cols, setCols] = useState([]);          // TODAS as defs do atendimento (OBS fixo + extras, com `required`)
-  const [convDefs, setConvDefs] = useState([]);  // defs de "Resolver conversa" (sub-tabela do detalhe)
-  const [convResolveDefs, setConvResolveDefs] = useState([]); // conversa: obs+extras editáveis (popup)
-  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo personalizado do core (escopo conversa, não-sistema)
+  const [cols, setCols] = useState([]);          // TODAS as defs do protocolo (OBS fixo + extras, com `required`)
+  const [atendDefs, setAtendDefs] = useState([]);  // defs de "Resolver atendimento" (sub-tabela do detalhe)
+  const [atendResolveDefs, setAtendResolveDefs] = useState([]); // atendimento: obs+extras editáveis (popup)
+  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo personalizado do core (escopo atendimento, não-sistema)
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
@@ -231,6 +265,8 @@ function AtendimentosList({ api }) {
   // Visualizações (abas de "Agrupar por"): built-ins + carregadas do backend.
   const [views, setViews] = useState([]);
   const [activeViewId, setActiveViewId] = useState(() => {
+    const u = readUrlParam('view');                   // precedência URL > localStorage
+    if (u) return u;
     const v = lsGet(VIEW_KEY, '');
     if (v) return v;
     const kg = lsGet(KGROUP_KEY, '');                 // migração suave da chave antiga
@@ -240,32 +276,36 @@ function AtendimentosList({ api }) {
     try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); } catch (e) { return null; }
   });
   const [assigneeFilter, setAssigneeFilter] = useState(null);  // filtro por atendente (da aba)
-  const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de conversa (da aba)
+  const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);            // grupos de permissão (p/ "Quem pode ver")
   const [actionMsg, setActionMsg] = useState(null);  // {text, error}
-  const [detail, setDetail] = useState(null);        // {atendimento, conversas}
+  const [detail, setDetail] = useState(null);        // {protocolo, atendimentos}
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
   const appliedViewRef = useRef(null);               // última aba cujos filtros já foram aplicados
   const setM = (m) => { setMode(m); lsSet(MODE_KEY, m); };
-  const setActiveView = (id) => { setActiveViewId(String(id)); lsSet(VIEW_KEY, String(id)); };
+  // Troca a aba ativa: estado + localStorage (por-device) + reflete ?view=<id> na URL
+  // (replaceState, preservando ?detail=). id vazio limpa o param (ex.: view excluída).
+  const setActiveView = (id) => {
+    setActiveViewId(String(id)); lsSet(VIEW_KEY, String(id)); writeUrlParam('view', id ? String(id) : '');
+  };
 
-  const tabs = useMemo(() => [...BUILTIN_VIEWS, ...views.map((v) => ({ ...v, label: v.name }))], [views]);
+  const tabs = useMemo(() => views.map((v) => ({ ...v, label: v.name })), [views]);
   const activeView = useMemo(
-    () => tabs.find((t) => String(t.id) === String(activeViewId)) || BUILTIN_VIEWS[0],
+    () => tabs.find((t) => String(t.id) === String(activeViewId)) || tabs[0] || FALLBACK_VIEW,
     [tabs, activeViewId]);
   const canTeam = api.services.hasPermission
-    ? api.services.hasPermission(currentUser, 'plugin.atendimentos.manage_team_views') : true;
-  const canEditView = (v) => !v.builtin
-    && (canTeam || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id)));
+    ? api.services.hasPermission(currentUser, 'plugin.protocolos.manage_team_views') : true;
+  const canEditView = (v) => canTeam
+    || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id));
   // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
   // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|attr:<key>.
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
   const availFilter = (key) => !availArr || availArr.includes(key);
 
-  const dragRef = useRef(null);     // atendimento sendo arrastado
+  const dragRef = useRef(null);     // protocolo sendo arrastado
   const draggedRef = useRef(false); // distingue clique de arrasto
   const [dropCol, setDropCol] = useState(null);
 
@@ -295,18 +335,18 @@ function AtendimentosList({ api }) {
       if (assigneeFilter != null) params.set('assignee_user_id', String(assigneeFilter));
       if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
       const [dd, cd, ca, ll] = await Promise.all([
+        getJson(`${apiBase}/field-defs?scope=protocolo`),
         getJson(`${apiBase}/field-defs?scope=atendimento`),
-        getJson(`${apiBase}/field-defs?scope=conversa`),
         getJson('/api/custom-attributes?applies_to=conversation'),  // atributos do CORE
-        getJson(`${apiBase}/atendimentos?${params.toString()}`),
+        getJson(`${apiBase}/protocolos?${params.toString()}`),
       ]);
-      // TODAS as defs do atendimento (OBS fixo + extras, com `required`) — alimentam o
+      // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
       // form editável do detalhe e o gate de obrigatórios (drag p/ "Fechado"). Sem filtrar.
       setCols((dd && dd.ok && dd.data && dd.data.defs) || []);
-      const convAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
-      setConvDefs(convAll.filter((d) => !d.fixed));
-      setConvResolveDefs(convAll.filter((d) => !d.readonly)); // p/ o popup "Resolver conversa"
-      // Atributo personalizado = def do core (escopo conversa) que NÃO é espelho do plugin (is_system=0).
+      const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
+      setAtendDefs(atendAll.filter((d) => !d.fixed));
+      setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
+      // Atributo personalizado = def do core (escopo atendimento) que NÃO é espelho do plugin (is_system=0).
       setCoreAttrDefs(((ca && ca.ok && ca.data) || [])
         .filter((d) => !d.is_system)
         .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
@@ -346,7 +386,7 @@ function AtendimentosList({ api }) {
     if (!resolved || appliedViewRef.current === String(activeViewId)) return;
     appliedViewRef.current = String(activeViewId);
     // Origem dos filtros: a preferência do usuário (pessoal x equipe) por aba. Default =
-    // filtros da EQUIPE (a coluna filters compartilhada). Builtin não tem pref/filters → {}.
+    // filtros da EQUIPE (a coluna filters compartilhada). O fallback de render não tem pref/filters → {}.
     const usePersonal = v.pref && v.pref.use_personal;
     const f = (usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {};
     // Só aplica pré-determinados de filtros DISPONÍVEIS nesta aba (available_filters da view;
@@ -389,7 +429,7 @@ function AtendimentosList({ api }) {
     let ws;
     try {
       ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_atendimentos_changed') { load(); loadViews(); } } catch (_) { /* ignore */ } };
+      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_protocolos_changed') { load(); loadViews(); } } catch (_) { /* ignore */ } };
     } catch (_) { /* ignore */ }
     return () => { try { ws && ws.close(); } catch (_) { /* ignore */ } };
   }, [load, loadViews]);
@@ -412,26 +452,45 @@ function AtendimentosList({ api }) {
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
+  // Id do protocolo atualmente aberto no detalhe (espelha ?detail= na URL). Ref p/ o
+  // sync bidirecional não depender do estado assíncrono e evitar reabrir/refetch em loop.
+  const detailIdRef = useRef(null);
+
   const openDetail = useCallback(async (atid, warn = false) => {
-    const r = await getJson(`${apiBase}/atendimentos/${atid}`);
+    const r = await getJson(`${apiBase}/protocolos/${atid}`);
     if (r && r.ok) {
-      setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este atendimento.' : '');
+      setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este protocolo.' : '');
       setDetail(r.data);
+      // Deep-link (Plano 24): o protocolo aberto vira ?detail=<id> na URL (compartilhável).
+      detailIdRef.current = String(atid);
+      writeUrlParam('detail', String(atid));
     }
   }, [apiBase, getJson]);
 
-  // Deep-link de entrada (Req 1): /attendances?detail=<atid> abre o detalhe daquele
-  // atendimento. Lido no mount E em popstate — é assim que o "Resolver e ir ao atendimento"
-  // (navega com pushState+popstate no extends.js) chega aqui. Limpa o param (replaceState)
-  // p/ não reabrir o detalhe ao navegar de volta.
+  // Fecha o detalhe e limpa o ?detail= (preservando o ?view=).
+  const closeDetail = useCallback(() => {
+    setDetail(null); setDetailWarning('');
+    detailIdRef.current = null;
+    writeUrlParam('detail', '');
+  }, []);
+
+  // Deep-link do protocolo aberto (Plano 24): /attendances?detail=<id> abre e MANTÉM o
+  // param na URL (compartilhável — antes era one-shot). Lido no mount E em popstate (é
+  // assim que o "Resolver e ir ao protocolo" chega, via pushState no extends.js). Sync
+  // bidirecional: param novo → abre; param ausente com detalhe aberto (voltar) → fecha.
+  // No mesmo passo ressincroniza a aba ativa com ?view= (o param vence o localStorage).
   useEffect(() => {
     const readDeep = () => {
-      let id = null;
-      try { id = new URLSearchParams(location.search).get('detail'); } catch (_) { /* ignore */ }
-      if (!id) return;
-      const n = parseInt(id, 10);
-      try { history.replaceState(null, '', '/attendances'); } catch (_) { /* ignore */ }
-      if (!Number.isNaN(n)) openDetail(n);
+      const v = readUrlParam('view');            // ?view= tem precedência (setState idempotente no Preact)
+      if (v) { setActiveViewId(String(v)); lsSet(VIEW_KEY, String(v)); }
+      const id = readUrlParam('detail');
+      if (id) {
+        const n = parseInt(id, 10);
+        if (detailIdRef.current !== String(id) && !Number.isNaN(n)) openDetail(n);
+      } else if (detailIdRef.current != null) {
+        // URL sem ?detail= (ex.: voltar do navegador) → fecha o detalhe aberto.
+        setDetail(null); setDetailWarning(''); detailIdRef.current = null;
+      }
     };
     readDeep();
     window.addEventListener('popstate', readDeep);
@@ -458,7 +517,7 @@ function AtendimentosList({ api }) {
   }, [api, coreAttrDefs, users, roles, canTeam, currentUser, loadViews, activeViewId]);
 
   const removeView = useCallback(async (view) => {
-    if (!view || view.builtin) return;
+    if (!view) return;
     const ok = await api.ui.openModal((close) => html`<${ConfirmDialog} danger=${true} okLabel="Excluir"
       message=${`Excluir a visualização "${view.label || view.name}"?`}
       onOk=${() => close(true)} onCancel=${() => close(false)} />`);
@@ -466,42 +525,42 @@ function AtendimentosList({ api }) {
     try {
       const r = await fetch(`${apiBase}/kanban-views/${view.id}`, { method: 'DELETE', headers: authHeaders() });
       const j = await r.json().catch(() => ({}));
-      if (j && j.ok) { if (String(activeViewId) === String(view.id)) setActiveView('__status'); await loadViews(); }
+      if (j && j.ok) { if (String(activeViewId) === String(view.id)) setActiveView(''); await loadViews(); }
       else setActionMsg({ text: (j && j.error) || 'Falha ao excluir.', error: true });
     } catch (_) { setActionMsg({ text: 'Falha ao excluir a visualização.', error: true }); }
   }, [api, apiBase, authHeaders, activeViewId, loadViews]);
 
-  // Resolve a conversa do ciclo aberto do atendimento (popup) e finaliza. Usado quando
-  // o backend recusa o fechamento por haver conversa aberta. Retorna true se finalizou.
+  // Resolve a atendimento do ciclo aberto do protocolo (popup) e finaliza. Usado quando
+  // o backend recusa o fechamento por haver atendimento aberta. Retorna true se finalizou.
   async function forceResolveAndClose(atid) {
-    const r = await getJson(`${apiBase}/atendimentos/${atid}`);
-    const conversas = (r && r.ok && r.data && r.data.conversas) || [];
-    const openCycle = conversas.find((c) => !c.ended_at && c.conversation_id);
+    const r = await getJson(`${apiBase}/protocolos/${atid}`);
+    const atendimentos = (r && r.ok && r.data && r.data.atendimentos) || [];
+    const openCycle = atendimentos.find((c) => !c.ended_at && c.conversation_id);
     if (!openCycle) return false; // nada aberto → mantém o erro original
     let fields = {};
-    if (convResolveDefs.length) {
+    if (atendResolveDefs.length) {
       const picked = await api.ui.openModal((close) => html`
-        <${ResolveForm} defs=${convResolveDefs} conv=${{ id: openCycle.conversation_id }}
+        <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return false; // cancelou → não finaliza
       fields = picked.fields || {}; // onOk devolve { fields, custom_attributes, goTo }
     }
-    const res = await apiPost(`/conversas/${openCycle.conversation_id}/resolve`, { fields });
+    const res = await apiPost(`/atendimentos/${openCycle.conversation_id}/resolve`, { fields });
     if (!res || res.ok === false) {
-      setActionMsg({ text: (res && res.error) || 'Falha ao resolver a conversa.', error: true });
+      setActionMsg({ text: (res && res.error) || 'Falha ao resolver o atendimento.', error: true });
       return false;
     }
-    // Fecha a CONVERSA no core (status=closed). O resolve do plugin só encerra o CICLO
-    // (ended_at) — sem este passo a conversa segue ABERTA na aba de conversa (o header
-    // fica em "Resolver" em vez de "Reabrir"). É o MESMO 2º passo que a aba de conversa
+    // Fecha a ATENDIMENTO no core (status=closed). O resolve do plugin só encerra o CICLO
+    // (ended_at) — sem este passo a atendimento segue ABERTA na aba de atendimento (o header
+    // fica em "Resolver" em vez de "Reabrir"). É o MESMO 2º passo que a aba de atendimento
     // faz após o beforeResolve (resolveConversation → setConversationStatus); aqui o popup
     // do plugin já rodou, então chamamos o status direto. Mantém as duas abas em sincronia.
     const st = await api.services.setConversationStatus(openCycle.conversation_id, 'closed');
     if (st && st.ok === false) {
-      setActionMsg({ text: st.error || 'Falha ao fechar a conversa.', error: true });
+      setActionMsg({ text: st.error || 'Falha ao fechar o atendimento.', error: true });
       return false;
     }
-    const closed = await apiPost(`/atendimentos/${atid}/close`);
+    const closed = await apiPost(`/protocolos/${atid}/close`);
     if (closed && closed.ok === false) {
       setActionMsg({ text: closed.error || 'Falha ao finalizar.', error: true });
       return false;
@@ -509,29 +568,29 @@ function AtendimentosList({ api }) {
     return true;
   }
 
-  // Finaliza o atendimento a partir do detalhe (Req 3/4). Se o backend recusar por haver
-  // conversa aberta, abre o popup "Resolver conversa" (forceResolveAndClose) e finaliza
+  // Finaliza o protocolo a partir do detalhe (Req 3/4). Se o backend recusar por haver
+  // atendimento aberta, abre o popup "Resolver atendimento" (forceResolveAndClose) e finaliza
   // depois. Sucesso → fecha o modal + recarrega. Outro erro → devolve {ok:false,error}
   // p/ o DetailModal exibir inline.
-  async function finalizeAtendimento(atid) {
-    const res = await apiPost(`/atendimentos/${atid}/close`);
+  async function finalizeProtocolo(atid) {
+    const res = await apiPost(`/protocolos/${atid}/close`);
     if (res && res.ok === false) {
-      if (/conversa aberta/i.test(res.error || '')) {
+      if (/atendimento abert[ao]/i.test(res.error || '')) {
         const done = await forceResolveAndClose(atid);
-        if (done) { setDetail(null); setDetailWarning(''); await load(); return { ok: true }; }
-        return { ok: false, error: 'Resolva a conversa aberta para finalizar o atendimento.' };
+        if (done) { closeDetail(); await load(); return { ok: true }; }
+        return { ok: false, error: 'Resolva o atendimento aberto para finalizar o protocolo.' };
       }
       return { ok: false, error: res.error || 'Falha ao finalizar.' };
     }
-    setDetail(null); setDetailWarning(''); await load();
+    closeDetail(); await load();
     return { ok: true };
   }
 
-  // Obrigatórios do ATENDIMENTO faltando (mesma regra do backend _missing_required):
+  // Obrigatórios do PROTOCOLO faltando (mesma regra do backend _missing_required):
   // OBS (coluna) + extras das defs `required`; checkbox sempre conta como preenchido.
-  function missingRequiredAtend(row) {
+  function missingRequiredProto(row) {
     const eff = { obs: (row && row.obs) || '', ...((row && row.fields) || {}) };
-    return cols.some((d) => d.required && !isFilledAtend(d, eff[d.key]));
+    return cols.some((d) => d.required && !isFilledProto(d, eff[d.key]));
   }
 
   async function applyDrop(row, colId) {
@@ -544,30 +603,30 @@ function AtendimentosList({ api }) {
     const ok = await api.ui.openModal((close) => html`<${ConfirmDialog} message=${msg}
       onOk=${() => close(true)} onCancel=${() => close(false)} />`);
     if (!ok) return;
-    // Req 5: soltar em "Fechado" sem os obrigatórios do atendimento → abre o detalhe
-    //        daquele atendimento com um aviso e NÃO fecha.
-    if (colId === 'fechado' && missingRequiredAtend(row)) {
+    // Req 5: soltar em "Fechado" sem os obrigatórios do protocolo → abre o detalhe
+    //        daquele protocolo com um aviso e NÃO fecha.
+    if (colId === 'fechado' && missingRequiredProto(row)) {
       openDetail(row.id, true);
       return;
     }
     try {
       const res = await grouping.onDrop(row, colId);
       if (res && res.ok === false) {
-        // Fechar barrado por conversa aberta → força o popup "Resolver conversa".
-        if (colId === 'fechado' && /conversa aberta/i.test(res.error || '')) {
+        // Fechar barrado por atendimento aberta → força o popup "Resolver atendimento".
+        if (colId === 'fechado' && /atendimento abert[ao]/i.test(res.error || '')) {
           await forceResolveAndClose(row.id);
         } else {
           setActionMsg({ text: res.error || 'Falha ao mover.', error: true });
         }
       }
-    } catch (_) { setActionMsg({ text: 'Falha ao mover o atendimento.', error: true }); }
+    } catch (_) { setActionMsg({ text: 'Falha ao mover o protocolo.', error: true }); }
     await load();
   }
 
   // ── Lista: colunas data-driven (ordenáveis) ──────────────────────────────────
-  // Só os dados PRÓPRIOS do atendimento. Os rótulos do plugin e os atributos
-  // personalizados NÃO aparecem aqui — eles vivem no DETALHE de cada atendimento
-  // (modal), junto da conversa a que pertencem.
+  // Só os dados PRÓPRIOS do protocolo. Os rótulos do plugin e os atributos
+  // personalizados NÃO aparecem aqui — eles vivem no DETALHE de cada protocolo
+  // (modal), junto da atendimento a que pertencem.
   const allCols = useMemo(() => [
     { key: 'cliente', label: 'Cliente', nowrap: true,
       get: (r) => (r.contact_name || r.contact_phone || '').toLowerCase(),
@@ -629,15 +688,14 @@ function AtendimentosList({ api }) {
           <div key=${t.id} class="inline-flex items-center rounded-lg border overflow-hidden ${String(activeViewId) === String(t.id) ? 'border-wa-teal' : 'border-wa-border'}">
             <button onClick=${() => setActiveView(t.id)}
               class="px-3 py-1 text-[12px] ${String(activeViewId) === String(t.id) ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}"
-              title=${t.scope === 'team' ? 'Visualização de equipe' : (t.builtin ? '' : 'Visualização pessoal')}>
+              title=${t.scope === 'team' ? 'Visualização de equipe' : 'Visualização pessoal'}>
               ${t.label}${t.scope === 'team' ? html`<span class="ml-1 opacity-70">·equipe</span>` : null}
             </button>
-            ${!t.builtin ? html`
-              <button title=${canEditView(t) ? 'Editar' : 'Meus filtros desta aba'} onClick=${() => openViewEditor(t)}
-                class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-wa-text border-l border-wa-border">✎</button>
-              ${canEditView(t) ? html`
-                <button title="Excluir" onClick=${() => removeView(t)}
-                  class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}` : null}
+            <button title=${canEditView(t) ? 'Editar' : 'Meus filtros desta aba'} onClick=${() => openViewEditor(t)}
+              class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-wa-text border-l border-wa-border">✎</button>
+            ${canEditView(t) ? html`
+              <button title="Excluir" onClick=${() => removeView(t)}
+                class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}
           </div>`)}
         <button title="Nova visualização" onClick=${() => openViewEditor(null)}
           class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>
@@ -742,20 +800,20 @@ function AtendimentosList({ api }) {
       ${mode === 'kanban' ? tabBar : null}
 
       ${loading ? html`<div class="text-[13px] text-wa-secondary p-4">Carregando…</div>`
-        : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum atendimento.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
+        : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
         : mode === 'kanban' ? kanbanView : listaView}
 
-      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${convDefs} attrDefs=${coreAttrDefs}
-        atendDefs=${cols} warning=${detailWarning} api=${api}
-        onClose=${() => { setDetail(null); setDetailWarning(''); }}
-        onChanged=${load} onFinalize=${finalizeAtendimento} />` : null}
+      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs} attrDefs=${coreAttrDefs}
+        protoDefs=${cols} warning=${detailWarning} api=${api}
+        onClose=${closeDetail}
+        onChanged=${load} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
 }
 
 // Card do kanban: draggable (altera estado ao soltar) + clique abre o detalhe. A CAPA
-// mostra só os dados próprios do atendimento (cliente, datas, atendente, status) — os
+// mostra só os dados próprios do protocolo (cliente, datas, atendente, status) — os
 // rótulos do plugin e os atributos personalizados ficam no DETALHE (modal), junto da
-// conversa a que pertencem.
+// atendimento a que pertencem.
 function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = true }) {
   return html`
     <div draggable=${canDrag}
@@ -779,37 +837,43 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
     </div>`;
 }
 
-// Detalhe do atendimento. Topo = form EDITÁVEL dos campos do atendimento (OBS fixo +
+// Detalhe do protocolo. Topo = form EDITÁVEL dos campos do protocolo (OBS fixo +
 // extras, normais e obrigatórios), pré-preenchido; "Salvar" persiste parcial (fechar
-// depois) e "Finalizar atendimento" só habilita com os obrigatórios preenchidos. Se o
-// atendimento já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
-// conversas (histórico, read-only) fica abaixo.
-function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warning = '',
+// depois) e "Finalizar protocolo" só habilita com os obrigatórios preenchidos. Se o
+// protocolo já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
+// atendimentos (histórico, read-only) fica abaixo.
+function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warning = '',
                       api, onClose, onChanged, onFinalize }) {
-  const at = data.atendimento || {};
-  const conversas = data.conversas || [];
+  const at = data.protocolo || {};
+  const atendimentos = data.atendimentos || [];
   const fechado = at.status === 'fechado';
 
-  // Estado local dos campos do atendimento, pré-preenchido (OBS na coluna obs; extras em
+  // Estado local dos campos do protocolo, pré-preenchido (OBS na coluna obs; extras em
   // at.fields). Editável enquanto aberto; serve de fonte também p/ a visão read-only.
   const [vals, setVals] = useState(() => {
     const init = {};
-    for (const d of atendDefs) {
+    for (const d of protoDefs) {
       const cur = d.key === 'obs' ? at.obs : (at.fields || {})[d.key];
-      init[d.key] = d.type === 'checkbox'
-        ? (cur === true || cur === 'true')
-        : (cur == null ? '' : String(cur));
+      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
+      else if (d.type === 'checkboxes') init[d.key] = Array.isArray(cur)
+        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
+      else init[d.key] = (cur == null ? '' : String(cur));
     }
     return init;
   });
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
+  const [linkCopied, setLinkCopied] = useState(false);
 
-  const missing = atendDefs.filter((d) => d.required && !isFilledAtend(d, vals[d.key]));
+  // Copia o link compartilhável deste protocolo (/attendances?detail=<id>) — plano 24.
+  const copyLink = () => copyText(`${location.origin}/attendances?detail=${at.id}`,
+    () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); });
 
-  // PUT parcial dos campos do atendimento (obrigatório só é exigido ao FECHAR).
-  const putFields = () => fetch(`${api.apiBase}/atendimentos/${at.id}/fields`, {
+  const missing = protoDefs.filter((d) => d.required && !isFilledProto(d, vals[d.key]));
+
+  // PUT parcial dos campos do protocolo (obrigatório só é exigido ao FECHAR).
+  const putFields = () => fetch(`${api.apiBase}/protocolos/${at.id}/fields`, {
     method: 'PUT',
     headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: vals }),
@@ -836,34 +900,40 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
     if (res && res.ok === false) { setMsg({ text: res.error || 'Falha ao finalizar.', error: true }); setFinalizing(false); }
   };
 
-  // Clicar numa conversa (ciclo) → resolve a âncora (1ª mensagem do ciclo) no backend
+  // Clicar numa atendimento (ciclo) → resolve a âncora (1ª mensagem do ciclo) no backend
   // e abre o chat rolando ATÉ aquele ponto exato (permalink ?message=<_id>). Se a
-  // âncora falhar, abre a conversa mesmo assim (sem o scroll fino).
-  const openConv = async (c) => {
+  // âncora falhar, abre a atendimento mesmo assim (sem o scroll fino).
+  const openAtend = async (c) => {
     if (!c) return;
-    let convId = c.conversation_id;
+    let atendId = c.conversation_id;
     let msgId = null;
     try {
-      const r = await fetch(`${api.apiBase}/conversas/${c.id}/anchor`, { headers: api.services.authHeaders() });
+      const r = await fetch(`${api.apiBase}/atendimentos/${c.id}/anchor`, { headers: api.services.authHeaders() });
       const d = await r.json();
       if (d && d.ok && d.data) {
-        if (d.data.conversation_id != null) convId = d.data.conversation_id;
+        if (d.data.conversation_id != null) atendId = d.data.conversation_id;
         if (d.data.message_id != null) msgId = d.data.message_id;
       }
-    } catch (_) { /* fallback: abre a conversa sem âncora de mensagem */ }
+    } catch (_) { /* fallback: abre a atendimento sem âncora de mensagem */ }
     onClose();
-    openConversation(convId, msgId);
+    openConversation(atendId, msgId);
   };
 
-  // Visão read-only (atendimento fechado): só os campos com valor (checkbox sempre exibe).
-  const readOnlyInfo = atendDefs.filter((d) => d.type === 'checkbox' || isFilledAtend(d, vals[d.key]));
+  // Visão read-only (protocolo fechado): só os campos com valor (checkbox sempre exibe).
+  const readOnlyInfo = protoDefs.filter((d) => d.type === 'checkbox' || isFilledProto(d, vals[d.key]));
 
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-auto">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold text-wa-text">${at.contact_name || at.contact_phone || 'Atendimento'}</h2>
-          <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-xl leading-none">×</button>
+        <div class="flex items-center justify-between mb-3 gap-2">
+          <h2 class="text-base font-semibold text-wa-text truncate">${at.contact_name || at.contact_phone || 'Protocolo'}</h2>
+          <div class="flex items-center gap-1 shrink-0">
+            <button onClick=${copyLink} title="Copiar link deste protocolo"
+              class="px-2 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">
+              ${linkCopied ? '✓ Link copiado' : 'Copiar link'}
+            </button>
+            <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-xl leading-none px-1">×</button>
+          </div>
         </div>
         <div class="text-[12px] text-wa-secondary mb-3">
           Início: ${fmtTs(at.opened_at)}${at.closed_at ? ` · Fim: ${fmtTs(at.closed_at)}` : ''} · ${fechado ? 'Fechado' : 'Aberto'}
@@ -876,7 +946,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
 
         ${fechado ? html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
-            <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do atendimento</div>
+            <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do protocolo</div>
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
                 ${readOnlyInfo.map((d) => html`<div key=${d.key}>
@@ -886,9 +956,9 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
           </div>`
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
-            <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do atendimento</div>
+            <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
             <div class="space-y-3">
-              ${atendDefs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
+              ${protoDefs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
                 value=${vals[d.key]}
                 onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
             </div>
@@ -904,14 +974,14 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], atendDefs = [], warn
                 ${saving ? 'Salvando…' : 'Salvar'}</button>
               <button onClick=${finalize} disabled=${missing.length > 0 || finalizing || saving}
                 class="flex-1 px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[14px] font-medium">
-                ${finalizing ? 'Finalizando…' : 'Finalizar atendimento'}</button>
+                ${finalizing ? 'Finalizando…' : 'Finalizar protocolo'}</button>
             </div>
           </div>`}
 
-        <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Conversas</div>
-        <div class="text-[12px] text-wa-secondary mb-2">Clique numa conversa para abri-la no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações da conversa</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
-        <${ConversasTable} conversas=${conversas} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
-          storageKey="whatsbot_atend_conv_cols_modal" onRowClick=${openConv} />
+        <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
+        <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações do atendimento</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
+        <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
+          storageKey="whatsbot_proto_atend_cols_modal" onRowClick=${openAtend} />
       </div>
     </div>`;
 }
@@ -945,18 +1015,18 @@ function ConfirmDialog({ message, onOk, onCancel, okLabel = 'Confirmar', danger 
 // Nome/Quem pode ver/Agrupar por e os filtros de EQUIPE ficam read-only; só o toggle + os
 // filtros PESSOAIS são editáveis e salvos.
 function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUser, api, onSaved, onCancel }) {
-  const editing = !!(view && !view.builtin && view.id != null);
+  const editing = !!(view && view.id != null);
   // Pode editar os METADADOS + filtros de equipe? Criar (view=null) sempre pode (vira pessoal).
   const canEditMeta = !view ? true
-    : (!view.builtin && (canTeam || (view.scope === 'personal'
-        && (!currentUser || view.owner_user_id === currentUser.id))));
+    : (canTeam || (view.scope === 'personal'
+        && (!currentUser || view.owner_user_id === currentUser.id)));
   const listAttrs = (coreAttrDefs || []).filter((d) => d.type === 'list');
   const initTeam = (view && view.filters) || {};
   const initPersonal = (view && view.pref && view.pref.personal_filters) || {};
   const initUsePersonal = !!(view && view.pref && view.pref.use_personal);
   const initActive = initUsePersonal ? initPersonal : initTeam;  // origem mostrada ao abrir
   const initGroup = () => {
-    if (!view || view.builtin) return (view && view.group_by) || 'status';
+    if (!view) return 'status';
     return view.group_by === 'attr' ? `attr:${view.group_attr_key || ''}` : view.group_by;
   };
   // ACL "Quem pode ver": grupos (roles) + usuários (3 estados: padrão/incluir/excluir).
@@ -966,7 +1036,7 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
   // Equipe LEGADO (view team sem ACL): preservar "todos veem" ao salvar sem selecionar nada.
   const wasLegacyTeamAll = editing && view.scope === 'team' && !initRoleKeys.length && !initInc.length;
 
-  const [name, setName] = useState((view && (view.name || (view.builtin ? '' : ''))) || '');
+  const [name, setName] = useState((view && view.name) || '');
   const [visTab, setVisTab] = useState('grupos');                  // 'grupos' | 'usuarios'
   const [visRoles, setVisRoles] = useState(() => new Set(initRoleKeys.map(String)));
   const [userStates, setUserStates] = useState(() => {
@@ -1274,4 +1344,4 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
     </div>`;
 }
 
-export default AtendimentosTab;
+export default ProtocolosTab;
