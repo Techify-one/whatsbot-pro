@@ -12,7 +12,7 @@
 import { useState, useCallback } from 'preact/hooks';
 import {
   setConversationAi, archiveContact, pinContact,
-  markAsRead, markAsUnread, updateContactTags,
+  markAsRead, markAsUnread, updateContactTags, assignAgent,
 } from '../../../services/api.js';
 import { rowKeyFor } from '../ContactList.js';
 
@@ -77,6 +77,33 @@ export function useBulkSelection({
           }
         : c
     ));
+  }, [_selectedRows, setContacts]);
+
+  // Assign a HUMAN attendant (userId) — or clear whoever is currently assigned
+  // (userId == null) — across all selected conversations at once. Uses the unified
+  // /assign-agent endpoint (plano 10) so that:
+  //   * kind='user' → sets the assignee, clears any AI agent and turns the IA OFF
+  //     (a person took over) — same transition as the per-conversation picker;
+  //   * kind='none' → unassigns whatever is set, HUMAN or AI (active_agent_key),
+  //     even when it was assigned before the selection.
+  // The bulk list only offers humans; removal clears both by design.
+  // Conversation-level — one call per conversation_id; legacy rows without a
+  // conversation are skipped.
+  const handleBulkAssign = useCallback(async (userId) => {
+    const convIds = _selectedRows()
+      .filter(c => c.conversation_id != null)
+      .map(c => c.conversation_id);
+    if (!convIds.length) return;
+    const idSet = new Set(convIds);
+    const body = userId == null ? { kind: 'none' } : { kind: 'user', userId };
+    await Promise.all(convIds.map(id => assignAgent(id, body).catch(() => null)));
+    setContacts(prev => prev.map(c => {
+      if (!idSet.has(c.conversation_id)) return c;
+      return userId == null
+        ? { ...c, assignee_user_id: null, active_agent_key: null }
+        // Human took over: mirror the backend — clear the AI agent + flip IA OFF.
+        : { ...c, assignee_user_id: userId, active_agent_key: null, conv_ai_active: 0 };
+    }));
   }, [_selectedRows, setContacts]);
 
   const handleBulkArchive = useCallback(async () => {
@@ -168,6 +195,6 @@ export function useBulkSelection({
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
     enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection,
     handleBulkAI, handleBulkArchive, handleBulkTag, handleBulkRemoveAllTags,
-    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread,
+    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread, handleBulkAssign,
   };
 }

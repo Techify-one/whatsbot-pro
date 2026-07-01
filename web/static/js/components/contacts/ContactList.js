@@ -112,7 +112,8 @@ function highlightParts(text, query) {
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
+  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
+  users, currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
@@ -126,17 +127,31 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
   const allSelectedPinned = selectedContacts.length > 0 && selectedContacts.every(c => c.is_pinned);
+  // Bulk assign (attendant): mirror the single-conversation menu's visibility rule
+  // — hide in legacy single-password mode (no identity and no listable users).
+  const userList = Array.isArray(users) ? users : [];
+  const showBulkAssign = currentUserId != null || userList.length > 0;
+  const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
+  // Checkmark a user only when EVERY selected conversation is already assigned to them.
+  const allSelectedAssignedTo = (uid) =>
+    selectedContacts.length > 0 && selectedContacts.every(c => c.assignee_user_id === uid);
+  // "Remover atribuição" clears whoever is assigned — human OR AI agent — so it
+  // must appear whenever any selected conversation has either set (incl. those
+  // assigned before entering selection mode).
+  const anySelectedAssigned = selectedContacts.some(c => c.assignee_user_id != null || c.active_agent_key != null);
 
   // Header dropdown state (one menu visible at a time given selectionMode).
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
   const menuRef = useRef(null);
 
   function closeMenus() {
     setHeaderMenuOpen(false);
     setBulkMenuOpen(false);
     setBulkTagsOpen(false);
+    setBulkAssignOpen(false);
   }
 
   useEffect(() => {
@@ -168,7 +183,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
         </div>
         <div ref=${menuRef} class="relative shrink-0">
           <button
-            onClick=${() => { setBulkMenuOpen(o => !o); setBulkTagsOpen(false); }}
+            onClick=${() => { setBulkMenuOpen(o => !o); setBulkTagsOpen(false); setBulkAssignOpen(false); }}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 text-white"
             title="Ações em massa"
           ><${KebabIcon} /></button>
@@ -218,7 +233,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               </button>
               <button
                 disabled=${selCount === 0}
-                onClick=${() => setBulkTagsOpen(o => !o)}
+                onClick=${() => { setBulkTagsOpen(o => !o); setBulkAssignOpen(false); }}
                 class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
@@ -241,6 +256,59 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                     onCreateTag=${onCreateTag}
                   />
                 </div>
+              ` : ''}
+              ${showBulkAssign ? html`
+              <button
+                disabled=${selCount === 0}
+                onClick=${() => { setBulkAssignOpen(o => !o); setBulkTagsOpen(false); }}
+                class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                Atribuir atendente
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${bulkAssignOpen ? 'rotate-180' : ''}"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+              </button>
+              ${(bulkAssignOpen && selCount > 0) ? html`
+                <div class="border-t border-wa-border">
+                  ${currentUserId != null ? html`
+                    <button
+                      onClick=${() => { onBulkAssign && onBulkAssign(currentUserId); }}
+                      class="w-full text-left px-4 py-[8px] text-[13px] text-wa-teal hover:bg-wa-hover transition-colors flex items-center gap-3"
+                    >
+                      <span class="w-[16px] h-[16px] shrink-0"></span>
+                      Atribuir a mim
+                    </button>
+                  ` : ''}
+                  <div class="max-h-[200px] overflow-y-auto wa-scrollbar">
+                    ${userList.length === 0 ? html`
+                      <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Sem usuários para listar</div>
+                    ` : userList.map(u => {
+                      const active = allSelectedAssignedTo(u.id);
+                      return html`
+                        <button
+                          key=${u.id}
+                          onClick=${() => { onBulkAssign && onBulkAssign(u.id); }}
+                          class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+                          title=${active ? 'Todas as selecionadas já estão com este atendente' : 'Atribuir a este atendente'}
+                        >
+                          <span class="w-[16px] h-[16px] shrink-0 flex items-center justify-center text-wa-teal">
+                            ${active ? html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>` : ''}
+                          </span>
+                          <span class="truncate ${active ? 'font-medium' : ''}">${userName(u)}</span>
+                        </button>
+                      `;
+                    })}
+                  </div>
+                  ${anySelectedAssigned ? html`
+                    <button
+                      onClick=${() => { onBulkAssign && onBulkAssign(null); }}
+                      class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-3 border-t border-wa-border"
+                    >
+                      <span class="w-[16px] h-[16px] shrink-0"></span>
+                      Remover atribuição
+                    </button>
+                  ` : ''}
+                </div>
+              ` : ''}
               ` : ''}
               <button
                 disabled=${selCount === 0}
