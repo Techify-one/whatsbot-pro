@@ -244,6 +244,7 @@ function AtendimentosList({ api }) {
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
   const [users, setUsers] = useState([]);
+  const [roles, setRoles] = useState([]);            // grupos de permissão (p/ "Quem pode ver")
   const [actionMsg, setActionMsg] = useState(null);  // {text, error}
   const [detail, setDetail] = useState(null);        // {atendimento, conversas}
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
@@ -259,6 +260,10 @@ function AtendimentosList({ api }) {
     ? api.services.hasPermission(currentUser, 'plugin.atendimentos.manage_team_views') : true;
   const canEditView = (v) => !v.builtin
     && (canTeam || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id)));
+  // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
+  // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|attr:<key>.
+  const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
+  const availFilter = (key) => !availArr || availArr.includes(key);
 
   const dragRef = useRef(null);     // atendimento sendo arrastado
   const draggedRef = useRef(false); // distingue clique de arrasto
@@ -318,6 +323,12 @@ function AtendimentosList({ api }) {
     catch (e) { /* ignore */ }
   }, [apiBase, getJson]);
   useEffect(() => { loadViews(); }, [loadViews]);
+  // Grupos de permissão (roles) p/ o seletor "Quem pode ver" do editor.
+  useEffect(() => {
+    let alive = true;
+    getJson(`${apiBase}/roles`).then((r) => { if (alive && r && r.ok && r.data) setRoles(r.data.roles || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, [apiBase, getJson]);
   useEffect(() => {
     if (!api.services.getMe) return;
     api.services.getMe().then((r) => { if (r && r.ok && r.data && r.data.user) setCurrentUser(r.data.user); }).catch(() => {});
@@ -334,14 +345,22 @@ function AtendimentosList({ api }) {
     const resolved = v && String(v.id) === String(activeViewId);
     if (!resolved || appliedViewRef.current === String(activeViewId)) return;
     appliedViewRef.current = String(activeViewId);
-    const f = v.filters || {};
-    setStatus(f.status != null ? f.status : '');
-    setQ(f.q != null ? f.q : '');
-    setAssigneeFilter(f.assignee_user_id != null ? f.assignee_user_id : null);
-    setAttrFilters(f.attrs && typeof f.attrs === 'object' ? { ...f.attrs } : {});
+    // Origem dos filtros: a preferência do usuário (pessoal x equipe) por aba. Default =
+    // filtros da EQUIPE (a coluna filters compartilhada). Builtin não tem pref/filters → {}.
+    const usePersonal = v.pref && v.pref.use_personal;
+    const f = (usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {};
+    // Só aplica pré-determinados de filtros DISPONÍVEIS nesta aba (available_filters da view;
+    // null/undefined = todos). Um filtro indisponível nunca constrange silenciosamente.
+    const availArr = Array.isArray(v.available_filters) ? v.available_filters : null;
+    const av = (key) => !availArr || availArr.includes(key);
+    setStatus(av('status') && f.status != null ? f.status : '');
+    setQ(av('q') && f.q != null ? f.q : '');
+    setAssigneeFilter(av('atendente') && f.assignee_user_id != null ? f.assignee_user_id : null);
+    setAttrFilters(f.attrs && typeof f.attrs === 'object'
+      ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => av(`attr:${k}`))) : {});
     // Data: preset relativo vira intervalo REAL (from/to); 'tudo' limpa; from/to literais
-    // são respeitados; sem date → default (hoje→frente).
-    const df = (f.date && typeof f.date === 'object') ? f.date : null;
+    // são respeitados; sem date (ou Período indisponível) → default (hoje→frente).
+    const df = (av('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
     const presetDays = df && df.preset && df.preset !== 'tudo'
       ? (DATE_PRESETS.find(([lbl]) => lbl === df.preset) || [])[1] : undefined;
     if (df && presetDays != null) {
@@ -429,13 +448,14 @@ function AtendimentosList({ api }) {
   // Uma aba nova aparece na barra; editar a aba ATIVA re-aplica seus filtros (reset do ref).
   const openViewEditor = useCallback(async (view) => {
     const saved = await api.ui.openModal((close) => html`<${ViewEditorModal}
-      view=${view} coreAttrDefs=${coreAttrDefs} users=${users} canTeam=${canTeam} api=${api}
+      view=${view} coreAttrDefs=${coreAttrDefs} users=${users} roles=${roles} canTeam=${canTeam}
+      currentUser=${currentUser} api=${api}
       onSaved=${(v) => close(v)} onCancel=${() => close(null)} />`);
     if (saved) {
       if (view && String(view.id) === String(activeViewId)) appliedViewRef.current = null;
       await loadViews();
     }
-  }, [api, coreAttrDefs, users, canTeam, loadViews, activeViewId]);
+  }, [api, coreAttrDefs, users, roles, canTeam, currentUser, loadViews, activeViewId]);
 
   const removeView = useCallback(async (view) => {
     if (!view || view.builtin) return;
@@ -612,11 +632,12 @@ function AtendimentosList({ api }) {
               title=${t.scope === 'team' ? 'Visualização de equipe' : (t.builtin ? '' : 'Visualização pessoal')}>
               ${t.label}${t.scope === 'team' ? html`<span class="ml-1 opacity-70">·equipe</span>` : null}
             </button>
-            ${canEditView(t) ? html`
-              <button title="Editar" onClick=${() => openViewEditor(t)}
+            ${!t.builtin ? html`
+              <button title=${canEditView(t) ? 'Editar' : 'Meus filtros desta aba'} onClick=${() => openViewEditor(t)}
                 class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-wa-text border-l border-wa-border">✎</button>
-              <button title="Excluir" onClick=${() => removeView(t)}
-                class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}
+              ${canEditView(t) ? html`
+                <button title="Excluir" onClick=${() => removeView(t)}
+                  class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}` : null}
           </div>`)}
         <button title="Nova visualização" onClick=${() => openViewEditor(null)}
           class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>
@@ -657,6 +678,7 @@ function AtendimentosList({ api }) {
     <div>
       <!-- Filtros principais + alternância Kanban/Lista -->
       <div class="flex flex-wrap items-end gap-3 mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
+        ${availFilter('status') ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Status</label>
           <select class="wa-field px-3 py-2 rounded-md text-[13px]" value=${status} onChange=${(e) => setStatus(e.target.value)}>
@@ -664,7 +686,8 @@ function AtendimentosList({ api }) {
             <option value="aberto">Aberto</option>
             <option value="fechado">Fechado</option>
           </select>
-        </div>
+        </div>` : null}
+        ${availFilter('atendente') ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Atendente</label>
           <select class="wa-field px-3 py-2 rounded-md text-[13px]"
@@ -673,8 +696,8 @@ function AtendimentosList({ api }) {
             <option value="">Todos</option>
             ${users.map((u) => html`<option key=${u.id} value=${String(u.id)}>${u.name || `Usuário #${u.id}`}</option>`)}
           </select>
-        </div>
-        ${coreAttrDefs.filter((d) => d.type === 'list').map((d) => html`
+        </div>` : null}
+        ${coreAttrDefs.filter((d) => d.type === 'list' && availFilter(`attr:${d.key}`)).map((d) => html`
           <div key=${d.key}>
             <label class="block text-[12px] text-wa-secondary mb-1 truncate max-w-[180px]" title=${d.label}>${d.label}</label>
             <select class="wa-field px-3 py-2 rounded-md text-[13px]" value=${attrFilters[d.key] || ''}
@@ -683,11 +706,13 @@ function AtendimentosList({ api }) {
               ${(d.options || []).map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
             </select>
           </div>`)}
+        ${availFilter('q') ? html`
         <div class="flex-1 min-w-[180px]">
           <label class="block text-[12px] text-wa-secondary mb-1">Buscar cliente</label>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
             placeholder="nome ou telefone" onInput=${(e) => setQ(e.target.value)} />
-        </div>
+        </div>` : null}
+        ${availFilter('periodo') ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Período (criação)</label>
           <div class="flex flex-wrap items-center gap-1.5">
@@ -701,7 +726,7 @@ function AtendimentosList({ api }) {
             <button onClick=${onClearDate}
               class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === 'tudo' ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">Tudo</button>
           </div>
-        </div>
+        </div>` : null}
         <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
         ${hasViewFilters ? html`<button onClick=${clearFilters}
           class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
@@ -912,30 +937,93 @@ function ConfirmDialog({ message, onOk, onCancel, okLabel = 'Confirmar', danger 
 // Editor de visualização (criar/editar uma aba de "Agrupar por"). Nome, escopo
 // (Equipe desabilitado sem permissão), agrupamento (nativos + atributos lista) e filtros
 // pré-determinados (cada um com toggle "pré-determinar"). Salva via POST/PUT /kanban-views.
-function ViewEditorModal({ view, coreAttrDefs, users, canTeam, api, onSaved, onCancel }) {
+//
+// Origem dos filtros (toggle Pessoal/Equipe, logo acima dos filtros): cada usuário escolhe,
+// por aba, se ao entrar aplica os filtros da EQUIPE (compartilhados) ou os PESSOAIS dele
+// (preferência por-usuário, salva via PUT /kanban-views/{id}/my-pref). Quem NÃO pode editar
+// a visualização (sem manage_team_views, e não é dono de pessoal) entra em modo RESTRITO:
+// Nome/Quem pode ver/Agrupar por e os filtros de EQUIPE ficam read-only; só o toggle + os
+// filtros PESSOAIS são editáveis e salvos.
+function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUser, api, onSaved, onCancel }) {
   const editing = !!(view && !view.builtin && view.id != null);
+  // Pode editar os METADADOS + filtros de equipe? Criar (view=null) sempre pode (vira pessoal).
+  const canEditMeta = !view ? true
+    : (!view.builtin && (canTeam || (view.scope === 'personal'
+        && (!currentUser || view.owner_user_id === currentUser.id))));
   const listAttrs = (coreAttrDefs || []).filter((d) => d.type === 'list');
-  const initFilters = (view && view.filters) || {};
+  const initTeam = (view && view.filters) || {};
+  const initPersonal = (view && view.pref && view.pref.personal_filters) || {};
+  const initUsePersonal = !!(view && view.pref && view.pref.use_personal);
+  const initActive = initUsePersonal ? initPersonal : initTeam;  // origem mostrada ao abrir
   const initGroup = () => {
     if (!view || view.builtin) return (view && view.group_by) || 'status';
     return view.group_by === 'attr' ? `attr:${view.group_attr_key || ''}` : view.group_by;
   };
+  // ACL "Quem pode ver": grupos (roles) + usuários (3 estados: padrão/incluir/excluir).
+  const initRoleKeys = (view && Array.isArray(view.visibility_roles)) ? view.visibility_roles : [];
+  const initInc = (view && Array.isArray(view.visibility_users_include)) ? view.visibility_users_include : [];
+  const initExc = (view && Array.isArray(view.visibility_users_exclude)) ? view.visibility_users_exclude : [];
+  // Equipe LEGADO (view team sem ACL): preservar "todos veem" ao salvar sem selecionar nada.
+  const wasLegacyTeamAll = editing && view.scope === 'team' && !initRoleKeys.length && !initInc.length;
 
   const [name, setName] = useState((view && (view.name || (view.builtin ? '' : ''))) || '');
-  const [scope, setScope] = useState((view && view.scope) || 'personal');
+  const [visTab, setVisTab] = useState('grupos');                  // 'grupos' | 'usuarios'
+  const [visRoles, setVisRoles] = useState(() => new Set(initRoleKeys.map(String)));
+  const [userStates, setUserStates] = useState(() => {
+    const m = {};
+    initInc.forEach((id) => { m[String(id)] = 'include'; });
+    initExc.forEach((id) => { m[String(id)] = 'exclude'; });
+    return m;
+  });
   const [groupSel, setGroupSel] = useState(initGroup());
   const [dateMode, setDateMode] = useState((view && view.group_date_mode) || 'faixas');
-  const [fStatusOn, setFStatusOn] = useState(initFilters.status != null);
-  const [fStatus, setFStatus] = useState(initFilters.status || '');
-  const [fQOn, setFQOn] = useState(initFilters.q != null);
-  const [fQ, setFQ] = useState(initFilters.q || '');
-  const [fAssignOn, setFAssignOn] = useState(initFilters.assignee_user_id != null);
-  const [fAssign, setFAssign] = useState(initFilters.assignee_user_id != null ? String(initFilters.assignee_user_id) : '');
-  const [fDateOn, setFDateOn] = useState(!!initFilters.date);
-  const [fDatePreset, setFDatePreset] = useState((initFilters.date && initFilters.date.preset) || '7 dias');
-  const [fAttrs, setFAttrs] = useState((initFilters.attrs && typeof initFilters.attrs === 'object') ? { ...initFilters.attrs } : {});
+  const [usePersonal, setUsePersonal] = useState(initUsePersonal);  // toggle origem dos filtros
+  const [fStatusOn, setFStatusOn] = useState(initActive.status != null);
+  const [fStatus, setFStatus] = useState(initActive.status || '');
+  const [fQOn, setFQOn] = useState(initActive.q != null);
+  const [fQ, setFQ] = useState(initActive.q || '');
+  const [fAssignOn, setFAssignOn] = useState(initActive.assignee_user_id != null);
+  const [fAssign, setFAssign] = useState(initActive.assignee_user_id != null ? String(initActive.assignee_user_id) : '');
+  const [fDateOn, setFDateOn] = useState(!!initActive.date);
+  const [fDatePreset, setFDatePreset] = useState((initActive.date && initActive.date.preset) || '7 dias');
+  const [fAttrs, setFAttrs] = useState((initActive.attrs && typeof initActive.attrs === 'object') ? { ...initActive.attrs } : {});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  // Buffer das DUAS origens; os campos visíveis editam só a origem ativa. Ao alternar,
+  // os campos são salvos no buffer de saída e o buffer de entrada é carregado nos campos.
+  const bufRef = useRef({ team: { ...initTeam }, personal: { ...initPersonal } });
+
+  // Filtros de EQUIPE são read-only para quem não pode editar a visualização.
+  const fieldsRO = !usePersonal && !canEditMeta;
+
+  // Filtros DISPONÍVEIS nesta aba (metadado da VIEW; só o editor muda). null na view = TODOS.
+  // Chaves: status | atendente | q | periodo | attr:<key>. Só filtros disponíveis aparecem
+  // na barra ao vivo E podem ser pré-determinados.
+  const ALL_FILTER_KEYS = ['status', 'atendente', 'q', 'periodo', ...listAttrs.map((d) => `attr:${d.key}`)];
+  const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
+  const [availSet, setAvailSet] = useState(() => new Set(initAvail == null ? ALL_FILTER_KEYS : initAvail));
+  const isAvail = (key) => availSet.has(key);
+  const toggleAvail = (key) => setAvailSet((s) => {
+    const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n;
+  });
+
+  // ACL "Quem pode ver": grupos + usuários (3 estados). scope é DERIVADO (compartilha → team).
+  const toggleRole = (key) => setVisRoles((s) => {
+    const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n;
+  });
+  const setUserState = (uid, st) => setUserStates((s) => {
+    const n = { ...s }; if (st === 'padrao') delete n[String(uid)]; else n[String(uid)] = st; return n;
+  });
+  const userState = (uid) => userStates[String(uid)] || 'padrao';
+  const aclBody = () => {
+    const roleArr = [...visRoles];
+    const includeIds = Object.keys(userStates).filter((k) => userStates[k] === 'include').map(Number);
+    const excludeIds = Object.keys(userStates).filter((k) => userStates[k] === 'exclude').map(Number);
+    const shared = roleArr.length > 0 || includeIds.length > 0;
+    const scope = shared ? 'team' : (wasLegacyTeamAll ? 'team' : 'personal');
+    return { scope, visibility_roles: roleArr,
+             visibility_users_include: includeIds, visibility_users_exclude: excludeIds };
+  };
 
   const setAttr = (key, val) => setFAttrs((s) => {
     const next = { ...s };
@@ -945,64 +1033,132 @@ function ViewEditorModal({ view, coreAttrDefs, users, canTeam, api, onSaved, onC
 
   const buildFilters = () => {
     const f = {};
-    if (fStatusOn) f.status = fStatus;
-    if (fQOn && fQ.trim()) f.q = fQ.trim();
-    if (fAssignOn && fAssign) f.assignee_user_id = +fAssign;
-    if (fDateOn) f.date = { preset: fDatePreset, from: '', to: '' };
+    if (isAvail('status') && fStatusOn) f.status = fStatus;
+    if (isAvail('q') && fQOn && fQ.trim()) f.q = fQ.trim();
+    if (isAvail('atendente') && fAssignOn && fAssign) f.assignee_user_id = +fAssign;
+    if (isAvail('periodo') && fDateOn) f.date = { preset: fDatePreset, from: '', to: '' };
     const attrs = {};
-    for (const [k, v] of Object.entries(fAttrs)) if (v != null && v !== '') attrs[k] = v;
+    for (const [k, v] of Object.entries(fAttrs)) if (isAvail(`attr:${k}`) && v != null && v !== '') attrs[k] = v;
     if (Object.keys(attrs).length) f.attrs = attrs;
     return f;
+  };
+
+  const loadFiltersIntoFields = (f) => {
+    f = f || {};
+    setFStatusOn(f.status != null); setFStatus(f.status || '');
+    setFQOn(f.q != null); setFQ(f.q || '');
+    setFAssignOn(f.assignee_user_id != null);
+    setFAssign(f.assignee_user_id != null ? String(f.assignee_user_id) : '');
+    setFDateOn(!!f.date); setFDatePreset((f.date && f.date.preset) || '7 dias');
+    setFAttrs((f.attrs && typeof f.attrs === 'object') ? { ...f.attrs } : {});
+  };
+
+  const switchSource = (toPersonal) => {
+    if (toPersonal === usePersonal) return;
+    bufRef.current[usePersonal ? 'personal' : 'team'] = buildFilters();  // guarda edições atuais
+    setUsePersonal(toPersonal);
+    loadFiltersIntoFields(bufRef.current[toPersonal ? 'personal' : 'team']);
   };
 
   const save = async () => {
     setErr('');
     const gb = groupSel.startsWith('attr:') ? 'attr' : groupSel;
     const gak = groupSel.startsWith('attr:') ? groupSel.slice(5) : null;
-    if (!name.trim()) { setErr('Informe um nome para a visualização.'); return; }
-    if (gb === 'attr' && !gak) { setErr('Selecione um atributo (lista) para agrupar.'); return; }
-    if (scope === 'team' && !canTeam) { setErr('Sem permissão para visualizações de equipe.'); return; }
+    // Captura as edições atuais na origem ativa antes de ler os dois buffers.
+    bufRef.current[usePersonal ? 'personal' : 'team'] = buildFilters();
+    const teamFilters = bufRef.current.team;
+    const personalFilters = bufRef.current.personal;
+    const acl = aclBody();  // { scope derivado, visibility_roles, users_include, users_exclude }
+    if (canEditMeta) {
+      if (!name.trim()) { setErr('Informe um nome para a visualização.'); return; }
+      if (gb === 'attr' && !gak) { setErr('Selecione um atributo (lista) para agrupar.'); return; }
+      if (acl.scope === 'team' && !canTeam) { setErr('Sem permissão para compartilhar (visualização de equipe).'); return; }
+    }
     setSaving(true);
-    const body = {
-      name: name.trim(), scope, group_by: gb, group_attr_key: gak,
-      group_date_mode: gb === 'data' ? dateMode : null, filters: buildFilters(),
-    };
     try {
-      const url = editing ? `${api.apiBase}/kanban-views/${view.id}` : `${api.apiBase}/kanban-views`;
-      const r = await fetch(url, {
-        method: editing ? 'PUT' : 'POST',
-        headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (j && j.ok) onSaved(j.data || { id: editing ? view.id : null });
-      else { setErr((j && j.error) || 'Falha ao salvar.'); setSaving(false); }
+      let vid = editing ? view.id : null;
+      // Metadados + filtros de EQUIPE: só quem pode editar a visualização.
+      if (canEditMeta) {
+        // available_filters: todos habilitados → null (todos, à prova de futuro); senão a lista.
+        const enabled = ALL_FILTER_KEYS.filter((k) => availSet.has(k));
+        const availableFilters = enabled.length === ALL_FILTER_KEYS.length ? null : enabled;
+        const body = {
+          name: name.trim(), scope: acl.scope, group_by: gb, group_attr_key: gak,
+          visibility_roles: acl.visibility_roles,
+          visibility_users_include: acl.visibility_users_include,
+          visibility_users_exclude: acl.visibility_users_exclude,
+          group_date_mode: gb === 'data' ? dateMode : null, filters: teamFilters,
+          available_filters: availableFilters,
+        };
+        const url = editing ? `${api.apiBase}/kanban-views/${view.id}` : `${api.apiBase}/kanban-views`;
+        const r = await fetch(url, {
+          method: editing ? 'PUT' : 'POST',
+          headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!(j && j.ok)) { setErr((j && j.error) || 'Falha ao salvar.'); setSaving(false); return; }
+        vid = (j.data && j.data.id != null) ? j.data.id : vid;
+      }
+      // Preferência do PRÓPRIO usuário (origem + filtros pessoais), sempre que há view salva.
+      if (vid != null) {
+        const pr = await fetch(`${api.apiBase}/kanban-views/${vid}/my-pref`, {
+          method: 'PUT',
+          headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ use_personal: usePersonal, personal_filters: personalFilters }),
+        });
+        const pj = await pr.json().catch(() => ({}));
+        if (!(pj && pj.ok)) { setErr((pj && pj.error) || 'Falha ao salvar preferência.'); setSaving(false); return; }
+      }
+      onSaved({ id: vid });
     } catch (_) { setErr('Falha ao salvar.'); setSaving(false); }
   };
 
   const fieldCls = 'wa-field px-3 py-2 rounded-md text-[13px]';
+  const title = editing ? (canEditMeta ? 'Editar visualização' : 'Meus filtros desta aba') : 'Nova visualização';
   return html`
     <div class="fixed inset-0 bg-black/50 z-[75] flex items-center justify-center p-4">
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-lg w-full p-6 max-h-[85vh] overflow-auto">
         <div class="flex items-center justify-between mb-4">
-          <h2 class="text-base font-semibold text-wa-text">${editing ? 'Editar visualização' : 'Nova visualização'}</h2>
+          <h2 class="text-base font-semibold text-wa-text">${title}</h2>
           <button onClick=${onCancel} class="text-wa-secondary hover:text-wa-text text-xl leading-none">×</button>
         </div>
 
+        ${canEditMeta ? html`
         <label class="block text-[12px] text-wa-secondary mb-1">Nome</label>
         <input class="${fieldCls} w-full mb-4" type="text" value=${name}
           placeholder="Ex.: Por etapa de venda" onInput=${(e) => setName(e.target.value)} />
 
         <div class="mb-4">
           <span class="block text-[12px] text-wa-secondary mb-1">Quem pode ver</span>
-          <div class="flex items-center gap-4 text-[13px] text-wa-text">
-            <label class="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="radio" name="scope" checked=${scope === 'personal'} onChange=${() => setScope('personal')} /> Pessoal
-            </label>
-            <label class="inline-flex items-center gap-1.5 ${canTeam ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}">
-              <input type="radio" name="scope" disabled=${!canTeam} checked=${scope === 'team'} onChange=${() => canTeam && setScope('team')} /> Equipe
-            </label>
-            ${!canTeam ? html`<span class="text-[11px] text-wa-secondary">(requer permissão)</span>` : null}
+          <div class="inline-flex rounded-lg border border-wa-border overflow-hidden mb-2">
+            ${[['grupos', 'Grupos'], ['usuarios', 'Usuários']].map(([k, lbl]) => html`
+              <button key=${k} type="button" onClick=${() => setVisTab(k)}
+                class="px-3 py-1 text-[12px] ${visTab === k ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
+          </div>
+          ${!canTeam ? html`<div class="text-[11px] text-wa-secondary mb-1">Sem permissão para compartilhar — a visualização fica só sua (pessoal).</div>` : null}
+          ${visTab === 'grupos' ? html`
+            <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
+              ${(roles || []).length ? (roles || []).map((r) => html`
+                <label key=${r.key} class="inline-flex items-center gap-1.5 ${canTeam ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}">
+                  <input type="checkbox" disabled=${!canTeam} checked=${visRoles.has(r.key)} onChange=${() => canTeam && toggleRole(r.key)} /> ${r.name || r.key}
+                </label>`) : html`<span class="text-[11px] text-wa-secondary">Nenhum grupo disponível.</span>`}
+            </div>` : html`
+            <div class="max-h-40 overflow-auto rounded-md border border-wa-border p-2 space-y-1">
+              ${(users || []).length ? (users || []).map((u) => html`
+                <div key=${u.id} class="flex items-center justify-between gap-2 text-[13px]">
+                  <span class="text-wa-text truncate" title=${u.name || `Usuário #${u.id}`}>${u.name || `Usuário #${u.id}`}</span>
+                  <div class="inline-flex rounded-md border border-wa-border overflow-hidden shrink-0">
+                    ${[['padrao', 'Padrão'], ['include', 'Incluir'], ['exclude', 'Excluir']].map(([st, lbl]) => html`
+                      <button key=${st} type="button" disabled=${!canTeam} onClick=${() => canTeam && setUserState(u.id, st)}
+                        class="px-2 py-0.5 text-[11px] ${canTeam ? '' : 'opacity-50 cursor-not-allowed'} ${userState(u.id) === st ? (st === 'exclude' ? 'bg-red-500 text-white' : (st === 'include' ? 'bg-wa-teal text-white' : 'bg-wa-hover text-wa-text')) : 'bg-wa-panel text-wa-secondary hover:bg-wa-hover'}">${lbl}</button>`)}
+                  </div>
+                </div>`) : html`<span class="text-[11px] text-wa-secondary">Nenhum usuário.</span>`}
+            </div>`}
+          <div class="text-[11px] text-wa-secondary mt-1">
+            ${aclBody().scope === 'team'
+              ? 'Compartilhada: veem os grupos e usuários incluídos (menos os excluídos). Você e admins veem sempre.'
+              : 'Sem grupos/usuários selecionados: só você vê esta visualização (pessoal).'}
           </div>
         </div>
 
@@ -1024,50 +1180,83 @@ function ViewEditorModal({ view, coreAttrDefs, users, canTeam, api, onSaved, onC
             <option value="mes">Por mês</option>
           </select>` : html`<div class="mb-4"></div>`}
 
-        <div class="text-[12px] text-wa-secondary font-medium mb-2">Filtros pré-determinados desta aba</div>
+        <div class="mb-4">
+          <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros disponíveis nesta aba</span>
+          <div class="text-[11px] text-wa-secondary mb-2">Só os filtros marcados aparecem na barra de filtros e podem ser pré-determinados.</div>
+          <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
+            ${[['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
+               ...listAttrs.map((d) => [`attr:${d.key}`, d.label])].map(([key, lbl]) => html`
+              <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
+              </label>`)}
+          </div>
+        </div>` : null}
+
+        <div class="mb-2">
+          <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros pré-determinados desta aba</span>
+          <div class="flex items-center gap-4 text-[13px] text-wa-text">
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name="filtersrc" checked=${usePersonal} onChange=${() => switchSource(true)} /> Pessoal
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name="filtersrc" checked=${!usePersonal} onChange=${() => switchSource(false)} /> Equipe
+            </label>
+          </div>
+          <div class="text-[11px] text-wa-secondary mt-1">
+            ${usePersonal
+              ? 'Ao entrar nesta aba, você verá os SEUS filtros pessoais.'
+              : (canEditMeta
+                  ? 'Ao entrar nesta aba, você (e a equipe) verá os filtros definidos abaixo.'
+                  : 'Ao entrar nesta aba, você verá os filtros definidos pela equipe (somente leitura).')}
+          </div>
+        </div>
         <div class="space-y-2 mb-4">
+          ${isAvail('status') ? html`
           <div class="flex items-center gap-2">
             <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fStatusOn} onChange=${(e) => setFStatusOn(e.target.checked)} /> Status
+              <input type="checkbox" checked=${fStatusOn} disabled=${fieldsRO} onChange=${(e) => setFStatusOn(e.target.checked)} /> Status
             </label>
-            <select class="${fieldCls} flex-1" disabled=${!fStatusOn} value=${fStatus} onChange=${(e) => setFStatus(e.target.value)}>
+            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fStatusOn} value=${fStatus} onChange=${(e) => setFStatus(e.target.value)}>
               <option value="">Todos</option>
               <option value="aberto">Aberto</option>
               <option value="fechado">Fechado</option>
             </select>
-          </div>
+          </div>` : null}
+          ${isAvail('q') ? html`
           <div class="flex items-center gap-2">
             <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fQOn} onChange=${(e) => setFQOn(e.target.checked)} /> Buscar
+              <input type="checkbox" checked=${fQOn} disabled=${fieldsRO} onChange=${(e) => setFQOn(e.target.checked)} /> Buscar
             </label>
-            <input class="${fieldCls} flex-1" type="text" disabled=${!fQOn} value=${fQ}
+            <input class="${fieldCls} flex-1" type="text" disabled=${fieldsRO || !fQOn} value=${fQ}
               placeholder="nome ou telefone" onInput=${(e) => setFQ(e.target.value)} />
-          </div>
+          </div>` : null}
+          ${isAvail('atendente') ? html`
           <div class="flex items-center gap-2">
             <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fAssignOn} onChange=${(e) => setFAssignOn(e.target.checked)} /> Atendente
+              <input type="checkbox" checked=${fAssignOn} disabled=${fieldsRO} onChange=${(e) => setFAssignOn(e.target.checked)} /> Atendente
             </label>
-            <select class="${fieldCls} flex-1" disabled=${!fAssignOn} value=${fAssign} onChange=${(e) => setFAssign(e.target.value)}>
+            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fAssignOn} value=${fAssign} onChange=${(e) => setFAssign(e.target.value)}>
               <option value="">Qualquer</option>
               ${(users || []).map((u) => html`<option key=${u.id} value=${String(u.id)}>${u.name || `Usuário #${u.id}`}</option>`)}
             </select>
-          </div>
+          </div>` : null}
+          ${isAvail('periodo') ? html`
           <div class="flex items-center gap-2">
             <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fDateOn} onChange=${(e) => setFDateOn(e.target.checked)} /> Período
+              <input type="checkbox" checked=${fDateOn} disabled=${fieldsRO} onChange=${(e) => setFDateOn(e.target.checked)} /> Período
             </label>
-            <select class="${fieldCls} flex-1" disabled=${!fDateOn} value=${fDatePreset} onChange=${(e) => setFDatePreset(e.target.value)}>
+            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fDateOn} value=${fDatePreset} onChange=${(e) => setFDatePreset(e.target.value)}>
               ${DATE_PRESETS.map(([lbl]) => html`<option key=${lbl} value=${lbl}>Últimos: ${lbl}</option>`)}
               <option value="tudo">Tudo</option>
             </select>
-          </div>
-          ${listAttrs.length ? html`
+          </div>` : null}
+          ${listAttrs.filter((d) => isAvail(`attr:${d.key}`)).length ? html`
             <div class="pt-1">
               <div class="text-[12px] text-wa-secondary mb-1">Atributos (lista)</div>
-              ${listAttrs.map((d) => html`
+              ${listAttrs.filter((d) => isAvail(`attr:${d.key}`)).map((d) => html`
                 <div key=${d.key} class="flex items-center gap-2 mb-1">
                   <span class="text-[13px] text-wa-text w-28 truncate" title=${d.label}>${d.label}</span>
-                  <select class="${fieldCls} flex-1" value=${fAttrs[d.key] || ''} onChange=${(e) => setAttr(d.key, e.target.value)}>
+                  <select class="${fieldCls} flex-1" disabled=${fieldsRO} value=${fAttrs[d.key] || ''} onChange=${(e) => setAttr(d.key, e.target.value)}>
                     <option value="">— sem filtro —</option>
                     ${(d.options || []).map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
                   </select>

@@ -1558,6 +1558,80 @@ check("set_conversa_attr -> atendimento inexistente -> erro", _esa is not None)
 _lf = _alogic.list_atendimentos(attr_filters={"etapa": "Proposta"}, limit=50)
 check("list_atendimentos(attr_filters) -> retorna lista", isinstance(_lf, list))
 
+# 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
+_p0 = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref ausente -> default equipe",
+      _p0 == {"use_personal": False, "personal_filters": {}})
+_p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
+                                    personal_filters={"status": "fechado"})
+check("upsert pref -> retorna pessoal",
+      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"}})
+_p1r = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref persistida -> personal_filters round-trip",
+      _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
+_p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
+check("upsert parcial -> flip use_personal mantém filters",
+      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"}})
+_p999 = _alogic.get_user_view_pref(_v2["id"], 999)
+check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}})
+_alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
+_lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
+_lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
+check("list anexa pref do chamador 101",
+      _lv101.get(_v2["id"], {}).get("use_personal") is True)
+check("list anexa pref default p/ 999",
+      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}})
+check("get_user_view_pref(uid=None) -> default equipe",
+      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}})
+_vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
+                                       group_by="status", owner_user_id=101)
+_alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
+_alogic.delete_kanban_view(_vp["id"])
+check("delete_kanban_view -> prefs limpas",
+      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}})
+
+# 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
+check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
+_va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
+                                       available_filters=["status", "attr:curso"], owner_user_id=101)
+check("create available_filters -> round-trip lista",
+      _eva is None and _va.get("available_filters") == ["status", "attr:curso"])
+_vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
+check("update sem available_filters -> mantém lista (sentinela)",
+      _vau.get("available_filters") == ["status", "attr:curso"])
+_vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
+check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
+_vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
+check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
+_alogic.delete_kanban_view(_va["id"])
+
+# 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
+_vacl, _eacl = _alogic.create_kanban_view(
+    name="Só atendentes", group_by="status",
+    visibility_roles=["atendente"], visibility_users_exclude=[500], owner_user_id=101)
+check("create ACL -> scope derivado team", _eacl is None and _vacl.get("scope") == "team")
+check("create ACL -> roles round-trip", _vacl.get("visibility_roles") == ["atendente"])
+check("create ACL -> exclude round-trip", _vacl.get("visibility_users_exclude") == [500])
+check("ACL: criador sempre vê", _alogic._view_visible(_vacl, 101, set()) is True)
+check("ACL: atendente (do grupo) vê", _alogic._view_visible(_vacl, 300, {"atendente"}) is True)
+check("ACL: atendente EXCLUÍDO não vê", _alogic._view_visible(_vacl, 500, {"atendente"}) is False)
+check("ACL: gestor (fora do grupo) não vê", _alogic._view_visible(_vacl, 300, {"gestor"}) is False)
+check("ACL: admin vê tudo", _alogic._view_visible(_vacl, 900, {"admin"}) is True)
+_vinc, _ = _alogic.create_kanban_view(name="Incluir fulano", group_by="status",
+                                      visibility_users_include=[700], owner_user_id=101)
+check("ACL: usuário incluído vê (sem papel)", _alogic._view_visible(_vinc, 700, set()) is True)
+check("ACL: não incluído/sem grupo não vê", _alogic._view_visible(_vinc, 701, set()) is False)
+_vp2, _ = _alogic.create_kanban_view(name="Priv", group_by="status", owner_user_id=101)
+check("sem ACL -> scope personal", _vp2.get("scope") == "personal")
+check("personal: outro não vê", _alogic._view_visible(_vp2, 800, {"atendente"}) is False)
+_ids_at = {v["id"] for v in _alogic.list_kanban_views(user_id=300, role_keys={"atendente"})}
+check("list(atendente) inclui view de atendentes", _vacl["id"] in _ids_at)
+_ids_ex = {v["id"] for v in _alogic.list_kanban_views(user_id=500, role_keys={"atendente"})}
+check("list(atendente excluído) não inclui", _vacl["id"] not in _ids_ex)
+_alogic.delete_kanban_view(_vacl["id"])
+_alogic.delete_kanban_view(_vinc["id"])
+_alogic.delete_kanban_view(_vp2["id"])
+
 # 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
 _rrepo.upsert_plugin_permission("plugin.atendimentos.manage_team_views",
                                 "Criar/editar visualizações de EQUIPE no Kanban",

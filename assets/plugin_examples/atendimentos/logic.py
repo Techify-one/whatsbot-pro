@@ -56,6 +56,10 @@ _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
 # Visualizações personalizadas do Kanban (abas de "Agrupar por"). Nome interno (não vem
 # de input) → seguro em f-string SQL.
 _VIEWS_TABLE = "plugin_atendimentos_kanban_views"
+# Preferência POR-USUÁRIO e POR-VISUALIZAÇÃO dos filtros pré-determinados (pessoal x equipe).
+_PREFS_TABLE = "plugin_atendimentos_user_view_prefs"
+# Sentinela p/ "não informado" no update (distingue de None=todos os filtros, []=nenhum).
+_UNSET = object()
 _VIEW_GROUP_BY = {"status", "atendente", "data", "attr"}
 _VIEW_SCOPES = {"personal", "team"}
 _VIEW_DATE_MODES = {"dia", "faixas", "mes"}
@@ -849,28 +853,134 @@ def _attach_latest_conversa(items: list[dict]) -> None:
 # CRUD puro sobre plugin_atendimentos_kanban_views. O GATE (pessoal x equipe, ownership)
 # vive na rota (precisa do request p/ checar manage_team_views) — aqui só valida o shape.
 
+def _avail_list(s):
+    """available_filters TEXT → list[str] | None. None/NULL/JSON inválido → None
+    (= TODOS os filtros disponíveis). Lista JSON → lista de chaves (strings)."""
+    if s in (None, ""):
+        return None
+    try:
+        v = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return [str(x) for x in v] if isinstance(v, list) else None
+
+
+def _int_list(s):
+    """TEXT JSON → list[int] | None (ids de usuário). None/NULL/inválido → None."""
+    if s in (None, ""):
+        return None
+    try:
+        v = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(v, list):
+        return None
+    out = []
+    for x in v:
+        try:
+            out.append(int(x))
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
+def _dump_str_list(v):
+    """list não-vazia → JSON de strings; senão None (NULL = sem restrição)."""
+    return json.dumps([str(x) for x in v]) if isinstance(v, list) and v else None
+
+
+def _dump_int_list(v):
+    """list não-vazia → JSON de ints; senão None (NULL = sem restrição)."""
+    if not (isinstance(v, list) and v):
+        return None
+    out = []
+    for x in v:
+        try:
+            out.append(int(x))
+        except (ValueError, TypeError):
+            pass
+    return json.dumps(out) if out else None
+
+
 def _view_dict(row) -> dict:
     d = dict(row)
     d["filters"] = _safe_json(d.get("filters"))  # JSON TEXT → dict
+    d["available_filters"] = _avail_list(d.get("available_filters"))  # JSON array | None (=todos)
+    # ACL de visibilidade (quem pode ver): grupos (role keys) + usuários incluídos/excluídos.
+    d["visibility_roles"] = _avail_list(d.get("visibility_roles"))          # list[str] | None
+    d["visibility_users_include"] = _int_list(d.get("visibility_users_include"))  # list[int] | None
+    d["visibility_users_exclude"] = _int_list(d.get("visibility_users_exclude"))  # list[int] | None
     return d
 
 
-def list_kanban_views(*, user_id: int | None = None) -> list[dict]:
-    """Visualizações visíveis ao usuário: as PESSOAIS dele + TODAS as de equipe.
-    user_id None (legado/open, sem identidade) → todas. Ordena por (scope, position, id)."""
-    with make_plugin_db() as conn:
-        if user_id is not None:
+def _user_role_keys(user_id) -> set:
+    """role.key do usuário (via core user_roles/roles). Vazio se sem identidade ou erro."""
+    if user_id is None:
+        return set()
+    try:
+        with make_plugin_db() as conn:
             rows = conn.execute(
-                text(f"SELECT * FROM {_VIEWS_TABLE} "
-                     "WHERE scope = 'team' OR owner_user_id = :uid "
-                     "ORDER BY scope ASC, position ASC, id ASC"),
+                text("SELECT r.key FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+                     "WHERE ur.user_id = :uid"),
+                {"uid": int(user_id)},
+            ).all()
+        return {row[0] for row in rows}
+    except Exception:  # tabelas core ausentes em algum contexto → falha fechada
+        return set()
+
+
+def _view_visible(view: dict, uid, role_keys) -> bool:
+    """A view é visível para (uid, role_keys)? CRIADOR e 'admin' veem SEMPRE. Sem grupos e
+    sem incluídos numa view de EQUIPE = legado 'todos veem'. Exclusão bloqueia (menos
+    criador/admin). uid None (legado/open) → tudo."""
+    if uid is None:
+        return True
+    if view.get("owner_user_id") == uid:
+        return True
+    role_keys = role_keys or set()
+    if "admin" in role_keys:
+        return True
+    if uid in set(view.get("visibility_users_exclude") or []):
+        return False
+    if view.get("scope") == "personal":
+        return False
+    roles = view.get("visibility_roles") or []
+    include = set(view.get("visibility_users_include") or [])
+    if not roles and not include:
+        return True  # equipe legado (sem ACL) → todos veem
+    if uid in include:
+        return True
+    return bool(roles and (set(role_keys) & set(roles)))
+
+
+def list_kanban_views(*, user_id: int | None = None, role_keys=None) -> list[dict]:
+    """Visualizações VISÍVEIS ao usuário (ver ``_view_visible``): pessoais dele + equipe
+    conforme a ACL (grupos/usuários) + sempre as que ele criou + admin vê tudo. user_id None
+    (legado/open) → todas. Ordena por (scope, position, id). Anexa ``view["pref"]`` do
+    chamador (default de equipe). ``role_keys`` None → resolvido do banco (testes passam)."""
+    if role_keys is None:
+        role_keys = _user_role_keys(user_id)
+    role_keys = set(role_keys or [])
+    with make_plugin_db() as conn:
+        rows = conn.execute(
+            text(f"SELECT * FROM {_VIEWS_TABLE} ORDER BY scope ASC, position ASC, id ASC")
+        ).mappings().all()
+        pref_rows = []
+        if user_id is not None:
+            pref_rows = conn.execute(
+                text(f"SELECT view_id, use_personal, personal_filters FROM {_PREFS_TABLE} "
+                     "WHERE user_id = :uid"),
                 {"uid": int(user_id)},
             ).mappings().all()
-        else:
-            rows = conn.execute(
-                text(f"SELECT * FROM {_VIEWS_TABLE} ORDER BY scope ASC, position ASC, id ASC")
-            ).mappings().all()
-    return [_view_dict(r) for r in rows]
+    prefs = {int(p["view_id"]): _pref_dict(p) for p in pref_rows}
+    out = []
+    for r in rows:
+        d = _view_dict(r)
+        if not _view_visible(d, user_id, role_keys):
+            continue
+        d["pref"] = prefs.get(int(d["id"]), {"use_personal": False, "personal_filters": {}})
+        out.append(d)
+    return out
 
 
 def get_kanban_view(vid: int) -> dict | None:
@@ -896,15 +1006,24 @@ def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode) ->
 
 
 def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_key=None,
-                       group_date_mode=None, filters=None,
+                       group_date_mode=None, filters=None, available_filters=None,
+                       visibility_roles=None, visibility_users_include=None,
+                       visibility_users_exclude=None,
                        owner_user_id=None) -> tuple[dict | None, str | None]:
     name = (name or "").strip()
+    vroles = _dump_str_list(visibility_roles)
+    vinc = _dump_int_list(visibility_users_include)
+    vexc = _dump_int_list(visibility_users_exclude)
+    # scope DERIVADO: há grupo ou usuário incluído → compartilhado (team).
+    if vroles or vinc:
+        scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
                          group_attr_key=group_attr_key, group_date_mode=group_date_mode)
     if err:
         return None, err
     ts = now()
     fjson = json.dumps(filters if isinstance(filters, dict) else {})
+    afjson = json.dumps([str(x) for x in available_filters]) if isinstance(available_filters, list) else None
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
     with make_plugin_db() as conn:
@@ -914,10 +1033,13 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
         conn.execute(
             text(f"INSERT INTO {_VIEWS_TABLE} "
                  "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
-                 " filters, position, created_at, updated_at) "
-                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :pos, :ts, :ts)"),
+                 " filters, available_filters, visibility_roles, visibility_users_include, "
+                 " visibility_users_exclude, position, created_at, updated_at) "
+                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :af, :vr, :vi, "
+                 " :ve, :pos, :ts, :ts)"),
             {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
-             "gak": gak, "gdm": gdm, "filters": fjson, "pos": int(pos), "ts": ts},
+             "gak": gak, "gdm": gdm, "filters": fjson, "af": afjson, "vr": vroles, "vi": vinc,
+             "ve": vexc, "pos": int(pos), "ts": ts},
         )
         # Re-seleciona a linha recém-criada de forma portável (SQLite/Postgres): created_at
         # + name (ts é um float preciso do time.time desta chamada) ordenado por id DESC.
@@ -931,7 +1053,9 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
 
 
 def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_key=None,
-                       group_date_mode=None, filters=None) -> tuple[dict | None, str | None]:
+                       group_date_mode=None, filters=None, available_filters=_UNSET,
+                       visibility_roles=_UNSET, visibility_users_include=_UNSET,
+                       visibility_users_exclude=_UNSET) -> tuple[dict | None, str | None]:
     cur = get_kanban_view(vid)
     if not cur:
         return None, "Visualização não encontrada."
@@ -940,11 +1064,24 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     group_by = group_by or cur["group_by"]
     group_attr_key = cur.get("group_attr_key") if group_attr_key is None else group_attr_key
     group_date_mode = cur.get("group_date_mode") if group_date_mode is None else group_date_mode
+    fjson = json.dumps(filters if isinstance(filters, dict) else (cur.get("filters") or {}))
+    # available_filters: _UNSET = mantém atual; None = TODOS (NULL); lista = allow-list.
+    af_src = cur.get("available_filters") if available_filters is _UNSET else available_filters
+    afjson = json.dumps([str(x) for x in af_src]) if isinstance(af_src, list) else None
+    # ACL de visibilidade: _UNSET = mantém atual; lista/None substitui.
+    vr_src = cur.get("visibility_roles") if visibility_roles is _UNSET else visibility_roles
+    vi_src = cur.get("visibility_users_include") if visibility_users_include is _UNSET else visibility_users_include
+    ve_src = cur.get("visibility_users_exclude") if visibility_users_exclude is _UNSET else visibility_users_exclude
+    vrjson = _dump_str_list(vr_src)
+    vijson = _dump_int_list(vi_src)
+    vejson = _dump_int_list(ve_src)
+    # scope DERIVADO: há grupo ou usuário incluído → compartilhado (team).
+    if vrjson or vijson:
+        scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
                          group_attr_key=group_attr_key, group_date_mode=group_date_mode)
     if err:
         return None, err
-    fjson = json.dumps(filters if isinstance(filters, dict) else (cur.get("filters") or {}))
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
     ts = now()
@@ -952,9 +1089,12 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
         conn.execute(
             text(f"UPDATE {_VIEWS_TABLE} SET name = :name, scope = :scope, group_by = :gby, "
                  "group_attr_key = :gak, group_date_mode = :gdm, filters = :filters, "
+                 "available_filters = :af, visibility_roles = :vr, "
+                 "visibility_users_include = :vi, visibility_users_exclude = :ve, "
                  "updated_at = :ts WHERE id = :id"),
             {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
-             "filters": fjson, "ts": ts, "id": int(vid)},
+             "filters": fjson, "af": afjson, "vr": vrjson, "vi": vijson, "ve": vejson,
+             "ts": ts, "id": int(vid)},
         )
     _broadcast_changed(None, None)
     return get_kanban_view(vid), None
@@ -966,8 +1106,69 @@ def delete_kanban_view(vid) -> tuple[bool, str | None]:
         return False, "Visualização não encontrada."
     with make_plugin_db() as conn:
         conn.execute(text(f"DELETE FROM {_VIEWS_TABLE} WHERE id = :id"), {"id": int(vid)})
+        # Limpa as preferências por-usuário órfãs desta view (sem FK cross-table).
+        conn.execute(text(f"DELETE FROM {_PREFS_TABLE} WHERE view_id = :id"), {"id": int(vid)})
     _broadcast_changed(None, None)
     return True, None
+
+
+# ── Preferência pessoal x equipe dos filtros por usuário/visualização ─────────
+# Cada usuário escolhe, por aba, se ao entrar aplica os filtros da EQUIPE (a coluna
+# filters compartilhada) ou os seus PESSOAIS. É a pref do PRÓPRIO usuário — a rota
+# que escreve exige só `view`, não `manage_team_views`.
+
+def _pref_dict(row) -> dict:
+    """Linha de preferência → dict com personal_filters decodificado. Default de equipe
+    (use_personal False, sem filtros pessoais) quando a linha não existe."""
+    if not row:
+        return {"use_personal": False, "personal_filters": {}}
+    d = dict(row)
+    return {
+        "use_personal": bool(d.get("use_personal")),
+        "personal_filters": _safe_json(d.get("personal_filters")),
+    }
+
+
+def get_user_view_pref(view_id: int, user_id: int | None) -> dict:
+    """Preferência (pessoal x equipe) de UM usuário para UMA aba. Ausente ou sem identidade
+    (legado/open) → default de EQUIPE: {use_personal: False, personal_filters: {}}."""
+    if user_id is None:
+        return {"use_personal": False, "personal_filters": {}}
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text(f"SELECT use_personal, personal_filters FROM {_PREFS_TABLE} "
+                 "WHERE user_id = :uid AND view_id = :vid"),
+            {"uid": int(user_id), "vid": int(view_id)},
+        ).mappings().first()
+    return _pref_dict(row)
+
+
+def upsert_user_view_pref(view_id: int, user_id: int | None, *, use_personal=None,
+                          personal_filters=None) -> dict:
+    """Cria/atualiza a preferência de (user_id, view_id) via UPSERT no índice único.
+    Merge parcial: campos None não são alterados (igual a update_kanban_view). Retorna a
+    pref resultante. user_id None (sem identidade) → no-op, devolve o default de equipe."""
+    if user_id is None:
+        return {"use_personal": False, "personal_filters": {}}
+    cur = get_user_view_pref(view_id, user_id)
+    up = cur["use_personal"] if use_personal is None else bool(use_personal)
+    pf = cur["personal_filters"] if personal_filters is None else (
+        personal_filters if isinstance(personal_filters, dict) else {})
+    pjson = json.dumps(pf, ensure_ascii=False)
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text(f"INSERT INTO {_PREFS_TABLE} "
+                 "(user_id, view_id, use_personal, personal_filters, created_at, updated_at) "
+                 "VALUES (:uid, :vid, :up, :pf, :ts, :ts) "
+                 "ON CONFLICT (user_id, view_id) DO UPDATE SET "
+                 "use_personal = excluded.use_personal, "
+                 "personal_filters = excluded.personal_filters, "
+                 "updated_at = excluded.updated_at"),
+            {"uid": int(user_id), "vid": int(view_id),
+             "up": 1 if up else 0, "pf": pjson, "ts": ts},
+        )
+    return {"use_personal": up, "personal_filters": pf}
 
 
 def set_conversa_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:
