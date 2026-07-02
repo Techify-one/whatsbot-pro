@@ -7,18 +7,14 @@ the transferir_agente tool directly against a temp DB — no LLM / no HTTP neede
 """
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-_tmpdir = tempfile.mkdtemp(prefix="whatsbot_routing_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
-
-from db import init_db  # noqa: E402
-init_db(_db_path)
+from tests.pg import init_test_engine  # noqa: E402
+init_test_engine(reset=True)
 
 from sqlalchemy import update  # noqa: E402
 from db.engine import get_engine  # noqa: E402

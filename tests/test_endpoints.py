@@ -25,21 +25,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # create_app behavior and dirty the tree). Set BEFORE importing server.app.
 os.environ["WHATSBOT_TEST"] = "1"
 
-# Initialize the engine in a temp directory before importing anything else.
-# Default: SQLite. Override with ``WHATSBOT_TEST_DB_URL`` to run the same
-# assertions against Postgres (e.g. via testcontainers).
+# Initialize the engine on the Postgres TEST database (plano 29 C3): schema
+# reset + Alembic head via tests.pg (URL de WHATSBOT_TEST_DB_URL ou .env).
+# ``_tmpdir`` continua existindo só para artefatos de mídia do teste.
 _tmpdir = tempfile.mkdtemp(prefix="whatsbot_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
 
-from db import init_db, init_engine
+from tests.pg import init_test_engine  # noqa: E402
 
-_test_url = os.environ.get("WHATSBOT_TEST_DB_URL", "").strip()
-if _test_url:
-    init_engine(_test_url)
-    from db.connection import _run_alembic_upgrade  # noqa: E402
-    _run_alembic_upgrade()
-else:
-    init_db(_db_path)
+init_test_engine(reset=True)
 
 # Seed some test data
 from db.repositories import contact_repo, message_repo, usage_repo, tag_repo, config_repo, execution_repo

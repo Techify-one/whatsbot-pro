@@ -497,12 +497,10 @@ section("inbound GOWA device → channel resolution (channel_repo)")
 
 import logging as _logging
 _logging.disable(_logging.INFO)
-_routedb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
-os.environ["DATABASE_URL"] = f"sqlite:///{_routedb}"
-from db.engine import dispose_engine as _dispose_engine
-_dispose_engine()  # force a fresh engine bound to the temp DB
-from db.connection import init_db as _init_db
-_init_db()
+# Plano 29 C3 (Postgres-only): roda contra o Postgres de teste com o schema
+# resetado — o equivalente do antigo temp-SQLite dedicado desta seção.
+from tests.pg import init_test_engine as _init_test_engine
+_init_test_engine(reset=True)
 from db.repositories import channel_repo as _cr
 
 # 'default' is seeded by migration 0011 (gowa, gowa_device_id='whatsbot').
@@ -531,10 +529,6 @@ check("session_id resolves before login (own_phone still NULL)",
 _cr.set_status("whatsapp_teste", enabled=0)
 check("disabled channel → None (won't route)",
       _cr.get_gowa_channel_for_device("whatsapp_teste", None) is None)
-try:
-    os.unlink(_routedb)
-except OSError:
-    pass
 
 
 # ═══════════════════════════════════════════════════════════════════
