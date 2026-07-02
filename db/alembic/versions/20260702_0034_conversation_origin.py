@@ -17,7 +17,7 @@ constraint would be wrong here.
 Guarded + idempotent + reversible.
 
 Revision ID: 0034_conversation_origin
-Revises: 0033_core_atendimento
+Revises: 0034_message_sent_by
 Create Date: 2026-07-02
 """
 from typing import Sequence, Union
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 
 
 revision: str = "0034_conversation_origin"
-down_revision: Union[str, Sequence[str], None] = "0033_core_atendimento"
+down_revision: Union[str, Sequence[str], None] = "0034_message_sent_by"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
