@@ -70,28 +70,78 @@ def _default_ai_enabled() -> bool:
         return True
 
 
-def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
-           opened_at: float | None = None, ai_active: int | None = None,
-           is_archived: int = 0, active_agent_key: str | None = None) -> dict:
+def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_id: int,
+                         opened_at: float | None, ai_active: int | None,
+                         is_archived: int, active_agent_key: str | None,
+                         origin: str | None) -> dict:
+    """Insert a conversation row on an EXISTING transaction ``conn`` and return it.
+
+    Shared by :func:`create` (opens its own txn) and :func:`_create_open_atomic`
+    (checks-then-inserts inside one txn to close the brand-new-contact race)."""
     now = time.time()
     opened = opened_at if opened_at is not None else now
     if ai_active is None:
         ai_active = 1 if _default_ai_enabled() else 0
     if active_agent_key is None:
         active_agent_key = default_agent_key_for_inbox(inbox_id)
-    with get_engine().begin() as conn:
-        display_id = _next_display_id(conn)
-        result = conn.execute(conversations.insert().values(
-            display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
-            contact_inbox_id=contact_inbox_id, status="open", is_archived=is_archived,
-            ai_active=ai_active, active_agent_key=active_agent_key,
-            opened_at=opened, last_activity_at=opened,
-            custom_attributes={}, created_at=now, updated_at=now,
-        ))
-        conv_id = result.inserted_primary_key[0]
-        row = conn.execute(
-            select(conversations).where(conversations.c.id == conv_id)).mappings().first()
+    display_id = _next_display_id(conn)
+    result = conn.execute(conversations.insert().values(
+        display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
+        contact_inbox_id=contact_inbox_id, status="open", is_archived=is_archived,
+        ai_active=ai_active, active_agent_key=active_agent_key, origin=origin,
+        opened_at=opened, last_activity_at=opened,
+        custom_attributes={}, created_at=now, updated_at=now,
+    ))
+    conv_id = result.inserted_primary_key[0]
+    row = conn.execute(
+        select(conversations).where(conversations.c.id == conv_id)).mappings().first()
     return dict(row)
+
+
+def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
+           opened_at: float | None = None, ai_active: int | None = None,
+           is_archived: int = 0, active_agent_key: str | None = None,
+           origin: str | None = None) -> dict:
+    """Insert a new conversation. ``origin`` (plano 28) records who started the
+    thread — ``inbound`` (customer), ``outbound``/``manual`` (operator), ``imported``
+    (chat import) — and drives the sidebar visibility gate. Always inserts (the
+    atendimento model allows multiple conversations per contact/inbox); the inbound
+    auto-create dedup lives in :func:`_create_open_atomic`."""
+    with get_engine().begin() as conn:
+        return _insert_conversation(
+            conn, inbox_id=inbox_id, contact_id=contact_id,
+            contact_inbox_id=contact_inbox_id, opened_at=opened_at,
+            ai_active=ai_active, is_archived=is_archived,
+            active_agent_key=active_agent_key, origin=origin)
+
+
+def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
+                        opened_at: float | None, origin: str | None) -> tuple[dict, bool]:
+    """Race-safe get-or-create of the OPEN conversation for (contact, inbox).
+
+    Closes the brand-new-contact double-create: when two inbound messages of a
+    contact with NO conversation yet resolve concurrently, both would otherwise
+    ``create`` a thread. Here the existence re-check and the insert run in ONE write
+    transaction — on SQLite the single-writer lock serializes them (the loser's
+    re-check sees the winner's committed row and reuses it). Returns
+    ``(conv, created)`` where ``created`` is False when an existing open thread was
+    adopted. Only called when the pre-check already found no conversation at all, so
+    the common path still inserts."""
+    with get_engine().begin() as conn:
+        existing = conn.execute(
+            select(conversations)
+            .where(conversations.c.contact_id == contact_id,
+                   conversations.c.inbox_id == inbox_id,
+                   conversations.c.status == "open")
+            .order_by(conversations.c.last_activity_at.desc())
+        ).mappings().first()
+        if existing is not None:
+            return dict(existing), False
+        row = _insert_conversation(
+            conn, inbox_id=inbox_id, contact_id=contact_id,
+            contact_inbox_id=contact_inbox_id, opened_at=opened_at,
+            ai_active=None, is_archived=0, active_agent_key=None, origin=origin)
+        return row, True
 
 
 def get(conv_id: int) -> dict | None:
@@ -155,7 +205,8 @@ def get_latest_for_contact_inbox(contact_id: int, inbox_id: int) -> dict | None:
 
 def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                            opened_at: float | None = None,
-                           inbox_id: int = DEFAULT_INBOX_ID) -> tuple[dict, str | None]:
+                           inbox_id: int = DEFAULT_INBOX_ID,
+                           origin: str | None = None) -> tuple[dict, str | None]:
     """Like :func:`resolve_for_contact` but also reports the lifecycle transition.
 
     Returns ``(conv, event)`` where ``event`` is ``"created"`` (a brand-new
@@ -163,14 +214,23 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     reactivated by this inbound), or ``None`` (already-open conversation, no
     transition). Lets callers surface an automatic system notice (plano 12 §3)
     without re-querying the prior status.
+
+    ``origin`` (plano 28) stamps a brand-new conversation's provenance. Concurrency:
+    if two inbound messages of a brand-new contact resolve in parallel, both see
+    "no conversation" here — :func:`_create_open_atomic` re-checks + inserts inside
+    ONE write transaction, so the loser adopts the winner's thread (``event=None``)
+    instead of creating a duplicate. No DB unique constraint is used (the atendimento
+    model allows multiple conversations per contact/inbox by design).
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(
         inbox_id=inbox_id, contact_id=contact_id, source_id=jid, source_jid=jid)
     conv = get_latest_for_contact_inbox(contact_id, inbox_id)
     if conv is None:
-        return create(inbox_id=inbox_id, contact_id=contact_id,
-                      contact_inbox_id=ci["id"], opened_at=opened_at), "created"
+        row, created = _create_open_atomic(
+            inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
+            opened_at=opened_at, origin=origin)
+        return row, ("created" if created else None)
     if reopen_if_closed and conv["status"] == "closed":
         return set_status(conv["id"], "open"), "reopened"
     return conv, None
@@ -178,7 +238,8 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
 
 def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                         opened_at: float | None = None,
-                        inbox_id: int = DEFAULT_INBOX_ID) -> dict:
+                        inbox_id: int = DEFAULT_INBOX_ID,
+                        origin: str | None = None) -> dict:
     """Return the active conversation for a contact IN a given inbox (plano 01 F2 / plano 11 F1).
 
     Idempotent: get_or_creates the contact_inbox on ``inbox_id`` (JID = source_id,
@@ -192,7 +253,7 @@ def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = F
     """
     conv, _event = resolve_for_contact_ex(
         contact_id, jid, reopen_if_closed=reopen_if_closed,
-        opened_at=opened_at, inbox_id=inbox_id)
+        opened_at=opened_at, inbox_id=inbox_id, origin=origin)
     conv = dict(conv)
     conv["created"] = (_event == "created")
     return conv
@@ -279,6 +340,20 @@ def get_with_channel(conv_id: int) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(stmt).mappings().first()
     return _finalize_conv(row) if row else None
+
+
+def get_row_for_broadcast(conv_id: int) -> dict | None:
+    """One enriched conversation row in the EXACT shape of a ``/api/atendimentos``
+    list item — ``get_with_channel`` plus the conversation labels (plano 28).
+
+    This is the single source of the ``conversation_upsert`` WS payload, so a
+    row pushed live is byte-for-byte what a refetch would return. ``get_with_channel``
+    alone omits ``labels`` (only ``list_conversations`` runs ``_attach_labels``), which
+    would make an upserted row diverge from a fetched one — this closes that gap."""
+    row = get_with_channel(conv_id)
+    if row is None:
+        return None
+    return _attach_labels([row])[0]
 
 
 def mark_conversation_read(conv_id: int) -> list[str]:
@@ -482,3 +557,32 @@ def delete(conv_id: int) -> int | None:
                      .where(conversation_label_links.c.conversation_id == conv_id))
         conn.execute(sa_delete(conversations).where(conversations.c.id == conv_id))
     return contact_id
+
+
+def find_empty_inbound_ghosts(cutoff_ts: float, limit: int = 200) -> list[dict]:
+    """Inbound "ghost" conversations to sweep (plano 28 Fase 5).
+
+    A ghost is ``origin='inbound'`` + created before ``cutoff_ts`` + NO VISIBLE
+    message — the conversation was materialized at ingest (t=0) but the batch that
+    would persist its first customer message never ran (shutdown/crash between t=0 and
+    t≈3s). "Visible" excludes the panel-only roles (``LIST_PANEL_ONLY_ROLES``): the t=0
+    materialization ALSO writes a ``conversation_event`` "created" card, so a real
+    ghost is never literally message-less — it has only that card. The TTL sweep
+    removes these so they don't linger as permanently-empty rows. The TTL (default
+    30 min) is far longer than the batch delay (~3s), so a legitimate brand-new
+    conversation is never caught. Returns minimal dicts for delete+broadcast."""
+    from db.repositories._mapping import LIST_PANEL_ONLY_ROLES
+    no_visible_msg = ~(select(messages.c.id)
+                       .where(messages.c.conversation_id == conversations.c.id)
+                       .where(messages.c.role.notin_(LIST_PANEL_ONLY_ROLES))
+                       .exists())
+    stmt = (select(conversations.c.id, conversations.c.contact_id,
+                   conversations.c.display_id, conversations.c.inbox_id,
+                   conversations.c.status)
+            .where(conversations.c.origin == "inbound")
+            .where(conversations.c.created_at < cutoff_ts)
+            .where(no_visible_msg)
+            .limit(limit))
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(r) for r in rows]

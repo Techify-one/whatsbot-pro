@@ -17,6 +17,10 @@ AVATAR_REFRESH_INTERVAL = 1800  # seconds (30 min)
 AUDIT_PURGE_INTERVAL = 86400  # seconds (1 day)
 AUDIT_RETENTION_DAYS_DEFAULT = 365
 
+# How often the empty-inbound-ghost sweep runs, and the default TTL (plano 28 Fase 5).
+GHOST_SWEEP_INTERVAL = 600  # seconds (10 min)
+EMPTY_CONV_TTL_MINUTES_DEFAULT = 30
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,5 +245,51 @@ async def audit_purge_loop(deps):
 
         slept = 0
         while slept < AUDIT_PURGE_INTERVAL and not state.stop_event.is_set():
+            await asyncio.sleep(5)
+            slept += 5
+
+
+async def empty_conversation_sweep_loop(deps):
+    """Sweep 'inbound' ghost conversations (plano 28 Fase 5).
+
+    A brand-new conversation is materialized at ingest (t=0, origin='inbound') so it
+    shows on the sidebar immediately; its first message is persisted ~3s later by the
+    batch. If that batch never runs (shutdown/crash), the conversation lingers as an
+    empty row (trade-off: "visible and empty" > "invisible until F5"). This TTL sweep
+    removes inbound conversations that still have NO message after
+    ``empty_conversation_ttl_minutes`` (config, default 30; <=0 disables), broadcasting
+    ``conversation_deleted`` so open panels drop the row live. The TTL is far larger
+    than the batch delay, so a legitimate new conversation is never swept.
+    """
+    state = deps.state
+    from db.repositories import config_repo, conversation_repo
+    from app.services import conversation_service
+
+    while not state.stop_event.is_set():
+        try:
+            raw = await asyncio.to_thread(config_repo.get, "empty_conversation_ttl_minutes")
+            try:
+                ttl_min = int(raw) if raw is not None else EMPTY_CONV_TTL_MINUTES_DEFAULT
+            except (TypeError, ValueError):
+                ttl_min = EMPTY_CONV_TTL_MINUTES_DEFAULT
+            if ttl_min > 0:
+                cutoff = time.time() - ttl_min * 60
+                ghosts = await asyncio.to_thread(
+                    conversation_repo.find_empty_inbound_ghosts, cutoff)
+                for g in ghosts:
+                    if state.stop_event.is_set():
+                        break
+                    try:
+                        await conversation_service.delete(deps, g)
+                    except Exception:
+                        logger.debug("[GhostSweep] delete failed for conv %s", g.get("id"))
+                if ghosts:
+                    logger.info("[GhostSweep] removed %d empty inbound ghost conversation(s)",
+                                len(ghosts))
+        except Exception as e:
+            logger.warning("[GhostSweep] loop error: %s", e)
+
+        slept = 0
+        while slept < GHOST_SWEEP_INTERVAL and not state.stop_event.is_set():
             await asyncio.sleep(5)
             slept += 5

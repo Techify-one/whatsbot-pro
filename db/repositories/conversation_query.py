@@ -48,6 +48,9 @@ def enriched_columns() -> list:
         contacts.c.is_group.label("contact_is_group"),
         contacts.c.is_pinned.label("is_pinned"),
         contacts.c.has_unread_mention.label("has_unread_mention"),
+        # Contact-level AI-unread count (plano 28): carried so a conversation_upsert
+        # keeps the "IA respondeu" badge live (contact-level, like in buildRows).
+        contacts.c.unread_ai_count.label("unread_ai_count"),
         inboxes.c.channel_id.label("channel_id"),
         channels.c.provider.label("channel_provider"),
         channels.c.display_name.label("channel_name"),
@@ -80,6 +83,7 @@ def finalize_conv(row) -> dict:
     d["last_message_status"] = d.get("last_msg_status") or ""
     d["last_message_msg_id"] = d.get("last_msg_id") or ""
     d["unread_count"] = int(d.get("unread_count") or 0)
+    d["unread_ai_count"] = int(d.get("unread_ai_count") or 0)
     d["is_pinned"] = bool(d.get("is_pinned"))
     d["has_unread_mention"] = bool(d.get("has_unread_mention"))
     return d

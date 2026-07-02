@@ -45,15 +45,22 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
 
-  // Só entram na sidebar atendimentos com mensagem real trocada (last_message_ts > 0,
-  // que já exclui eventos painel-only). Um contato recém-criado sem mensagem — ex:
-  // recriado pela importação de chats do GOWA, ou aberto pelo modal sem enviar nada
-  // — não deve poluir a lista. O atendimento atualmente ABERTA fica visível mesmo sem
-  // mensagem, pra não sumir enquanto o operador digita a 1ª mensagem.
+  // Quais atendimentos entram na sidebar (plano 28). O sinal de visibilidade é a
+  // provenância EXPLÍCITA `origin`, não mais o proxy racy `last_message_ts>0`:
+  //  • `origin==='inbound'`  → conversa que o CLIENTE iniciou. Aparece em t=0, mesmo
+  //    antes da 1ª mensagem ser persistida pelo batch (é o fix do "conversa nova só
+  //    aparece após F5"). O backend materializa em t=0 e emite `conversation_upsert`.
+  //  • `last_message_ts>0`   → qualquer conversa com mensagem visível (cobre saída do
+  //    operador/IA, que nasce já com mensagem, e todo o histórico legado).
+  // Contato importado (GOWA) / rascunho de modal (origin 'imported'/'manual', sem
+  // mensagem) NÃO satisfaz nenhum termo → fica oculto (não polui a lista). O
+  // atendimento atualmente ABERTO fica visível mesmo sem mensagem (não sumir enquanto
+  // o operador digita a 1ª).
   const activeContacts = useMemo(() => {
     const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
     return contacts.filter(c => {
       if (c.last_message_ts && c.last_message_ts > 0) return true;
+      if (c.origin === 'inbound') return true;
       const key = c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
       return key === selKey;
     });

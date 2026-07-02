@@ -19,8 +19,9 @@
 // with the selection hook's detail loader so reads gate on the same visibility.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
-import { isDuplicateMessage, findDuplicateIndex, mediaPreviewLabel } from '../../../services/messages.js';
+import { isDuplicateMessage, findDuplicateIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
+import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
 import { useWebSocket } from '../../../hooks/useWebSocket.js';
 
@@ -101,6 +102,16 @@ export function useConversationWsEvents(opts) {
   // P19: latest conversation-scope custom-attribute write, forwarded to the open
   // ConversationInfoPanel for live refresh (mirrors contact_info_updated → panel).
   const onConversationChanged = useCallback((name, data) => {
+    // plano 28: the AUTHORITATIVE list-row event. Carries the whole enriched row;
+    // we upsert it by conversation_id (insert brand-new, or scoped-merge the
+    // message/preview/unread of an existing row) — no refetch, no stale-read race.
+    // Its `id` is the conversation id, so the generic cid/convId guard below (which
+    // reads data.conversation_id) does not apply; handle it first and return.
+    if (name === 'conversation_upsert') {
+      if (data == null || data.id == null) return;
+      setContacts(prev => upsertConversationRow(prev, convRowToSidebarRow(data)));
+      return;
+    }
     const cid = data && data.contact_id;
     const convId = data && data.conversation_id;
     if (cid == null && convId == null) return;
@@ -363,13 +374,11 @@ export function useConversationWsEvents(opts) {
     }
   }, [contactData, selected]);
 
-  // A brand-new per-channel conversation just materialised on the backend
-  // (conversation_created) — refetch so its row appears in the sidebar even before
-  // any reply arrives (plano 11 D1). Events are rare, so no debounce is needed.
-  useEffect(() => {
-    if (!conversationCreated) return;
-    scheduleListRefetch();
-  }, [conversationCreated]);
+  // plano 28: `conversation_created` no longer drives a list refetch. The brand-new
+  // conversation's row is INSERTED by the authoritative `conversation_upsert` emitted
+  // at t=0 by `ensure_conversation_live` (fully formed: name/channel/status, gated
+  // visible by origin='inbound'), so no stale-read refetch is needed. The event is
+  // still consumed elsewhere (kanban/plugins); it is simply a no-op for this list.
 
   // Handle real-time messages from WebSocket. Atendimento-cêntrico routing: a message
   // belongs to the OPEN thread by conversation_id when present (operator/save
@@ -449,50 +458,13 @@ export function useConversationWsEvents(opts) {
       }
     }
 
-    // Skip contact list preview update for panel-only roles (transcription,
-    // system_notice, tool_call, conversation_event, private_note, error) — these
-    // never leave the panel, so they must not become a conversation's "last message".
-    if (message.role === 'transcription' || message.role === 'system_notice' || message.role === 'tool_call' || message.role === 'conversation_event' || message.role === 'private_note' || message.role === 'error') return;
-
-    setContacts(prev => {
-      // Target the row for this exact conversation/channel (not all rows of the phone).
-      const idx = prev.findIndex(c =>
-        (msgConvId != null && c.conversation_id === msgConvId) ||
-        (msgConvId == null && c.phone === phone && (c.channel_id || 'default') === msgChannel)
-      );
-      if (idx >= 0) {
-        const updated = [...prev];
-        const isUserMsg = message.role === 'user';
-        const isViewing = isOpenRow(updated[idx]) && pageVisibleRef.current;
-        const lastPreview = mediaPreviewLabel(message);
-        updated[idx] = {
-          ...updated[idx],
-          last_message: lastPreview,
-          last_message_role: message.role,
-          last_message_ts: message.ts,
-          last_message_status: message.status || '',
-          last_message_msg_id: message.msg_id || '',
-          msg_count: (updated[idx].msg_count || 0) + 1,
-          unread_count: isUserMsg && !isViewing
-            ? (updated[idx].unread_count || 0) + 1
-            : updated[idx].unread_count || 0,
-          unread_ai_count: message.role === 'assistant' && !isViewing
-            ? (updated[idx].unread_ai_count || 0) + 1
-            : updated[idx].unread_ai_count || 0,
-          has_unread_mention: (message.mentioned && !isViewing)
-            ? true
-            : (updated[idx].has_unread_mention || false),
-          updated_at: message.ts,
-        };
-        return sortContacts(updated);
-      }
-      // No matching row — likely a brand-new (or deleted-then-recreated) conversation.
-      // Coalesced ref-based refetch materialises it reliably (debounced so it merges
-      // with the sibling `conversation_created` trigger into a single, post-commit
-      // fetch — no stale-closure fetch inside the reducer, no double-fetch race).
-      scheduleListRefetch();
-      return prev;
-    });
+    // plano 28: `new_message` is APPEND-ONLY for the open thread now. The sidebar
+    // list (new-row insert AND existing-row preview/unread) is driven exclusively by
+    // the authoritative `conversation_upsert` event (emitted post-commit from
+    // `add_message`, carrying the real preview/unread from the DB). This removes the
+    // notification-then-stale-refetch race (a brand-new conversation used to be
+    // fetched with last_message_ts=0 and hidden) AND the double-count that keeping an
+    // in-place unread increment alongside the DB-truth upsert would cause.
   }, [newMessage]);
 
   return { typingState, aiRespondingState, convAttrPatch };

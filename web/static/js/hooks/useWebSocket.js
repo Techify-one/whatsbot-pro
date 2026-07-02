@@ -37,6 +37,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       avatar_updated: onAvatarUpdated,
       group_participants_changed: onGroupParticipantsChanged,
       low_balance: onLowBalance,
+      conversation_upsert: conv ? conv('conversation_upsert') : undefined,
       conversation_created: conv ? conv('conversation_created') : undefined,
       conversation_status_changed: conv ? conv('conversation_status_changed') : undefined,
       conversation_assigned: conv ? conv('conversation_assigned') : undefined,
