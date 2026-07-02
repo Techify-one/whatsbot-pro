@@ -208,13 +208,34 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
         last_hop["executed"] = hop.executed_tools
         return hop
 
-    result, steps = await _routing.run_with_routing(
+    result, steps, halted = await _routing.run_with_routing(
         first_result=first_result, first_agent_key=first_spec.agent_key,
         resolve_next=_resolve_next, run_hop=_run_hop,
         max_depth=_resolve_max_route_depth(),
         get_reason=_pending_reason)
     if steps:
         set_execution_routing_steps(steps)
+    if halted is not None:
+        # Plano 29 A4: fim anômalo (cap estourado com handoff pendente) → rede de
+        # segurança: escala pra humano em vez do break silencioso. A10: registra
+        # o halt na execução. Ambos best-effort — nunca quebram o turno.
+        chain = "→".join([first_spec.agent_key] + [s["to"] for s in steps])
+        track_step("routing_halted", {"reason": halted.get("reason"),
+                                      "pending": halted.get("pending"),
+                                      "chain": chain}, status="error")
+        motivo = (f"Limite de roteamento atingido ({chain}). "
+                  f"Nenhum agente conseguiu resolver.")
+        try:
+            feedback = await asyncio.to_thread(
+                handler._dispatch_tool, contact, "transfer_to_human",
+                {"reason": motivo})
+            combined.append({"tool": "transfer_to_human",
+                             "args": {"reason": motivo},
+                             "result": feedback, "forced": True})
+            logger.warning("Routing halted for %s (%s) — escalado pra humano",
+                           sender, chain)
+        except Exception:
+            logger.exception("Escalação pra humano falhou para %s", sender)
     return result, combined, (acc_usage or None), steps
 
 

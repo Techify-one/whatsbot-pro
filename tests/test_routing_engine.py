@@ -56,16 +56,17 @@ class Fake:
 async def main():
     # No handoff: A stays → run_hop never called, result unchanged
     f = Fake({"A": None})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("sem handoff: 0 steps", steps == [])
     check("sem handoff: run_hop nunca chamado", f.hops == [])
     check("sem handoff: result inalterado", res == "result-A")
+    check("A4: fim normal -> halted=None", halted is None)
 
     # One handoff: A→B, B stays
     f = Fake({"A": "B", "B": None})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("1 handoff: result do agente final (B)", res == "result-B")
@@ -75,7 +76,7 @@ async def main():
 
     # Chained: A→B→C
     f = Fake({"A": "B", "B": "C", "C": None})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("encadeado: result final C", res == "result-C")
@@ -84,7 +85,7 @@ async def main():
     # Depth cap: every agent transfers to a fresh one → capped at MAX-1 extra hops
     chain = {"A": "h1", "h1": "h2", "h2": "h3", "h3": "h4", "h4": "h5", "h5": "h6"}
     f = Fake(chain)
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check(f"depth cap: no máx {routing.MAX_ROUTING_DEPTH-1} hops extras",
@@ -105,7 +106,7 @@ async def main():
             return f"result-{key}"
 
     f = Stabilizing({"A": "B", "B": "A"})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("A3: revisita A→B→A roda no mesmo turno",
@@ -115,22 +116,33 @@ async def main():
 
     # Ping-pong A→B→A→B…: bounded pelo depth cap (não roda infinito)
     f = Fake({"A": "B", "B": "A"})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check(f"A3: ping-pong é limitado pelo cap ({routing.MAX_ROUTING_DEPTH-1} hops extras)",
           len(steps) == routing.MAX_ROUTING_DEPTH - 1)
+    check("A4: cap estourado com handoff pendente -> halted depth_exhausted",
+          halted is not None and halted["reason"] == "depth_exhausted")
 
     # max_depth configurável (A3): cap menor via parâmetro
     f = Fake({"A": "B", "B": "A"})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop, max_depth=3)
     check("A3: max_depth=3 limita a 2 hops extras", len(steps) == 2)
+    check("A4: max_depth=3 com ping-pong pendente -> halted", halted is not None)
+
+    # Cadeia que se resolve EXATAMENTE no último hop do cap → fim normal
+    f = Fake({"A": "h1", "h1": "h2", "h2": "h3", "h3": "h4", "h4": None})
+    res, steps, halted = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f.resolve_next, run_hop=f.run_hop)
+    check("A4: cadeia resolvida no último hop do cap -> halted=None",
+          len(steps) == routing.MAX_ROUTING_DEPTH - 1 and halted is None)
 
     # Downstream hop aborts (filter on C) → keep last good result (B)
     f = Fake({"A": "B", "B": "C", "C": None}, abort_on={"C"})
-    res, steps = await routing.run_with_routing(
+    res, steps, halted = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("hop C aborta no filtro: result fica no último bom (B)", res == "result-B")
@@ -138,7 +150,7 @@ async def main():
 
     # First continuation hop aborts → 0 steps, hop-1 result kept
     f2 = Fake({"A": "B", "B": None}, abort_on={"B"})
-    res2, steps2 = await routing.run_with_routing(
+    res2, steps2, halted2 = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f2.resolve_next, run_hop=f2.run_hop)
     check("1º hop de continuação aborta: 0 steps, result-A mantido",
@@ -156,7 +168,7 @@ async def main():
             return f"result-{key}"
 
     f3 = Stab3({"A": "B", "B": "C", "C": "A"})
-    res3, steps3 = await routing.run_with_routing(
+    res3, steps3, halted3 = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f3.resolve_next, run_hop=f3.run_hop)
     check("A3: revisita indireta A→B→C→A roda no mesmo turno",
@@ -170,7 +182,7 @@ async def main():
           steps3 and all(s.get("reason") is None for s in steps3))
     f4 = Fake({"A": "B", "B": "C", "C": None})
     _reasons = {"B": "oferta X não existe", "C": None}
-    res4, steps4 = await routing.run_with_routing(
+    res4, steps4, halted4 = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f4.resolve_next, run_hop=f4.run_hop,
         get_reason=lambda: _reasons.get(f4.active))
@@ -179,7 +191,7 @@ async def main():
           and steps4[1].get("reason") is None)
     _boom = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: E731
     f5 = Fake({"A": "B", "B": None})
-    res5, steps5 = await routing.run_with_routing(
+    res5, steps5, halted5 = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f5.resolve_next, run_hop=f5.run_hop,
         get_reason=_boom)

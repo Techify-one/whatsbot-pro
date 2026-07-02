@@ -17,12 +17,17 @@ nothing about agno, the DB, or the handler — so it is unit-testable in isolati
   A3) flags an agent being revisited within the same turn (nexus
   ``skip_history`` equivalent — the hop tones down/replaces its earlier take).
 
-Returns ``(final_result, routing_steps)`` where ``routing_steps`` is the list of
-``{"from", "to", "depth", "reason"}`` handoffs taken (empty when no handoff
-happened — the common single-agent case, in which ``run_hop`` is never called
-again). ``reason`` (plano 29 A2/A7) is the handoff motivo supplied by the
+Returns ``(final_result, routing_steps, halted)`` where ``routing_steps`` is the
+list of ``{"from", "to", "depth", "reason"}`` handoffs taken (empty when no
+handoff happened — the common single-agent case, in which ``run_hop`` is never
+called again). ``reason`` (plano 29 A2/A7) is the handoff motivo supplied by the
 optional ``get_reason`` callback (``None`` when absent) — the caller reads it
 off the previous hop's ``transferir_agente`` call.
+
+``halted`` (plano 29 A4): ``None`` on a normal end, or ``{"reason":
+"depth_exhausted", "pending": <agent_key>}`` when the depth budget ran out with
+a handoff STILL pending — the anomalous end. The module stays pure (no DB): the
+CALLER escalates (``transfer_to_human``) on a non-``None`` halt.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ async def run_with_routing(*, first_result, first_agent_key, resolve_next, run_h
     current = first_agent_key
     steps: list[dict] = []
     seen = {first_agent_key}
+    halted = None
 
     # depth counts hops already run (1 = the first). Stop before exceeding max_depth.
     for depth in range(1, max_depth):
@@ -69,5 +75,12 @@ async def run_with_routing(*, first_result, first_agent_key, resolve_next, run_h
         result = hop
         current = nxt
         seen.add(nxt)
+    else:
+        # Depth budget exhausted (plano 29 A4). If a handoff is STILL pending,
+        # nobody resolved the conversation — report the anomalous end so the
+        # caller can escalate to a human (this module stays DB-free).
+        pending = resolve_next()
+        if pending and pending != current:
+            halted = {"reason": "depth_exhausted", "pending": pending}
 
-    return result, steps
+    return result, steps, halted
