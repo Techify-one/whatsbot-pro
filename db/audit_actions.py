@@ -56,7 +56,6 @@ class AuditAction:
     TAG_DELETE = "tag.delete"
     # Data
     DATA_EXPORT = "data.export"
-    DB_MIGRATE_TO_POSTGRES = "db.migrate_to_postgres"
 
 
 # Bus event name -> (action, resource_type). Allowlist consumed by the core
