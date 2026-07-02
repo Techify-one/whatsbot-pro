@@ -29,9 +29,10 @@ hermetic and deterministic:
 SHARED DB / ENGINE — IMPORTANT
 ------------------------------
 The DB engine is a PROCESS-GLOBAL singleton (``db.engine``), initialized ONCE
-per session by the ``_engine_ready`` session fixture against a single temp
-SQLite DB (or ``WHATSBOT_TEST_DB_URL``). ``build_test_app`` **reuses that already
--initialized global engine** — it does NOT create a per-app DB. The hermeticity
+per session by the ``_engine_ready`` session fixture against the Postgres TEST
+database (``WHATSBOT_TEST_DB_URL`` via ``tests.pg`` — schema reset + Alembic
+head; plano 29 C3). ``build_test_app`` **reuses that already-initialized global
+engine** — it does NOT create a per-app DB. The hermeticity
 here is about the PLUGINS dir + ``data_dir``, NOT DB isolation: every built app
 reads/writes the same shared DB the rest of the suite uses (the ``default``
 channel seeded by migration, contacts, config, the ``plugins`` table, …). That
