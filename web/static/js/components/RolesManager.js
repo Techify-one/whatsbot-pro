@@ -3,7 +3,8 @@
 // Lists every role with its permissions and lets an admin:
 //   • edit the permissions of gestor/atendente (system) and custom roles,
 //   • restore a system role to its seeded defaults,
-//   • create new custom roles and delete unused ones.
+//   • create new custom roles and delete unused ones,
+//   • delete the seeded system roles too (only `admin` is undeletable).
 // The `admin` role is locked (it is a short-circuit that always has every
 // permission). The backend enforces the same rules and refuses to delete a role
 // still assigned to a user (409) — we surface its message as-is.
@@ -132,13 +133,14 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, onDuplicate, busy,
             ` : null}
             <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
               onClick=${() => onDuplicate(role)}>Duplicar</button>
-            ${!isAdmin ? (isSystem ? html`
+            ${!isAdmin && isSystem ? html`
               <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                 onClick=${() => onReset(role)}>Restaurar padrão</button>
-            ` : html`
+            ` : null}
+            ${!isAdmin ? html`
               <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
                 onClick=${() => onDelete(role)}>Excluir</button>
-            `) : null}
+            ` : null}
           </div>
         ` : null}
       </div>
