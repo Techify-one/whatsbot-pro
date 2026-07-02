@@ -1,8 +1,9 @@
 """Alembic runtime environment.
 
-The engine is taken from ``db.engine`` so the same URL resolution (ENV > file
-> sqlite default) applies whether migrations run on app boot or via the
-``alembic`` CLI.
+The engine is taken from ``db.engine`` so the same URL resolution (env
+``DATABASE_URL``, Postgres-only — plano 29) applies whether migrations run on
+app boot or via the ``alembic`` CLI. Batch mode (``render_as_batch``) morreu
+junto com o SQLite: Postgres tem ALTER TABLE completo.
 """
 
 from __future__ import annotations
@@ -29,20 +30,18 @@ def _resolve_connectable():
         return engine_module.get_engine()
     except RuntimeError:
         pass
-    url = config.get_main_option("sqlalchemy.url") or "sqlite:///storages/whatsbot.db"
+    url = config.get_main_option("sqlalchemy.url") or engine_module.resolve_database_url()
     return engine_module.init_engine(url)
 
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (no DB connection, emits SQL)."""
     url = config.get_main_option("sqlalchemy.url")
-    is_sqlite = (url or "").startswith("sqlite")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         compare_type=True,
-        render_as_batch=is_sqlite,
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
@@ -52,14 +51,12 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations using a live engine."""
     connectable = _resolve_connectable()
-    is_sqlite = connectable.dialect.name == "sqlite"
 
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
-            render_as_batch=is_sqlite,
         )
         with context.begin_transaction():
             context.run_migrations()
