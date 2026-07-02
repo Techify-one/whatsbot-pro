@@ -109,6 +109,20 @@ async def main():
     check("1º hop de continuação aborta: 0 steps, result-A mantido",
           steps2 == [] and res2 == "result-A")
 
+    # ── Caracterização plano 29 (Fase A0) — baseline ANTES da revisita (A3) ──
+    # Documenta o comportamento ATUAL do `seen`: qualquer revisita (direta ou
+    # indireta) é barrada. A3 remove isso de propósito e atualiza estes checks.
+    f3 = Fake({"A": "B", "B": "C", "C": "A"})
+    res3, steps3 = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f3.resolve_next, run_hop=f3.run_hop)
+    check("A0: revisita indireta A→B→C→A barrada pelo seen (muda em A3)",
+          [s["to"] for s in steps3] == ["B", "C"] and res3 == "result-C")
+    check("A0: depth cap é hardcoded MAX_ROUTING_DEPTH=5 (vira config em A3)",
+          routing.MAX_ROUTING_DEPTH == 5)
+    check("A0: steps não carregam 'reason' (ganham em A7/A2)",
+          steps3 and all("reason" not in s for s in steps3))
+
 
 asyncio.run(main())
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
