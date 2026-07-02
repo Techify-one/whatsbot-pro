@@ -62,7 +62,9 @@ async def list_templates(deps, channel_id: str) -> list[dict]:
 
 
 async def send_template(deps, channel_id: str, *, phone: str, template_name: str,
-                        language: str, components, preview_text: str):
+                        language: str, components, preview_text: str,
+                        sent_by_user_id: int | None = None,
+                        sent_by_name: str | None = None):
     """Send an approved template and persist the operator message (plano 21).
 
     Returns one of:
@@ -86,7 +88,8 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
     try:
         msg_data = await asyncio.to_thread(
             deps.agent_handler.save_operator_message, phone, preview,
-            status="operator", msg_id=msg_id, channel_id=channel_id)
+            status="operator", msg_id=msg_id, channel_id=channel_id,
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
     except Exception as e:  # noqa: BLE001
         return ("save_failed", str(e))
 

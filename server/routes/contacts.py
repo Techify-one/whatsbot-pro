@@ -716,6 +716,11 @@ def register_routes(app, deps):
             return _err("Campo 'message' é obrigatório.")
         # Optional: quote/reply to an existing message (GOWA msg_id).
         reply_to = (body.get("reply_to") or "").strip() or None
+        # Operador logado (para exibir o nome no balão em vez de "Manual"). None em
+        # instalação legada/aberta → cai em "Manual".
+        _u = current_user(request)
+        _uid = _u.get("id") if _u else None
+        _uname = _u.get("name") if _u else None
 
         # Plugin filter: allow plugins to add signature/formatting/redact to operator sends
         filtered = await apply_filter(
@@ -732,6 +737,7 @@ def register_routes(app, deps):
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message, status="operator",
                 reply_to_msg_id=reply_to,
+                sent_by_user_id=_uid, sent_by_name=_uname,
             )
             await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
             await emit_with_filter("message.sent", {
@@ -791,6 +797,7 @@ def register_routes(app, deps):
                 agent_handler.save_operator_message, phone, message,
                 status="failed" if send_failed else "operator",
                 msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=channel_id,
+                sent_by_user_id=_uid, sent_by_name=_uname,
             )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)
@@ -1376,10 +1383,13 @@ def register_routes(app, deps):
         content = await image.read()
         dest.write_bytes(content)
         # R14: shared operator media-send tail (send → persist → broadcast → emit).
+        _u = current_user(request)
         result = await messaging.send_media(
             channel_id=channel_id, phone=phone, kind="image", dest=dest,
             is_sandbox=is_sandbox, content=caption, emit_text=caption,
-            caption=caption, error_label="imagem")
+            caption=caption, error_label="imagem",
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None))
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
@@ -1418,10 +1428,13 @@ def register_routes(app, deps):
         # R14: shared media-send tail. Audio sends with no caption, persists
         # "[Áudio]" / emits empty text, and runs the operator-audio transcription
         # tail (audio_transcription_mode in sent/both) inside the service.
+        _u = current_user(request)
         result = await messaging.send_media(
             channel_id=channel_id, phone=phone, kind="audio", dest=dest,
             is_sandbox=is_sandbox, content="[Áudio]", emit_text="",
-            error_label="áudio", transcribe_audio=True)
+            error_label="áudio", transcribe_audio=True,
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None))
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
@@ -1466,10 +1479,13 @@ def register_routes(app, deps):
         # R14: shared media-send tail. Document persists/broadcasts the label
         # (+caption) body, emits the caption as the message.sent text, and sends
         # with the caption + the safe original filename.
+        _u = current_user(request)
         result = await messaging.send_media(
             channel_id=channel_id, phone=phone, kind="document", dest=dest,
             is_sandbox=is_sandbox, content=text_content, emit_text=caption,
-            caption=caption, filename=safe_name, error_label="documento")
+            caption=caption, filename=safe_name, error_label="documento",
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None))
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar documento: {result['error']}", status=500)

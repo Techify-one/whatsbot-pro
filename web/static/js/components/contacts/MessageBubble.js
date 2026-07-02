@@ -43,7 +43,7 @@ export function MessageBubble({
   const isFromMe = sandbox ? isUser : !isUser;
   const senderLabel = sandbox
     ? (isUser ? 'Você' : 'IA')
-    : (isUser ? (groupSender || displayName) : (isOperator ? 'Manual' : 'IA'));
+    : (isUser ? (groupSender || displayName) : (isOperator ? (m.sent_by_name || 'Manual') : 'IA'));
   const sColor = senderColor(isUser, isOperator);
 
   return html`
