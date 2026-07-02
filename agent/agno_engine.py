@@ -297,22 +297,28 @@ _AGENT_CONTEXT_OFF = dict(_CONTEXT_OFF, build_context=False)
 # the model gives up — which it may not (QA Teste 3b: 12/12 iterations without
 # stopping, ~US$0.025 in a single message). We cap the number of tool calls per
 # agent run. On overflow AGNO does NOT raise: it feeds the model a "limit reached"
-# message for the extra calls and the run ends gracefully. Override via env
-# ``WHATSBOT_TOOL_CALL_LIMIT`` (set to ``0`` — or any non-positive — to disable).
+# message for the extra calls and the run ends gracefully (confirmed on agno
+# 2.6.x: ``create_tool_call_limit_error_result``). Resolution (plano 29 A8):
+# env ``WHATSBOT_TOOL_CALL_LIMIT`` > config ``ai_tool_call_limit_total`` >
+# :data:`DEFAULT_TOOL_CALL_LIMIT`. ``0``/non-positive = disable the cap.
 DEFAULT_TOOL_CALL_LIMIT = 25
 
 
 def _resolve_tool_call_limit() -> int | None:
-    """Per-run tool-call cap: env override, else :data:`DEFAULT_TOOL_CALL_LIMIT`.
+    """Per-run tool-call cap: env > config ``ai_tool_call_limit_total`` > default.
 
     Returns ``None`` (no cap) only when explicitly disabled with a non-positive
     value; a malformed value falls back to the default (fail safe, not open)."""
     raw = os.environ.get("WHATSBOT_TOOL_CALL_LIMIT")
     if raw is None or raw.strip() == "":
-        return DEFAULT_TOOL_CALL_LIMIT
+        try:
+            from db.repositories import config_repo
+            raw = config_repo.get("ai_tool_call_limit_total", DEFAULT_TOOL_CALL_LIMIT)
+        except Exception:
+            raw = DEFAULT_TOOL_CALL_LIMIT
     try:
         n = int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return DEFAULT_TOOL_CALL_LIMIT
     return n if n > 0 else None
 
