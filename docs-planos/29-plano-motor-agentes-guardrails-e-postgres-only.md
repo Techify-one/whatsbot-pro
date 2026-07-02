@@ -431,6 +431,11 @@ Mapa item→fase: A1={A-i3,A-i5,A-i7,A-i9} · A2={A-i1} · A3={A-i2} · A4={A-i4
 - **Problemas / pendências:** nenhuma.
 - **Verificação:** `grep -i sqlite CLAUDE.md` sem instruções operacionais (só menções históricas/decisão).
 
+#### Follow-up pós-C5 (fix)
+Duas descobertas na verificação final, corrigidas em commit próprio:
+1. **`test_postgres_roundtrip` nunca rodava de verdade** — o fixture conectava no DB de manutenção `postgres` (encoding SQL_ASCII neste servidor → psycopg3 devolve bytes e o handshake do dialeto quebra com `TypeError`), que o skip mascarava como "sem CREATEDB". Fix: conexão admin no próprio banco de teste + `CREATE DATABASE … TEMPLATE template0 ENCODING 'UTF8'`. Os 3 testes agora executam (e passam).
+2. **Bug real de instalação fresh no Postgres**: a migration 0013 semeia a inbox default com `id=1` explícito, o que NÃO avança a sequence — o 1º INSERT implícito em `inboxes` num banco recém-nascido colidiria na PK. Fix: `_run_alembic_upgrade()` (boot e testes) chama `repair_postgres_sequences` após o `upgrade head` (idempotente).
+
 ---
 
 ## 6. Riscos e cuidados

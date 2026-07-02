@@ -16,24 +16,13 @@ próprio servidor de teste; sem privilégio ``CREATEDB`` o módulo dá skip.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
-from tests.pg import test_db_url
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _alembic_cfg(engine):
-    from alembic.config import Config
-
-    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(PROJECT_ROOT / "db" / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", str(engine.url).replace("%", "%%"))
-    return cfg
+# Alias: sem o rename o pytest coletaria a helper como "teste" deste módulo.
+from tests.pg import test_db_url as _test_db_url
 
 
 def _seed_one_conversation_with_messages(engine) -> tuple[int, int]:
@@ -84,13 +73,17 @@ def fresh_pg():
     (o env.py do Alembic reusa o engine do app), restaurado no teardown — mesmo
     padrão save/restore do antigo fixture ``sqlite_source``.
     """
-    from alembic import command
     from db import engine as engine_module
+    from db.connection import _run_alembic_upgrade
 
-    base = make_url(test_db_url())
+    base = make_url(_test_db_url())
     fresh_name = f"{base.database}_fresh"
+    # Conexão admin no PRÓPRIO banco de teste (UTF8): o DB de manutenção
+    # ``postgres`` deste servidor é SQL_ASCII e o psycopg3 devolve bytes,
+    # quebrando o handshake do dialeto. CREATE/DROP DATABASE funciona de
+    # qualquer banco em AUTOCOMMIT.
     admin = create_engine(
-        base.set(database="postgres"), future=True,
+        base, future=True,
         isolation_level="AUTOCOMMIT", connect_args={"prepare_threshold": None})
     try:
         with admin.connect() as conn:
@@ -98,7 +91,11 @@ def fresh_pg():
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                 f"WHERE datname = '{fresh_name}'")
             conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{fresh_name}"')
-            conn.exec_driver_sql(f'CREATE DATABASE "{fresh_name}"')
+            # ENCODING explícito: o template do cluster de teste é SQL_ASCII
+            # (psycopg3 devolveria bytes e o dialeto quebra no handshake).
+            conn.exec_driver_sql(
+                f'CREATE DATABASE "{fresh_name}" TEMPLATE template0 '
+                "ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'")
     except Exception as e:
         admin.dispose()
         pytest.skip(f"sem privilégio para criar o banco efêmero no PG de teste: {e}")
@@ -108,7 +105,9 @@ def fresh_pg():
 
     url = base.set(database=fresh_name).render_as_string(hide_password=False)
     eng = engine_module.init_engine(url)
-    command.upgrade(_alembic_cfg(eng), "head")
+    # Mesmo caminho do boot real: upgrade head + repair de sequences (seeds
+    # com id explícito não avançam a sequence — ver db/connection.py).
+    _run_alembic_upgrade()
 
     try:
         yield eng

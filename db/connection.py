@@ -75,6 +75,15 @@ def _run_alembic_upgrade() -> None:
 
     command.upgrade(cfg, "head")
 
+    # Seeds de migration com id explícito (ex.: inbox default id=1 na 0013) NÃO
+    # avançam a sequence no Postgres — o 1º INSERT implícito num banco fresh
+    # colidiria com a PK. Re-ancorar é idempotente e barato.
+    from db.pg_maintenance import repair_postgres_sequences
+
+    fixed = repair_postgres_sequences(engine)
+    if fixed:
+        logger.info("Postgres sequences re-anchored: %s", sorted(fixed))
+
 
 # ── Legacy shim ───────────────────────────────────────────────────────────
 
