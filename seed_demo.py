@@ -18,24 +18,36 @@ MODEL = "deepseek/deepseek-v4-pro"  # mesmo do agente default (válido no proxy 
 log = []
 
 # ── 1. Sub-agentes de IA (prompt + agente) ───────────────────────────────
+# Padrão hub-and-spoke (plano 29 A6): SÓ o roteador tem transfer_to_human;
+# os spokes recebem transferir_agente e DEVOLVEM pro roteador com o motivo.
+_DEVOLVE = (" Se o assunto sair do seu escopo (ou o que o cliente pediu não "
+            "existir), use transferir_agente de volta para 'triagem' explicando "
+            "o motivo — não tente resolver fora da sua área.")
 AGENTS = [
     ("vendas", "Agente de Vendas", False, None,
      "Você é um agente de vendas simpático e objetivo. Qualifique o lead, "
      "entenda a necessidade, apresente os planos e conduza para o fechamento. "
      "Use o frete e os valores quando perguntarem. Seja cordial e use no máximo "
-     "2 emojis por mensagem.", ["calcular_frete"]),
+     "2 emojis por mensagem." + _DEVOLVE,
+     ["calcular_frete", "transferir_agente", "save_contact_info"]),
     ("suporte", "Suporte Técnico", False, None,
      "Você é o suporte técnico. Diagnostique o problema do cliente com perguntas "
      "claras, dê o passo a passo da solução e confirme se resolveu. Se for algo "
-     "que você não resolve, oriente a abrir um chamado.", []),
+     "que você não resolve, oriente a abrir um chamado." + _DEVOLVE,
+     ["transferir_agente", "save_contact_info"]),
     ("financeiro", "Financeiro", False, None,
      "Você cuida do financeiro: segunda via de boleto, chave PIX, prazos de "
-     "pagamento e negociação de débitos. Seja formal e preciso com valores e datas.",
-     []),
+     "pagamento e negociação de débitos. Seja formal e preciso com valores e "
+     "datas." + _DEVOLVE,
+     ["transferir_agente", "save_contact_info"]),
+    # Roteador (hub): tool_names=None herda TODAS as tools — é o único com
+    # transfer_to_human (escala pra humano quando ninguém resolve).
     ("triagem", "Triagem (Roteador)", True, ["vendas", "suporte", "financeiro"],
      "Você é a triagem. Identifique a intenção do cliente e transfira para o "
      "agente certo: vendas (comprar/planos/preços), suporte (problema técnico) ou "
-     "financeiro (pagamento/boleto/PIX). Faça no máximo uma pergunta antes de transferir.",
+     "financeiro (pagamento/boleto/PIX). Faça no máximo uma pergunta antes de "
+     "transferir. Quando um agente devolver com um motivo ([REDIRECIONAMENTO]), "
+     "decida o próximo destino — se ninguém resolver, use transfer_to_human.",
      None),
 ]
 for key, name, is_router, targets, prompt_body, tools in AGENTS:
