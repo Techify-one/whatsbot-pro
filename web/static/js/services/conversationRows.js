@@ -318,6 +318,9 @@ export function buildRows(contacts, conversations) {
           conv_ai_active: cv.ai_active,
           assignee_user_id: cv.assignee_user_id,
           active_agent_key: cv.active_agent_key,
+          // plano 28: provenance drives the sidebar visibility gate (an 'inbound'
+          // conversation shows at t=0 even before its first message is persisted).
+          origin: cv.origin,
           // Conversation-scoped custom attributes (plano 05) — kept under a distinct
           // key so they don't collide with the contact's `custom_attributes` (spread
           // from `...c` above). Both feed the cattr: filter dimensions.
@@ -357,4 +360,111 @@ export function shapeConvData(d) {
     templates_supported: !!d.templates_supported,
     session_open: d.session_open,
   };
+}
+
+// ── Event-Carried State Transfer: conversation_upsert (plano 28) ─────
+// The backend pushes the whole enriched conversation row (same shape as a
+// /api/atendimentos item) after a commit; the sidebar applies it as an idempotent
+// upsert by `conversation_id` — no notification-then-refetch race. `buildRows`
+// (REST fetch) and this mapper produce the SAME row shape; a unit test pins that.
+
+/**
+ * Map a `conversation_upsert` payload (an enriched conversation row) into the
+ * sidebar row shape `buildRows` produces. Field-by-field on purpose: the enriched
+ * row's `id` is the CONVERSATION id (→ `conversation_id`) while the sidebar row's
+ * `id` is the CONTACT id — conflating them would corrupt row identity.
+ * @param {Record<string, any>} p - the enriched conversation row (WS payload).
+ * @returns {Record<string, any>}
+ */
+export function convRowToSidebarRow(p) {
+  return {
+    id: p.contact_id,                 // row identity for contact-level ops
+    contact_id: p.contact_id,
+    conversation_id: p.id,            // enriched row `id` = conversation id
+    name: p.contact_name,
+    phone: p.contact_phone,
+    is_group: p.contact_is_group,
+    channel_id: p.channel_id || 'default',
+    channel_provider: p.channel_provider || null,
+    channel_name: p.channel_name || null,
+    conv_status: p.status,
+    conv_ai_active: p.ai_active,
+    assignee_user_id: p.assignee_user_id,
+    active_agent_key: p.active_agent_key,
+    conv_custom_attributes: p.custom_attributes || {},
+    conv_labels: p.labels || [],
+    last_message: p.last_message,
+    last_message_role: p.last_message_role,
+    last_message_ts: p.last_message_ts,
+    last_message_status: p.last_message_status,
+    last_message_msg_id: p.last_message_msg_id,
+    unread_count: p.unread_count,
+    unread_ai_count: p.unread_ai_count,
+    has_unread_mention: p.has_unread_mention,
+    is_pinned: p.is_pinned,
+    is_archived: p.is_archived,
+    origin: p.origin,
+    // Sort key: a t=0 row has last_message_ts=0, so fall back to last_activity_at
+    // (touched = now) via updated_at → the brand-new conversation sorts to the top.
+    updated_at: p.last_activity_at,
+    // Contact-only fields the enriched row does NOT carry — seeded empty so the row
+    // renders (name/preview/channel); tags/avatar arrive on the next reconcile.
+    tags: [],
+    custom_attributes: {},
+    avatar_v: undefined,
+  };
+}
+
+// Fields a MERGE (row already present) is allowed to overwrite — message/preview +
+// unread + activity only. Status/assignee/AI/labels/pin/archive stay owned by their
+// dedicated conversation_* events (scoped merge — plano 28 D4), so a stale upsert
+// snapshot can never revert an assign/resolve/AI toggle.
+const UPSERT_MSG_FIELDS = [
+  'last_message', 'last_message_role', 'last_message_ts', 'last_message_status',
+  'last_message_msg_id', 'unread_count', 'unread_ai_count', 'has_unread_mention',
+];
+
+/**
+ * Apply a `conversation_upsert` row to the sidebar list (idempotent by
+ * `conversation_id`). Absent → INSERT (replacing any legacy phone-only row of the
+ * same contact, mirroring `buildRows`). Present → scoped MERGE of message/preview/
+ * unread fields, guarded so an older snapshot never regresses the preview. Always a
+ * NEW sorted array.
+ * @param {Record<string, any>[]} prev - current sidebar rows.
+ * @param {Record<string, any>} incoming - a `convRowToSidebarRow(...)` result.
+ * @returns {Record<string, any>[]}
+ */
+export function upsertConversationRow(prev, incoming) {
+  if (!Array.isArray(prev) || incoming == null || incoming.conversation_id == null) return prev;
+  const idx = prev.findIndex(r => r.conversation_id != null
+    && r.conversation_id === incoming.conversation_id);
+
+  if (idx === -1) {
+    // INSERT. If a legacy phone-only row (no conversation) exists for this contact,
+    // REPLACE it — `buildRows` never emits both a legacy and a conversation row.
+    const legacyIdx = prev.findIndex(r => r.conversation_id == null
+      && r.phone === incoming.phone);
+    const next = [...prev];
+    if (legacyIdx !== -1) next[legacyIdx] = incoming;
+    else next.push(incoming);
+    return sortContacts(next);
+  }
+
+  const existing = prev[idx];
+  const incomingTs = incoming.last_message_ts || 0;
+  const existingTs = existing.last_message_ts || 0;
+  // A newer (or first-ever) snapshot may write the message/preview/unread fields; an
+  // older one (e.g. the t=0 seed with ts=0 arriving after the batch's real preview)
+  // must not regress them.
+  const patch = {};
+  if (existingTs === 0 || incomingTs >= existingTs) {
+    for (const k of UPSERT_MSG_FIELDS) {
+      if (incoming[k] !== undefined) patch[k] = incoming[k];
+    }
+  }
+  // Activity/sort bump is always forward-only.
+  patch.updated_at = Math.max(existing.updated_at || 0, incoming.updated_at || 0);
+  const next = [...prev];
+  next[idx] = { ...existing, ...patch };
+  return sortContacts(next);
 }

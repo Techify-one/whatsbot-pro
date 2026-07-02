@@ -394,6 +394,11 @@ atendimentos = Table(
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
     Column("active_agent_key", Text),                          # plano 06: agente da conversa
+    # plano 28: origem do atendimento — 'inbound' (cliente iniciou), 'outbound'/'manual'
+    # (operador), 'imported' (import de chats). Dirige o gate de visibilidade da sidebar
+    # (uma conversa inbound aparece em t=0 mesmo sem mensagem salva ainda), substituindo
+    # o proxy racy last_message_ts>0. NULL = tratado como não-inbound (cai no ts>0).
+    Column("origin", Text),
     Column("opened_at", Float, nullable=False),
     Column("resolved_at", Float),
     Column("waiting_since", Float),

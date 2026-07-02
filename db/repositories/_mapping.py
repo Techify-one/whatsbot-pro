@@ -56,10 +56,26 @@ def row_to_dict(row: Mapping, json_fields: Iterable[str] = ()) -> dict:
 
 # ── Last-message preview (R11) ─────────────────────────────────────────────
 
-# Roles excluded from the last-message preview of a conversation/contact row.
-# Purely internal/painel-only roles never become the sidebar "last message".
-# Shared by contact_repo.list_contacts (raw SQL) and conversation_repo (Core).
-_PREVIEW_EXCLUDED = ("transcription", "system_notice", "conversation_event", "system")
+# Canonical set of PANEL-ONLY message roles (plano 28 Fase 0). These never leave
+# the panel (they are not sent to WhatsApp and render as centered cards), so they
+# must NEVER become a conversation's "last message" preview NOR trigger a list
+# (``conversation_upsert``) broadcast. Single source of truth: the DB preview
+# subqueries (``conversation_query`` + ``contact_search``), the ``conversation_upsert``
+# emit gate (``agent.memory``) and the frontend list-preview skip
+# (``useConversationWsEvents.js``) must all agree on this set.
+#
+# Before plano 28 there were THREE divergent sets: the DB preview excluded only 4
+# (missing ``tool_call``/``private_note``/``error`` → those leaked into the preview),
+# the LLM-context exclusion 5, and the frontend 6. This is their UNION (7), which
+# also fixes the pre-existing preview leak.
+LIST_PANEL_ONLY_ROLES = (
+    "transcription", "system_notice", "conversation_event", "system",
+    "tool_call", "private_note", "error",
+)
+
+# Backwards-compatible alias: existing importers (``conversation_query``,
+# ``contact_search``) keep the old name, now pointing at the canonical set.
+_PREVIEW_EXCLUDED = LIST_PANEL_ONLY_ROLES
 
 
 def media_preview(content: str | None, media_type: str | None) -> str:

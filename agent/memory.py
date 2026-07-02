@@ -183,9 +183,13 @@ class ContactMemory:
         Returns ``(conv, conversation_id, transition)``; on a resolution error returns
         ``(None, None, None)`` (fail-soft — the save still happens, just unlinked)."""
         try:
+            # plano 28: stamp provenance on a brand-new thread — a customer message
+            # ('user') opens an 'inbound' conversation (shows on the sidebar at t=0
+            # via the origin gate); anything else (AI/operator/panel-only) is 'outbound'.
+            origin = "inbound" if role == "user" else "outbound"
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
-                inbox_id=self.inbox_id)
+                inbox_id=self.inbox_id, origin=origin)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
@@ -210,6 +214,16 @@ class ContactMemory:
                 transition=transition, conv=conv, role=role)
         except Exception:
             logger.exception("Falha nas reações de message.persisted para %s", self.phone)
+
+    def _broadcast_conversation_upsert(self, conversation_id: int, role: str) -> None:
+        """Emit the ``conversation_upsert`` list-row broadcast (plano 28). Delegates
+        to :func:`agent.message_listeners.broadcast_conversation_upsert`, which gates
+        panel-only roles and is fully defensive (never breaks the save)."""
+        try:
+            from agent.message_listeners import broadcast_conversation_upsert
+            broadcast_conversation_upsert(conversation_id, role)
+        except Exception:
+            logger.exception("Falha ao emitir conversation_upsert para %s", self.phone)
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
@@ -239,6 +253,11 @@ class ContactMemory:
             # directly (not via the bus) keeps it exactly-once and synchronous.
             self._emit_message_persisted(conversation_id, role, msg_id, saved)
             self._run_lifecycle_reactions(conversation_id, transition, conv, role)
+            # plano 28: Event-Carried State Transfer — after the INSERT (preview/unread
+            # now real), push the authoritative list row so the sidebar upserts it by
+            # conversation_id without a stale refetch. Panel-only roles are gated out
+            # inside the helper. Never breaks the save.
+            self._broadcast_conversation_upsert(conversation_id, role)
         # Touch updated_at
         contact_repo.update(self.id)
         # Return the inserted row (id/ts/conversation_id/…) so callers that need
@@ -273,6 +292,12 @@ class ContactMemory:
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
             self._run_lifecycle_reactions(conversation_id, transition, conv, role)
+            # plano 28 Fase 4: aparição em t=0. Emit the fully-formed list row NOW
+            # (name/channel/status; origin='inbound', last_message_ts=0) so the sidebar
+            # shows the brand-new conversation immediately — the gate keys on
+            # origin=='inbound', not on a message existing yet. The batch's later
+            # add_message re-emits with the real preview (guard-merged on the client).
+            self._broadcast_conversation_upsert(conversation_id, role)
         return conversation_id
 
     def _emit_message_persisted(self, conversation_id: int, role: str,

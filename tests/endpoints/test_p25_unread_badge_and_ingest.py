@@ -246,3 +246,133 @@ def test_bug2_conversation_materialized_at_ingest(build_app, monkeypatch):
     user_rows = [m for m in message_repo.get_all(contact["id"]) if m.get("role") == "user"]
     assert len(user_rows) == 1, f"expected one saved user message, got {len(user_rows)}"
     assert user_rows[0].get("conversation_id") == conv_id
+
+
+# ── Plano 28 — Event-Carried State Transfer for the sidebar list ────────────────
+
+def _capture_plugin_broadcast(monkeypatch) -> list[tuple]:
+    """Spy on ``plugins.context.broadcast`` (where conversation_upsert /
+    conversation_created ride). Returns a growing list of ``(event, payload)``."""
+    import plugins.context as plugin_ctx
+    seen: list[tuple] = []
+    orig = plugin_ctx.broadcast
+
+    def _pb(event, payload=None):
+        seen.append((event, payload))
+        try:
+            return orig(event, payload)
+        except Exception:
+            return None
+
+    monkeypatch.setattr(plugin_ctx, "broadcast", _pb)
+    return seen
+
+
+def test_plano28_conversation_upsert_ecst_at_ingest_and_batch(build_app, monkeypatch):
+    """Plano 28: a brand-new inbound conversation emits ``conversation_upsert`` at
+    INGEST (t=0) — fully formed (name/channel/status, ``origin='inbound'``) with
+    ``last_message_ts=0`` — so the sidebar can insert the row immediately (gate keys
+    on origin, not on a message existing). After the batch persists the message a
+    second ``conversation_upsert`` carries the real preview (``last_message_ts>0``).
+    The payload shape mirrors a ``/api/atendimentos`` list item (carries ``labels``)."""
+    seen = _capture_plugin_broadcast(monkeypatch)
+    phone = "5511955550028"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    _reset_ai_cache()
+
+    from db.repositories import contact_repo, conversation_repo
+
+    r = built.client.post("/api/webhook/gowa/default",
+                          json=_text_payload(phone, "p28_new_1", "olá primeira"))
+    assert r.status_code == 200, r.text
+
+    contact = contact_repo.get_by_phone(phone)
+    conv = conversation_repo.get_latest_for_contact(contact["id"])
+    conv_id = conv["id"]
+
+    # origin was stamped 'inbound' by the resolve (customer-initiated thread).
+    assert conv.get("origin") == "inbound", f"origin should be inbound, got {conv.get('origin')!r}"
+
+    upserts = [p for (n, p) in seen if n == "conversation_upsert"]
+    assert upserts, "conversation_upsert must fire at ingest (t=0)"
+    t0 = upserts[0]
+    # t=0 row: fully formed, no message yet.
+    assert t0.get("id") == conv_id, f"upsert.id must be the conversation id ({conv_id}), got {t0.get('id')}"
+    assert t0.get("contact_id") == contact["id"]
+    assert t0.get("contact_phone") == phone
+    assert t0.get("origin") == "inbound"
+    assert t0.get("status") == "open"
+    assert (t0.get("last_message_ts") or 0) == 0, "t=0 upsert must carry last_message_ts=0"
+    # list-item shape: channel + labels present (get_row_for_broadcast attaches labels).
+    assert "channel_id" in t0 and "labels" in t0, f"upsert must be a full list row; keys={sorted(t0)[:8]}"
+    assert isinstance(t0.get("labels"), list)
+
+    # ── Drain the batch → a later upsert carries the REAL preview (ts>0). ──
+    _drain_orchestrator(built, "default", phone)
+    upserts2 = [p for (n, p) in seen if n == "conversation_upsert"]
+    assert any((p.get("last_message_ts") or 0) > 0 and p.get("id") == conv_id for p in upserts2), \
+        "batch add_message must emit a conversation_upsert with the real preview (last_message_ts>0)"
+
+
+def test_plano28_panel_only_role_emits_no_upsert(build_app, monkeypatch):
+    """A panel-only save (``private_note``) must NOT emit ``conversation_upsert`` — it
+    never becomes a conversation's last message, so it must not push a list update. A
+    visible role (``user``) on the same contact DOES emit."""
+    seen = _capture_plugin_broadcast(monkeypatch)
+    build_app(["gowa"], settings_overrides={"auto_reply": False})
+    _reset_ai_cache()
+
+    from agent.memory import ContactMemory
+    cm = ContactMemory("5511955550029")
+
+    cm.add_message("private_note", "nota interna do operador")
+    assert not [p for (n, p) in seen if n == "conversation_upsert"], \
+        "panel-only role (private_note) must not emit conversation_upsert"
+
+    cm.add_message("user", "mensagem visível do cliente")
+    assert [p for (n, p) in seen if n == "conversation_upsert"], \
+        "a visible role (user) must emit conversation_upsert"
+
+
+def test_plano28_find_empty_inbound_ghosts(build_app):
+    """The TTL-sweep finder returns ONLY inbound conversations that are empty (no
+    message) and older than the cutoff — never one with a message, an outbound one,
+    or a too-recent one."""
+    import time as _t
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import conversations as _conv_t
+    from agent.memory import ContactMemory
+    from db.repositories import conversation_repo
+
+    build_app(["gowa"], settings_overrides={"auto_reply": False})
+    _reset_ai_cache()
+
+    old = _t.time() - 3600      # 1h ago
+    cutoff = _t.time() - 1800   # 30 min ago
+
+    def _backdate(conv_id):
+        with get_engine().begin() as conn:
+            conn.execute(update(_conv_t).where(_conv_t.c.id == conv_id)
+                         .values(created_at=old))
+
+    # (a) inbound, empty, old → GHOST.
+    ghost_cm = ContactMemory("5511955550030")
+    ghost_id = ghost_cm.ensure_conversation_live("user")   # origin='inbound', no message
+    _backdate(ghost_id)
+
+    # (b) inbound, WITH a message, old → not a ghost.
+    msg_cm = ContactMemory("5511955550031")
+    msg_cm.add_message("user", "tenho mensagem")
+    with_msg_id = conversation_repo.get_latest_for_contact(msg_cm.id)["id"]
+    _backdate(with_msg_id)
+
+    # (c) inbound, empty, but RECENT → not swept yet.
+    recent_cm = ContactMemory("5511955550032")
+    recent_id = recent_cm.ensure_conversation_live("user")  # created_at = now
+
+    found = {g["id"] for g in conversation_repo.find_empty_inbound_ghosts(cutoff)}
+    assert ghost_id in found, "empty old inbound conversation must be a sweepable ghost"
+    assert with_msg_id not in found, "a conversation WITH a message is never a ghost"
+    assert recent_id not in found, "a too-recent empty conversation must not be swept"

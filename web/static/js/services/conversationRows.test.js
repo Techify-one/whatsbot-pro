@@ -11,6 +11,7 @@ import {
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
   isUnassigned, sortContactsBy, sortContacts,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
+  convRowToSidebarRow, upsertConversationRow,
 } from './conversationRows.js';
 
 // ── buildRows ──────────────────────────────────────────────────────
@@ -328,4 +329,110 @@ test('specsEqual / isDefaultSpec', () => {
   assert.equal(isDefaultSpec(DEFAULT_SPEC), true);
   assert.equal(isDefaultSpec({}), true);  // empty normalizes to defaults
   assert.equal(isDefaultSpec({ statusFilter: 'closed' }), false);
+});
+
+// ── convRowToSidebarRow + upsertConversationRow (plano 28 · ECST) ─────
+
+// A `conversation_upsert` payload = an enriched conversation row (like a
+// /api/atendimentos item). `id` is the CONVERSATION id, contact fields are prefixed.
+const ENRICHED = {
+  id: 42, contact_id: 7, contact_name: 'Bia', contact_phone: '5511', contact_is_group: 0,
+  inbox_id: 3, channel_id: 'wa1', channel_provider: 'gowa', channel_name: 'WA',
+  origin: 'inbound', status: 'open', ai_active: 1, assignee_user_id: null, active_agent_key: 'default',
+  is_archived: 0, is_pinned: 0, has_unread_mention: false,
+  last_message: 'oi', last_message_role: 'user', last_message_ts: 1000,
+  last_message_status: '', last_message_msg_id: 'm1', unread_count: 2,
+  labels: ['VIP'], custom_attributes: { plano: 'ouro' }, last_activity_at: 1000,
+};
+
+test('convRowToSidebarRow: enriched row → sidebar row shape (identity not conflated)', () => {
+  const r = convRowToSidebarRow(ENRICHED);
+  assert.equal(r.id, 7);                 // row identity = CONTACT id
+  assert.equal(r.contact_id, 7);
+  assert.equal(r.conversation_id, 42);   // enriched `id` = conversation id
+  assert.equal(r.name, 'Bia');
+  assert.equal(r.phone, '5511');
+  assert.equal(r.conv_status, 'open');
+  assert.equal(r.conv_ai_active, 1);
+  assert.equal(r.active_agent_key, 'default');
+  assert.deepEqual(r.conv_labels, ['VIP']);
+  assert.deepEqual(r.conv_custom_attributes, { plano: 'ouro' });
+  assert.equal(r.origin, 'inbound');
+  assert.equal(r.channel_id, 'wa1');
+  assert.equal(r.last_message, 'oi');
+  assert.equal(r.last_message_ts, 1000);
+  assert.equal(r.unread_count, 2);
+  assert.equal(r.updated_at, 1000);      // sort key falls back to last_activity_at
+});
+
+test('convRowToSidebarRow shape ≡ buildRows shape for the key sidebar fields', () => {
+  // buildRows produces a row from (contact, conversation); convRowToSidebarRow must
+  // produce the same-shaped row from the enriched WS payload.
+  const contact = { id: 7, phone: '5511', name: 'Bia' };
+  const conv = {
+    id: 42, contact_id: 7, channel_id: 'wa1', channel_provider: 'gowa', channel_name: 'WA',
+    status: 'open', ai_active: 1, assignee_user_id: null, active_agent_key: 'default',
+    custom_attributes: { plano: 'ouro' }, labels: ['VIP'], origin: 'inbound',
+    last_message: 'oi', last_message_role: 'user', last_message_ts: 1000,
+    last_message_status: '', last_message_msg_id: 'm1', unread_count: 2, has_unread_mention: false,
+  };
+  const fromBuild = buildRows([contact], [conv])[0];
+  const fromWs = convRowToSidebarRow(ENRICHED);
+  for (const k of ['contact_id', 'conversation_id', 'name', 'phone', 'channel_id',
+    'conv_status', 'conv_ai_active', 'active_agent_key', 'conv_labels', 'origin',
+    'last_message', 'last_message_ts', 'unread_count']) {
+    assert.deepEqual(fromWs[k], fromBuild[k], `field ${k} must match buildRows`);
+  }
+});
+
+test('upsertConversationRow: absent → INSERT (sorted)', () => {
+  const prev = [{ conversation_id: 1, phone: 'a', last_message_ts: 500 }];
+  const next = upsertConversationRow(prev, convRowToSidebarRow(ENRICHED));
+  assert.equal(next.length, 2);
+  const inserted = next.find(r => r.conversation_id === 42);
+  assert.ok(inserted, 'new conversation row inserted');
+  assert.equal(next[0].conversation_id, 42);  // ts 1000 > 500 → sorts first
+});
+
+test('upsertConversationRow: INSERT replaces a legacy phone-only row of same contact', () => {
+  const prev = [{ conversation_id: null, phone: '5511', name: 'Bia', id: 7 }];
+  const next = upsertConversationRow(prev, convRowToSidebarRow(ENRICHED));
+  assert.equal(next.length, 1, 'legacy phone row replaced, not duplicated');
+  assert.equal(next[0].conversation_id, 42);
+});
+
+test('upsertConversationRow: present → scoped MERGE (message fields only, not status/assignee)', () => {
+  const prev = [{
+    conversation_id: 42, phone: '5511', name: 'Bia',
+    conv_status: 'closed', assignee_user_id: 99, conv_ai_active: 0,   // owned by dedicated events
+    last_message: 'antigo', last_message_ts: 500, unread_count: 0,
+  }];
+  const next = upsertConversationRow(prev, convRowToSidebarRow(ENRICHED));  // incoming ts 1000
+  const row = next[0];
+  assert.equal(row.last_message, 'oi');        // message field merged (newer)
+  assert.equal(row.last_message_ts, 1000);
+  assert.equal(row.unread_count, 2);
+  assert.equal(row.conv_status, 'closed');     // NOT clobbered by the upsert
+  assert.equal(row.assignee_user_id, 99);      // NOT clobbered → no assign/resolve revert
+  assert.equal(row.conv_ai_active, 0);         // NOT clobbered
+});
+
+test('upsertConversationRow: guard — older snapshot never regresses the preview', () => {
+  const prev = [{ conversation_id: 42, phone: '5511', last_message: 'novo', last_message_ts: 2000, unread_count: 5 }];
+  const stale = convRowToSidebarRow({ ...ENRICHED, last_message: 'velho', last_message_ts: 1000, unread_count: 1 });
+  const next = upsertConversationRow(prev, stale);
+  assert.equal(next[0].last_message, 'novo');   // preview kept
+  assert.equal(next[0].last_message_ts, 2000);
+  assert.equal(next[0].unread_count, 5);        // unread not regressed
+});
+
+test('upsertConversationRow: t=0 seed (ts=0) inserts, then real preview (ts>0) merges forward', () => {
+  const seed = convRowToSidebarRow({ ...ENRICHED, last_message: '', last_message_ts: 0, unread_count: 0, last_activity_at: 900 });
+  let rows = upsertConversationRow([], seed);
+  assert.equal(rows[0].last_message_ts, 0);     // brand-new row visible with no preview
+  const real = convRowToSidebarRow({ ...ENRICHED, last_message: 'oi', last_message_ts: 1000, unread_count: 1 });
+  rows = upsertConversationRow(rows, real);
+  assert.equal(rows.length, 1, 'same conversation, no duplicate');
+  assert.equal(rows[0].last_message, 'oi');     // existing (ts 0) accepts the first real preview
+  assert.equal(rows[0].last_message_ts, 1000);
 });
