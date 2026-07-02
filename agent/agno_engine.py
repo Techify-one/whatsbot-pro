@@ -136,7 +136,8 @@ def _clean_args(kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k not in _RESERVED_TOOL_KWARGS}
 
 
-def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
+def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None,
+                           default_call_limit=None):
     async def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = await apply_filter(
@@ -150,7 +151,8 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
 
-        block = _hooks_check(hooks_config, name, executed)
+        block = _hooks_check(hooks_config, name, executed,
+                             default_call_limit=default_call_limit)
         if block is not None:
             executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
             return block
@@ -180,7 +182,8 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
     return entrypoint
 
 
-def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
+def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None,
+                          default_call_limit=None):
     def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = apply_filter_sync(
@@ -194,7 +197,8 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
 
-        block = _hooks_check(hooks_config, name, executed)
+        block = _hooks_check(hooks_config, name, executed,
+                             default_call_limit=default_call_limit)
         if block is not None:
             executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
             return block
@@ -224,15 +228,31 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
     return entrypoint
 
 
+def _resolve_default_call_limit() -> int | None:
+    """Per-tool default cap (plano 29 A1): config ``ai_tool_call_limit_per_tool``.
+
+    ``0``/absent/malformed ⇒ ``None`` (unlimited — legacy behaviour). Read once
+    per run; a broken config read never blocks the pipeline.
+    """
+    try:
+        from db.repositories import config_repo
+        raw = config_repo.get("ai_tool_call_limit_per_tool", 0)
+        n = int(raw)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
 def build_functions(handler, contact, sender, active_tools, executed, *, is_async,
-                    hooks_config=None):
+                    hooks_config=None, default_call_limit=None):
     """Wrap each active tool schema into an AGNO Function.
 
     ``active_tools`` is the post-``filter.llm.tools`` list of OpenAI tool
     schemas. ``executed`` is the per-request sink that collects what actually
     ran (used to build ProcessResult and detect ``save_contact_info``).
     ``hooks_config`` (config-in-DB) gates calls declaratively (call_limit /
-    requires_prior_call) using ``executed`` as per-message state.
+    requires_prior_call) using ``executed`` as per-message state;
+    ``default_call_limit`` caps tools without an explicit ``call_limit``.
     """
     make = _make_async_entrypoint if is_async else _make_sync_entrypoint
     functions: dict[str, Function] = {}
@@ -246,7 +266,8 @@ def build_functions(handler, contact, sender, active_tools, executed, *, is_asyn
             name=name,
             description=fn.get("description", ""),
             parameters=params,
-            entrypoint=make(handler, contact, sender, name, executed, hooks_config),
+            entrypoint=make(handler, contact, sender, name, executed, hooks_config,
+                            default_call_limit),
             skip_entrypoint_processing=True,
         )
     return functions
@@ -440,7 +461,8 @@ async def run_async(handler, contact, sender, messages, active_tools,
     executed: list[dict] = []
     hooks_config = (model_config or {}).get("_hooks_config")
     functions = build_functions(handler, contact, sender, active_tools, executed,
-                                is_async=True, hooks_config=hooks_config)
+                                is_async=True, hooks_config=hooks_config,
+                                default_call_limit=_resolve_default_call_limit())
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
@@ -491,7 +513,8 @@ def run_sync(handler, contact, sender, messages, active_tools,
     executed: list[dict] = []
     hooks_config = (model_config or {}).get("_hooks_config")
     functions = build_functions(handler, contact, sender, active_tools, executed,
-                                is_async=False, hooks_config=hooks_config)
+                                is_async=False, hooks_config=hooks_config,
+                                default_call_limit=_resolve_default_call_limit())
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
