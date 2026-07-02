@@ -141,6 +141,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # Plano 29 A3: total de runs de agente por mensagem no routing within-turn
     # (1º hop + handoffs). Substitui o MAX_ROUTING_DEPTH hardcoded.
     ConfigKey("ai_max_route_depth", default=5, exposed=True, writable=True),
+    # Plano 29 A8: teto TOTAL de tool calls por run do Agent AGNO (freio de loop
+    # desenfreado). 0 = sem teto; env WHATSBOT_TOOL_CALL_LIMIT tem precedência.
+    ConfigKey("ai_tool_call_limit_total", default=25, exposed=True, writable=True),
     ConfigKey("setup_completed", default=False, exposed=True, writable=True),
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
