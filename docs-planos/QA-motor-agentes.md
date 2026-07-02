@@ -352,6 +352,70 @@ transfere de volta, ela gruda no especialista. Ver "Sugestões de melhoria".
 
 ---
 
+## Teste D — Sugestão de melhoria ("Gerar melhoria") (2026-07-02)
+
+Feature: `POST /api/contacts/{phone}/improve` → [app/services/improvement_service.py](../app/services/improvement_service.py)
+(chamada one-shot, NÃO-agêntica, cliente OpenAI direto). Cenário: contato João da Silva
+Teste (556490000001), conv #31 presa no **Maestro**, resposta marcada = "Que notícia boa!
+Já separei aqui o **plano premium**…" (erro real: o produto é por créditos, não plano fixo).
+
+**Resultados:**
+- **D1 — Happy path ✅** (live): retornou análise com **Diagnóstico** + **Recomendações**;
+  identificou corretamente o erro (Maestro inventou um "plano premium" inexistente) e deu
+  5 recomendações concretas de ajuste no prompt. Excelente qualidade.
+- **D2 — Painel-only ✅** (código): `role="system"` está em `excluded` no
+  [message_repo.py:84](../db/repositories/message_repo.py#L84) → não entra no contexto do
+  LLM; o card é salvo como `system`, não enviado ao WhatsApp.
+- **D3 — Feedback opcional ✅** (código): `feedback.strip() or "(o operador não detalhou…)"`
+  (improvement_service:123) — roda sem feedback.
+- **D4 — Ferramentas usadas ✅** (input): `_find_tools_used_around(phone, ts)` retornou
+  `[transferir_agente, save_contact_info]` da exec 372 (a seção "Ferramentas usadas" é
+  montada corretamente; o LLM só não as citou porque o erro não era de tool).
+- **D5 — Multi-agente ✅** (live): a análise fala em "O agente **Maestro**" e cita "Seu
+  papel como VENDEDOR" → usou o prompt do agente ATIVO (maestro via `build_for_contact`),
+  não o do default.
+- **D6 — Modelo ✅** (código): `improvement_model` (config + env `WHATSBOT_IMPROVEMENT_MODEL`)
+  → modelo do agente → `DEFAULT_MODEL` (improvement_service:152).
+- **D7 — Usage ✅** (live): linha em `usage` com `call_type="improvement"`, modelo
+  `deepseek-v4-pro`, 4986 tokens / US$0,0029.
+- **D8 — RBAC ✅** (código): `permission_denied(request, "conversation.reply")` na rota.
+- **D9 — Fallbacks ✅** (código): "[WhatsBot] API key não configurada." / "[WhatsBot] Falha
+  ao gerar a análise…" — strings retornadas e salvas como card.
+- **D10 — Validação ✅** (live): content vazio/ausente → `_err("Mensagem inválida para
+  análise.")`, sem chamar o LLM.
+- **D11 — Modo escuro ✅** (código): `SystemMessageCard.js` usa `wa-*`
+  (`bg-wa-bg`/`border-wa-border`/`text-wa-secondary`).
+
+### Achado D.A — card salvo na CONVERSA/CANAL ERRADO (bug) 🐞
+
+**Observado:** ao gerar a melhoria numa conversa do canal `gowa_MdPAavUPkc` (inbox 2), o
+card "🔧 Análise de melhoria" foi salvo numa **conversa NOVA (#32) no inbox 1 (default)**,
+não na #31 onde está a resposta marcada. No painel apareceram **duas conversas do mesmo
+número** (a real no Maestro + a fantasma no Jarvis). O endpoint ainda retornou o evento
+"Conversa #32 iniciada" em vez do card (o `get_last` pegou o `conversation_event` de
+criação emitido logo após).
+
+**Causa:** a rota `improve_message` salva via `agent_handler._get_contact(phone)`
+([handler.py:224](../agent/handler.py#L224)), cujo `channel_id` tem default `"default"`
+→ `ContactMemory` no inbox 1. Como o contato não tinha conversa aberta no inbox 1, o
+`add_message("system", …)` **criou a #32**. A rota recebe o `message` marcado (que carrega
+`conversation_id`) mas **não usa** — e o frontend (`generateImprovement`) só manda
+`{message, feedback}`. `add_message` também não aceita `conversation_id` override.
+
+**Impacto:** afeta contatos cuja conversa ativa NÃO está no inbox default (setups
+multi-canal — Telegram, múltiplos canais GOWA). Em single-channel default o card cai certo
+(a conversa do contato já está no inbox 1). O `get_last` devolver o `conversation_event` é
+consequência: se o card fosse pra conversa existente (sem criar nova), nenhum evento
+"created" sairia e o `get_last` devolveria o card.
+
+**Fix proposto (backend):** resolver o canal a partir do `conversation_id` da resposta
+marcada (`target["conversation_id"]`, já presente) e salvar o card **naquela conversa** —
+via `_get_contact(phone, channel_id=<canal do conv>)` ou salvando direto com
+`message_repo.add(..., conversation_id=…)`. **NÃO implementado ainda** (aguardando decisão).
+Conversa fantasma #32 removida manualmente após o teste.
+
+---
+
 ## Pendentes
 
 - **Teste 2 — Dependências (`requires_prior_call`):** validar que uma tool só roda
