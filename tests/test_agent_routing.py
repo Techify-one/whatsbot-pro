@@ -178,5 +178,35 @@ _steps = _full.get("steps") or []
 check("execution_steps.agent_key gravado por passo",
       {s.get("agent_key") for s in _steps} == {"triagem", "vendas"})
 
+print("\núnico roteador (plano 29 Eixo B):")
+# "triagem" é o roteador atual (seed lá em cima). Promover outro rebaixa ela.
+agent_repo.save("comercial", display_name="Comercial",
+                prompt="Você é o comercial.", model_config={"model": "test/model"},
+                tool_names=None, enabled=True,
+                is_router=True, routing_targets=["vendas"])
+_tri = agent_repo.get("triagem")
+_com = agent_repo.get("comercial")
+check("promover 2º roteador rebaixa o anterior (radio)",
+      _com["is_router"] and not _tri["is_router"])
+check("get_router devolve o único roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+_tri_hist = agent_repo.list_history("triagem")
+check("rebaixamento bumpa versão + snapshot do rebaixado",
+      _tri_hist and _tri_hist[0]["version"] == _tri["version"])
+
+# Cinto de segurança no banco: índice único parcial barra violação direta.
+import sqlalchemy.exc  # noqa: E402
+from sqlalchemy import text as _sql_text  # noqa: E402
+try:
+    with get_engine().begin() as cn:
+        cn.execute(_sql_text(
+            "UPDATE ai_agents SET is_router = 1 WHERE agent_key = 'triagem'"))
+    _violated = False
+except sqlalchemy.exc.IntegrityError:
+    _violated = True
+check("índice único parcial barra 2º roteador direto no banco", _violated)
+check("estado pós-violação: só 'comercial' segue roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
