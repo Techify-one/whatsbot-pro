@@ -2,9 +2,26 @@
 
 Idempotente — pode rodar de novo sem duplicar. NÃO faz parte do app (é um script
 de conveniência). Roda com a venv: ./venv/bin/python seed_demo.py
+
+Postgres-only (plano 29): usa a DATABASE_URL da env; se ausente, tenta ler a
+linha DATABASE_URL= do .env na raiz do repo (mesma URL que o linux_start.sh
+carrega) antes de falhar.
 """
-from db.engine import init_engine, get_engine
-init_engine("sqlite:///storages/whatsbot.db")
+import os
+from pathlib import Path
+
+from db.engine import init_engine, get_engine, resolve_database_url
+
+if not os.environ.get("DATABASE_URL"):
+    _envfile = Path(__file__).resolve().parent / ".env"
+    if _envfile.is_file():
+        for _line in _envfile.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line.startswith("DATABASE_URL="):
+                os.environ["DATABASE_URL"] = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+
+init_engine(resolve_database_url())
 
 import time
 from sqlalchemy import text
