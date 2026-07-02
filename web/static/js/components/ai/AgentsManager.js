@@ -477,6 +477,13 @@ export default function AgentsManager({ initialEntity }) {
   // Dedicated prompt-trail modal state (separate from the whole-agent history)
   const [promptHistoryFor, setPromptHistoryFor] = useState(null);
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
+
   async function load() {
     setLoading(true);
     setError('');
@@ -608,19 +615,21 @@ export default function AgentsManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`
-        <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
-          existingKeys=${agents.map(a => a.agent_key)}
-          tools=${tools}
-          onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
-      ` : null}
+      <div ref=${formRef}>
+        ${creating ? html`
+          <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
+            existingKeys=${agents.map(a => a.agent_key)}
+            tools=${tools}
+            onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
+        ` : null}
 
-      ${editing ? html`
-        <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-          tools=${tools}
-          onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy}
-          onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
-      ` : null}
+        ${editing ? html`
+          <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
+            tools=${tools}
+            onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy}
+            onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
+        ` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 

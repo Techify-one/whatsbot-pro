@@ -228,6 +228,13 @@ export default function CustomAttributesManager({ initialEntity }) {
   // Aba de escopo (Chatwoot-style) espelha /custom-attributes/<scope>[/<key>].
   const [tab, setTab] = useState(() => initialEntity?.sub || 'conversation');
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
+
   async function load() {
     setLoading(true);
     // Both scopes (P54): contact + conversation, filtered per active tab below.
@@ -343,8 +350,10 @@ export default function CustomAttributesManager({ initialEntity }) {
         `)}
       </div>
 
-      ${creating ? html`<${AttributeForm} defaultScope=${tab} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${AttributeForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${AttributeForm} defaultScope=${tab} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+        ${editing ? html`<${AttributeForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 

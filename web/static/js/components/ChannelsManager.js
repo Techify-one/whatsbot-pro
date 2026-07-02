@@ -92,6 +92,16 @@ export default function ChannelsManager({ initialEntity }) {
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
+  // Rola a viewport até o form ao abrir (criar no topo / editar abaixo da lista).
+  const createFormRef = useRef(null);
+  const editFormRef = useRef(null);
+  useEffect(() => {
+    if (creating) createFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [creating]);
+  useEffect(() => {
+    if (editingChannel) editFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [editingChannel]);
+
   // Deep-link /channels/<id>: a URL reflete o canal aberto no editor. Também
   // resolve /channels/new (form de criação, com ?provider=) e as flags de modal
   // (?connect|?webhook|?telegram=1) sobre um canal existente — lidas do search
@@ -368,16 +378,18 @@ export default function ChannelsManager({ initialEntity }) {
         displayName=${connectFor.display_name}
         onClose=${() => { setConnectFor(null); refreshStatuses(); }} />` : null}
 
-      ${creating ? html`<${ChannelForm}
-        onCreated=${handleCreate}
-        onCancel=${closeCreate}
-        onProviderChange=${setInitialProvider}
-        initialProvider=${initialProvider}
-        busy=${createBusy}
-        error=${createError}
-        aiDefaults=${aiDefaults}
-        availableProviders=${providers}
-        requiredCreds=${requiredCreds} />` : null}
+      <div ref=${createFormRef}>
+        ${creating ? html`<${ChannelForm}
+          onCreated=${handleCreate}
+          onCancel=${closeCreate}
+          onProviderChange=${setInitialProvider}
+          initialProvider=${initialProvider}
+          busy=${createBusy}
+          error=${createError}
+          aiDefaults=${aiDefaults}
+          availableProviders=${providers}
+          requiredCreds=${requiredCreds} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -432,11 +444,13 @@ export default function ChannelsManager({ initialEntity }) {
         </div>
       ` : null}
 
-      ${editingChannel ? html`<${ChannelEditForm}
-        channel=${editingChannel}
-        aiDefaults=${aiDefaults}
-        onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
-        onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
+      <div ref=${editFormRef}>
+        ${editingChannel ? html`<${ChannelEditForm}
+          channel=${editingChannel}
+          aiDefaults=${aiDefaults}
+          onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
+          onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}
+      </div>
 
       ${purgeTarget ? html`<${PurgeChannelModal}
         channel=${purgeTarget}

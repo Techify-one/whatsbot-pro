@@ -69,6 +69,13 @@ export default function VariablesEditor({ initialEntity }) {
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
+
   async function load() {
     setLoading(true);
     setError('');
@@ -127,8 +134,10 @@ export default function VariablesEditor({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${VariableForm} onSave=${handleSave} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${VariableForm} editing=${editing} onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${VariableForm} onSave=${handleSave} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+        ${editing ? html`<${VariableForm} editing=${editing} onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
