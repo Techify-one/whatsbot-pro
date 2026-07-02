@@ -31,19 +31,22 @@ class Fake:
     ``transfers[key]`` = the agent ``key`` hands off to when it runs (None = stays).
     ``abort_on`` = agents whose hop is aborted by a filter (run_hop returns None,
     active unchanged). The first hop (agent 'A') is assumed already run, so the
-    initial active reflects A's handoff.
+    initial active reflects A's handoff. ``reinvokes`` records the ``is_reinvoke``
+    flag passed to each hop (plano 29 A3).
     """
     def __init__(self, transfers, abort_on=()):
         self.transfers = transfers
         self.abort_on = set(abort_on)
         self.active = transfers.get("A")  # state after A's (already-run) hop
         self.hops = []
+        self.reinvokes = []
 
     def resolve_next(self):
         return self.active
 
-    async def run_hop(self, key):
+    async def run_hop(self, key, *, is_reinvoke=False):
         self.hops.append(key)
+        self.reinvokes.append(is_reinvoke)
         if key in self.abort_on:
             return None  # filter aborted this hop; active stays put
         self.active = self.transfers.get(key)
@@ -87,12 +90,43 @@ async def main():
     check(f"depth cap: no máx {routing.MAX_ROUTING_DEPTH-1} hops extras",
           len(steps) == routing.MAX_ROUTING_DEPTH - 1)
 
-    # Cycle A→B→A: stops when a seen agent reappears
+    # Plano 29 A3 — revisita CONTROLADA: A→B→A roda os 3 hops no mesmo turno
+    # (era barrado pelo `seen`); B fica estável em A → routing termina.
+    f = Fake({"A": "B", "B": "A", })
+    f.transfers["A"] = "B"  # A (revisitado) transfere de novo → ping-pong até o cap
+
+    class Stabilizing(Fake):
+        """A devolve pra B, mas na REVISITA fica (modela o roteador decidindo
+        diferente com o motivo threadado — A2)."""
+        async def run_hop(self, key, *, is_reinvoke=False):
+            self.hops.append(key)
+            self.reinvokes.append(is_reinvoke)
+            self.active = None if is_reinvoke else self.transfers.get(key)
+            return f"result-{key}"
+
+    f = Stabilizing({"A": "B", "B": "A"})
+    res, steps = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f.resolve_next, run_hop=f.run_hop)
+    check("A3: revisita A→B→A roda no mesmo turno",
+          [s["to"] for s in steps] == ["B", "A"])
+    check("A3: hop revisitado recebe is_reinvoke=True", f.reinvokes == [False, True])
+    check("A3: result final é o da revisita", res == "result-A")
+
+    # Ping-pong A→B→A→B…: bounded pelo depth cap (não roda infinito)
     f = Fake({"A": "B", "B": "A"})
     res, steps = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
-    check("ciclo A→B→A: para (não repete A)", [s["to"] for s in steps] == ["B"])
+    check(f"A3: ping-pong é limitado pelo cap ({routing.MAX_ROUTING_DEPTH-1} hops extras)",
+          len(steps) == routing.MAX_ROUTING_DEPTH - 1)
+
+    # max_depth configurável (A3): cap menor via parâmetro
+    f = Fake({"A": "B", "B": "A"})
+    res, steps = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f.resolve_next, run_hop=f.run_hop, max_depth=3)
+    check("A3: max_depth=3 limita a 2 hops extras", len(steps) == 2)
 
     # Downstream hop aborts (filter on C) → keep last good result (B)
     f = Fake({"A": "B", "B": "C", "C": None}, abort_on={"C"})
@@ -110,16 +144,25 @@ async def main():
     check("1º hop de continuação aborta: 0 steps, result-A mantido",
           steps2 == [] and res2 == "result-A")
 
-    # ── Caracterização plano 29 (Fase A0) — baseline ANTES da revisita (A3) ──
-    # Documenta o comportamento ATUAL do `seen`: qualquer revisita (direta ou
-    # indireta) é barrada. A3 remove isso de propósito e atualiza estes checks.
-    f3 = Fake({"A": "B", "B": "C", "C": "A"})
+    # ── Plano 29 A3 (era caracterização A0; comportamento mudou de propósito) ──
+    # Revisita indireta A→B→C→A também roda; C→A marca is_reinvoke.
+    f3 = Fake({"A": "B", "B": "C", "C": "A", })
+
+    class Stab3(Fake):
+        async def run_hop(self, key, *, is_reinvoke=False):
+            self.hops.append(key)
+            self.reinvokes.append(is_reinvoke)
+            self.active = None if is_reinvoke else self.transfers.get(key)
+            return f"result-{key}"
+
+    f3 = Stab3({"A": "B", "B": "C", "C": "A"})
     res3, steps3 = await routing.run_with_routing(
         first_result="result-A", first_agent_key="A",
         resolve_next=f3.resolve_next, run_hop=f3.run_hop)
-    check("A0: revisita indireta A→B→C→A barrada pelo seen (muda em A3)",
-          [s["to"] for s in steps3] == ["B", "C"] and res3 == "result-C")
-    check("A0: depth cap é hardcoded MAX_ROUTING_DEPTH=5 (vira config em A3)",
+    check("A3: revisita indireta A→B→C→A roda no mesmo turno",
+          [s["to"] for s in steps3] == ["B", "C", "A"]
+          and f3.reinvokes == [False, False, True])
+    check("A3: MAX_ROUTING_DEPTH segue como default do parâmetro (config no caller)",
           routing.MAX_ROUTING_DEPTH == 5)
 
     # ── Plano 29 A2/A7 — reason nos steps via get_reason ────────────────────

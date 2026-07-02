@@ -11,9 +11,11 @@ nothing about agno, the DB, or the handler — so it is unit-testable in isolati
 
 - ``resolve_next``: ``() -> str | None`` — the conversation's current active agent
   key (re-resolved after each hop; the tool moved it on a handoff).
-- ``run_hop``: ``async (agent_key) -> object | None`` — build + run that agent for
-  the same message; returns the hop result, or ``None`` to stop routing (a filter
-  aborted the hop).
+- ``run_hop``: ``async (agent_key, *, is_reinvoke=False) -> object | None`` —
+  build + run that agent for the same message; returns the hop result, or
+  ``None`` to stop routing (a filter aborted the hop). ``is_reinvoke`` (plano 29
+  A3) flags an agent being revisited within the same turn (nexus
+  ``skip_history`` equivalent — the hop tones down/replaces its earlier take).
 
 Returns ``(final_result, routing_steps)`` where ``routing_steps`` is the list of
 ``{"from", "to", "depth", "reason"}`` handoffs taken (empty when no handoff
@@ -50,17 +52,17 @@ async def run_with_routing(*, first_result, first_agent_key, resolve_next, run_h
     for depth in range(1, max_depth):
         nxt = resolve_next()
         if not nxt or nxt == current:
-            break  # no handoff this turn
-        if nxt in seen:
-            # Cycle (A→B→A): stop to avoid bouncing within the depth budget.
-            break
+            break  # no handoff this turn (A→A immediate re-handoff also stops here)
+        # Plano 29 A3 — revisita CONTROLADA: um agente já visitado PODE receber a
+        # conversa de volta (roteador→spoke→roteador), sinalizado como re-invocação;
+        # o freio é o depth cap (+ o motivo threadado em A2, que muda a decisão).
         reason = None
         if get_reason is not None:
             try:
                 reason = get_reason()
             except Exception:
                 reason = None
-        hop = await run_hop(nxt)
+        hop = await run_hop(nxt, is_reinvoke=nxt in seen)
         if hop is None:
             break  # filter aborted the hop — keep the last good result
         steps.append({"from": current, "to": nxt, "depth": depth, "reason": reason})

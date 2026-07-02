@@ -120,6 +120,71 @@ def test_hop_recebe_motivo_e_steps_carregam_reason(routing_world, monkeypatch):
                       "depth": 1, "reason": motivo}]
 
 
+def test_revisita_roteador_comercial_roteador_no_mesmo_turno(routing_world, monkeypatch):
+    """Plano 29 A3: o cenário-alvo do plano — 3 hops no mesmo turno.
+
+    1º hop (já rodado): roteador transfere pro comercial ("quero oferta X").
+    2º hop: comercial descobre que a oferta não existe e DEVOLVE pro roteador.
+    3º hop: roteador REVISITADO (is_reinvoke) recebe o motivo e responde.
+    """
+    contact, conv = routing_world
+    handler = _FakeHandler()
+
+    conversation_repo.set_agent(conv["id"], "comercial29")
+    first_result = EngineResult(
+        reply="vou te passar pro comercial",
+        executed_tools=[{
+            "tool": "transferir_agente",
+            "args": {"agente": "comercial29", "motivo": "cliente quer a oferta X"},
+            "result": "Transferência registrada: ...",
+        }], usage=None)
+    first_spec = agent_factory.AgentSpec(
+        agent_key="roteador29", base_prompt="Você roteia.",
+        model_config={"model": "test/model"})
+
+    captured = []
+
+    async def _fake_run_async(handler, contact, sender, messages, active_tools,
+                              model_config=None):
+        captured.append(messages)
+        if len(captured) == 1:
+            # Hop do comercial: oferta não existe → devolve pro roteador.
+            conversation_repo.set_agent(conv["id"], "roteador29")
+            return EngineResult(
+                reply="", executed_tools=[{
+                    "tool": "transferir_agente",
+                    "args": {"agente": "roteador29",
+                             "motivo": "oferta X não existe"},
+                    "result": "Transferência registrada: ...",
+                }], usage=None)
+        # Hop do roteador revisitado: responde e encerra.
+        return EngineResult(reply="a oferta X não está disponível; posso ajudar com Y",
+                            executed_tools=[], usage=None)
+
+    monkeypatch.setattr(agno_engine, "run_async", _fake_run_async)
+
+    result, combined, _, steps = asyncio.run(
+        agent_run_service._continue_routing(
+            handler, contact, PHONE,
+            [{"role": "user", "content": "quero a oferta X"}],
+            first_spec, first_result, first_result.executed_tools, None,
+            disable_tools=False))
+
+    # 3 hops no mesmo turno: roteador→comercial→roteador.
+    assert [(s["from"], s["to"]) for s in steps] == [
+        ("roteador29", "comercial29"), ("comercial29", "roteador29")]
+    assert steps[0]["reason"] == "cliente quer a oferta X"
+    assert steps[1]["reason"] == "oferta X não existe"
+    assert result.reply.startswith("a oferta X não está disponível")
+
+    # O hop revisitado recebeu a sintética de re-invocação com o motivo.
+    revisit_msgs = captured[1]
+    synthetic = [m for m in revisit_msgs
+                 if m["role"] == "user" and "[REDIRECIONAMENTO de" in m["content"]]
+    assert "oferta X não existe" in synthetic[-1]["content"]
+    assert "não repita a mesma transferência" in synthetic[-1]["content"]
+
+
 def test_handoff_sem_motivo_injeta_sintetica_sem_linha_motivo(routing_world, monkeypatch):
     contact, conv = routing_world
     handler = _FakeHandler()

@@ -138,6 +138,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # TOOL por mensagem, aplicado a toda tool sem ``call_limit`` próprio no
     # ``hooks_config`` do agente. 0 = ilimitado (comportamento legado).
     ConfigKey("ai_tool_call_limit_per_tool", default=0, exposed=True, writable=True),
+    # Plano 29 A3: total de runs de agente por mensagem no routing within-turn
+    # (1º hop + handoffs). Substitui o MAX_ROUTING_DEPTH hardcoded.
+    ConfigKey("ai_max_route_depth", default=5, exposed=True, writable=True),
     ConfigKey("setup_completed", default=False, exposed=True, writable=True),
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
