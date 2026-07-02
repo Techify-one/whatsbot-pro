@@ -1,8 +1,9 @@
 """SQLite → Postgres round-trip safety for the schema (Plano 23 · Fase E3).
 
 E3 reconciled ``db/tables.py`` ↔ the real schema by adding the FK
-``messages.conversation_id → conversations.id ON DELETE CASCADE`` (migration
-``0027``). Because the cross-backend copy in ``db/migration_postgres.py`` walks
+``messages.conversation_id → atendimentos.id ON DELETE CASCADE`` (migration
+``0027``; table later renamed ``conversations`` → ``atendimentos`` in ``0033``).
+Because the cross-backend copy in ``db/migration_postgres.py`` walks
 ``metadata.sorted_tables`` (FK-topological order) and Postgres ENFORCES FKs at
 insert time, a regression in the FK or the copy ordering would surface here as a
 ``ForeignKeyViolation`` during the copy.
@@ -15,7 +16,7 @@ process-global engine the rest of the suite shares. It does NOT depend on the
 
 * The SQLite leg ALWAYS runs: it proves ``alembic upgrade head`` materializes the
   ``conversation_id`` FK and that the FK-topological copy order places
-  ``messages`` after ``conversations``/``contacts`` (so a parent-before-child
+  ``messages`` after ``atendimentos``/``contacts`` (so a parent-before-child
   insert is possible).
 * The Postgres leg runs ONLY when ``WHATSBOT_TEST_DB_URL`` is a Postgres URL
   (CI / dev PG). It exercises the FULL ``migrate_sqlite_to_postgres`` and asserts
@@ -122,19 +123,19 @@ def test_sqlite_head_has_conversation_fk(sqlite_source):
         fks = conn.execute(text("PRAGMA foreign_key_list(messages)")).mappings().all()
     by_col = {f["from"]: (f["table"], f["on_delete"]) for f in (dict(r) for r in fks)}
     assert "conversation_id" in by_col, "FK on messages.conversation_id missing"
-    assert by_col["conversation_id"] == ("conversations", "CASCADE")
+    assert by_col["conversation_id"] == ("atendimentos", "CASCADE")
     # The legacy contact_id FK must survive the batch table-recreate.
     assert by_col.get("contact_id") == ("contacts", "CASCADE")
 
 
 def test_copy_order_places_messages_after_parents():
     """The cross-backend copy walks FK-topological order: messages AFTER its
-    parents (contacts, conversations) so parent rows exist before the child
+    parents (contacts, atendimentos) so parent rows exist before the child
     insert under FK enforcement (Postgres)."""
     from db.tables import metadata
 
     order = [t.name for t in metadata.sorted_tables]
-    assert order.index("messages") > order.index("conversations")
+    assert order.index("messages") > order.index("atendimentos")
     assert order.index("messages") > order.index("contacts")
 
 
@@ -160,7 +161,7 @@ def test_full_roundtrip_to_postgres(sqlite_source):
         fks = insp.get_foreign_keys("messages")
         conv_fk = next((f for f in fks if f["constrained_columns"] == ["conversation_id"]), None)
         assert conv_fk is not None, "conversation_id FK missing on Postgres target"
-        assert conv_fk["referred_table"] == "conversations"
+        assert conv_fk["referred_table"] == "atendimentos"
         assert (conv_fk.get("options") or {}).get("ondelete", "").upper() == "CASCADE"
 
         with target.connect() as conn:
