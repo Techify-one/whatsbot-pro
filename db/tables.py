@@ -28,6 +28,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -84,6 +85,9 @@ contacts = Table(
 )
 Index("idx_contacts_updated", contacts.c.updated_at)
 Index("idx_contacts_archived", contacts.c.is_archived)
+# GIN sobre o JSONB de custom attributes (migration 0014) — declarado aqui para o
+# metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
+Index("idx_contacts_cattr_gin", contacts.c.custom_attributes, postgresql_using="gin")
 
 
 observations = Table(
@@ -422,6 +426,13 @@ Index("idx_atend_contact", atendimentos.c.contact_id)
 Index("idx_atend_contact_inbox", atendimentos.c.contact_inbox_id)
 Index("idx_atend_last_activity", atendimentos.c.last_activity_at)
 Index("idx_atend_archived", atendimentos.c.is_archived)
+# Índice único PARCIAL (plano 28, materializado na migration 0036): no máximo UMA
+# conversa aberta por (contato, inbox). É o cinto de segurança do double-create de
+# resolvers concorrentes — o loser recebe IntegrityError e adota a thread do winner
+# (catch em conversation_repo._create_open_atomic). Múltiplas conversas FECHADAS
+# por par continuam permitidas (o modelo de atendimento guarda o histórico).
+Index("uq_atend_open_contact_inbox", atendimentos.c.contact_id, atendimentos.c.inbox_id,
+      unique=True, postgresql_where=text("status = 'open'"))
 
 # Contador atômico de display_id (P6) — INSERT/UPDATE na mesma transação do create.
 atendimento_counters = Table(
@@ -573,6 +584,10 @@ ai_agents = Table(
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
+# Único roteador no sistema (plano 29 Eixo B, migration 0035) — declarado aqui para
+# o metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
+Index("ux_ai_agents_single_router", ai_agents.c.is_router,
+      unique=True, postgresql_where=text("is_router = 1"))
 
 
 ai_prompts = Table(
