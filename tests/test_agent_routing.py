@@ -208,5 +208,27 @@ check("índice único parcial barra 2º roteador direto no banco", _violated)
 check("estado pós-violação: só 'comercial' segue roteador",
       (agent_repo.get_router() or {}).get("agent_key") == "comercial")
 
+print("\ngating de transfer_to_human (plano 29 A6 — só o roteador escala):")
+from agent.tool_registry import ToolRegistry  # noqa: E402
+
+_reg = ToolRegistry()
+for _schema, _executor in CORE_TOOLS:
+    _reg.register_tool(_schema, _executor)
+_spoke_spec = agent_factory.AgentSpec(
+    agent_key="vendas", base_prompt="x",
+    tool_names=["transferir_agente", "save_contact_info"])
+_spoke_names = [(s.get("function") or {}).get("name")
+                for s in _reg.select_active_tools(_spoke_spec)]
+check("spoke sem transfer_to_human no tool_names NÃO recebe a tool",
+      "transfer_to_human" not in _spoke_names)
+check("spoke recebe transferir_agente (devolve pro roteador)",
+      "transferir_agente" in _spoke_names)
+_router_spec = agent_factory.AgentSpec(
+    agent_key="triagem", base_prompt="x", tool_names=None)
+_router_names = [(s.get("function") or {}).get("name")
+                 for s in _reg.select_active_tools(_router_spec)]
+check("roteador (tool_names=None) recebe transfer_to_human",
+      "transfer_to_human" in _router_names)
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

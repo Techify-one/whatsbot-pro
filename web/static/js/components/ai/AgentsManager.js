@@ -365,6 +365,12 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
               Lista todas as tools registradas (core, plugin e code-in-DB). Deixe "Todas" marcado para herdar o registry inteiro.
             </div>
           ` : null}
+          ${!isRouter && !allTools && toolNames.includes('transfer_to_human') ? html`
+            <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mt-2">
+              Convenção hub-and-spoke: deixe <code>transfer_to_human</code> apenas no <b>roteador</b>.
+              Agentes especializados devolvem com <code>transferir_agente</code> (destino: o roteador) e ele decide escalar.
+            </div>
+          ` : null}
         </div>
 
         <div>
