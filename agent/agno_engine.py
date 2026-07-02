@@ -24,6 +24,7 @@ events — the handler owns those, since it also owns the surrounding
 try/except and usage snapshot.
 """
 
+import os
 import time
 import logging
 from dataclasses import dataclass, field
@@ -270,12 +271,37 @@ _CONTEXT_OFF = dict(
 # ``build_context`` configures the single Agent.
 _AGENT_CONTEXT_OFF = dict(_CONTEXT_OFF, build_context=False)
 
+# Safety backstop for tool-call loops. AGNO's ``Agent.tool_call_limit`` defaults
+# to ``None`` (unbounded): a tool that keeps asking to be called again loops until
+# the model gives up — which it may not (QA Teste 3b: 12/12 iterations without
+# stopping, ~US$0.025 in a single message). We cap the number of tool calls per
+# agent run. On overflow AGNO does NOT raise: it feeds the model a "limit reached"
+# message for the extra calls and the run ends gracefully. Override via env
+# ``WHATSBOT_TOOL_CALL_LIMIT`` (set to ``0`` — or any non-positive — to disable).
+DEFAULT_TOOL_CALL_LIMIT = 25
+
+
+def _resolve_tool_call_limit() -> int | None:
+    """Per-run tool-call cap: env override, else :data:`DEFAULT_TOOL_CALL_LIMIT`.
+
+    Returns ``None`` (no cap) only when explicitly disabled with a non-positive
+    value; a malformed value falls back to the default (fail safe, not open)."""
+    raw = os.environ.get("WHATSBOT_TOOL_CALL_LIMIT")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_TOOL_CALL_LIMIT
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_TOOL_CALL_LIMIT
+    return n if n > 0 else None
+
 
 def _build_single_agent(handler, system_prompt, functions, model_config=None):
     return Agent(
         model=build_model(handler, model_config=model_config),
         system_message=system_prompt,
         tools=list(functions.values()) or None,
+        tool_call_limit=_resolve_tool_call_limit(),
         **_AGENT_CONTEXT_OFF,
     )
 
