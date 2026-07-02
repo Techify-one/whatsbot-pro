@@ -3,9 +3,9 @@
 Lets an admin edit the permissions of existing roles and create/delete custom
 roles. The ``admin`` role is a runtime short-circuit (always every permission),
 so it is locked: it cannot be edited, reset or deleted. The seeded system roles
-``gestor``/``atendente`` can have their permissions edited and reset to defaults,
-but cannot be deleted. Custom roles (``is_system=0``) are fully editable and
-deletable (unless still assigned to a user).
+``gestor``/``atendente`` can have their permissions edited, reset to defaults
+and — like custom roles — deleted (unless still assigned to a user). Only the
+``admin`` role is undeletable.
 """
 
 import asyncio
@@ -88,8 +88,8 @@ def register_routes(app, deps):
         role = await asyncio.to_thread(rbac_repo.get_role, role_id)
         if not role:
             return _err("Grupo de permissão não encontrado.", status=404)
-        if role.get("is_system"):
-            return _err("Grupos de sistema não podem ser excluídos.", status=409)
+        if role["key"] == "admin":
+            return _err("O grupo Administrador é fixo e não pode ser excluído.", status=409)
         count = await asyncio.to_thread(rbac_repo.role_assignment_count, role_id)
         if count > 0:
             return _err(f"Grupo atribuído a {count} usuário(s). "
