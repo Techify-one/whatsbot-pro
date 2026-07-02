@@ -51,7 +51,8 @@ def check_hooks(hooks_config: dict | None, tool_name: str,
     if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0:
         if _ran_count(executed, tool_name) >= limit:
             return (f"A ferramenta '{tool_name}' já atingiu o limite de "
-                    f"{limit} chamada(s) nesta conversa. Não a chame de novo.")
+                    f"{limit} chamada(s) nesta mensagem. Não a chame de novo agora "
+                    f"— o limite é por mensagem e reseta na próxima mensagem do cliente.")
 
     prior = cfg.get("requires_prior_call")
     if isinstance(prior, str) and prior:
