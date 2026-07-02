@@ -26,6 +26,9 @@ PHONE = "5511777770042"
 class _FakeHandler:
     split_messages = False
 
+    def __init__(self):
+        self.dispatched = []
+
     def _build_system_prompt(self, contact, base_prompt=None, split_messages=None):
         return base_prompt or "prompt"
 
@@ -34,6 +37,10 @@ class _FakeHandler:
 
     def _record_usage_tokens(self, *a, **k):
         pass
+
+    def _dispatch_tool(self, contact, name, args):
+        self.dispatched.append((name, args))
+        return "Transferência realizada."
 
 
 class _Contact:
@@ -183,6 +190,56 @@ def test_revisita_roteador_comercial_roteador_no_mesmo_turno(routing_world, monk
                  if m["role"] == "user" and "[REDIRECIONAMENTO de" in m["content"]]
     assert "oferta X não existe" in synthetic[-1]["content"]
     assert "não repita a mesma transferência" in synthetic[-1]["content"]
+
+
+def test_cap_estourado_escala_pra_humano(routing_world, monkeypatch):
+    """Plano 29 A4+A10: cadeia que nunca resolve → transfer_to_human forçado."""
+    from db.repositories import config_repo
+
+    contact, conv = routing_world
+    handler = _FakeHandler()
+    config_repo.set("ai_max_route_depth", 3)
+    try:
+        conversation_repo.set_agent(conv["id"], "comercial29")
+        first_result = EngineResult(
+            reply="", executed_tools=[{
+                "tool": "transferir_agente",
+                "args": {"agente": "comercial29", "motivo": "vai"},
+                "result": "Transferência registrada: ...",
+            }], usage=None)
+        first_spec = agent_factory.AgentSpec(
+            agent_key="roteador29", base_prompt="Você roteia.",
+            model_config={"model": "test/model"})
+
+        async def _pingpong_run_async(handler, contact, sender, messages,
+                                      active_tools, model_config=None):
+            cur = conversation_repo.get_open_for_contact(contact.id)["active_agent_key"]
+            nxt = "roteador29" if cur == "comercial29" else "comercial29"
+            conversation_repo.set_agent(conv["id"], nxt)
+            return EngineResult(reply="", executed_tools=[{
+                "tool": "transferir_agente",
+                "args": {"agente": nxt, "motivo": "volta"},
+                "result": "Transferência registrada: ...",
+            }], usage=None)
+
+        monkeypatch.setattr(agno_engine, "run_async", _pingpong_run_async)
+
+        result, combined, _, steps = asyncio.run(
+            agent_run_service._continue_routing(
+                handler, contact, PHONE, [{"role": "user", "content": "oi"}],
+                first_spec, first_result, first_result.executed_tools, None,
+                disable_tools=False))
+
+        # Cap 3 → 2 hops extras; handoff seguia pendente → escalou pra humano.
+        assert len(steps) == 2
+        assert handler.dispatched, "transfer_to_human não foi disparado"
+        name, args = handler.dispatched[-1]
+        assert name == "transfer_to_human"
+        assert "Limite de roteamento atingido" in args["reason"]
+        forced = [t for t in combined if t.get("forced")]
+        assert forced and forced[-1]["tool"] == "transfer_to_human"
+    finally:
+        config_repo.set("ai_max_route_depth", 5)
 
 
 def test_handoff_sem_motivo_injeta_sintetica_sem_linha_motivo(routing_world, monkeypatch):
