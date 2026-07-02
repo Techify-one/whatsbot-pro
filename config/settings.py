@@ -134,6 +134,10 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # WHATSBOT_AI_TOOLS_CODE=0 to lock (untrusted host). Historical GET fallback
     # was False (inert — the key is always seeded True). See DECISOES.md P62.
     ConfigKey("ai_tools_code_enabled", default=True, exposed=True, get_default=False, writable=True),
+    # Guardrails do motor de agentes (plano 29 A1): teto default de chamadas POR
+    # TOOL por mensagem, aplicado a toda tool sem ``call_limit`` próprio no
+    # ``hooks_config`` do agente. 0 = ilimitado (comportamento legado).
+    ConfigKey("ai_tool_call_limit_per_tool", default=0, exposed=True, writable=True),
     ConfigKey("setup_completed", default=False, exposed=True, writable=True),
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
