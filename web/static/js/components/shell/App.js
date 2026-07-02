@@ -9,6 +9,7 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { PluginModalHost } from '../../plugins/ModalHost.js';
+import { Slot } from '../../plugins/Slot.js';
 import { buildPluginApi, isFrontendApiCompatible } from '../../plugins/api.js';
 import { reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory, getRouteOverride } from '../../plugins/registry.js';
 import { SetupWizard } from '../SetupWizard.js';
@@ -425,6 +426,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
       <!-- Host for plugin-opened modals (e.g. the "popup ao resolver" flow). -->
       <${PluginModalHost} />
+
+      <!-- Root overlay extension point (P: dev tools): a plugin may register a
+           persistent, non-blocking floating widget here via addSlot('app.overlay').
+           Renders nothing until a plugin fills it, so it has zero impact by default. -->
+      <${Slot} name="app.overlay" ctx=${{ tab, currentUser }} />
     </div>
   `;
 }
