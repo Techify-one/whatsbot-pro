@@ -145,9 +145,9 @@ def execute_my_tool(ctx, args: dict) -> str | None:
 CORE_TOOLS = [(MY_TOOL, execute_my_tool)]
 ```
 
-**Banco de dados (importante)**: o WhatsBot agora roda em cima de SQLAlchemy
-Core (SQLite default, Postgres opcional via tela Settings → Banco). Plugin
-acessa o banco SEMPRE via:
+**Banco de dados (importante)**: o WhatsBot roda em cima de SQLAlchemy Core
+com **PostgreSQL como único backend** (plano 29 — a env `DATABASE_URL` é
+obrigatória). Plugin acessa o banco SEMPRE via:
 
 ```python
 from sqlalchemy import text
@@ -160,13 +160,13 @@ with make_plugin_db() as conn:
     ).mappings().all()
 ```
 
-Proibido em código de plugin (quebra em Postgres):
+Proibido em código de plugin (o backend é Postgres):
 
 - `?` placeholders (use `:nome` bind params)
 - `strftime('%s','now')` → use `int(time.time())` em Python
 - `INSERT OR REPLACE` / `INSERT OR IGNORE` → ver `db.upsert.upsert()` ou refatore com select+update
 - `cur.lastrowid` direto → use `result.inserted_primary_key[0]`
-- Qualquer função/sintaxe SQLite-only (`||` concat com regras peculiares, `AUTOINCREMENT`, `PRAGMA`).
+- Qualquer função/sintaxe SQLite-only (`AUTOINCREMENT`, `PRAGMA`) — exceção: `INTEGER PRIMARY KEY AUTOINCREMENT` em migration é traduzido pra `SERIAL PRIMARY KEY` pelo migrator (compat com plugins publicados).
 
 ### prompts.py (se houver fragments)
 
@@ -314,14 +314,11 @@ FILTERS = {
 **Toda** tabela / índice tem que começar com `plugin_<id>_`. O migrator faz validação por regex.
 
 **Sintaxe das migrations.** O migrator usa `engine.begin()` e roda contra o
-backend ativo — SQLite por default, Postgres se o usuário trocou pelo Settings.
-Para máxima portabilidade, evite `strftime` (gere timestamps no Python com
-`int(time.time())`) e defaults baseados em funções específicas. `INTEGER PRIMARY
-KEY AUTOINCREMENT` funciona em SQLite (default) mas falha em fresh Postgres
-install — se o plugin precisar rodar em Postgres direto do zero, prefira
-gerar o `id` no código (UUID, snowflake) e declarar `id TEXT PRIMARY KEY`.
-Para uma migração SQLite → Postgres existente, o endpoint admin reflete as
-tabelas do source e recria no destino com os tipos corretos.
+**Postgres** (único backend). Evite `strftime` (gere timestamps no Python com
+`int(time.time())`) e defaults baseados em funções específicas. `INTEGER
+PRIMARY KEY AUTOINCREMENT` é aceito por compat (o migrator traduz pra `SERIAL
+PRIMARY KEY`), mas em plugin novo prefira `SERIAL PRIMARY KEY` direto — ou
+gere o `id` no código (UUID) e declare `id TEXT PRIMARY KEY`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS plugin_<id>_items (
