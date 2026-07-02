@@ -13,7 +13,7 @@ Each plugin can ship a ``migrations/`` folder with files named
 Plugin migration files must contain **portable** SQL (no ``strftime``,
 ``INSERT OR REPLACE``, ``RETURNING`` etc). The runner splits the file on
 ``;`` boundaries and executes each statement individually so the same file
-runs against both SQLite and Postgres.
+roda inteiro no Postgres (único backend — plano 29).
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 
 _MIG_FILE_RE = re.compile(r"^(\d+)_.+\.sql$", re.IGNORECASE)
 # SQLite-only autoincrement PK idiom. It is *the* ubiquitous primary-key form
-# (the bundled example plugins use it), so translate it for Postgres instead of
-# forcing every plugin author to special-case the dialect. SQLite keeps it.
+# in existing plugin migrations, so translate it for Postgres instead of
+# forcing every plugin author to rewrite published SQL (app é Postgres-only).
 _AUTOINC_PK_RE = re.compile(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.IGNORECASE)
 _AUTOINC_RE = re.compile(r"\s+AUTOINCREMENT\b", re.IGNORECASE)
 _TABLE_OP_RE = re.compile(
@@ -73,11 +73,10 @@ def run_pending_migrations(manifest: PluginManifest, plugin_dir: Path) -> list[i
 
     applied_now: list[int] = []
     engine = get_engine()
-    dialect = engine.dialect.name
     for version, path in pending:
         sql = path.read_text(encoding="utf-8")
         _validate_sql_prefix(sql, pid, table_prefix, path.name)
-        sql = _portable_sql(sql, dialect)
+        sql = _portable_sql(sql)
         try:
             with engine.begin() as conn:
                 for stmt in _split_statements(sql):
@@ -94,18 +93,16 @@ def run_pending_migrations(manifest: PluginManifest, plugin_dir: Path) -> list[i
     return applied_now
 
 
-def _portable_sql(sql: str, dialect: str) -> str:
+def _portable_sql(sql: str) -> str:
     """Translate SQLite-only DDL idioms so plugin migrations run on Postgres.
 
-    Today this only maps the autoincrement primary key
-    (``INTEGER PRIMARY KEY AUTOINCREMENT`` → ``SERIAL PRIMARY KEY``) and strips
-    any stray ``AUTOINCREMENT`` keyword Postgres would reject. SQLite migrations
-    are returned unchanged. Other non-portable idioms (``strftime``,
-    ``INSERT OR REPLACE``, ``RETURNING``) remain the plugin author's
-    responsibility, as documented.
+    O app é Postgres-only (plano 29), mas migrations de plugin publicadas antes
+    usam o idiom do SQLite — traduzimos sempre. Today this only maps the
+    autoincrement primary key (``INTEGER PRIMARY KEY AUTOINCREMENT`` →
+    ``SERIAL PRIMARY KEY``) and strips any stray ``AUTOINCREMENT`` keyword
+    Postgres would reject. Other non-portable idioms (``strftime``,
+    ``INSERT OR REPLACE``) remain the plugin author's responsibility.
     """
-    if not dialect.startswith("postgres"):
-        return sql
     sql = _AUTOINC_PK_RE.sub("SERIAL PRIMARY KEY", sql)
     sql = _AUTOINC_RE.sub("", sql)
     return sql
