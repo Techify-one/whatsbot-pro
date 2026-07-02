@@ -214,7 +214,9 @@ class ContactMemory:
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
-                    reply_to_msg_id: str | None = None) -> dict:
+                    reply_to_msg_id: str | None = None,
+                    sent_by_user_id: int | None = None,
+                    sent_by_name: str | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
         # tocar webhook.py. plano 25 Fase 2: the resolve is now a shared helper (also
@@ -227,6 +229,7 @@ class ContactMemory:
             media_type=media_type, media_path=media_path,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
             conversation_id=conversation_id,
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
         )
         if conversation_id is not None:
             try:

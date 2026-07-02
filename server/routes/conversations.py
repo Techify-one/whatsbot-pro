@@ -540,9 +540,12 @@ def register_routes(app, deps):
         msg_id = result.external_msg_id or None
         preview = (body.get("preview_text") or "").strip() or f"📋 Template: {template_name}"
         try:
+            _u = current_user(request)
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, preview,
-                status="operator", msg_id=msg_id, channel_id=channel_id)
+                status="operator", msg_id=msg_id, channel_id=channel_id,
+                sent_by_user_id=(_u.get("id") if _u else None),
+                sent_by_name=(_u.get("name") if _u else None))
         except Exception as e:  # noqa: BLE001
             logger.error("[Template] save failed for %s: %s", phone, e)
             return _err(f"Template enviado, mas falha ao salvar a mensagem: {e}", status=500)

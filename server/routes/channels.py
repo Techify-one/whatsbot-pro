@@ -24,7 +24,7 @@ from fastapi.responses import Response
 from app.services import channel_service as svc
 from app.services import template_service as tpl_svc
 from db.repositories import channel_repo
-from server.authz import permission_denied, has_permission
+from server.authz import permission_denied, has_permission, current_user
 from server.helpers import _ok, _err
 
 _ID_RE = svc.ID_RE
@@ -122,10 +122,13 @@ def register_routes(app, deps):
         if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
 
+        _u = current_user(request)
         kind, data = await tpl_svc.send_template(
             deps, channel_id, phone=phone, template_name=template_name,
             language=language, components=components,
-            preview_text=body.get("preview_text") or "")
+            preview_text=body.get("preview_text") or "",
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None))
         if kind == "send_failed":
             return _err(f"Falha ao enviar template: {data}", status=502)
         if kind == "save_failed":
