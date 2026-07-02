@@ -46,7 +46,7 @@ import logging
 import time
 
 from db.repositories import (conversation_repo, contact_repo, user_repo,
-                             agent_repo)
+                             agent_repo, tag_repo)
 from server import system_notices
 from plugins.events import apply_filter, emit_with_filter
 from domain.events import (emit_domain, ConversationReopened,
@@ -260,6 +260,26 @@ async def delete(deps, conv: dict) -> None:
 
 # ── Ownership (assign / agent / per-conversation AI) — unified via _transfer ──
 
+async def _clear_transfer_tag(deps, contact_id) -> None:
+    """Plano 29 A5: a tag ``transferido_atendente`` é lida como trava da IA
+    (belt-and-suspenders do gate de humano), então REATIVAR a IA precisa
+    removê-la — senão a conversa fica muda para sempre. Best-effort: falha aqui
+    nunca quebra a ação. Também sincroniza o cache de ``ContactMemory``."""
+    from agent.tools.transfer_to_human import TRANSFER_TAG
+    if contact_id is None:
+        return
+    try:
+        await asyncio.to_thread(tag_repo.remove_contact_tag, contact_id, TRANSFER_TAG)
+        handler = getattr(deps, "agent_handler", None)
+        if handler is not None:
+            contact = await asyncio.to_thread(contact_repo.get, contact_id)
+            if contact:
+                for cm in handler.iter_cached_contacts(contact["phone"]):
+                    if TRANSFER_TAG in cm.tags:
+                        cm.tags.remove(TRANSFER_TAG)
+    except Exception:
+        logger.debug("Falha ao limpar tag de transferência do contato %s", contact_id)
+
 async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
                     ai_active, mirror_contact_ai: bool | None,
                     contact_id=None) -> dict | None:
@@ -284,6 +304,10 @@ async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
         ai_active=ai_active)
     if not updated:
         return None
+    # Plano 29 A5: a IA reassumindo a conversa limpa a trava de transferência.
+    if ai_active == 1:
+        await _clear_transfer_tag(
+            deps, contact_id if contact_id is not None else updated.get("contact_id"))
     if mirror_contact_ai is not None:
         cid = contact_id if contact_id is not None else updated.get("contact_id")
         contact = await asyncio.to_thread(contact_repo.get, cid)
@@ -476,6 +500,9 @@ async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
         "phone": phone, "ai_enabled": enabled})
     await emit_with_filter("contact.ai_toggled", {
         "phone": phone, "ai_enabled": enabled, "ts": time.time()})
+    # Plano 29 A5: religar a IA do contato limpa a trava de transferência.
+    if enabled:
+        await _clear_transfer_tag(deps, contact_id)
     conv = await asyncio.to_thread(
         system_notices.emit_for_contact,
         event_type="ai_on" if enabled else "ai_off",
