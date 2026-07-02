@@ -17,6 +17,16 @@ no agno/DB import.
 from __future__ import annotations
 
 
+# Engine-level default guards, applied unless an agent overrides the same tool.
+# ``transferir_agente`` must never fire more than once per message: the handoff is
+# per-message (it only rebinds ``active_agent_key`` for the NEXT message), so a
+# second hop in the same turn just thrashes the pointer, and mutual routing
+# allowlists let agents ping-pong (A→B→A) within a single turn. Capping at 1 kills
+# the loop by default; an agent that sets its own ``transferir_agente`` hook takes
+# full control (the agent entry replaces this default entirely).
+_DEFAULT_HOOKS: dict[str, dict] = {"transferir_agente": {"call_limit": 1}}
+
+
 def _ran_count(executed: list[dict], tool_name: str) -> int:
     return sum(1 for e in executed
               if e.get("tool") == tool_name and not e.get("skipped"))
@@ -27,10 +37,13 @@ def check_hooks(hooks_config: dict | None, tool_name: str,
     """Return a block reason (string for the LLM) if the call is disallowed, else None.
 
     Defensive: a malformed hooks_config entry never raises — it just doesn't block.
+    Engine defaults (:data:`_DEFAULT_HOOKS`) apply unless the agent overrides the
+    same tool name.
     """
-    if not hooks_config or not isinstance(hooks_config, dict):
-        return None
-    cfg = hooks_config.get(tool_name)
+    if not isinstance(hooks_config, dict):
+        hooks_config = {}
+    # Agent config wins over the engine default for the same tool name.
+    cfg = {**_DEFAULT_HOOKS, **hooks_config}.get(tool_name)
     if not isinstance(cfg, dict):
         return None
 
