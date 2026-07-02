@@ -116,6 +116,14 @@ messages = Table(
     # FK por nome (conversations é definida adiante).
     Column("conversation_id", Integer,
            ForeignKey("atendimentos.id", ondelete="CASCADE")),
+    # Quem (operador logado) enviou uma mensagem MANUAL (role='assistant' +
+    # status='operator'). Aditivo e nullable. FK LÓGICA para users.id (sem
+    # constraint, igual audit_log.actor_user_id) — permite op.add_column em SQLite
+    # sem rebuild e não quebra a linha se o usuário for deletado. sent_by_name é um
+    # SNAPSHOT do nome no momento do envio (o frontend o lê direto, sem join).
+    # NULL = remetente desconhecido → o painel cai no rótulo "Manual".
+    Column("sent_by_user_id", Integer),
+    Column("sent_by_name", Text),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)

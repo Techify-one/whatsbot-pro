@@ -185,7 +185,9 @@ class MessagingService:
                          emit_text: str, caption: str = "",
                          filename: str | None = None,
                          error_label: str,
-                         transcribe_audio: bool = False) -> dict:
+                         transcribe_audio: bool = False,
+                         sent_by_user_id: int | None = None,
+                         sent_by_name: str | None = None) -> dict:
         """Send an operator-uploaded media file and persist/broadcast/emit it (R14).
 
         UNIFIES the three near-duplicate operator send handlers
@@ -252,10 +254,12 @@ class MessagingService:
             "media_path": rel_path,
             "status": "operator",
             "msg_id": msg_id,
+            "sent_by_name": sent_by_name,
         }
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", content, media_type=kind,
-                            media_path=rel_path, status="operator", msg_id=msg_id)
+                            media_path=rel_path, status="operator", msg_id=msg_id,
+                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
 
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})

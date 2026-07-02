@@ -27,7 +27,7 @@ import { sendPrivateAudio } from '../../../services/api.js';
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useMediaUpload({
-  api, phone, conversationId, channelId, sandbox, sessionClosed,
+  api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
   setContactData, updateMsgByLocalId, openTemplatePicker,
 }) {
@@ -141,7 +141,8 @@ export function useMediaUpload({
     // otherwise it is a manual operator send (status='operator').
     const base = sandbox
       ? { role: 'user' }
-      : { role: 'assistant', status: 'operator' };
+      : { role: 'assistant', status: 'operator',
+          sent_by_name: (currentUser && currentUser.name) || undefined };
 
     let optimistic, sendPromise;
     if (media.type === 'image') {

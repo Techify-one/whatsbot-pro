@@ -402,6 +402,10 @@ r = client.post("/api/contacts/5511999990001/send", json={"message": "Teste manu
 check("POST /send -> 200", r.status_code == 200)
 check("POST /send -> message sent", "enviada" in r.json()["data"]["message"].lower())
 check("POST /send -> gowa called", mock_gowa_client.send_message.called)
+# Sem usuário logado (instalação aberta): a mensagem manual não carrega remetente,
+# então o painel cai no rótulo "Manual" (sent_by_name ausente).
+_nm_last = message_repo.get_last(contact_repo.get_full_contact("5511999990001")["id"])
+check("POST /send (sem usuário) -> sem sent_by_name", not _nm_last.get("sent_by_name"))
 
 # Empty message
 r = client.post("/api/contacts/5511999990001/send", json={"message": ""})
@@ -1838,6 +1842,10 @@ _imrepo.set_inboxes_for_user(_at["id"], [1])
 r = client.post(f"/api/contacts/{_scope_phone}/send",
                 json={"message": "oi agora vai", "conversation_id": _conv2["id"]}, headers=_h_att)
 check("send (membro da inbox) -> 200", r.status_code == 200)
+# Envio manual autenticado carimba o nome do operador (exibido no lugar de "Manual").
+_att_last = message_repo.get_last(_cid)
+check("send (autenticado) -> persiste sent_by_name do operador",
+      _att_last.get("sent_by_name") == "A2")
 # Sem read_all e membro só da inbox 1: enviar para conversa de OUTRA inbox bloqueia.
 from db.repositories import inbox_repo as _ibx_repo
 if _chrepo.get("scope_ch") is None:
