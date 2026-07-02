@@ -63,18 +63,40 @@ async def _resolve_agent_spec(handler, contact, sender):
     return spec
 
 
-def _handoff_notice(from_agent: str, reason: str | None) -> str:
+def _handoff_notice(from_agent: str, reason: str | None,
+                    is_reinvoke: bool = False) -> str:
     """Synthetic user turn injected on a routing hop (plano 29 A2, estilo nexus).
 
     Threads WHY the conversation arrived: the target agent sees the sender and
     the ``transferir_agente`` motivo instead of receiving the hop blind.
+    ``is_reinvoke`` (A3) tells a revisited agent to re-decide with the motivo
+    instead of repeating its earlier take (nexus ``skip_history`` equivalent).
     """
     lines = [f"[REDIRECIONAMENTO de {from_agent}]"]
     if reason:
         lines.append(f"Motivo: {reason}")
     lines.append("")
-    lines.append("(responda à mensagem atual do cliente acima)")
+    if is_reinvoke:
+        lines.append("(você já atendeu esta conversa neste turno — reavalie com o "
+                     "motivo acima e responda ao cliente; não repita a mesma "
+                     "transferência)")
+    else:
+        lines.append("(responda à mensagem atual do cliente acima)")
     return "\n".join(lines)
+
+
+def _resolve_max_route_depth() -> int:
+    """Depth cap do routing (plano 29 A3): config ``ai_max_route_depth``.
+
+    Fallback no default do módulo (:data:`ai_engine.routing.MAX_ROUTING_DEPTH`);
+    valores malformados/não-positivos caem no default (fail safe, not open)."""
+    from ai_engine import routing as _routing
+    try:
+        from db.repositories import config_repo
+        n = int(config_repo.get("ai_max_route_depth", _routing.MAX_ROUTING_DEPTH))
+        return n if n >= 1 else _routing.MAX_ROUTING_DEPTH
+    except Exception:
+        return _routing.MAX_ROUTING_DEPTH
 
 
 def _last_transfer_reason(executed_tools: list[dict] | None) -> str | None:
@@ -94,10 +116,11 @@ async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
     aborts (so within-turn routing stops on the last good reply instead of
     sending an empty message). Used only for handoff continuations.
 
-    ``handoff`` (plano 29 A2): ``{"from": agent_key, "reason": str | None}`` —
-    when present, a synthetic user turn (:func:`_handoff_notice`) is appended
-    AFTER the frozen context so this hop sees who handed the conversation over
-    and why (the nexus ``[REDIRECIONAMENTO de X]`` pattern).
+    ``handoff`` (plano 29 A2/A3): ``{"from": agent_key, "reason": str | None,
+    "is_reinvoke": bool}`` — when present, a synthetic user turn
+    (:func:`_handoff_notice`) is appended AFTER the frozen context so this hop
+    sees who handed the conversation over and why (the nexus
+    ``[REDIRECIONAMENTO de X]`` pattern).
     """
     eff_split = bool(ai_settings.value(
         getattr(contact, "channel_id", "default"),
@@ -113,7 +136,8 @@ async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
         messages.append({
             "role": "user",
             "content": _handoff_notice(handoff.get("from") or "?",
-                                       handoff.get("reason")),
+                                       handoff.get("reason"),
+                                       bool(handoff.get("is_reinvoke"))),
         })
     messages = await apply_filter("filter.llm.messages", messages, {"phone": sender})
     if messages is None:
@@ -154,7 +178,7 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
     def _pending_reason():
         return _last_transfer_reason(last_hop["executed"])
 
-    async def _run_hop(agent_key):
+    async def _run_hop(agent_key, *, is_reinvoke=False):
         try:
             spec = agent_factory.build_for_contact(handler, contact)
         except agent_factory.AgentResolutionError:
@@ -163,7 +187,8 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
             return None
         set_execution_agent_key(spec.agent_key)
         set_current_step_agent(spec.agent_key)
-        handoff = {"from": last_hop["agent"], "reason": _pending_reason()}
+        handoff = {"from": last_hop["agent"], "reason": _pending_reason(),
+                   "is_reinvoke": is_reinvoke}
         hop = await _run_routing_hop(
             handler, contact, sender, context_messages, spec,
             disable_tools=disable_tools, handoff=handoff)
@@ -186,6 +211,7 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
     result, steps = await _routing.run_with_routing(
         first_result=first_result, first_agent_key=first_spec.agent_key,
         resolve_next=_resolve_next, run_hop=_run_hop,
+        max_depth=_resolve_max_route_depth(),
         get_reason=_pending_reason)
     if steps:
         set_execution_routing_steps(steps)
