@@ -90,6 +90,13 @@ export default function QuickReplies({ initialEntity }) {
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
+
   async function load() {
     setLoading(true);
     const res = await getQuickReplies();
@@ -156,8 +163,10 @@ export default function QuickReplies({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${QuickReplyForm} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${QuickReplyForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${QuickReplyForm} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+        ${editing ? html`<${QuickReplyForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
