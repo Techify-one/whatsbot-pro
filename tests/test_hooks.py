@@ -64,5 +64,19 @@ check("config malformado (cfg não-dict) -> None",
 check("call_limit bool é ignorado (True não é limite)",
       check_hooks({"x": {"call_limit": True}}, "x", [{"tool": "x"}]) is None)
 
+# ── Caracterização plano 29 (Fase A0) — baseline ANTES dos guardrails A1 ──
+# Estes checks documentam o comportamento ATUAL; A1 muda cada um de propósito
+# (success-aware, lista de priors, default global) e atualiza os checks junto.
+check("A0: prior que rodou e FALHOU ainda satisfaz requires_prior_call (muda em A1)",
+      check_hooks(cfg2, "pagar",
+                  [{"tool": "autenticar", "result": "[ERRO] credencial inválida"}]) is None)
+check("A0: requires_prior_call em LISTA é ignorado — não bloqueia (muda em A1)",
+      check_hooks({"pagar": {"requires_prior_call": ["autenticar"]}}, "pagar", []) is None)
+check("A0: tool sem call_limit próprio é ilimitada — sem default global (muda em A1)",
+      check_hooks({}, "buscar", [{"tool": "buscar"}] * 50) is None)
+_blk = check_hooks({"buscar": {"call_limit": 1}}, "buscar", [{"tool": "buscar"}])
+check("A0: mensagem de bloqueio não orienta rota de escape (muda em A1)",
+      _blk is not None and "transferir_agente" not in _blk)
+
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
