@@ -33,17 +33,11 @@ def test_url_postgres_do_env_aceita(tmp_path: Path, monkeypatch):
     assert resolve_database_url(tmp_path) == url
 
 
-def test_url_postgres_do_database_json_aceita(tmp_path: Path, monkeypatch):
+def test_database_json_nao_e_mais_lido(tmp_path: Path, monkeypatch):
+    """Plano 29 C4: o override storages/database.json morreu — só DATABASE_URL."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
     (tmp_path / "database.json").write_text(
         '{"url": "postgresql+psycopg://u:p@db:5432/whatsbot"}', encoding="utf-8")
-    assert resolve_database_url(tmp_path).startswith("postgresql+psycopg://")
-
-
-def test_database_json_sqlite_rejeitado(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    (tmp_path / "database.json").write_text(
-        '{"url": "sqlite:///x.db"}', encoding="utf-8")
     with pytest.raises(RuntimeError):
         resolve_database_url(tmp_path)
 

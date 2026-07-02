@@ -1,26 +1,21 @@
 """SQLAlchemy engine factory.
 
-Postgres-only (plano 29 Eixo C): the DATABASE_URL is resolved with the priority
-(first match wins):
-
-1. Environment variable ``DATABASE_URL`` (covers Docker/Coolify + ``.env`` via
-   launcher).
-2. Per-app config file ``storages/database.json`` (legacy local override).
-
-There is NO SQLite fallback anymore — a missing/non-Postgres URL fails the boot
-with an actionable error. Only the engine is exposed; everything else
-(connection pooling, dialect setup) is internal.
+Postgres-only (plano 29 Eixo C): the DATABASE_URL comes EXCLUSIVELY from the
+``DATABASE_URL`` environment variable (``.env`` via launcher, Docker/Coolify
+envs). There is NO SQLite fallback and NO ``storages/database.json`` override
+anymore — a missing/non-Postgres URL fails the boot with an actionable error.
+Only the engine is exposed; everything else (connection pooling, dialect setup)
+is internal.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
@@ -30,36 +25,9 @@ logger = logging.getLogger(__name__)
 
 _engine: Optional[Engine] = None
 _db_url: Optional[str] = None
-_sqlite_path: Optional[Path] = None  # only set when dialect is sqlite
 
 
 # ── URL resolution ────────────────────────────────────────────────────────
-
-CONFIG_FILENAME = "database.json"
-
-
-def _config_file_path(storages_dir: Path) -> Path:
-    return storages_dir / CONFIG_FILENAME
-
-
-def _read_url_from_file(storages_dir: Path) -> Optional[str]:
-    """Return a DATABASE_URL declared in ``storages/database.json`` if any.
-
-    Schema:
-        {"url": "postgresql+psycopg://user:pass@host:5432/db"}
-    Returns ``None`` if the file is missing or has no ``url`` key.
-    """
-    path = _config_file_path(storages_dir)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        url = (data or {}).get("url", "").strip()
-        return url or None
-    except Exception as exc:
-        logger.warning("Could not parse %s: %s — falling back to defaults", path, exc)
-        return None
-
 
 def _redact(url: str) -> str:
     """Strip credentials from a URL for logs/errors (never leak the password)."""
@@ -78,18 +46,15 @@ _MISSING_URL_MSG = (
 )
 
 
-def resolve_database_url(storages_dir: Path) -> str:
-    """Resolve the Postgres URL (ENV > ``database.json``) — fail-fast otherwise.
+def resolve_database_url(storages_dir: Path | None = None) -> str:
+    """Resolve the Postgres URL from the environment — fail-fast otherwise.
 
-    Plano 29 C0: no SQLite default. A missing URL or a non-Postgres dialect
-    raises ``RuntimeError`` with an actionable message instead of silently
-    booting on a local file DB.
+    Plano 29 C0/C4: no SQLite default and no ``database.json`` override. A
+    missing URL or a non-Postgres dialect raises ``RuntimeError`` with an
+    actionable message instead of silently booting on a local file DB.
+    ``storages_dir`` is accepted for call-site compatibility and ignored.
     """
     url = os.environ.get("DATABASE_URL", "").strip()
-    source = "environment"
-    if not url:
-        url = _read_url_from_file(storages_dir) or ""
-        source = str(_config_file_path(storages_dir))
     if not url:
         raise RuntimeError(_MISSING_URL_MSG)
     if not url.startswith("postgresql"):
@@ -97,22 +62,15 @@ def resolve_database_url(storages_dir: Path) -> str:
             f"DATABASE_URL inválida ({_redact(url)}): o WhatsBot é Postgres-only "
             f"(plano 29). Use postgresql+psycopg://usuario:senha@host:5432/whatsbot."
         )
-    logger.info("Using DATABASE_URL from %s", source)
+    logger.info("Using DATABASE_URL from environment")
     return url
-
-
-def write_url_to_file(storages_dir: Path, url: str) -> None:
-    """Persist a DATABASE_URL into the local config file."""
-    storages_dir.mkdir(parents=True, exist_ok=True)
-    path = _config_file_path(storages_dir)
-    path.write_text(json.dumps({"url": url}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ── Engine lifecycle ──────────────────────────────────────────────────────
 
 def init_engine(url: str) -> Engine:
     """Create the module-level engine. Idempotent if called with the same URL."""
-    global _engine, _db_url, _sqlite_path
+    global _engine, _db_url
 
     if _engine is not None and _db_url == url:
         return _engine
@@ -121,62 +79,31 @@ def init_engine(url: str) -> Engine:
         _engine.dispose()
         _engine = None
 
-    is_sqlite = url.startswith("sqlite")
-    is_psycopg = url.startswith("postgresql+psycopg")
     connect_args: dict = {}
-
-    if is_sqlite:
-        # Match the legacy threading model: a single connection may be reused
-        # across threads (FastAPI runs blocking calls via asyncio.to_thread).
-        connect_args["check_same_thread"] = False
-        # Cache the resolved file path for diagnostics / migrate-to-postgres.
-        if url.startswith("sqlite:///"):
-            _sqlite_path = Path(url.removeprefix("sqlite:///"))
-        else:
-            _sqlite_path = None
-    else:
-        _sqlite_path = None
-        if is_psycopg:
-            # Disable client-side prepared statements. Managed Postgres services
-            # like Neon and Supabase expose a PgBouncer pooler in transaction
-            # mode by default, which assigns a different backend per
-            # transaction. psycopg3's prepared statement cache (default
-            # ``prepare_threshold=5``) breaks under that routing: a name
-            # registered on backend A is referenced from backend B and either
-            # "does not exist" or collides. The cost of disabling prepared
-            # statements is a small per-query overhead (re-parsing on the
-            # server) — irrelevant at WhatsBot's scale and worth the
-            # plug-and-play compatibility with any pooled endpoint.
-            connect_args["prepare_threshold"] = None
+    if url.startswith("postgresql+psycopg"):
+        # Disable client-side prepared statements. Managed Postgres services
+        # like Neon and Supabase expose a PgBouncer pooler in transaction
+        # mode by default, which assigns a different backend per
+        # transaction. psycopg3's prepared statement cache (default
+        # ``prepare_threshold=5``) breaks under that routing: a name
+        # registered on backend A is referenced from backend B and either
+        # "does not exist" or collides. The cost of disabling prepared
+        # statements is a small per-query overhead (re-parsing on the
+        # server) — irrelevant at WhatsBot's scale and worth the
+        # plug-and-play compatibility with any pooled endpoint.
+        connect_args["prepare_threshold"] = None
 
     _engine = create_engine(
         url,
         future=True,
         connect_args=connect_args,
         # pool_pre_ping helps survive Postgres connection drops (idle timeouts).
-        pool_pre_ping=not is_sqlite,
+        pool_pre_ping=True,
     )
-
-    if is_sqlite:
-        _attach_sqlite_pragmas(_engine)
 
     _db_url = url
     logger.info("Database engine initialized (dialect=%s)", _engine.dialect.name)
     return _engine
-
-
-def _attach_sqlite_pragmas(engine: Engine) -> None:
-    """Apply WAL/foreign_keys/busy_timeout on every new SQLite connection."""
-
-    @event.listens_for(engine, "connect")
-    def _on_connect(dbapi_conn, _connection_record):
-        cursor = dbapi_conn.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=5000")
-        finally:
-            cursor.close()
 
 
 def get_engine() -> Engine:
@@ -193,24 +120,14 @@ def get_database_url() -> str:
     return _db_url
 
 
-def get_sqlite_path() -> Optional[Path]:
-    """Return the on-disk SQLite path if the engine is SQLite, else ``None``."""
-    return _sqlite_path
-
-
-def is_sqlite() -> bool:
-    return _engine is not None and _engine.dialect.name == "sqlite"
-
-
 def is_postgres() -> bool:
     return _engine is not None and _engine.dialect.name == "postgresql"
 
 
 def dispose_engine() -> None:
-    """Close the pool — used by the migration flow before swapping URLs."""
-    global _engine, _db_url, _sqlite_path
+    """Close the pool (tests and shutdown paths)."""
+    global _engine, _db_url
     if _engine is not None:
         _engine.dispose()
     _engine = None
     _db_url = None
-    _sqlite_path = None

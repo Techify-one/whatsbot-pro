@@ -2,7 +2,6 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { markAllUnread, markAllRead } from '../services/api.js';
-import { DatabaseSettings } from './DatabaseSettings.js';
 
 const html = htm.bind(h);
 
@@ -39,7 +38,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
-  // (marcar-atendimentos | avisos | avancado | banco). Roda uma vez, quando o
+  // (marcar-atendimentos | avisos | avancado). Roda uma vez, quando o
   // conteúdo já montou (config carregada).
   const sectionScrolledRef = useRef(false);
   useEffect(() => {
@@ -343,10 +342,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           ` : null}
         </div>
       <//>
-
-      <div id="banco" class="scroll-mt-4">
-        <${DatabaseSettings} onNotify=${onNotify} />
-      </div>
 
       <!-- Save Button (sticky) -->
       <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">
