@@ -22,11 +22,36 @@ const html = htm.bind(h);
 const KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const RESERVED = ['admin', 'gestor', 'atendente'];
 
+// ── Modal de confirmação in-app (substitui o confirm() nativo do navegador) ──
+function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = false, busy = false, onConfirm, onClose }) {
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-sm"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[15px] font-medium text-wa-text">${title}</div>
+          <button class="text-wa-secondary hover:text-wa-text text-xl leading-none" onClick=${onClose}>×</button>
+        </div>
+        <div class="text-[13px] text-wa-secondary mb-4 break-words">${message}</div>
+        <div class="flex gap-2 justify-end">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onClose} disabled=${busy}>Cancelar</button>
+          <button
+            class="px-4 py-2 rounded-md text-[14px] text-white transition-opacity disabled:opacity-50 ${danger ? 'bg-red-600 hover:opacity-90' : 'bg-wa-teal hover:opacity-90'}"
+            onClick=${onConfirm} disabled=${busy}>${busy ? 'Aguarde…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // ── New-role form ───────────────────────────────────────────────────
-function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
+// `seed` (opcional) pré-preenche nome e permissões ao duplicar um grupo — a
+// chave fica em branco de propósito (precisa ser única).
+function NewRoleForm({ catalog, seed, onSubmit, onCancel, busy }) {
   const [key, setKey] = useState('');
-  const [name, setName] = useState('');
-  const [sel, setSel] = useState([]);
+  const [name, setName] = useState(seed?.name || '');
+  const [sel, setSel] = useState(seed?.permission_keys ? [...seed.permission_keys] : []);
 
   const keyErr = key && !KEY_RE.test(key)
     ? 'Use a-z, 0-9 e _ (começando por letra).'
@@ -37,7 +62,7 @@ function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
-      <div class="text-[14px] font-medium text-wa-text mb-3">Novo grupo de permissão</div>
+      <div class="text-[14px] font-medium text-wa-text mb-3">${seed ? 'Duplicar grupo de permissão' : 'Novo grupo de permissão'}</div>
       <div class="flex flex-col gap-3">
         <div class="flex gap-3 flex-wrap">
           <div class="flex-1 min-w-[160px]">
@@ -71,7 +96,7 @@ function NewRoleForm({ catalog, onSubmit, onCancel, busy }) {
 }
 
 // ── Single role card (with inline editor) ───────────────────────────
-function RoleCard({ role, catalog, onSave, onReset, onDelete, busy, editing, onOpen, onClose }) {
+function RoleCard({ role, catalog, onSave, onReset, onDelete, onDuplicate, busy, editing, onOpen, onClose }) {
   const isAdmin = role.key === 'admin';
   const isSystem = !!role.is_system;
   const [sel, setSel] = useState([...(role.permission_keys || [])]);
@@ -99,17 +124,21 @@ function RoleCard({ role, catalog, onSave, onReset, onDelete, busy, editing, onO
             ${isAdmin ? 'Todas as permissões (grupo fixo)' : `${(role.permission_keys || []).length} permissão(ões)`}
           </div>
         </div>
-        ${!isAdmin && !editing ? html`
+        ${!editing ? html`
           <div class="flex gap-1 shrink-0 flex-wrap justify-end">
+            ${!isAdmin ? html`
+              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                onClick=${onOpen}>Editar permissões</button>
+            ` : null}
             <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-              onClick=${onOpen}>Editar permissões</button>
-            ${isSystem ? html`
+              onClick=${() => onDuplicate(role)}>Duplicar</button>
+            ${!isAdmin ? (isSystem ? html`
               <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                 onClick=${() => onReset(role)}>Restaurar padrão</button>
             ` : html`
               <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
                 onClick=${() => onDelete(role)}>Excluir</button>
-            `}
+            `) : null}
           </div>
         ` : null}
       </div>
@@ -148,10 +177,13 @@ export default function RolesManager({ initialEntity }) {
   const [catalog, setCatalog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // creating: false = fechado; true = grupo em branco; objeto = seed de duplicação.
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   // Papel aberto no editor (controla os cards) — espelha /users/roles/<key>.
   const [editingKey, setEditingKey] = useState(null);
+  // Grupo pendente de exclusão (abre o modal de confirmação).
+  const [deleting, setDeleting] = useState(null);
 
   async function load() {
     setLoading(true); setError('');
@@ -212,12 +244,24 @@ export default function RolesManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao restaurar padrão.');
   }
 
+  function startDuplicate(role) {
+    // Nova cópia como grupo custom: leva nome + permissões, mas chave em branco.
+    // O admin é short-circuit (permission_keys vazio) → semeia com todo o catálogo.
+    const perms = role.key === 'admin'
+      ? (catalog || []).map(p => p.key)
+      : [...(role.permission_keys || [])];
+    setCreating({
+      name: `${role.label || role.name || role.key} (cópia)`,
+      permission_keys: perms,
+    });
+    setEditingKey(null); setError('');
+  }
+
   async function handleDelete(role) {
-    if (!confirm(`Excluir o grupo de permissão "${role.label || role.key}"? Esta ação não pode ser desfeita.`)) return;
     setBusy(true); setError('');
     const res = await deleteRole(role.id);
     setBusy(false);
-    if (res && res.ok) load();
+    if (res && res.ok) { setDeleting(null); load(); }
     else setError((res && res.error) || 'Falha ao excluir o grupo de permissão.');
   }
 
@@ -236,18 +280,27 @@ export default function RolesManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${NewRoleForm} catalog=${catalog} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+      ${creating ? html`<${NewRoleForm} key=${creating === true ? 'new' : creating.name}
+        catalog=${catalog} seed=${creating === true ? null : creating}
+        onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
       <div class="flex flex-col gap-2">
         ${roles.map(role => html`
           <${RoleCard} key=${role.id} role=${role} catalog=${catalog}
-            onSave=${handleSave} onReset=${handleReset} onDelete=${handleDelete} busy=${busy}
+            onSave=${handleSave} onReset=${handleReset} onDelete=${(r) => { setDeleting(r); setError(''); }} onDuplicate=${startDuplicate} busy=${busy}
             editing=${editingKey === role.key && role.key !== 'admin'}
             onOpen=${() => setEditingKey(role.key)} onClose=${() => setEditingKey(null)} />
         `)}
       </div>
+
+      ${deleting ? html`<${ConfirmModal}
+        title="Excluir grupo de permissão"
+        message=${html`Excluir o grupo de permissão "${deleting.label || deleting.key}"? Esta ação não pode ser desfeita.`}
+        confirmLabel="Excluir" danger=${true} busy=${busy}
+        onConfirm=${() => handleDelete(deleting)}
+        onClose=${() => { if (!busy) setDeleting(null); }} />` : null}
     </div>
   `;
 }
