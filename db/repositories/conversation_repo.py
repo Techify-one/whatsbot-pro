@@ -10,6 +10,7 @@ import logging
 import time
 
 from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
+from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.repositories import conversation_query, conversation_label_repo
@@ -104,9 +105,10 @@ def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
            origin: str | None = None) -> dict:
     """Insert a new conversation. ``origin`` (plano 28) records who started the
     thread — ``inbound`` (customer), ``outbound``/``manual`` (operator), ``imported``
-    (chat import) — and drives the sidebar visibility gate. Always inserts (the
-    atendimento model allows multiple conversations per contact/inbox); the inbound
-    auto-create dedup lives in :func:`_create_open_atomic`."""
+    (chat import) — and drives the sidebar visibility gate. Always inserts — but at
+    most ONE conversation per (contact, inbox) may be OPEN (partial unique index
+    ``uq_atend_open_contact_inbox``, migration 0036; raises ``IntegrityError``
+    otherwise). The inbound auto-create dedup lives in :func:`_create_open_atomic`."""
     with get_engine().begin() as conn:
         return _insert_conversation(
             conn, inbox_id=inbox_id, contact_id=contact_id,
@@ -121,27 +123,40 @@ def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int
 
     Closes the brand-new-contact double-create: when two inbound messages of a
     contact with NO conversation yet resolve concurrently, both would otherwise
-    ``create`` a thread. Here the existence re-check and the insert run in ONE write
-    transaction — on SQLite the single-writer lock serializes them (the loser's
-    re-check sees the winner's committed row and reuses it). Returns
+    ``create`` a thread. The re-check inside the write transaction catches the
+    common case (the loser sees the winner's committed row and reuses it), but on
+    Postgres READ COMMITTED two concurrent transactions can both pass it — the
+    partial unique index ``uq_atend_open_contact_inbox`` (one OPEN conversation
+    per contact/inbox, migration 0036) is the real backstop: the loser's INSERT
+    raises ``IntegrityError`` and we adopt the winner's thread. Returns
     ``(conv, created)`` where ``created`` is False when an existing open thread was
     adopted. Only called when the pre-check already found no conversation at all, so
     the common path still inserts."""
-    with get_engine().begin() as conn:
-        existing = conn.execute(
-            select(conversations)
-            .where(conversations.c.contact_id == contact_id,
-                   conversations.c.inbox_id == inbox_id,
-                   conversations.c.status == "open")
-            .order_by(conversations.c.last_activity_at.desc())
-        ).mappings().first()
-        if existing is not None:
-            return dict(existing), False
-        row = _insert_conversation(
-            conn, inbox_id=inbox_id, contact_id=contact_id,
-            contact_inbox_id=contact_inbox_id, opened_at=opened_at,
-            ai_active=None, is_archived=0, active_agent_key=None, origin=origin)
-        return row, True
+    try:
+        with get_engine().begin() as conn:
+            existing = conn.execute(
+                select(conversations)
+                .where(conversations.c.contact_id == contact_id,
+                       conversations.c.inbox_id == inbox_id,
+                       conversations.c.status == "open")
+                .order_by(conversations.c.last_activity_at.desc())
+            ).mappings().first()
+            if existing is not None:
+                return dict(existing), False
+            row = _insert_conversation(
+                conn, inbox_id=inbox_id, contact_id=contact_id,
+                contact_inbox_id=contact_inbox_id, opened_at=opened_at,
+                ai_active=None, is_archived=0, active_agent_key=None, origin=origin)
+            return row, True
+    except IntegrityError:
+        # Loser of the open-conversation race (uq_atend_open_contact_inbox): the
+        # winner committed between our re-check and INSERT. Adopt its thread.
+        winner = get_open_for_contact_inbox(contact_id, inbox_id)
+        if winner is None:
+            raise
+        logger.info("open-conversation race for contact=%s inbox=%s: adopted #%s",
+                    contact_id, inbox_id, winner["id"])
+        return winner, False
 
 
 def get(conv_id: int) -> dict | None:
@@ -218,9 +233,12 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     ``origin`` (plano 28) stamps a brand-new conversation's provenance. Concurrency:
     if two inbound messages of a brand-new contact resolve in parallel, both see
     "no conversation" here — :func:`_create_open_atomic` re-checks + inserts inside
-    ONE write transaction, so the loser adopts the winner's thread (``event=None``)
-    instead of creating a duplicate. No DB unique constraint is used (the atendimento
-    model allows multiple conversations per contact/inbox by design).
+    ONE write transaction, and the partial unique index
+    ``uq_atend_open_contact_inbox`` (one OPEN conversation per contact/inbox,
+    migration 0036) backstops the Postgres race: the loser adopts the winner's
+    thread (``event=None``) instead of creating a duplicate. Multiple CLOSED
+    conversations per contact/inbox remain allowed (the atendimento model keeps
+    the history).
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(

@@ -1766,6 +1766,9 @@ check("inbox default seeded (id=1)", _inbox_seeded == 1)
 _ci = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
                              source_id=f"{_cid}@s.whatsapp.net")
 _conv1 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+# Índice parcial uq_atend_open_contact_inbox (migration 0036): no máximo UMA
+# conversa ABERTA por (contato, inbox) — fecha a 1ª antes de criar a 2ª.
+_conv_repo.set_status(_conv1["id"], "closed")
 _conv2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 check("conversation_repo.create -> display_id sequencial",
       _conv2["display_id"] == _conv1["display_id"] + 1)
@@ -2009,6 +2012,8 @@ section("Planos 16-20 (apagar, IA por conversa, atributos de sistema)")
 
 # ── P17: desligar IA entrega a conversa a quem desligou + zera agente; ligar
 #    rebinda o agente default e limpa o responsável humano (IA assume) ──
+# uq_atend_open_contact_inbox: fecha a conversa aberta do par antes de criar outra.
+_conv_repo.set_status(_conv2["id"], "closed")
 _p17 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17["id"], _mgr["id"])  # responsável humano + agente default
 # Operador autenticado desliga a IA -> assume a conversa.
@@ -2025,6 +2030,7 @@ check("P17 ai on -> ai_active=1", _d2["ai_active"] == 1)
 check("P17 ai on -> religa agente default", _d2["active_agent_key"] == "default")
 check("P17 ai on -> limpa responsável humano (IA assume)", _d2["assignee_user_id"] is None)
 # Legacy/open (sem identidade de operador) cai em "Não atribuídas".
+_conv_repo.set_status(_p17["id"], "closed")  # 1 aberta por (contato, inbox)
 _p17b = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17b["id"], _mgr["id"])
 r = client.post(f"/api/conversations/{_p17b['id']}/ai", json={"active": False})
@@ -2042,6 +2048,9 @@ with _get_engine().connect() as _conn:
         .order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
 _ciB = _ci_repo.get_or_create(inbox_id=1, contact_id=_cmdel.id,
                               source_id=f"{_cmdel.id}@s.whatsapp.net")
+# A conversa A (aberta pelo add_message acima) e a B não podem estar abertas ao
+# mesmo tempo no mesmo par (uq_atend_open_contact_inbox) — fecha a A antes.
+_conv_repo.set_status(_convA_id, "closed")
 _convB = _conv_repo.create(inbox_id=1, contact_id=_cmdel.id, contact_inbox_id=_ciB["id"])
 r = client.delete(f"/api/conversations/{_convA_id}")
 check("P16 DELETE conversa -> 200", r.status_code == 200)
