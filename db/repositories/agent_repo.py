@@ -21,6 +21,14 @@ from db.upsert import upsert, upsert_ignore
 
 DEFAULT_AGENT_KEY = "default"
 
+# Colunas versionadas que entram no snapshot de ``ai_agents_history`` (mesma
+# ordem/conteúdo do dict ``values`` montado em :func:`save`).
+_SNAPSHOT_COLS = (
+    "agent_key", "display_name", "prompt", "prompt_key", "model_config",
+    "tool_names", "enabled", "description", "is_router", "routing_targets",
+    "hooks_config", "version", "updated_at",
+)
+
 
 def _decode_json(value, fallback):
     return coerce_json(value, fallback)
@@ -151,6 +159,11 @@ def save(
         "updated_at": now,
     }
     with get_engine().begin() as conn:
+        # Único roteador (plano 29 Eixo B): salvar este agente como roteador
+        # REBAIXA qualquer outro (semântica radio) na MESMA transação — antes do
+        # upsert, para nunca violar o índice único parcial (0035).
+        if is_router:
+            _demote_other_routers(conn, agent_key, now)
         conn.execute(upsert(
             ai_agents, values, conflict_cols=["agent_key"],
             update_cols=["display_name", "prompt", "prompt_key", "model_config",
@@ -171,6 +184,47 @@ def save(
         else:
             agent_prompt_repo.record(agent_key, prompt or "", note=change_note, conn=conn)
     return _row_to_dict(values)
+
+
+def _demote_other_routers(conn, agent_key: str, now: float) -> list[str]:
+    """Set ``is_router = 0`` on every OTHER router, inside the caller's txn.
+
+    Radio semantics (plano 29 P2a): promoting an agent to router demotes the
+    current one. Each demotion bumps ``version`` and snapshots to history, so
+    the change trail / rollback keeps working for the demoted agent too.
+    """
+    rows = conn.execute(
+        select(ai_agents).where(ai_agents.c.is_router == 1,
+                                ai_agents.c.agent_key != agent_key)
+    ).mappings().all()
+    demoted: list[str] = []
+    for row in rows:
+        d = dict(row)
+        new_version = (d.get("version") or 0) + 1
+        conn.execute(
+            ai_agents.update()
+            .where(ai_agents.c.agent_key == d["agent_key"])
+            .values(is_router=0, version=new_version, updated_at=now)
+        )
+        snap = {k: d.get(k) for k in _SNAPSHOT_COLS}
+        snap.update({"is_router": 0, "version": new_version, "updated_at": now})
+        conn.execute(ai_agents_history.insert().values(
+            agent_key=d["agent_key"],
+            version=new_version,
+            snapshot=json.dumps(snap, ensure_ascii=False),
+            created_at=now,
+        ))
+        demoted.append(d["agent_key"])
+    return demoted
+
+
+def get_router() -> dict | None:
+    """The single router agent (plano 29 Eixo B), or ``None``."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(ai_agents).where(ai_agents.c.is_router == 1)
+        ).mappings().first()
+    return _row_to_dict(row) if row else None
 
 
 def list_history(agent_key: str) -> list[dict]:

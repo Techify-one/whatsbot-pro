@@ -250,6 +250,8 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
   // Routing targets: other agents only (can't route to itself).
   const selfKey = isNew ? trimmedKey : agent.agent_key;
   const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== selfKey);
+  // Único roteador (plano 29 Eixo B): salvar este como roteador rebaixa o atual.
+  const currentRouter = otherAgents.find(a => a.is_router);
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
@@ -380,6 +382,13 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
           <input type="checkbox" checked=${isRouter} onChange=${(e) => setIsRouter(e.target.checked)} />
           <span class="text-[14px] text-wa-text">É roteador (handoff/routing)</span>
         </label>
+
+        ${isRouter && currentRouter ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Só pode existir <b>um</b> roteador. Ao salvar, o roteador atual
+            (<b>${currentRouter.display_name || currentRouter.agent_key}</b>) deixará de ser roteador.
+          </div>
+        ` : null}
 
         ${isRouter ? html`
           <div>
