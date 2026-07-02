@@ -66,7 +66,8 @@ async def main():
         first_result="result-A", first_agent_key="A",
         resolve_next=f.resolve_next, run_hop=f.run_hop)
     check("1 handoff: result do agente final (B)", res == "result-B")
-    check("1 handoff: 1 step A→B", steps == [{"from": "A", "to": "B", "depth": 1}])
+    check("1 handoff: 1 step A→B",
+          steps == [{"from": "A", "to": "B", "depth": 1, "reason": None}])
     check("1 handoff: rodou só B", f.hops == ["B"])
 
     # Chained: A→B→C
@@ -120,8 +121,27 @@ async def main():
           [s["to"] for s in steps3] == ["B", "C"] and res3 == "result-C")
     check("A0: depth cap é hardcoded MAX_ROUTING_DEPTH=5 (vira config em A3)",
           routing.MAX_ROUTING_DEPTH == 5)
-    check("A0: steps não carregam 'reason' (ganham em A7/A2)",
-          steps3 and all("reason" not in s for s in steps3))
+
+    # ── Plano 29 A2/A7 — reason nos steps via get_reason ────────────────────
+    check("A2: sem get_reason, steps carregam reason=None",
+          steps3 and all(s.get("reason") is None for s in steps3))
+    f4 = Fake({"A": "B", "B": "C", "C": None})
+    _reasons = {"B": "oferta X não existe", "C": None}
+    res4, steps4 = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f4.resolve_next, run_hop=f4.run_hop,
+        get_reason=lambda: _reasons.get(f4.active))
+    check("A2: get_reason threada o motivo no step correspondente",
+          steps4[0].get("reason") == "oferta X não existe"
+          and steps4[1].get("reason") is None)
+    _boom = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: E731
+    f5 = Fake({"A": "B", "B": None})
+    res5, steps5 = await routing.run_with_routing(
+        first_result="result-A", first_agent_key="A",
+        resolve_next=f5.resolve_next, run_hop=f5.run_hop,
+        get_reason=_boom)
+    check("A2: get_reason que quebra não derruba o routing (reason=None)",
+          res5 == "result-B" and steps5[0].get("reason") is None)
 
 
 asyncio.run(main())

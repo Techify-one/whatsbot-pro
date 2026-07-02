@@ -16,8 +16,11 @@ nothing about agno, the DB, or the handler — so it is unit-testable in isolati
   aborted the hop).
 
 Returns ``(final_result, routing_steps)`` where ``routing_steps`` is the list of
-``{"from", "to", "depth"}`` handoffs taken (empty when no handoff happened — the
-common single-agent case, in which ``run_hop`` is never called again).
+``{"from", "to", "depth", "reason"}`` handoffs taken (empty when no handoff
+happened — the common single-agent case, in which ``run_hop`` is never called
+again). ``reason`` (plano 29 A2/A7) is the handoff motivo supplied by the
+optional ``get_reason`` callback (``None`` when absent) — the caller reads it
+off the previous hop's ``transferir_agente`` call.
 """
 
 from __future__ import annotations
@@ -27,12 +30,16 @@ MAX_ROUTING_DEPTH = 5
 
 
 async def run_with_routing(*, first_result, first_agent_key, resolve_next, run_hop,
-                           max_depth: int = MAX_ROUTING_DEPTH):
+                           max_depth: int = MAX_ROUTING_DEPTH, get_reason=None):
     """Drive within-turn handoffs starting from an already-run first hop.
 
     The first hop (``first_agent_key`` → ``first_result``) has already executed;
     this only handles continuations. Loops while the active agent keeps changing,
     capped so total runs (first + handoffs) never exceed ``max_depth``.
+
+    ``get_reason``: ``() -> str | None`` — called right before each hop runs;
+    returns the motivo of the pending handoff (recorded on the step, plano 29 A7).
+    Pure orchestration is preserved: the callback owns the extraction.
     """
     result = first_result
     current = first_agent_key
@@ -47,10 +54,16 @@ async def run_with_routing(*, first_result, first_agent_key, resolve_next, run_h
         if nxt in seen:
             # Cycle (A→B→A): stop to avoid bouncing within the depth budget.
             break
+        reason = None
+        if get_reason is not None:
+            try:
+                reason = get_reason()
+            except Exception:
+                reason = None
         hop = await run_hop(nxt)
         if hop is None:
             break  # filter aborted the hop — keep the last good result
-        steps.append({"from": current, "to": nxt, "depth": depth})
+        steps.append({"from": current, "to": nxt, "depth": depth, "reason": reason})
         result = hop
         current = nxt
         seen.add(nxt)
