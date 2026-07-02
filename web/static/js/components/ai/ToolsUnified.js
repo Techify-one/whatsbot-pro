@@ -80,6 +80,13 @@ export default function ToolsUnified({ initialEntity }) {
 
   const [confirmDelete, setConfirmDelete] = useState(null); // row pendente de exclusão
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editingCode || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editingCode, creating]);
+
   async function load() {
     setLoading(true);
     setError('');
@@ -340,8 +347,10 @@ export default function ToolsUnified({ initialEntity }) {
 
       ${error ? html`<div class="text-red-600 mb-3 text-sm">${error}</div>` : null}
 
-      ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} />` : null}
-      ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} />` : null}
+        ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-wa-secondary">Carregando…</div>` : null}
 
