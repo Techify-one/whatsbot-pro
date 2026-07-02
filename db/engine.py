@@ -1,14 +1,15 @@
-"""SQLAlchemy engine factory with dialect-aware setup.
+"""SQLAlchemy engine factory.
 
-The DATABASE_URL is resolved with the priority (first match wins):
+Postgres-only (plano 29 Eixo C): the DATABASE_URL is resolved with the priority
+(first match wins):
 
-1. Environment variable ``DATABASE_URL`` (covers Docker/Coolify deployments).
-2. Per-app config file ``storages/database.json`` (managed by the Settings UI on
-   Windows — see ``server.app`` migration endpoint).
-3. Default SQLite file ``storages/whatsbot.db`` (zero-config fallback).
+1. Environment variable ``DATABASE_URL`` (covers Docker/Coolify + ``.env`` via
+   launcher).
+2. Per-app config file ``storages/database.json`` (legacy local override).
 
-Only the engine is exposed; everything else (connection pooling, PRAGMAs,
-dialect detection) is internal.
+There is NO SQLite fallback anymore — a missing/non-Postgres URL fails the boot
+with an actionable error. Only the engine is exposed; everything else
+(connection pooling, dialect setup) is internal.
 """
 
 from __future__ import annotations
@@ -60,19 +61,44 @@ def _read_url_from_file(storages_dir: Path) -> Optional[str]:
         return None
 
 
+def _redact(url: str) -> str:
+    """Strip credentials from a URL for logs/errors (never leak the password)."""
+    if "@" in url and "://" in url:
+        scheme, rest = url.split("://", 1)
+        _creds, host_part = rest.split("@", 1)
+        return f"{scheme}://***@{host_part}"
+    return url
+
+
+_MISSING_URL_MSG = (
+    "DATABASE_URL não configurada. O WhatsBot é Postgres-only (plano 29): "
+    "configure a variável de ambiente DATABASE_URL="
+    "postgresql+psycopg://usuario:senha@host:5432/whatsbot "
+    "(via .env no dev/Docker, ou nas envs do Coolify) e reinicie."
+)
+
+
 def resolve_database_url(storages_dir: Path) -> str:
-    """Apply the ENV > file > sqlite-default precedence to pick a DB URL."""
+    """Resolve the Postgres URL (ENV > ``database.json``) — fail-fast otherwise.
+
+    Plano 29 C0: no SQLite default. A missing URL or a non-Postgres dialect
+    raises ``RuntimeError`` with an actionable message instead of silently
+    booting on a local file DB.
+    """
     url = os.environ.get("DATABASE_URL", "").strip()
-    if url:
-        logger.info("Using DATABASE_URL from environment")
-        return url
-    url = _read_url_from_file(storages_dir)
-    if url:
-        logger.info("Using DATABASE_URL from %s", _config_file_path(storages_dir))
-        return url
-    storages_dir.mkdir(parents=True, exist_ok=True)
-    sqlite_path = storages_dir / "whatsbot.db"
-    return f"sqlite:///{sqlite_path}"
+    source = "environment"
+    if not url:
+        url = _read_url_from_file(storages_dir) or ""
+        source = str(_config_file_path(storages_dir))
+    if not url:
+        raise RuntimeError(_MISSING_URL_MSG)
+    if not url.startswith("postgresql"):
+        raise RuntimeError(
+            f"DATABASE_URL inválida ({_redact(url)}): o WhatsBot é Postgres-only "
+            f"(plano 29). Use postgresql+psycopg://usuario:senha@host:5432/whatsbot."
+        )
+    logger.info("Using DATABASE_URL from %s", source)
+    return url
 
 
 def write_url_to_file(storages_dir: Path, url: str) -> None:
