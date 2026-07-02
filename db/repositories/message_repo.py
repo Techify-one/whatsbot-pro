@@ -17,6 +17,8 @@ def add(contact_id: int, role: str, content: str, *,
         status: str | None = None, msg_id: str | None = None,
         reply_to_msg_id: str | None = None,
         conversation_id: int | None = None,
+        sent_by_user_id: int | None = None,
+        sent_by_name: str | None = None,
         ts: float | None = None) -> dict:
     """Insert a message and return it as a dict.
 
@@ -36,6 +38,8 @@ def add(contact_id: int, role: str, content: str, *,
             msg_id=msg_id,
             reply_to_msg_id=reply_to_msg_id,
             conversation_id=conversation_id,
+            sent_by_user_id=sent_by_user_id,
+            sent_by_name=sent_by_name,
         ))
         new_id = result.inserted_primary_key[0]
     return {
@@ -49,6 +53,7 @@ def add(contact_id: int, role: str, content: str, *,
         "msg_id": msg_id,
         "reply_to_msg_id": reply_to_msg_id,
         "conversation_id": conversation_id,
+        "sent_by_name": sent_by_name,
     }
 
 
@@ -361,6 +366,11 @@ def _row_to_dict(row) -> dict:
     # `reply_to_msg_id` may be absent on old rows read before the column existed.
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]
+    # Nome (snapshot) do operador que enviou a mensagem manual. Ausente em linhas
+    # legadas / echo / IA → o frontend cai em "Manual". Só expõe o nome (o
+    # sent_by_user_id é interno e não vai ao cliente).
+    if row.get("sent_by_name"):
+        d["sent_by_name"] = row["sent_by_name"]
     d["_id"] = row["id"]
     # conversa-cêntrico (plano 11): expõe a thread de pertencimento ao frontend,
     # para montar permalink de mensagem (/conversations/<id>?message=<_id>) mesmo

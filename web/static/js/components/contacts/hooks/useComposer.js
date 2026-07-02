@@ -37,7 +37,7 @@ const INPUT_MAX_HEIGHT = 120;
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useComposer({
-  api, phone, conversationId, channelId, sandbox, sessionClosed,
+  api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
 }) {
   const [input, setInput] = useState('');
@@ -203,6 +203,7 @@ export function useComposer({
         ? { role: 'user', content: text, ts: msgTs, _localId: localId, _status: 'sending',
             reply_to_msg_id: replyTo || undefined }
         : { role: 'assistant', content: text, ts: msgTs, status: 'operator',
+            sent_by_name: (currentUser && currentUser.name) || undefined,
             _localId: localId, _status: 'sending', reply_to_msg_id: replyTo || undefined }],
     } : prev);
 

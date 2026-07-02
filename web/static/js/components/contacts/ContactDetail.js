@@ -78,7 +78,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const autocompleteRef = useRef(null);
 
   const composer = useComposer({
-    api: _api, phone, conversationId, channelId, sandbox, sessionClosed,
+    api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
     setContactData, updateMsgByLocalId,
     updateMenus: (el, val) => autocompleteRef.current && autocompleteRef.current.updateMenus(el, val),
     closeMentionMenu: () => autocompleteRef.current && autocompleteRef.current.setMentionMenu(null),
@@ -92,7 +92,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   autocompleteRef.current = autocomplete;
 
   const media = useMediaUpload({
-    api: _api, phone, conversationId, channelId, sandbox, sessionClosed,
+    api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
     mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
     aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
     setContactData, updateMsgByLocalId, openTemplatePicker,
@@ -187,7 +187,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       : (info && info.name ? info.name.replace(/^~/, '') : phone);
     const senderLabel = sandbox
       ? (qIsUser ? 'Você' : 'IA')
-      : (qIsUser ? (qSender || dn) : (qmsg.status === 'operator' ? 'Manual' : 'IA'));
+      : (qIsUser ? (qSender || dn) : (qmsg.status === 'operator' ? (qmsg.sent_by_name || 'Manual') : 'IA'));
     const sColor = senderColor(qIsUser, qmsg.status === 'operator');
     return { senderLabel, senderColor: sColor, fromMe, snippet: (text || '').replace(/\s+/g, ' ').slice(0, 140) };
   }
