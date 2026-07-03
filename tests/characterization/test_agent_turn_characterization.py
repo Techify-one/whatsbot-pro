@@ -421,7 +421,7 @@ def test_agent_turn_ai_takeover_dedupe(build_app):
 
 # ── A2b.5 — multi-agent routing hop (handoff within one turn) ─────────────────
 
-def test_agent_turn_routing_hop(build_app):
+def test_agent_turn_routing_hop(build_app, request):
     """Within-turn multi-agent handoff: the first agent calls ``transferir_agente``
     (a real CORE tool) to hand off to a second agent, which then answers the SAME
     message. Characterizes ``_continue_routing`` running a second AGNO hop and the
@@ -438,13 +438,20 @@ def test_agent_turn_routing_hop(build_app):
     # Plano 30 F3 (D3): ``transferir_agente`` nasce DESLIGADA em instalação nova,
     # e o assunto deste teste é a MÁQUINA de routing (que pressupõe a tool ligada
     # pelo operador) — liga os dois gates ANTES do boot do app pra tool entrar no
-    # registry e no schema como antes.
+    # registry e no schema como antes. O finalizer devolve o estado nasce-OFF:
+    # sem ele, os goldens de killswitch/execution (que capturam a lista de tools
+    # de um app fresh SEM transferir_agente) quebram por ordem de coleta.
     from agent import ai_builtin_tools
     from db.repositories import tool_override_repo, tool_repo
     ai_builtin_tools.seed_builtin_tools()
     tool_repo.set_enabled("transferir_agente", True)
     tool_override_repo.ensure("transferir_agente", None, default_enabled=True)
     tool_override_repo.upsert("transferir_agente", enabled=True)
+
+    def _restore_born_off():
+        tool_repo.set_enabled("transferir_agente", False)
+        tool_override_repo.upsert("transferir_agente", enabled=False)
+    request.addfinalizer(_restore_born_off)
 
     built = build_app(["gowa"], settings_overrides={"message_batch_delay": 0})
 
