@@ -30,6 +30,11 @@ import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
 
 const html = htm.bind(h);
 
+// Builtins com delete REAL liberado (plano 30 WS3/D2). Espelha
+// DELETABLE_BUILTINS em agent/ai_builtin_tools.py — o backend grava um
+// tombstone (config.deleted_builtin_tools) pra tool não voltar no boot.
+const DELETABLE_BUILTINS = new Set(['transferir_agente']);
+
 // Deep-link (Plano 24): ?q= reflete a busca (replace); ?history=1 é aditivo ao
 // path /ai/tools/{name} (o path é dono do editor aberto; a flag abre o histórico).
 const TOOLS_URL_SCHEMA = [
@@ -403,7 +408,7 @@ export default function ToolsUnified({ initialEntity }) {
                         class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                       >Histórico</button>
                     ` : null}
-                    ${r.kind === 'code' ? html`
+                    ${(r.kind === 'code' || DELETABLE_BUILTINS.has(r.name)) ? html`
                       <button
                         onClick=${() => setConfirmDelete(r)}
                         disabled=${busy === r.name}
@@ -440,7 +445,9 @@ export default function ToolsUnified({ initialEntity }) {
       ${confirmDelete ? html`
         <${ConfirmModal}
           title="Excluir tool"
-          message=${html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
+          message=${confirmDelete.kind === 'builtin'
+            ? html`Excluir a tool core <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker. Esta ação é <b>definitiva pela interface</b> — ela não volta no próximo boot; para tê-la de volta, recrie-a como tool de código (ou remova-a da config <code>deleted_builtin_tools</code> direto no banco).`
+            : html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
           confirmLabel="Excluir"
           danger=${true}
           busy=${busy === confirmDelete.name}

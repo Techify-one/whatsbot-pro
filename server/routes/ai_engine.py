@@ -362,7 +362,28 @@ def register_routes(app, deps):
     async def delete_ai_tool(name: str):
         existing = await asyncio.to_thread(tool_repo.get, name)
         if existing and existing.get("kind") == "builtin":
-            return _err("Tools core não podem ser excluídas (apenas editadas ou desativadas).", status=400)
+            # Plano 30 WS3 (D2/D8): delete REAL de builtin, restrito à allowlist
+            # DELETABLE_BUILTINS. Grava o tombstone (config.deleted_builtin_tools)
+            # pra tool não voltar no boot (os dois caminhos de re-seed pulam
+            # nomes tombados), apaga as rows ai_tools + tool_overrides e
+            # desregistra do processo vivo. Sem rota de reinstalar — recriação
+            # é manual (tool code-in-DB ou editar a config no banco).
+            from agent import ai_builtin_tools
+            from db.repositories import tool_override_repo
+            if name not in ai_builtin_tools.DELETABLE_BUILTINS:
+                return _err("Tools core não podem ser excluídas (apenas editadas ou desativadas).", status=400)
+            await asyncio.to_thread(ai_builtin_tools.tombstone_builtin, name)
+            await asyncio.to_thread(tool_repo.delete, name)
+            await asyncio.to_thread(tool_override_repo.delete, name)
+            try:
+                deps.agent_handler.unregister_tool(name)
+                deps.agent_handler.refresh_tool_overrides()
+            except Exception as e:
+                logger.warning("delete builtin '%s': unregister falhou (%s)", name, e)
+            _emit_changed("tool", name)
+            schedule_restart(f"builtin tool deleted: {name}")
+            logger.info("Builtin tool '%s' deletada (tombstone gravado)", name)
+            return _ok({"deleted": True, "tombstoned": True})
         deleted = await asyncio.to_thread(tool_repo.delete, name)
         if not deleted:
             return _err("Tool não encontrada.", status=404)
