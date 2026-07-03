@@ -154,11 +154,11 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Pronto quando:** mesmo forçando um `conversation_id` divergente no payload, o card aparece na thread aberta; `node --test` dos módulos puros (`messages.js`) verde.
 
 #### Status de execução — Fase F1b
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _()_
-- **Problemas / pendências:** _()_
-- **Verificação:** _()_
+**Estado:** ✅ Concluída (2026-07-03)
+- **O que foi feito:** o ternário exclusivo do roteamento do `new_message` em [useConversationWsEvents.js](../web/static/js/components/contacts/hooks/useConversationWsEvents.js) virou OR-fallback: `belongsToOpen = (msgConvId != null && msgConvId === selectedConvIdRef.current) || (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current)`. O ramo legado (sem conversa selecionada → match por phone) ficou intacto.
+- **Como foi feito / decisões:** exatamente a expressão prescrita no plano — preserva o objetivo do commit 89e41a4 (id correto continua roteando primeiro) e adiciona a rede (phone, channel), que identifica unicamente a conversa aberta (índice único parcial `uq_atend_open_contact_inbox`). Não extraí o predicado pra módulo puro (mudança mínima e defensiva; o hook não tem harness de teste próprio).
+- **Problemas / pendências:** trade-off conhecido e aceito pelo plano: se o operador estiver vendo uma conversa FECHADA antiga do mesmo (phone, channel), uma mensagem nova da conversa aberta agora aparece nessa visão (antes era descartada). Comportamento de defesa em profundidade, preferível a perder cards.
+- **Verificação:** dedupe conferido — `sameMessage` colapsa por `ts+role` ou `content+role` (janela 30s); cards de tool têm conteúdo distinto e, após F1, `ts` do banco (cada INSERT tem `time.time()` próprio) → não colapsam. `node --test` de todos os módulos puros do frontend: 153 passed; `check_imports.mjs`: 317 imports OK; `node --check` no hook: sintaxe OK.
 
 ---
 

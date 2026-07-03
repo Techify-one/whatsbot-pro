@@ -392,9 +392,13 @@ export function useConversationWsEvents(opts) {
 
     let belongsToOpen;
     if (selectedConvIdRef.current != null) {
-      belongsToOpen = (msgConvId != null)
-        ? (msgConvId === selectedConvIdRef.current)
-        : (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current);
+      // OR-fallback (defesa em profundidade): casa por conversation_id quando o
+      // payload traz o id da thread aberta, senão pela identidade (phone, channel)
+      // — (phone, channel) identifica unicamente a conversa ABERTA, então um card
+      // painel-only com id divergente (bug histórico do tool_call) ainda chega à
+      // thread certa em vez de ser descartado até o F5.
+      belongsToOpen = (msgConvId != null && msgConvId === selectedConvIdRef.current)
+        || (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current);
     } else {
       // Legacy contact-only open thread (no conversation) — route by phone.
       belongsToOpen = (phone === selectedRef.current);
