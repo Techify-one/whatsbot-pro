@@ -138,11 +138,11 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Pronto quando:** com o contato tendo ≥2 conversas abertas em canais diferentes, a resposta da IA com tool mostra o card "🔧 …" **na hora** (sem F5), na thread certa; single-channel continua funcionando.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(removeu ou não o bloco get_open_for_contact? por quê)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(teste manual multi-conversa + suíte)_
+**Estado:** ✅ Concluída (2026-07-03)
+- **O que foi feito:** `broadcast_tool_calls` ([app/services/messaging_service.py](../app/services/messaging_service.py)) agora captura `saved = await asyncio.to_thread(contact.add_message, "tool_call", content)` e monta o `tc_message` com `conversation_id=saved["conversation_id"]`, `ts=saved["ts"]` e `_id=saved["id"]` — espelhando o padrão `private_note`. O save ganhou `try/except` defensivo (falha no save não derruba o broadcast; card sai sem `conversation_id` e cai no match phone+channel) e foi movido pra `asyncio.to_thread` (antes bloqueava o event loop). Teste de regressão novo: [tests/test_tool_call_broadcast.py](../tests/test_tool_call_broadcast.py) (2 testes: multi-conversa e single-channel).
+- **Como foi feito / decisões:** o bloco `get_open_for_contact` do topo **foi removido** — confirmado que `conv_id` só era usado no `tc_message`; o bloco `attr_scopes` (mais abaixo na mesma função) reconsulta a conversa por conta própria e ficou intacto. Caracterização primeiro: o teste multi-conversa foi escrito ANTES do fix e reproduziu o bug exato (payload com `conversation_id=2` da conversa de outro canal, row salva na conversa 1); depois do fix, verde.
+- **Problemas / pendências:** nenhuma. Goldens de caracterização do sandbox (`test_sandbox_improve_characterization.py`, 15 passed) confirmam que o efeito colateral persistido (card `tool_call` antes das rows assistant) não mudou.
+- **Verificação:** `pytest tests/test_tool_call_broadcast.py` (red→green) + `pytest tests/characterization/test_sandbox_improve_characterization.py` (15 passed). Reprodução manual multi-conversa coberta pelo teste (2 conversas abertas em canais diferentes).
 
 ---
 
