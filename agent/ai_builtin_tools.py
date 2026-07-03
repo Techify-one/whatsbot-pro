@@ -51,6 +51,33 @@ BUILTIN_MODULES: dict[str, types.ModuleType] = {
     "transferir_agente": _m_agent,
 }
 
+# Tools que NASCEM DESLIGADAS numa instalação nova (plano 30 D3/D7). O conjunto
+# é consultado pelos DOIS seeds (``seed_builtin_tools`` → ``ai_tools.enabled`` e
+# ``default_override_enabled`` → ``tool_overrides.enabled``) para os gates nunca
+# divergirem no nascimento. Bancos existentes não são tocados — os seeds só
+# criam rows ausentes.
+OFF_BY_DEFAULT_TOOLS: set[str] = {"transferir_agente"}
+
+
+def default_override_enabled(name: str) -> bool:
+    """Default de ``tool_overrides.enabled`` na PRIMEIRA criação da row.
+
+    Fora de :data:`OFF_BY_DEFAULT_TOOLS` o default segue ligado. Para as
+    off-by-default, o default espelha a row ``ai_tools`` do momento: numa
+    instalação nova (sem row ainda) nasce OFF; quando o operador ligou a tool
+    pela UI unificada (``ai_tools.enabled=1``) e a row de override foi limpa
+    pelo ``delete_orphans`` enquanto a tool esteve desregistrada, a recriação
+    no boot seguinte respeita a intenção do operador (senão o "ligar" nunca
+    sobreviveria ao restart — os dois gates divergiriam).
+    """
+    if name not in OFF_BY_DEFAULT_TOOLS:
+        return True
+    try:
+        row = tool_repo.get(name)
+        return bool(row and row.get("enabled"))
+    except Exception:  # noqa: BLE001 — nasce OFF em caso de dúvida (D3)
+        return False
+
 
 def _schema_in(namespace: dict, name: str) -> dict | None:
     """Find the OpenAI tool-schema dict for ``name`` in a module namespace.
@@ -102,8 +129,10 @@ def seed_builtin_tools() -> None:
     """Insert the built-in tool rows from the current on-disk source (idempotent).
 
     Only inserts rows that don't exist yet — never overwrites operator edits.
-    Seeded rows start enabled, at version 1, install_status='ok' (the trusted
-    on-disk code is what actually runs until the operator edits it).
+    Seeded rows start at version 1, install_status='ok' (the trusted on-disk
+    code is what actually runs until the operator edits it). Rows start enabled,
+    EXCETO as de :data:`OFF_BY_DEFAULT_TOOLS`, que nascem desligadas (plano 30
+    D3) — vale só para instalações novas, já que rows existentes são puladas.
     """
     for name, module in BUILTIN_MODULES.items():
         try:
@@ -117,7 +146,7 @@ def seed_builtin_tools() -> None:
                 description=description,
                 code=source,
                 dependencies=[],
-                enabled=True,
+                enabled=name not in OFF_BY_DEFAULT_TOOLS,
                 kind="builtin",
             )
             tool_repo.set_status(name, "ok", None)

@@ -29,6 +29,20 @@ from plugins.context import ToolContext
 logger = logging.getLogger(__name__)
 
 
+def _default_enabled(name: str) -> bool:
+    """Default de ``tool_overrides.enabled`` na primeira criação da row.
+
+    Delegado a ``agent.ai_builtin_tools.default_override_enabled`` (dono da
+    política off-by-default do plano 30 WS2). Import lazy + defensivo: qualquer
+    falha cai no comportamento legado (nasce ligada).
+    """
+    try:
+        from agent import ai_builtin_tools
+        return ai_builtin_tools.default_override_enabled(name)
+    except Exception:  # noqa: BLE001 — nunca bloqueia um registro de tool
+        return True
+
+
 class ToolRegistry:
     """Holds the tool schema/executor registry and resolves overrides.
 
@@ -91,7 +105,8 @@ class ToolRegistry:
         self._tool_schemas.append(clean)
         self._tool_executors[name] = (executor, plugin_id)
         try:
-            tool_override_repo.ensure(name, plugin_id)
+            tool_override_repo.ensure(
+                name, plugin_id, default_enabled=_default_enabled(name))
         except Exception as e:
             logger.warning("tool_overrides.ensure failed for %s: %s", name, e)
 
@@ -145,7 +160,8 @@ class ToolRegistry:
         self._tool_originals[name] = clean
         self._tool_executors[name] = (executor, plugin_id)
         try:
-            tool_override_repo.ensure(name, plugin_id)
+            tool_override_repo.ensure(
+                name, plugin_id, default_enabled=_default_enabled(name))
         except Exception as e:
             logger.warning("tool_overrides.ensure failed for %s: %s", name, e)
 

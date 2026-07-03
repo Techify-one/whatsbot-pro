@@ -54,8 +54,7 @@
           "tools": [
             "save_contact_info",
             "transfer_to_human",
-            "set_custom_attribute",
-            "transferir_agente"
+            "set_custom_attribute"
           ]
         },
         "status": "ok",
