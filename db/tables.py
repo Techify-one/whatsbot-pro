@@ -608,7 +608,6 @@ ai_variables = Table(
     # Global values referenceable by prompts via ``{name}``.
     Column("name", Text, primary_key=True),
     Column("value", Text, nullable=False, server_default=""),
-    Column("category", Text, nullable=False, server_default=""),
     Column("updated_at", Float, nullable=False),
 )
 

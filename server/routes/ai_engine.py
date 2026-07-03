@@ -13,6 +13,7 @@ deployments can invalidate.
 
 import asyncio
 import logging
+import re
 import time
 
 from fastapi import Depends, Query
@@ -299,8 +300,14 @@ def register_routes(app, deps):
     @app.put("/api/ai/variables/{name}",
              dependencies=[Depends(require_permission("agent.manage"))])
     async def save_variable(name: str, body: dict):
+        # A1 (plano 31 F6): a regex de render (agent_factory._PLACEHOLDER_RE) só
+        # casa {identificador} — um nome fora do padrão nunca renderiza (vira
+        # peso morto no banco). Paridade com o NAME_RE do VariablesEditor.js.
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$", name or ""):
+            return _err("Nome inválido: use letras, números e _ (começando por "
+                        "letra, máx. 64 caracteres).", status=400)
         row = await asyncio.to_thread(
-            variable_repo.save, name, body.get("value", ""), body.get("category", "")
+            variable_repo.save, name, body.get("value", "")
         )
         _emit_changed("variable", name)
         return _ok(row)
