@@ -164,6 +164,9 @@ async def setup(ctx) -> None:
                        policy=RestartPolicy.PERMANENT)
         ctx.spawn_task("avatar_fetch", lambda: avatar_fetch_task(deps),
                        policy=RestartPolicy.PERMANENT)
+        from . import alerts
+        ctx.spawn_task("disconnect_alert", lambda: alerts.disconnect_alert_loop(deps),
+                       policy=RestartPolicy.PERMANENT)
     except RuntimeError as e:  # supervisor not wired
         logger.warning("gowa: supervisor not wired (%s); polling loops not started", e)
     logger.info("gowa: lifecycle setup — subprocess spawned (owner=%s) + 3 polling "
