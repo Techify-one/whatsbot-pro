@@ -46,6 +46,23 @@ TRANSFERIR_AGENTE_TOOL = {
 }
 
 
+def router_destinations(router: dict) -> list[dict]:
+    """Destinos que ESTE roteador pode receber em ``transferir_agente``.
+
+    Fonte ÚNICA da allowlist (plano 30 F5×F6): a MESMA regra que ``execute``
+    aplica — agentes enabled, exceto o próprio, restritos a ``routing_targets``
+    quando a lista está preenchida. O prompt do roteador (``agent_factory``)
+    lista exatamente este conjunto, então o LLM nunca é induzido a um destino
+    que ``execute`` barraria.
+    """
+    targets = router.get("routing_targets") or []
+    agents = [a for a in agent_repo.list_all()
+              if a.get("enabled") and a.get("agent_key") != router.get("agent_key")]
+    if targets:
+        agents = [a for a in agents if a["agent_key"] in targets]
+    return agents
+
+
 def execute(ctx, args: dict) -> str | None:
     """Persist the handoff on the open conversation. Returns feedback for the LLM."""
     target = (args.get("agente") or args.get("target") or "").strip()

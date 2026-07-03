@@ -202,6 +202,35 @@ def _resolve_active_agent(contact) -> dict | None:
     return dynamic_registry.get_default_agent()
 
 
+def _router_destinations_section(router: dict) -> str:
+    """Seção "Agentes disponíveis para transferência" do prompt do roteador.
+
+    Uma linha por destino: ``display_name (agent_key) — description``. Retorna
+    string vazia quando não há destino (roteador sem spokes enabled).
+    """
+    from agent.tools.transferir_agente import router_destinations
+
+    destinations = router_destinations(router)
+    if not destinations:
+        return ""
+    lines = []
+    for a in destinations:
+        label = a.get("display_name") or a["agent_key"]
+        line = f"- {label} ({a['agent_key']})"
+        description = (a.get("description") or "").strip()
+        if description:
+            line += f" — {description}"
+        lines.append(line)
+    return (
+        "\n\n--- Agentes disponíveis para transferência ---\n"
+        "Quando o assunto do contato corresponder à especialidade de um destes "
+        "agentes, chame a tool transferir_agente informando o agent_key exato "
+        "(entre parênteses) e um motivo curto:\n"
+        + "\n".join(lines)
+        + "\n--- Fim dos agentes disponíveis ---"
+    )
+
+
 def build_for_contact(handler, contact) -> AgentSpec:
     """Resolve the DB-driven agent for a request. Always returns an ``AgentSpec``.
 
@@ -225,6 +254,19 @@ def build_for_contact(handler, contact) -> AgentSpec:
 
         variables = dynamic_registry.variables_map()
         rendered = render_template(body, variables)
+
+        # Plano 30 F6 (WS5): o roteador recebe no system prompt a lista de
+        # destinos com as descrições dos agentes (ai_agents.description) — a
+        # MESMA allowlist que transferir_agente.execute aceita (fonte única em
+        # router_destinations, F5). Seção ADITIVA ao prompt inline (se o humano
+        # já listou agentes à mão, as duas coexistem — sem dedupe). Defensivo:
+        # falha aqui nunca derruba o turno.
+        if agent.get("is_router"):
+            try:
+                rendered += _router_destinations_section(agent)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "AI engine: seção de destinos do roteador falhou (%s)", e)
 
         model_config = dict(agent.get("model_config") or {})
         if not model_config.get("model"):
