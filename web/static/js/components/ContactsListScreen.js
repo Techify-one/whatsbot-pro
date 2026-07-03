@@ -201,11 +201,11 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
         ${!loading && !contact.is_group ? html`
           <button
             onClick=${() => onStartConversation(contact)}
-            title="Iniciar atendimento"
+            title="Iniciar conversa"
             class="fixed bottom-6 right-6 lg:right-[424px] z-[121] flex items-center gap-2 bg-wa-teal text-white text-[14px] font-medium px-4 py-3 rounded-full shadow-lg hover:opacity-90 transition-opacity"
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-            Iniciar atendimento
+            Iniciar conversa
           </button>
         ` : null}
       </div>
@@ -618,7 +618,7 @@ export default function ContactsListScreen({ initialEntity = null }) {
               <!-- Iniciar atendimento -->
               <button
                 onClick=${() => startConversation(c)}
-                title="Iniciar atendimento"
+                title="Iniciar conversa"
                 class="w-[38px] h-[38px] rounded-full flex items-center justify-center text-wa-teal hover:bg-wa-teal/10 transition-colors shrink-0"
               >
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>

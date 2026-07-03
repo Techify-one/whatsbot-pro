@@ -44,6 +44,7 @@ rbac:
     - { key: view, label: "Ver protocolos" }
     - { key: edit, label: "Editar campos/observações do protocolo" }
     - { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" }
+    - { key: create_views, label: "Criar novas visualizações (agrupamentos) no Kanban" }
     - { key: resolve, label: "Fechar/reabrir protocolo e resolver atendimento" }
     - { key: assign, label: "Atribuir/reatribuir protocolos" }
     - { key: config, label: "Configurar campos e avaliação do plugin" }

@@ -239,7 +239,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             <${CloseIcon} />
           </button>
           <span class="text-white text-[16px] font-medium">
-            Informações do atendimento${conv && conv.display_id != null ? html` <span class="opacity-80">#${conv.display_id}</span>` : null}
+            Informações da conversa${conv && conv.display_id != null ? html` <span class="opacity-80">#${conv.display_id}</span>` : null}
           </span>
         </div>
 
@@ -248,7 +248,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
           ${loading ? html`<div class="px-6 py-8 text-wa-secondary text-[14px]">Carregando…</div>` : null}
           ${!loading && !conv ? html`
             <div class="px-6 py-8 text-wa-secondary text-[14px] text-center">
-              Nenhum atendimento para este contato ainda.
+              Nenhuma conversa para este contato ainda.
             </div>
           ` : null}
           ${!loading && conv ? html`
@@ -285,7 +285,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             <!-- Atributos do atendimento -->
             ${canReply && convDefs.length > 0 ? html`
               <div ref=${attrsRef} class="bg-wa-bg px-6 py-4 border-b border-wa-border transition-all duration-300 ${highlightAttrs ? 'ring-2 ring-inset ring-red-500' : ''}">
-                <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados deste atendimento</div>
+                <div class="text-wa-iconActive text-[13px] font-semibold mb-3">Dados desta conversa</div>
                 <div class="space-y-4">
                   ${convDefs.map(def => html`
                     <${CustomAttributeField}

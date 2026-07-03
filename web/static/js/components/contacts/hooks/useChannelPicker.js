@@ -60,7 +60,7 @@ export function useChannelPicker({ selectContact, fetchContacts, setSearch, newC
       setCheckPhoneError(null);
 
       if (channels.length === 0) {
-        setCheckPhoneError('Nenhuma caixa de entrada conectada para iniciar o atendimento.');
+        setCheckPhoneError('Nenhuma caixa de entrada conectada para iniciar a conversa.');
         return;
       }
 

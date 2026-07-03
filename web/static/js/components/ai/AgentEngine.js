@@ -71,7 +71,7 @@ export default function AgentEngine({ initialEntity }) {
     <div>
       <div class="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div class="min-w-0">
-          <div class="text-[13px] text-wa-text font-medium">Engine de IA</div>
+          <div class="text-[13px] text-wa-text font-medium">Configurações de IA</div>
           <div class="text-[12px] text-wa-secondary mt-0.5">
             Configure agente, prompt, variáveis e tools sem deploy. Edições de
             agente/prompt/variável valem na próxima mensagem; tools (código no banco)

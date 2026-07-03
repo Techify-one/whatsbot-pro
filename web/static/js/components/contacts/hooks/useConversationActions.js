@@ -155,7 +155,7 @@ export function useConversationActions({
     if (res && res.ok && res.data && res.data.conversation) {
       patchCtxConv({ assignee_user_id: res.data.conversation.assignee_user_id });
     } else {
-      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir atendimento.' }));
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
     }
   }, [patchCtxConv]);
 

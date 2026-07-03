@@ -36,6 +36,13 @@ async def _can_team(request: Request) -> bool:
     return await acheck(request, "plugin.protocolos.manage_team_views")
 
 
+async def _can_create_views(request: Request) -> bool:
+    """Pode CRIAR novas visualizações (agrupamentos)? Tem create_views OU manage_team_views
+    (quem gerencia views de equipe também pode criar). Default-allow em legado/open via acheck."""
+    return (await acheck(request, "plugin.protocolos.create_views")
+            or await _can_team(request))
+
+
 async def _gate_view_write(request: Request, *, existing: dict | None,
                            target_scope: str | None) -> tuple[bool, str]:
     """Gate de escrita de visualização. Envolver EQUIPE (a existente OU o alvo) exige
@@ -194,6 +201,8 @@ async def list_kanban_views(request: Request):
 @router.post("/kanban-views", dependencies=[plugin_permission("view")])
 async def create_kanban_view(body: dict, request: Request):
     uid, _ = _atendente(request)
+    if not await _can_create_views(request):
+        return _err("Requer permissão para criar visualizações.", status=403)
     scope = _visibility_scope(body, str((body or {}).get("scope") or "personal"))
     if scope == "team" and not await _can_team(request):
         return _err("Requer permissão para criar visualizações de equipe.", status=403)
@@ -204,6 +213,7 @@ async def create_kanban_view(body: dict, request: Request):
         group_date_mode=(body or {}).get("group_date_mode"),
         filters=(body or {}).get("filters") or {},
         available_filters=(body or {}).get("available_filters"),
+        column_order=(body or {}).get("column_order"),
         visibility_roles=(body or {}).get("visibility_roles"),
         visibility_users_include=(body or {}).get("visibility_users_include"),
         visibility_users_exclude=(body or {}).get("visibility_users_exclude"),
@@ -225,7 +235,7 @@ async def update_kanban_view(vid: int, body: dict, request: Request):
         return _err(msg, status=403)
     # Repassa só o que veio no body (ausente = mantém o atual, via sentinela no logic).
     extra = {}
-    for k in ("available_filters", "visibility_roles",
+    for k in ("available_filters", "column_order", "visibility_roles",
               "visibility_users_include", "visibility_users_exclude"):
         if isinstance(body, dict) and k in body:
             extra[k] = body[k]
@@ -279,10 +289,12 @@ async def set_my_view_pref(vid: int, body: dict, request: Request):
     body = body or {}
     up = body.get("use_personal")
     pf = body.get("personal_filters")
+    pco = body.get("personal_column_order")
     pref = logic.upsert_user_view_pref(
         vid, uid,
         use_personal=(None if up is None else bool(up)),
-        personal_filters=(pf if isinstance(pf, dict) else None))
+        personal_filters=(pf if isinstance(pf, dict) else None),
+        personal_column_order=(pco if isinstance(pco, list) else None))
     return {"ok": True, "data": pref}
 
 

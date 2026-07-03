@@ -14,8 +14,8 @@ const html = htm.bind(h);
 
 const TYPES = [
   ['text', 'Texto'], ['textarea', 'Área de texto'], ['number', 'Número'], ['date', 'Data'],
-  ['select', 'Seleção'], ['checkboxes', 'Caixa de seleção'],
-  ['radio', 'Opções (rádio)'], ['checkbox', 'Caixa (sim/não)'],
+  ['select', 'Lista de seleção'], ['checkboxes', 'Caixa de seleção'],
+  ['checkbox', 'Caixa (sim/não)'],
 ];
 // Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
 const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação']];
@@ -32,7 +32,6 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const [defs, setDefs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState('');
-  const [csvText, setCsvText] = useState('');         // atalho "modo simples" (CSV → rótulos)
   const [confirmBox, setConfirmBox] = useState(null); // { message, onYes }
   const [proto, setProto] = useState(null);           // config de avaliação ao finalizar
   const [protoMsg, setProtoMsg] = useState('');
@@ -67,29 +66,13 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   }
   function remove(i) { setDefs((list) => list.filter((_, j) => j !== i)); }
 
-  // Atalho "modo simples" (herdado do ext_demo): cria N rótulos de TEXTO a partir de uma
-  // lista separada por vírgula (ex.: "motivo, observacao"). Reaproveita o field-builder —
-  // o usuário ainda clica em "Salvar campos" para persistir via PUT /field-defs.
-  function addCsvFields() {
-    const names = String(csvText || '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (!names.length) return;
-    setDefs((list) => {
-      const have = new Set(list.map((d) => (d.key && d.key.trim()) ? d.key.trim() : slug(d.label)));
-      const adds = [];
-      for (const nm of names) {
-        const key = slug(nm);
-        if (have.has(key)) continue;
-        have.add(key);
-        adds.push({ key, label: nm, type: 'text', options: [], required: false, multiple: false, regex_pattern: '', regex_cue: '', fixed: false });
-      }
-      return [...list, ...adds];
-    });
-    setCsvText('');
-  }
-
   async function save() {
     setMsg('');
-    const payload = defs.map((d) => ({ ...d, key: d.key && d.key.trim() ? d.key.trim() : slug(d.label) }));
+    const payload = defs.map((d) => ({
+      ...d,
+      key: d.key && d.key.trim() ? d.key.trim() : slug(d.label),
+      options: (d.options || []).map((s) => String(s).trim()).filter(Boolean),
+    }));
     const r = await fetch(`${apiBase}/field-defs`, {
       method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: tab, defs: payload }),
@@ -169,9 +152,9 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
                   <textarea class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] min-h-[64px]"
                     disabled=${locked}
                     value=${(d.options || []).join('\n')}
-                    onInput=${(e) => update(i, { options: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) })} />
+                    onInput=${(e) => update(i, { options: e.target.value.split('\n') })} />
                 </div>` : null}
-              ${d.type === 'checkboxes' ? html`
+              ${(d.type === 'checkboxes' || d.type === 'select') ? html`
                 <label class="flex items-center gap-1.5 text-[13px] text-wa-text">
                   <input type="checkbox" checked=${!!d.multiple} disabled=${locked}
                     onChange=${(e) => update(i, { multiple: e.target.checked })} /> Permitir marcar várias opções
@@ -196,15 +179,6 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
             </div>`;
           })}
         </div>
-        ${canEdit ? html`
-          <div class="flex items-center gap-2">
-            <input class="wa-field flex-1 min-w-[200px] px-2 py-1.5 rounded-md text-[13px]" type="text"
-              placeholder="Campos rápidos por vírgula (ex.: motivo, observacao)"
-              value=${csvText} onInput=${(e) => setCsvText(e.target.value)}
-              onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); addCsvFields(); } }} />
-            <button onClick=${addCsvFields}
-              class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover whitespace-nowrap">+ Texto (CSV)</button>
-          </div>` : null}
         ${canEdit ? html`
           <div class="flex items-center gap-3">
             <button onClick=${addField} class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">+ Adicionar campo</button>

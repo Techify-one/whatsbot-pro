@@ -19,8 +19,8 @@ export function RequiredAttributesModal({ missing = [], onConfirm }) {
         </h2>
         <p class="text-sm text-wa-secondary mb-3">
           ${missing.length === 1
-            ? 'Este atributo é obrigatório e precisa ser preenchido antes de resolver o atendimento:'
-            : 'Estes atributos são obrigatórios e precisam ser preenchidos antes de resolver o atendimento:'}
+            ? 'Este atributo é obrigatório e precisa ser preenchido antes de resolver a conversa:'
+            : 'Estes atributos são obrigatórios e precisam ser preenchidos antes de resolver a conversa:'}
         </p>
         <ul class="mb-5 space-y-1.5">
           ${missing.map(def => html`
