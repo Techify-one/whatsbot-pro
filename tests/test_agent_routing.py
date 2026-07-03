@@ -93,18 +93,27 @@ check("agente vazio -> erro", r.startswith("Erro:"))
 r = transferir_agente.execute(ctx, {"agente": "inexistente"})
 check("destino inexistente -> erro lista disponíveis", "não existe" in r)
 
+print("\ntransferir_agente — enforcement spoke→router (plano 30 F5):")
+# A conversa nasce vinculada ao agente default (não-router, carimbado por
+# default_agent_key_for_inbox na criação); com um roteador configurado, um
+# não-router SÓ pode devolver pro roteador (D4) — destino livre exigiria não
+# ter roteador (P4) ou conversa sem agente ativo.
+r = transferir_agente.execute(ctx, {"agente": "suporte"})
+check("não-router p/ outro agente -> bloqueado", r.startswith("Erro"))
+check("bloqueio cita a rota de escape (roteador)", "triagem" in r)
+
 print("\ntransferir_agente — handoff persistente:")
-r = transferir_agente.execute(ctx, {"agente": "suporte"})
-check("transfere p/ suporte -> confirma", "Suporte" in r)
+r = transferir_agente.execute(ctx, {"agente": "triagem"})
+check("transfere p/ o roteador -> confirma", "Triagem" in r)
 conv2 = conversation_repo.get_open_for_contact(c["id"])
-check("conversa ganha active_agent_key=suporte", conv2["active_agent_key"] == "suporte")
-r = transferir_agente.execute(ctx, {"agente": "suporte"})
+check("conversa ganha active_agent_key=triagem", conv2["active_agent_key"] == "triagem")
+r = transferir_agente.execute(ctx, {"agente": "triagem"})
 check("transferir p/ o mesmo -> idempotente/aviso", "já está atendendo" in r)
 
 print("\nbuild_for_contact resolve o agente vinculado:")
 spec = agent_factory.build_for_contact(handler_on, contact)
-check("agora resolve 'suporte'", spec is not None and spec.agent_key == "suporte")
-check("prompt do suporte renderizado", "suporte" in spec.base_prompt.lower())
+check("agora resolve 'triagem'", spec is not None and spec.agent_key == "triagem")
+check("prompt da triagem renderizado", "triagem" in spec.base_prompt.lower())
 
 print("\nrouter allowlist (routing_targets):")
 conversation_repo.set_agent(conv["id"], "triagem")  # router c/ targets=["vendas"]

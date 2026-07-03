@@ -209,11 +209,11 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Pronto quando:** com um spoke ativo, uma `transferir_agente` para um agente que **não** é o roteador é recusada com mensagem clara; transferir para o roteador funciona; roteador→spoke continua igual.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _(política de get_router()==None)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(teste unitário de execute() nos 3 casos: router→allow, spoke→router ok, spoke→outro bloqueado)_
+**Estado:** ✅ Concluída (2026-07-03)
+- **O que foi feito:** o bloco de validação de `execute()` em [agent/tools/transferir_agente.py](../agent/tools/transferir_agente.py) foi generalizado por papel do agente ATUAL: router → allowlist própria (comportamento existente, intacto); **não-router (spoke) → único destino válido é o roteador** (`agent_repo.get_router()`), com mensagem de bloqueio citando a rota de escape (`agente='<router>'`) e prefixo "Erro:" (success-aware pros guardrails de `requires_prior_call`). Testes novos: [tests/test_spoke_router_enforcement.py](../tests/test_spoke_router_enforcement.py) (6 testes).
+- **Como foi feito / decisões:** P4 conforme recomendação — `get_router()==None` NÃO bloqueia (degrada pro legado; não trava instalação sem hub-and-spoke). Conversa sem `active_agent_key` também não é bloqueada (sem como classificar o atual). **Nota de semântica importante:** a conversa nasce carimbada com o agente default da inbox (`default_agent_key_for_inbox`), então na prática o agente default (não-router) também é tratado como spoke — com roteador configurado, default só transfere PRO roteador. É a leitura estrita de D4 ("um único roteador roteia") e o item do plano ("se o agente atual NÃO é router").
+- **Problemas / pendências:** o script legado `test_agent_routing.py` caracterizava o comportamento pré-F5 (default→suporte livre) — atualizado para a semântica nova (bloqueio documentado + handoff persistente agora via roteador), 29/29 verde. Fragilidade pré-existente anotada: `test_routing_motivo.py` deixa um roteador no banco compartilhado do processo (sem teardown de agentes); a ordem de coleta atual é segura e o reset de schema é por processo, mas seleções `-k` fora de ordem podem expor interações — não alterei fixtures de outros arquivos.
+- **Verificação:** `pytest tests/test_spoke_router_enforcement.py` (6 passed: router→allowlist ok/bloqueado, spoke→router ok, spoke→spoke bloqueado com escape + handoff não persistido, sem-router não bloqueia, conversa-sem-agente segue legado); `tests/test_agent_routing.py` 29/29; `tests/endpoints/test_conversation_events_c0.py` + `tests/test_routing_motivo.py` 14 passed.
 
 ---
 

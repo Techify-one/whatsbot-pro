@@ -67,14 +67,27 @@ def execute(ctx, args: dict) -> str | None:
         if conv.get("active_agent_key") == target:
             return f"O agente '{target}' já está atendendo esta conversa."
 
-        # Se o agente ATUAL é um roteador com lista de destinos, respeite a allowlist.
+        # Validação pelo papel do agente ATUAL (plano 30 F5 — hub-and-spoke):
+        # roteador respeita a própria allowlist; spoke SÓ devolve pro roteador.
         current_key = conv.get("active_agent_key")
         if current_key:
             current = agent_repo.get(current_key)
-            targets = (current or {}).get("routing_targets")
-            if current and current.get("is_router") and targets and target not in targets:
-                return (f"Erro: '{target}' não está entre os destinos permitidos "
-                        f"deste roteador: {', '.join(targets)}.")
+            if current and current.get("is_router"):
+                targets = current.get("routing_targets")
+                if targets and target not in targets:
+                    return (f"Erro: '{target}' não está entre os destinos permitidos "
+                            f"deste roteador: {', '.join(targets)}.")
+            elif current:
+                # Spoke (D4): o único destino válido é o roteador. Sem roteador
+                # configurado (P4), não bloqueia — instalação sem hub-and-spoke
+                # mantém o comportamento legado.
+                router = agent_repo.get_router()
+                if router and target != router["agent_key"]:
+                    return (
+                        "Erro: agentes especializados só transferem a conversa "
+                        "de volta ao roteador. Devolva usando transferir_agente "
+                        f"com agente='{router['agent_key']}' e informe o motivo."
+                    )
 
         conversation_repo.set_agent(conv["id"], target)
         logger.info("Handoff: conversa %s -> agente '%s' (motivo=%s)",
