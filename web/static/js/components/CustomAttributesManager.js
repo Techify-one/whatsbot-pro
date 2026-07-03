@@ -169,7 +169,7 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
           </select>
           <div class="text-[12px] text-wa-secondary mt-1">
             ${appliesTo === 'conversation'
-              ? 'Aparece no painel "Informações da conversa" — um valor por atendimento.'
+              ? 'Aparece no painel "Informações da conversa" — um valor por conversa.'
               : 'Aparece no painel "Informações do contato" — um valor por contato.'}
           </div>
         </div>
