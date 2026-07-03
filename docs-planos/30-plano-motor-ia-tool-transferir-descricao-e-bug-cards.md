@@ -229,11 +229,11 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Pronto quando:** com ≥2 agentes tendo descrição, o roteador transfere pro agente certo citando o motivo; a lista exposta no prompt é subconjunto/igual à allowlist aceita por `execute()`.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _(onde injetou; fonte da lista; help text sim/não)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(inspecionar o system prompt montado p/ o roteador; teste de roteamento)_
+**Estado:** ✅ Concluída (2026-07-03)
+- **O que foi feito:** (1) helper `router_destinations(router)` em [agent/tools/transferir_agente.py](../agent/tools/transferir_agente.py) — **fonte ÚNICA da allowlist** (F5×F6): agentes enabled, exceto o próprio, restritos a `routing_targets` quando preenchida; (2) `build_for_contact` ([agent/agent_factory.py](../agent/agent_factory.py)) injeta, quando `is_router`, a seção `--- Agentes disponíveis para transferência ---` (uma linha `display_name (agent_key) — description` por destino) via `_router_destinations_section`, dentro de `try/except` (falha nunca derruba o turno); roteador sem destinos não ganha seção vazia; (3) help text no campo Descrição do form de agente ([AgentsManager.js](../web/static/js/components/ai/AgentsManager.js)) — "usada pelo roteador para decidir o destino…". Testes novos: [tests/test_router_prompt_description.py](../tests/test_router_prompt_description.py) (6 testes).
+- **Como foi feito / decisões:** injeção no `build_for_contact` (região liberada pro plano 30 no contrato de fronteira), depois do `render_template` — a seção é dinâmica e NÃO participa do prompt inline cru (convenção com o plano 31: a análise do C1+ mostra o prompt inline; a seção é problema do runtime do roteador). Aditiva e sem dedupe com listagem manual no prompt (documentado no comentário). Opção A (prompt injection) conforme P5; enum dinâmico no schema fica registrado como melhoria futura.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `pytest tests/test_router_prompt_description.py` (6 passed) — inclui o teste de coerência F5×F6 (`test_lista_do_prompt_igual_allowlist_do_execute`: todo destino listado no prompt é aceito por `execute()`), restrição por `routing_targets`, agente desligado fora da lista, não-router sem seção, falha isolada, e roteador sem destinos sem seção vazia. Help text usa `text-wa-secondary` (dark-safe).
 
 ---
 
