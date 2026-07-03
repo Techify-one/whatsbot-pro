@@ -158,7 +158,7 @@ export function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
             <div class="border-t border-wa-border pt-3">
               <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
               <p class="text-[12px] text-wa-secondary mb-2">
-                Escolha quais tipos de conversa deste número viram atendimento. Os tipos
+                Escolha quais tipos de conversa deste número viram conversa. Os tipos
                 desmarcados são ignorados (não aparecem no painel).
               </p>
               <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />

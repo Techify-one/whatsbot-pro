@@ -201,7 +201,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <!-- Section: Avisos de sistema no chat (plano 12) -->
       <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
-          Registra no fio da conversa, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
+          Registra no fio da conversa, como uma mensagem de sistema, os eventos da conversa (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
         </span>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
