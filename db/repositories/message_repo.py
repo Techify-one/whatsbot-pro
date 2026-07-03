@@ -101,6 +101,29 @@ def get_context(contact_id: int, limit: int) -> list[dict]:
     return [_row_to_dict(r) for r in reversed(rows)]
 
 
+def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
+    """Last N eligible messages of ONE conversation, LLM-context style.
+
+    Mesmo filtro de elegibilidade de :func:`get_context` (roles painel-only e
+    envios failed excluídos), mas escopado por ``conversation_id`` — multi-canal
+    não mistura threads de outros canais (plano 31 F3; ``get_by_conversation``
+    não filtra nem limita, por isso a variante dedicada).
+    """
+    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages)
+            .where(
+                (messages.c.conversation_id == conversation_id)
+                & (~messages.c.role.in_(excluded))
+                & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
+            )
+            .order_by(messages.c.ts.desc())
+            .limit(limit)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in reversed(rows)]
+
+
 def get_last(contact_id: int) -> dict | None:
     """Return the most recent message for a contact."""
     with get_engine().connect() as conn:
