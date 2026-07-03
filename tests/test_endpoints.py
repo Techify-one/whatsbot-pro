@@ -1632,6 +1632,13 @@ check("list_protocolos(pf filter) -> exclui valor diferente",
       all(a["id"] != _proto_sf["id"] for a in _lf2))
 _lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
 check("list_protocolos(cattr filter) -> retorna lista", isinstance(_lf3, list))
+# _row_matches_filter: cattr = substring case-insensitive (texto); pf = igualdade exata.
+check("cattr filter -> substring case-insensitive",
+      _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro Civil"}}, "cattr:profissao", "civil") is True
+      and _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro"}}, "cattr:profissao", "civil") is False)
+check("pf filter -> exato (não substring)",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
+      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
 
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
