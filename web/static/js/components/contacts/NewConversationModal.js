@@ -237,7 +237,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-lg w-full flex flex-col max-h-[90vh] overflow-hidden">
         <!-- Header -->
         <div class="flex items-center justify-between px-5 py-4 border-b border-wa-border shrink-0">
-          <h2 class="text-base font-semibold text-wa-text">Novo atendimento</h2>
+          <h2 class="text-base font-semibold text-wa-text">Nova conversa</h2>
           <button
             onClick=${onClose}
             class="text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
@@ -309,7 +309,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
               <span>${sessionState && sessionState.has_conversation
                 ? 'Passaram-se mais de 24 horas desde a última mensagem do cliente. Só é possível enviar um template aprovado.'
-                : 'Ainda não há atendimento com este número neste canal. O primeiro contato precisa ser um template aprovado.'}</span>
+                : 'Ainda não há conversa com este número neste canal. O primeiro contato precisa ser um template aprovado.'}</span>
             </div>
           ` : ''}
 
@@ -355,7 +355,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
               })() : ''}
             </div>
             ${sessionLoading && checkResult ? html`
-              <span class="text-[12px] text-wa-secondary animate-pulse-slow">Verificando janela de atendimento...</span>
+              <span class="text-[12px] text-wa-secondary animate-pulse-slow">Verificando janela de conversa...</span>
             ` : ''}
           </div>
 

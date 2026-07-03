@@ -211,7 +211,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             <path fill="#8696a0" d="M229.565 160.229c32.874-12.676 53.009-32.508 53.009-54.669 0-39.356-56.792-71.26-126.87-71.26C85.627 34.3 28.835 66.204 28.835 105.56c0 20.655 17.776 39.174 45.883 51.974a8.372 8.372 0 014.773 5.573l.988 4.89a4.186 4.186 0 006.107 3.312l6.212-3.106a8.372 8.372 0 016.456-.37c12.157 3.96 25.676 6.13 39.95 6.13 7.096 0 14.038-.519 20.772-1.517a8.372 8.372 0 016.164 1.136l7.155 4.479a4.186 4.186 0 006.355-3.438l.247-5.287a8.372 8.372 0 013.636-6.223 8.372 8.372 0 017.258-1.314l17.4 4.64a4.186 4.186 0 005.096-2.013l3.47-6.587a8.372 8.372 0 017.09-4.41z"/>
           </svg>
         </div>
-        <h2 class="text-wa-text text-[32px] font-light mb-2">WhatsBot</h2>
+        <h2 class="text-wa-text text-[32px] font-light mb-2">WhatsBot-Pro</h2>
         <p class="text-wa-secondary text-[14px] text-center max-w-[450px] leading-[20px]">
           Envie e receba mensagens. Selecione um contato para começar.
         </p>
@@ -268,7 +268,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             type="button"
             onClick=${onOpenConversationInfo}
             class="shrink-0 ml-1 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
-            title="Informações do atendimento"
+            title="Informações da conversa"
           >
             <${InfoIcon} />
           </button>

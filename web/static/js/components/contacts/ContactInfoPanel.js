@@ -475,7 +475,7 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
               }}
               class="w-full mt-2 text-[14px] font-medium py-2.5 rounded-[8px] ${confirmDelete ? 'text-red-400 bg-red-500/10' : 'text-red-400'} hover:bg-wa-hover transition-colors"
             >
-              ${confirmDelete ? 'Confirmar exclusão? Apaga TODOS os atendimentos' : 'Apagar contato'}
+              ${confirmDelete ? 'Confirmar exclusão? Apaga TODAS as conversas' : 'Apagar contato'}
             </button>
           ` : null}
         </div>

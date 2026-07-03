@@ -20,6 +20,7 @@
 import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
+import { OptionListSelect } from '../OptionListSelect.js';
 
 const html = htm.bind(h);
 
@@ -28,7 +29,7 @@ const CORE_DIMENSIONS = [
   { key: 'channel',    label: 'Canais',              ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
-  { key: 'conv_label', label: 'Etiqueta do atendimento', ops: ['eq', 'ne'],               valueType: 'conv_label' },
+  { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
   { key: 'activity',   label: 'Última atividade',    ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
@@ -99,50 +100,13 @@ function useCloseOnOutside(open, setOpen, ref) {
   }, [open]);
 }
 
-// Dropdown custom de multi-seleção (checkboxes). Evita o `<select multiple>` nativo
-// (feio e ruim no dark mode). options: [{ value, label, group? }] — agrupadas por `group`.
+// Multi-seleção da barra de filtros → delega ao seletor PADRÃO do app (OptionListSelect):
+// busca sempre visível, agrupamento por `group` e rodapé "Limpar seleção".
+// options: [{ value, label, group? }]; `selected` = lista de values.
 function MultiSelect({ options, selected, onChange, placeholder = '+ Selecione uma opção...' }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useCloseOnOutside(open, setOpen, ref);
-
-  const sel = new Set(selected || []);
-  const toggle = (v) => {
-    const next = new Set(sel);
-    if (next.has(v)) next.delete(v); else next.add(v);
-    onChange(options.filter(o => next.has(o.value)).map(o => o.value));  // preserva ordem das options
-  };
-
-  const chosen = options.filter(o => sel.has(o.value));
-  const summary = chosen.length === 0
-    ? placeholder
-    : (chosen.length <= 2 ? chosen.map(o => o.label).join(', ') : `${chosen.length} selecionados`);
-
-  // Agrupa preservando a ordem de aparição dos grupos.
-  const groups = [];
-  const byGroup = new Map();
-  for (const o of options) {
-    const g = o.group || '';
-    if (!byGroup.has(g)) { byGroup.set(g, []); groups.push(g); }
-    byGroup.get(g).push(o);
-  }
-
-  return html`<div ref=${ref} class="relative flex-1 min-w-0">
-    <button type="button" onClick=${() => setOpen(o => !o)}
-      class="${FIELD} w-full flex items-center justify-between gap-1.5 text-left">
-      <span class="truncate ${chosen.length === 0 ? 'text-wa-secondary' : ''}">${summary}</span>
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="shrink-0 text-wa-secondary"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-    </button>
-    ${open ? html`<div class="absolute z-[80] mt-1 left-0 right-0 max-h-[220px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
-      ${groups.map(g => html`<div key=${'g' + g}>
-        ${g ? html`<div class="px-2.5 pt-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-wa-secondary">${g}</div>` : null}
-        ${byGroup.get(g).map(o => html`<label key=${o.value}
-          class="flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-wa-text hover:bg-wa-hover cursor-pointer">
-          <input type="checkbox" checked=${sel.has(o.value)} onChange=${() => toggle(o.value)} class="shrink-0" />
-          <span class="truncate">${o.label}</span>
-        </label>`)}
-      </div>`)}
-    </div>` : null}
+  return html`<div class="flex-1 min-w-0">
+    <${OptionListSelect} options=${options} value=${selected} multiple=${true} grouped=${true}
+      onChange=${onChange} placeholder=${placeholder} float=${true} />
   </div>`;
 }
 
@@ -185,7 +149,7 @@ function DimensionPicker({ dimensions, value, onChange }) {
     ${open ? html`<div class="absolute z-[80] mt-1 left-0 w-[240px] max-h-[320px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
       ${core.map(row)}
       ${accordion('Atributos do contato', contactDims, openContact, setOpenContact)}
-      ${accordion('Atributos do atendimento', convDims, openConv, setOpenConv)}
+      ${accordion('Atributos da conversa', convDims, openConv, setOpenConv)}
     </div>` : null}
   </div>`;
 }
@@ -286,7 +250,7 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
 
   return html`
     <div>
-      <div class="text-[15px] font-semibold text-wa-text mb-3">Filtrar atendimentos</div>
+      <div class="text-[15px] font-semibold text-wa-text mb-3">Filtrar conversas</div>
       ${onSortChange ? html`
         <label class="block text-[12px] text-wa-secondary mb-1">Ordenar por</label>
         <select value=${sortBy} onChange=${(e) => onSortChange(e.target.value)}

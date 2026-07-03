@@ -191,7 +191,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             <div class="absolute right-0 top-[46px] z-[60] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[238px]">
               <button
                 disabled=${selCount === 0}
-                onClick=${() => { if (confirm(`Ativar a IA para ${selCount} atendimento(s) selecionado(s)?`)) { onBulkAI && onBulkAI(true); } closeMenus(); }}
+                onClick=${() => { if (confirm(`Ativar a IA para ${selCount} conversa(s) selecionada(s)?`)) { onBulkAI && onBulkAI(true); } closeMenus(); }}
                 class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
@@ -199,7 +199,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               </button>
               <button
                 disabled=${selCount === 0}
-                onClick=${() => { if (confirm(`Desativar a IA para ${selCount} atendimento(s) selecionado(s)?`)) { onBulkAI && onBulkAI(false); } closeMenus(); }}
+                onClick=${() => { if (confirm(`Desativar a IA para ${selCount} conversa(s) selecionada(s)?`)) { onBulkAI && onBulkAI(false); } closeMenus(); }}
                 class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="#ef4444"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/></svg>
@@ -211,7 +211,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>
-                ${allSelectedPinned ? 'Desafixar atendimentos' : 'Fixar atendimentos'}
+                ${allSelectedPinned ? 'Desafixar conversas' : 'Fixar conversas'}
               </button>
               ${selCount <= 1 ? html`
               <button
@@ -243,7 +243,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               ${(bulkTagsOpen && selCount > 0) ? html`
                 <div class="border-t border-wa-border">
                   <button
-                    onClick=${() => { if (confirm(`Remover TODAS as tags de ${selCount} atendimento(s) selecionado(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
+                    onClick=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
                     class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
                   >
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="#ef4444"><path d="M19 13H5v-2h14v2z"/></svg>
@@ -316,7 +316,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
               >
                 <span class="text-wa-text"><${ArchiveIcon} /></span>
-                ${showArchived ? 'Desarquivar atendimentos' : 'Arquivar atendimentos'}
+                ${showArchived ? 'Desarquivar conversas' : 'Arquivar conversas'}
               </button>
               <div class="border-t border-wa-border">
                 <button
@@ -332,7 +332,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM7 13v-2h10v2H7z"/></svg>
-                  Limpar atendimentos selecionados
+                  Limpar conversas selecionadas
                 </button>
               </div>
             </div>
@@ -346,7 +346,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           <button
             onClick=${onToggleArchived}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 transition-colors ${showArchived ? 'bg-white/15' : ''}"
-            title=${showArchived ? 'Voltar aos atendimentos' : 'Ver arquivados'}
+            title=${showArchived ? 'Voltar às conversas' : 'Ver arquivados'}
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
@@ -356,7 +356,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             <span class="text-white/80 text-[13px] animate-pulse">Sem conexão</span>
             <span class="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" title="Offline"></span>
           ` : html`
-            <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot'}</span>
+            <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot-Pro'}</span>
             <span class="inline-block w-2 h-2 rounded-full bg-green-400" title="Online"></span>
           `}
           <div ref=${menuRef} class="relative">
@@ -372,14 +372,14 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   class="w-full text-left px-4 py-[10px] text-[14px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                  Selecionar atendimentos
+                  Selecionar conversas
                 </button>
                 <button
                   onClick=${() => { closeMenus(); onNewConversation && onNewConversation(); }}
                   class="w-full text-left px-4 py-[10px] text-[14px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 9h-2v2H9v-2H7V9h2V7h2v2h2v2z"/></svg>
-                  Iniciar atendimento
+                  Iniciar conversa
                 </button>
               </div>
             ` : ''}
@@ -394,7 +394,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           <${SearchIcon} />
           <input
             type="text"
-            placeholder="Pesquisar ou começar uma novo atendimento"
+            placeholder="Pesquisar ou começar uma nova conversa"
             value=${search}
             onInput=${(e) => onSearchChange(e.target.value)}
             class="bg-transparent border-none outline-none text-wa-text text-[14px] w-full placeholder-wa-secondary"
@@ -456,7 +456,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             onClick=${() => onStartConversation(normalizePhone(search))}
                             class="mt-2 px-4 py-[6px] bg-wa-teal/10 text-wa-teal text-[13px] rounded-lg hover:bg-wa-teal/20 transition-colors cursor-pointer border border-wa-teal/30"
                           >
-                            Iniciar atendimento com ${formatPhoneDisplay(normalizePhone(search))}
+                            Iniciar conversa com ${formatPhoneDisplay(normalizePhone(search))}
                           </button>`
                     }
                   </div>
@@ -509,7 +509,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                       </span>
                       <span class="flex flex-col items-end gap-[3px] ml-[6px] shrink-0">
                         <span class="flex items-center gap-[4px]">
-                          ${c.is_pinned ? html`<span class="text-wa-secondary" title="Atendimento fixado"><${PinIcon} /></span>` : ''}
+                          ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
                           <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
                         </span>
                         ${resolveAssignee ? html`<${AssigneeChip} assignee=${resolveAssignee(c)} />` : null}

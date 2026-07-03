@@ -35,7 +35,7 @@ export function useAudioRecorder({ onRecorded }) {
       return;
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Seu navegador não permite acesso ao microfone neste contexto. Abra o WhatsBot via HTTPS (ou http://localhost) para gravar áudios.');
+      alert('Seu navegador não permite acesso ao microfone neste contexto. Abra o WhatsBot-Pro via HTTPS (ou http://localhost) para gravar áudios.');
       return;
     }
     try {

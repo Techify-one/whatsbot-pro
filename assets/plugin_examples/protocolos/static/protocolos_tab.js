@@ -10,7 +10,8 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
-import { ResolveForm, LabeledField } from '/plugins/protocolos/static/resolve_form.js';
+import { ResolveForm, LabeledField, isMultiDef } from '/plugins/protocolos/static/resolve_form.js';
+import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 
 const html = htm.bind(h);
 
@@ -67,7 +68,7 @@ function fmtTs(ts) {
 
 function fmtCell(v, def) {
   if (def.type === 'checkbox') return v ? 'Sim' : 'Não';
-  if (def.type === 'checkboxes') return (Array.isArray(v) && v.length) ? v.join(', ') : '—';
+  if (isMultiDef(def)) return (Array.isArray(v) && v.length) ? v.join(', ') : '—';
   return (v == null || v === '') ? '—' : String(v);
 }
 
@@ -76,7 +77,7 @@ function fmtCell(v, def) {
 // de obrigatórios do detalhe e pelo guard do drag para "Fechado".
 function isFilledProto(def, v) {
   if (def.type === 'checkbox') return true;
-  if (def.type === 'checkboxes') return Array.isArray(v) ? v.length > 0 : !!v;
+  if (isMultiDef(def)) return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
@@ -135,7 +136,22 @@ function _monthLabel(ym) {
   catch (e) { return ym; }
 }
 
-function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
+// Tipos de campo de protocolo com OPÇÕES fixas (viram colunas de Kanban / filtro dropdown).
+const OPTION_TYPES = new Set(['select', 'radio', 'checkboxes']);
+// Um campo é MULTI-valor (várias colunas) quando select/checkboxes com `multiple`. (checkboxes
+// SEM multiple guarda lista de 1 item — conta como valor único p/ agrupar.)
+const isMultiField = (d) => (d.type === 'select' || d.type === 'checkboxes') && !!d.multiple;
+// Campos de opção de um escopo, com {scope,key,label,type,options,multiple}. singleOnly → só
+// valor único (agrupar/arrastar); senão todos (filtros).
+function optionFields(defs, scope, singleOnly) {
+  return (defs || [])
+    .filter((d) => OPTION_TYPES.has(d.type) && Array.isArray(d.options) && d.options.length
+                   && (!singleOnly || !isMultiField(d)))
+    .map((d) => ({ scope, key: d.key, label: d.label || d.key, type: d.type,
+                   options: d.options, multiple: !!d.multiple }));
+}
+
+function buildGrouping(view, { users, groupFields, rows, apiPost }) {
   const gb = (view && view.group_by) || 'status';
   const cliente = (r) => r.contact_name || r.contact_phone || 'cliente';
 
@@ -193,27 +209,44 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
     };
   }
 
-  if (gb === 'attr') {
+  if (gb === 'pfield') {
+    const scope = view && view.group_field_scope;
     const key = view && view.group_attr_key;
-    const def = (coreAttrDefs || []).find((d) => d.key === key);
+    const def = (groupFields || []).find((d) => d.scope === scope && d.key === key);
     if (!def) {
       return {
         readOnly: true, unavailable: true,
-        columns: [{ id: '__none__', label: 'Atributo indisponível' }],
+        columns: [{ id: '__none__', label: 'Campo indisponível' }],
         columnIdOf: () => '__none__',
       };
     }
     const opts = Array.isArray(def.options) ? def.options : [];
+    // Valor do campo na row: escopo protocolo → `fields`; atendimento → `atendimento_fields`.
+    // checkboxes de valor único guarda lista de 1 item → usa o 1º.
+    const valOf = (r) => {
+      const src = (scope === 'protocolo' ? r.fields : r.atendimento_fields) || {};
+      let v = src[key];
+      if (Array.isArray(v)) v = v.length ? v[0] : '';
+      return v;
+    };
     return {
       columns: [{ id: '__none__', label: 'Sem valor' },
                 ...opts.map((o) => ({ id: `o:${o}`, label: o }))],
-      columnIdOf: (r) => { const v = (r.atendimento_attrs || {})[key]; return (v != null && v !== '') ? `o:${v}` : '__none__'; },
+      columnIdOf: (r) => { const v = valOf(r); return (v != null && v !== '') ? `o:${v}` : '__none__'; },
       confirmText: (r, col) => (col === '__none__'
-        ? `Limpar "${def.label}" da última atendimento de ${cliente(r)}?`
-        : `Definir "${def.label}" = "${col.slice(2)}" na última atendimento de ${cliente(r)}?`),
-      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/set-attr`, {
-        key, value: col === '__none__' ? null : col.slice(2),
+        ? `Limpar "${def.label}" do protocolo de ${cliente(r)}?`
+        : `Definir "${def.label}" = "${col.slice(2)}" no protocolo de ${cliente(r)}?`),
+      onDrop: (r, col) => apiPost(`/protocolos/${r.id}/set-field`, {
+        scope, key, value: col === '__none__' ? null : col.slice(2),
       }),
+    };
+  }
+
+  if (gb === 'attr') {  // legado: agrupamento por atributo de conversa (descontinuado)
+    return {
+      readOnly: true, unavailable: true,
+      columns: [{ id: '__none__', label: 'Agrupamento indisponível' }],
+      columnIdOf: () => '__none__',
     };
   }
 
@@ -229,7 +262,24 @@ function buildGrouping(view, { users, coreAttrDefs, rows, apiPost }) {
   };
 }
 
+// Reordena as colunas geradas por `buildGrouping` segundo uma lista salva de ids. As colunas
+// cujo id está em `order` vêm primeiro (na ordem de `order`); as demais (dinâmicas novas,
+// ausentes da ordem salva) seguem na ordem natural, no fim. order vazio/nulo → intacto.
+function applyColumnOrder(columns, order) {
+  if (!Array.isArray(order) || !order.length) return columns;
+  const byId = new Map(columns.map((c) => [c.id, c]));
+  const seen = new Set();
+  const out = [];
+  for (const id of order) { const c = byId.get(id); if (c && !seen.has(id)) { out.push(c); seen.add(id); } }
+  for (const c of columns) if (!seen.has(c.id)) out.push(c);
+  return out;
+}
+
 export function ProtocolosTab({ api, setTab }) {
+  // Alternância Kanban/Lista vive AQUI (topo, ao lado do título) — o modo é passado ao
+  // ProtocolosList por prop. Persistido por-device em localStorage (MODE_KEY).
+  const [mode, setMode] = useState(() => lsGet(MODE_KEY, 'lista'));  // 'lista' | 'kanban'
+  const setM = (m) => { setMode(m); lsSet(MODE_KEY, m); };
   return html`
     <div>
       <div class="flex items-center gap-2 mb-3">
@@ -239,19 +289,25 @@ export function ProtocolosTab({ api, setTab }) {
           Voltar
         </button>` : null}
         <h1 class="text-lg font-semibold text-wa-text">Protocolos</h1>
+        <div class="inline-flex rounded-lg border border-wa-border overflow-hidden">
+          ${[['kanban', 'Kanban'], ['lista', 'Lista']].map(([k, lbl]) => html`
+            <button key=${k} onClick=${() => setM(k)}
+              class="px-3 py-1.5 text-[13px] ${mode === k ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
+        </div>
       </div>
-      <${ProtocolosList} api=${api} />
+      <${ProtocolosList} api=${api} mode=${mode} />
     </div>`;
 }
 
-function ProtocolosList({ api }) {
+function ProtocolosList({ api, mode }) {
   const apiBase = api.apiBase;
   const { authHeaders } = api.services;
 
   const [cols, setCols] = useState([]);          // TODAS as defs do protocolo (OBS fixo + extras, com `required`)
   const [atendDefs, setAtendDefs] = useState([]);  // defs de "Resolver atendimento" (sub-tabela do detalhe)
   const [atendResolveDefs, setAtendResolveDefs] = useState([]); // atendimento: obs+extras editáveis (popup)
-  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo personalizado do core (escopo atendimento, não-sistema)
+  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo de CONVERSA do core (só p/ o detalhe)
+  const [contactAttrDefs, setContactAttrDefs] = useState([]);  // atributo de CONTATO do core (filtros, tipo list, não-sistema)
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
@@ -261,7 +317,6 @@ function ProtocolosList({ api }) {
   const [dateFrom, setDateFrom] = useState(() => ymd(new Date()));
   const [dateTo, setDateTo] = useState('');
   const [datePreset, setDatePreset] = useState(null);
-  const [mode, setMode] = useState(() => lsGet(MODE_KEY, 'lista'));   // 'lista' | 'kanban'
   // Visualizações (abas de "Agrupar por"): built-ins + carregadas do backend.
   const [views, setViews] = useState([]);
   const [activeViewId, setActiveViewId] = useState(() => {
@@ -282,10 +337,11 @@ function ProtocolosList({ api }) {
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);            // grupos de permissão (p/ "Quem pode ver")
   const [actionMsg, setActionMsg] = useState(null);  // {text, error}
+  const [savingPref, setSavingPref] = useState(false);  // salvando filtros pessoais/equipe
+  const [prefMsg, setPrefMsg] = useState('');           // feedback do salvar/alternar origem
   const [detail, setDetail] = useState(null);        // {protocolo, atendimentos}
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
   const appliedViewRef = useRef(null);               // última aba cujos filtros já foram aplicados
-  const setM = (m) => { setMode(m); lsSet(MODE_KEY, m); };
   // Troca a aba ativa: estado + localStorage (por-device) + reflete ?view=<id> na URL
   // (replaceState, preservando ?detail=). id vazio limpa o param (ex.: view excluída).
   const setActiveView = (id) => {
@@ -300,6 +356,22 @@ function ProtocolosList({ api }) {
     ? api.services.hasPermission(currentUser, 'plugin.protocolos.manage_team_views') : true;
   const canEditView = (v) => canTeam
     || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id));
+
+  // Campos de "Configurações — Protocolos" (escopos protocolo + atendimento) que alimentam o
+  // Kanban: `groupFields` = opção de valor único (agrupar/arrastar); `filterFields` = todos os
+  // de opção (filtrar, inclusive multi). `cols` = defs do protocolo; `atendDefs` = de atendimento.
+  const groupFields = useMemo(() => [
+    ...optionFields(cols, 'protocolo', true),
+    ...optionFields(atendDefs, 'atendimento', true),
+  ], [cols, atendDefs]);
+  const filterFields = useMemo(() => [
+    ...optionFields(cols, 'protocolo', false),
+    ...optionFields(atendDefs, 'atendimento', false),
+  ], [cols, atendDefs]);
+  // Pode CRIAR novas visualizações (agrupamentos)? Gate do "+ Nova". create_views OU
+  // manage_team_views (quem gerencia views de equipe também cria). Default-allow sem RBAC.
+  const canCreateViews = (api.services.hasPermission
+    ? api.services.hasPermission(currentUser, 'plugin.protocolos.create_views') : true) || canTeam;
   // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
   // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|attr:<key>.
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
@@ -308,6 +380,11 @@ function ProtocolosList({ api }) {
   const dragRef = useRef(null);     // protocolo sendo arrastado
   const draggedRef = useRef(false); // distingue clique de arrasto
   const [dropCol, setDropCol] = useState(null);
+  // Reorder de COLUNAS (arrastar o título): ref separado do card p/ não colidir. A ordem só
+  // é aplicada localmente (colOrderDraft) — persiste no "Salvar visualização pessoal/equipe".
+  const colDragRef = useRef(null);              // id da coluna sendo arrastada
+  const [colOrderDraft, setColOrderDraft] = useState(null);  // null = usar a ordem salva
+  const [colDropTarget, setColDropTarget] = useState(null);  // realce da coluna alvo
 
   const getJson = useCallback(async (url, opts) => {
     const r = await fetch(url, { headers: authHeaders(), ...(opts || {}) });
@@ -334,10 +411,11 @@ function ProtocolosList({ api }) {
       if (ot != null) params.set('opened_to', String(ot));
       if (assigneeFilter != null) params.set('assignee_user_id', String(assigneeFilter));
       if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
-      const [dd, cd, ca, ll] = await Promise.all([
+      const [dd, cd, ca, co, ll] = await Promise.all([
         getJson(`${apiBase}/field-defs?scope=protocolo`),
         getJson(`${apiBase}/field-defs?scope=atendimento`),
-        getJson('/api/custom-attributes?applies_to=conversation'),  // atributos do CORE
+        getJson('/api/custom-attributes?applies_to=conversation'),  // atributos de CONVERSA (só p/ o detalhe)
+        getJson('/api/custom-attributes?applies_to=contact'),       // atributos de CONTATO (filtros)
         getJson(`${apiBase}/protocolos?${params.toString()}`),
       ]);
       // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
@@ -346,9 +424,14 @@ function ProtocolosList({ api }) {
       const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
       setAtendDefs(atendAll.filter((d) => !d.fixed));
       setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
-      // Atributo personalizado = def do core (escopo atendimento) que NÃO é espelho do plugin (is_system=0).
+      // Atributo de CONVERSA (is_system=0) — mantido SÓ p/ exibição no detalhe (não filtra/agrupa).
       setCoreAttrDefs(((ca && ca.ok && ca.data) || [])
         .filter((d) => !d.is_system)
+        .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
+                       options: Array.isArray(d.options) ? d.options : [] })));
+      // Atributo de CONTATO tipo list (is_system=0) — alimenta os FILTROS do Kanban.
+      setContactAttrDefs(((co && co.ok && co.data) || [])
+        .filter((d) => !d.is_system && d.type === 'list')
         .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
                        options: Array.isArray(d.options) ? d.options : [] })));
       setRows((ll && ll.ok && ll.data) || []);
@@ -374,33 +457,18 @@ function ProtocolosList({ api }) {
     api.services.getMe().then((r) => { if (r && r.ok && r.data && r.data.user) setCurrentUser(r.data.user); }).catch(() => {});
   }, [api]);
 
-  // Aplica os filtros pré-determinados da aba UMA vez por troca de aba (defaults de
-  // entrada, não travas). appliedViewRef evita reaplicar em reloads (WS) e só dispara
-  // quando a view alvo já está resolvida (built-in sempre; custom após carregar).
-  useEffect(() => {
-    const v = activeView;
-    // Só aplica quando a view ALVO está resolvida — usa v.id === activeViewId p/ NÃO marcar
-    // como aplicada enquanto activeView ainda é o fallback (senão a aba custom nunca recebia
-    // seus filtros no reload → ficava inconsistente com a troca de aba). Aplica 1× por aba.
-    const resolved = v && String(v.id) === String(activeViewId);
-    if (!resolved || appliedViewRef.current === String(activeViewId)) return;
-    appliedViewRef.current = String(activeViewId);
-    // Origem dos filtros: a preferência do usuário (pessoal x equipe) por aba. Default =
-    // filtros da EQUIPE (a coluna filters compartilhada). O fallback de render não tem pref/filters → {}.
-    const usePersonal = v.pref && v.pref.use_personal;
-    const f = (usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {};
-    // Só aplica pré-determinados de filtros DISPONÍVEIS nesta aba (available_filters da view;
-    // null/undefined = todos). Um filtro indisponível nunca constrange silenciosamente.
-    const availArr = Array.isArray(v.available_filters) ? v.available_filters : null;
-    const av = (key) => !availArr || availArr.includes(key);
-    setStatus(av('status') && f.status != null ? f.status : '');
-    setQ(av('q') && f.q != null ? f.q : '');
-    setAssigneeFilter(av('atendente') && f.assignee_user_id != null ? f.assignee_user_id : null);
+  // Aplica um dict de filtros pré-determinados na BARRA ao vivo. Só aplica os tipos
+  // DISPONÍVEIS na aba (availFilter); um tipo indisponível nunca constrange silenciosamente.
+  // Data: preset relativo vira intervalo REAL; 'tudo' limpa; from/to literais respeitados;
+  // sem date → default (hoje→frente). Reusado pela troca de aba e pelo toggle Pessoal/Equipe.
+  const applyFilterDict = (f) => {
+    f = f || {};
+    setStatus(availFilter('status') && f.status != null ? f.status : '');
+    setQ(availFilter('q') && f.q != null ? f.q : '');
+    setAssigneeFilter(availFilter('atendente') && f.assignee_user_id != null ? f.assignee_user_id : null);
     setAttrFilters(f.attrs && typeof f.attrs === 'object'
-      ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => av(`attr:${k}`))) : {});
-    // Data: preset relativo vira intervalo REAL (from/to); 'tudo' limpa; from/to literais
-    // são respeitados; sem date (ou Período indisponível) → default (hoje→frente).
-    const df = (av('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
+      ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => availFilter(k))) : {});
+    const df = (availFilter('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
     const presetDays = df && df.preset && df.preset !== 'tudo'
       ? (DATE_PRESETS.find(([lbl]) => lbl === df.preset) || [])[1] : undefined;
     if (df && presetDays != null) {
@@ -413,6 +481,20 @@ function ProtocolosList({ api }) {
     } else {
       setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');  // default: hoje→frente
     }
+  };
+
+  // Aplica os filtros pré-determinados da aba UMA vez por troca de aba (defaults de
+  // entrada, não travas). appliedViewRef evita reaplicar em reloads (WS) e só dispara
+  // quando a view alvo já está resolvida (built-in sempre; custom após carregar).
+  useEffect(() => {
+    const v = activeView;
+    const resolved = v && String(v.id) === String(activeViewId);
+    if (!resolved || appliedViewRef.current === String(activeViewId)) return;
+    appliedViewRef.current = String(activeViewId);
+    // Origem dos filtros: a preferência do usuário (pessoal x equipe) por aba. Default =
+    // filtros da EQUIPE (coluna filters compartilhada). Fallback de render não tem pref/filters.
+    const usePersonal = v.pref && v.pref.use_personal;
+    applyFilterDict((usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {});
   }, [activeViewId, views, activeView]);
 
   // Atendentes (p/ as colunas do kanban "por atendente"). Reusa o serviço do core.
@@ -450,6 +532,92 @@ function ProtocolosList({ api }) {
   const clearFilters = () => {
     setStatus(''); setQ(''); setAssigneeFilter(null); setAttrFilters({});
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
+  };
+
+  // Monta um dict de filtros a partir da BARRA ao vivo (o que o usuário vê agora), só com os
+  // tipos DISPONÍVEIS na aba. Data: preset relativo/'tudo' preservados; intervalo manual vira
+  // from/to literais; o default "hoje→frente" (sem ajuste) é omitido (= sem filtro de data).
+  const buildCurrentFilters = () => {
+    const f = {};
+    if (availFilter('status') && status) f.status = status;
+    if (availFilter('q') && q.trim()) f.q = q.trim();
+    if (availFilter('atendente') && assigneeFilter != null) f.assignee_user_id = assigneeFilter;
+    if (availFilter('periodo')) {
+      if (datePreset && datePreset !== 'tudo') f.date = { preset: datePreset, from: '', to: '' };
+      else if (datePreset === 'tudo') f.date = { preset: 'tudo', from: '', to: '' };
+      else if ((dateFrom && dateFrom !== ymd(new Date())) || dateTo) f.date = { preset: '', from: dateFrom || '', to: dateTo || '' };
+    }
+    const attrs = {};
+    for (const [k, v] of Object.entries(attrFilters || {})) if (availFilter(k) && v != null && v !== '') attrs[k] = v;
+    if (Object.keys(attrs).length) f.attrs = attrs;
+    return f;
+  };
+
+  // Toggle Pessoal/Equipe (parte de cima dos filtros): aplica na barra o conjunto escolhido e
+  // persiste a preferência do usuário (my-pref) sem mexer nos VALORES salvos. appliedViewRef é
+  // marcado p/ o effect de entrada não re-aplicar por cima.
+  const switchSource = async (toPersonal) => {
+    const v = activeView;
+    if (!v || v.id == null || v.id === FALLBACK_VIEW.id) return;
+    setPrefMsg('');
+    setColOrderDraft(null);  // a ordem exibida passa a refletir a origem escolhida
+    appliedViewRef.current = String(activeViewId);
+    applyFilterDict(toPersonal ? ((v.pref && v.pref.personal_filters) || {}) : (v.filters || {}));
+    setViews((vs) => vs.map((x) => String(x.id) === String(v.id)
+      ? { ...x, pref: { ...(x.pref || {}), use_personal: toPersonal } } : x));
+    try {
+      await fetch(`${apiBase}/kanban-views/${v.id}/my-pref`, {
+        method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ use_personal: toPersonal }),
+      });
+    } catch (_) { /* silencioso: a barra já reflete a escolha */ }
+  };
+
+  // Salva os filtros ATUAIS da barra como padrão PESSOAL desta aba (my-pref) e marca a origem
+  // como pessoal. Não re-aplica (a barra já mostra o que foi salvo).
+  const savePersonalFilters = async () => {
+    const v = activeView;
+    if (!v || v.id == null || v.id === FALLBACK_VIEW.id) return;
+    setSavingPref(true); setPrefMsg('');
+    const f = buildCurrentFilters();
+    const co = currentOrderIds();  // ordem das colunas atual (visível) → parte da visualização
+    try {
+      const r = await fetch(`${apiBase}/kanban-views/${v.id}/my-pref`, {
+        method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ use_personal: true, personal_filters: f, personal_column_order: co }),
+      });
+      const j = await r.json().catch(() => ({}));
+      setSavingPref(false);
+      if (!(j && j.ok)) { setPrefMsg('Falha ao salvar visualização pessoal.'); return; }
+      setPrefMsg('Visualização pessoal salva.');
+      appliedViewRef.current = String(activeViewId);
+      setColOrderDraft(null);
+      setViews((vs) => vs.map((x) => String(x.id) === String(v.id)
+        ? { ...x, pref: { use_personal: true, personal_filters: f, personal_column_order: co } } : x));
+    } catch (_) { setSavingPref(false); setPrefMsg('Falha ao salvar visualização pessoal.'); }
+  };
+
+  // Salva os filtros ATUAIS da barra como padrão da EQUIPE (kanban-views.filters). Só para
+  // quem pode editar a visualização; available_filters é omitido → o backend preserva.
+  const saveTeamFilters = async () => {
+    const v = activeView;
+    if (!v || v.id == null || v.id === FALLBACK_VIEW.id) return;
+    setSavingPref(true); setPrefMsg('');
+    const f = buildCurrentFilters();
+    const co = currentOrderIds();  // ordem das colunas atual (visível) → parte da visualização
+    try {
+      const r = await fetch(`${apiBase}/kanban-views/${v.id}`, {
+        method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters: f, column_order: co }),
+      });
+      const j = await r.json().catch(() => ({}));
+      setSavingPref(false);
+      if (!(j && j.ok)) { setPrefMsg((j && j.error) || 'Falha ao salvar visualização da equipe.'); return; }
+      setPrefMsg('Visualização da equipe salva.');
+      appliedViewRef.current = String(activeViewId);  // barra já reflete; não re-aplicar
+      setColOrderDraft(null);
+      setViews((vs) => vs.map((x) => String(x.id) === String(v.id) ? { ...x, filters: f, column_order: co } : x));
+    } catch (_) { setSavingPref(false); setPrefMsg('Falha ao salvar visualização da equipe.'); }
   };
 
   // Id do protocolo atualmente aberto no detalhe (espelha ?detail= na URL). Ref p/ o
@@ -499,22 +667,48 @@ function ProtocolosList({ api }) {
 
   // ── Kanban: agrupamento (dinâmico pela aba ativa) + drag-to-set-state ─────────
   const grouping = useMemo(
-    () => buildGrouping(activeView, { users, coreAttrDefs, rows, apiPost }),
-    [activeView, users, coreAttrDefs, rows, apiPost]);
+    () => buildGrouping(activeView, { users, groupFields, rows, apiPost }),
+    [activeView, users, groupFields, rows, apiPost]);
+
+  // Ordem das colunas salva desta aba: PESSOAL (pref) se a origem for pessoal, senão da EQUIPE
+  // (view.column_order). Ambas podem ser null → ordem padrão de buildGrouping.
+  const storedColumnOrder = (v) => {
+    if (!v) return null;
+    return (v.pref && v.pref.use_personal)
+      ? (v.pref.personal_column_order || null) : (v.column_order || null);
+  };
+  // Colunas efetivamente exibidas: rascunho local (se o usuário arrastou) tem precedência
+  // sobre a ordem salva. Reaplica sobre as colunas ATUAIS (dinâmicas continuam funcionando).
+  const orderedColumns = useMemo(
+    () => applyColumnOrder(grouping.columns, colOrderDraft || storedColumnOrder(activeView)),
+    [grouping, colOrderDraft, activeView]);
+  // Troca de aba OU de origem (Pessoal/Equipe) → descarta o rascunho, refletindo o que está salvo.
+  useEffect(() => { setColOrderDraft(null); },
+    [activeViewId, !!(activeView && activeView.pref && activeView.pref.use_personal)]);
+  // Move a coluna `fromId` para a posição da `toId` (só local; persiste no Salvar).
+  const reorderColumns = (fromId, toId) => {
+    if (fromId === toId) return;
+    const ids = orderedColumns.map((c) => c.id);
+    const from = ids.indexOf(fromId); const to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    ids.splice(from, 1); ids.splice(to, 0, fromId);
+    setColOrderDraft(ids);
+  };
+  const currentOrderIds = () => orderedColumns.map((c) => c.id);  // ordem visível p/ salvar
 
   // Abre o editor de visualização (criar quando view=null). NÃO troca de aba sozinho —
   // o usuário só sai da aba atual pelo "✕" dela ou clicando noutra aba (req. do usuário).
   // Uma aba nova aparece na barra; editar a aba ATIVA re-aplica seus filtros (reset do ref).
   const openViewEditor = useCallback(async (view) => {
     const saved = await api.ui.openModal((close) => html`<${ViewEditorModal}
-      view=${view} coreAttrDefs=${coreAttrDefs} users=${users} roles=${roles} canTeam=${canTeam}
+      view=${view} groupFields=${groupFields} users=${users} roles=${roles} canTeam=${canTeam}
       currentUser=${currentUser} api=${api}
       onSaved=${(v) => close(v)} onCancel=${() => close(null)} />`);
     if (saved) {
       if (view && String(view.id) === String(activeViewId)) appliedViewRef.current = null;
       await loadViews();
     }
-  }, [api, coreAttrDefs, users, roles, canTeam, currentUser, loadViews, activeViewId]);
+  }, [api, groupFields, users, roles, canTeam, currentUser, loadViews, activeViewId]);
 
   const removeView = useCallback(async (view) => {
     if (!view) return;
@@ -698,10 +892,11 @@ function ProtocolosList({ api }) {
               <button title="Excluir" onClick=${() => removeView(t)}
                 class="px-1.5 py-1 text-[12px] bg-wa-panel text-wa-secondary hover:bg-wa-hover hover:text-red-500 border-l border-wa-border">✕</button>` : null}
           </div>`)}
-        <button title="Nova visualização" onClick=${() => openViewEditor(null)}
-          class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>
+        ${canCreateViews ? html`<button title="Novo agrupamento" onClick=${() => openViewEditor(null)}
+          class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>` : null}
       </div>
       ${mode === 'kanban' && grouping.onDrop ? html`<span class="text-[11px] text-wa-secondary">Arraste um card para outra coluna (pede confirmação).</span>` : null}
+      ${mode === 'kanban' ? html`<span class="text-[11px] text-wa-secondary">Arraste o título de uma coluna para reordenar (salve para manter).</span>` : null}
       ${mode === 'kanban' && grouping.unavailable ? html`<span class="text-[11px] text-amber-600">Atributo da visualização indisponível (foi removido).</span>` : null}
     </div>`;
 
@@ -709,19 +904,27 @@ function ProtocolosList({ api }) {
     <div>
       ${actionMsg ? html`<div class="mb-2 px-3 py-2 rounded-md text-[13px] ${actionMsg.error ? 'bg-red-500/15 border border-red-500 text-red-500 font-semibold' : 'text-wa-secondary'}">${actionMsg.text}</div>` : null}
       <div class="flex gap-3 overflow-x-auto pb-2">
-        ${grouping.columns.map((col) => {
+        ${orderedColumns.map((col) => {
           const cards = rows.filter((r) => grouping.columnIdOf(r) === col.id);
           const isTarget = dropCol === col.id;
+          const isColTarget = colDropTarget === col.id;
           return html`
             <div key=${col.id} class="flex flex-col w-72 shrink-0">
-              <div class="flex items-center justify-between mb-2 px-1">
+              <div draggable=${true}
+                onDragStart=${(e) => { colDragRef.current = col.id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(col.id)); } catch (_) { /* ignore */ } }}
+                onDragEnd=${() => { colDragRef.current = null; setColDropTarget(null); }}
+                onDragOver=${(e) => { if (!colDragRef.current) return; e.preventDefault(); if (colDropTarget !== col.id) setColDropTarget(col.id); }}
+                onDragLeave=${() => setColDropTarget((d) => (d === col.id ? null : d))}
+                onDrop=${(e) => { if (!colDragRef.current) return; e.preventDefault(); reorderColumns(colDragRef.current, col.id); colDragRef.current = null; setColDropTarget(null); }}
+                title="Arraste para reordenar as colunas"
+                class="flex items-center justify-between mb-2 px-1 py-0.5 rounded cursor-move select-none ${isColTarget ? 'ring-2 ring-wa-teal bg-wa-hover' : ''}">
                 <span class="text-[13px] font-semibold text-wa-text truncate">${col.label}</span>
                 <span class="text-[12px] text-wa-secondary">${cards.length}</span>
               </div>
               <div
-                onDragOver=${(e) => { e.preventDefault(); if (dropCol !== col.id) setDropCol(col.id); }}
+                onDragOver=${(e) => { if (colDragRef.current) return; e.preventDefault(); if (dropCol !== col.id) setDropCol(col.id); }}
                 onDragLeave=${() => setDropCol((d) => (d === col.id ? null : d))}
-                onDrop=${(e) => { e.preventDefault(); const row = dragRef.current; setDropCol(null); applyDrop(row, col.id); }}
+                onDrop=${(e) => { if (colDragRef.current) return; e.preventDefault(); const row = dragRef.current; setDropCol(null); applyDrop(row, col.id); }}
                 class="flex-1 min-h-[120px] rounded-lg p-2 flex flex-col gap-2 border border-dashed transition-colors ${isTarget ? 'ring-2 ring-wa-teal bg-wa-hover border-wa-teal' : 'bg-wa-bg border-wa-border'}">
                 ${cards.length === 0 ? html`<div class="text-[12px] text-wa-secondary text-center py-4">Vazio</div>`
                   : cards.map((r) => html`<${KanbanCard} key=${r.id} row=${r}
@@ -735,42 +938,56 @@ function ProtocolosList({ api }) {
 
   return html`
     <div>
-      <!-- Configuração da aba ativa (filtros disponíveis + pré-determinados), acima da
-           barra. Painel recolhível; só aparece quando há uma view real selecionada. -->
-      ${activeView && activeView.id != null && activeView.id !== FALLBACK_VIEW.id ? html`
-        <${ViewFilterConfig} key=${activeView.id}
-          view=${activeView} coreAttrDefs=${coreAttrDefs} users=${users}
-          canEdit=${canEditView(activeView)} apiBase=${apiBase} authHeaders=${authHeaders}
+      <!-- Config do AGRUPAMENTO (quais TIPOS de filtro existem nesta aba) — painel recolhível,
+           só para quem pode editar a visualização. -->
+      ${activeView && activeView.id != null && activeView.id !== FALLBACK_VIEW.id && canEditView(activeView) ? html`
+        <${ViewGroupingConfig} key=${activeView.id}
+          view=${activeView} filterFields=${filterFields} contactAttrDefs=${contactAttrDefs}
+          apiBase=${apiBase} authHeaders=${authHeaders}
           onSaved=${() => { appliedViewRef.current = null; loadViews(); }} />` : null}
-      <!-- Filtros principais + alternância Kanban/Lista -->
+      <!-- Origem (Pessoal/Equipe) + salvar a VISUALIZAÇÃO atual (filtros da barra + ordem das
+           colunas) como padrão da aba. "Salvar visualização equipe" só para quem pode editar. -->
+      ${activeView && activeView.id != null && activeView.id !== FALLBACK_VIEW.id ? html`
+        <div class="flex flex-wrap items-center gap-3 mb-3">
+          <span class="text-[12px] text-wa-secondary">Visualização do agrupamento:</span>
+          <div class="inline-flex items-center gap-3 text-[13px] text-wa-text">
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name=${`src-${activeView.id}`} checked=${!!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(true)} /> Pessoal
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name=${`src-${activeView.id}`} checked=${!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(false)} /> Equipe
+            </label>
+          </div>
+          <button onClick=${savePersonalFilters} disabled=${savingPref}
+            class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização pessoal</button>
+          ${canEditView(activeView) ? html`<button onClick=${saveTeamFilters} disabled=${savingPref}
+            class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização equipe</button>` : null}
+          ${prefMsg ? html`<span class="text-[12px] ${prefMsg.includes('Falha') ? 'text-red-500' : 'text-wa-teal'}">${prefMsg}</span>` : null}
+        </div>` : null}
+      <!-- Filtros principais (Kanban/Lista alternam no topo, ao lado do título) -->
       <div class="flex flex-wrap items-end gap-3 mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
         ${availFilter('status') ? html`
-        <div>
+        <div class="w-[150px]">
           <label class="block text-[12px] text-wa-secondary mb-1">Status</label>
-          <select class="wa-field px-3 py-2 rounded-md text-[13px]" value=${status} onChange=${(e) => setStatus(e.target.value)}>
-            <option value="">Todos</option>
-            <option value="aberto">Aberto</option>
-            <option value="fechado">Fechado</option>
-          </select>
+          <${OptionListSelect} options=${[{ value: 'aberto', label: 'Aberto' }, { value: 'fechado', label: 'Fechado' }]}
+            value=${status} onChange=${(v) => setStatus(v)} placeholder="Todos" float=${true} />
         </div>` : null}
         ${availFilter('atendente') ? html`
-        <div>
+        <div class="w-[170px]">
           <label class="block text-[12px] text-wa-secondary mb-1">Atendente</label>
-          <select class="wa-field px-3 py-2 rounded-md text-[13px]"
+          <${OptionListSelect}
+            options=${users.map((u) => ({ value: String(u.id), label: u.name || `Usuário #${u.id}` }))}
             value=${assigneeFilter == null ? '' : String(assigneeFilter)}
-            onChange=${(e) => setAssigneeFilter(e.target.value === '' ? null : +e.target.value)}>
-            <option value="">Todos</option>
-            ${users.map((u) => html`<option key=${u.id} value=${String(u.id)}>${u.name || `Usuário #${u.id}`}</option>`)}
-          </select>
+            onChange=${(v) => setAssigneeFilter(v === '' ? null : +v)} placeholder="Todos" float=${true} />
         </div>` : null}
-        ${coreAttrDefs.filter((d) => d.type === 'list' && availFilter(`attr:${d.key}`)).map((d) => html`
-          <div key=${d.key}>
-            <label class="block text-[12px] text-wa-secondary mb-1 truncate max-w-[180px]" title=${d.label}>${d.label}</label>
-            <select class="wa-field px-3 py-2 rounded-md text-[13px]" value=${attrFilters[d.key] || ''}
-              onChange=${(e) => setAttrFilters((s) => { const n = { ...s }; if (e.target.value) n[d.key] = e.target.value; else delete n[d.key]; return n; })}>
-              <option value="">Todos</option>
-              ${(d.options || []).map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
-            </select>
+        ${[...filterFields.map((d) => ({ fk: `pf:${d.scope}:${d.key}`, label: d.label, options: d.options })),
+           ...contactAttrDefs.map((d) => ({ fk: `cattr:${d.key}`, label: d.label, options: d.options }))]
+          .filter((d) => availFilter(d.fk)).map((d) => html`
+          <div key=${d.fk} class="w-[180px]">
+            <label class="block text-[12px] text-wa-secondary mb-1 truncate" title=${d.label}>${d.label}</label>
+            <${OptionListSelect} options=${d.options || []} value=${attrFilters[d.fk] || ''}
+              onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })}
+              placeholder="Todos" float=${true} />
           </div>`)}
         ${availFilter('q') ? html`
         <div class="flex-1 min-w-[180px]">
@@ -796,11 +1013,6 @@ function ProtocolosList({ api }) {
         <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
         ${hasViewFilters ? html`<button onClick=${clearFilters}
           class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
-        <div class="inline-flex rounded-lg border border-wa-border overflow-hidden">
-          ${[['kanban', 'Kanban'], ['lista', 'Lista']].map(([k, lbl]) => html`
-            <button key=${k} onClick=${() => setM(k)}
-              class="px-3 py-2 text-[13px] ${mode === k ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
-        </div>
       </div>
 
       <!-- Abas "Agrupar por" — só no Kanban (agrupamento não se aplica à Lista); aparece
@@ -863,7 +1075,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
     for (const d of protoDefs) {
       const cur = d.key === 'obs' ? at.obs : (at.fields || {})[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
-      else if (d.type === 'checkboxes') init[d.key] = Array.isArray(cur)
+      else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
         ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
       else init[d.key] = (cur == null ? '' : String(cur));
     }
@@ -1012,122 +1224,49 @@ function ConfirmDialog({ message, onOk, onCancel, okLabel = 'Confirmar', danger 
     </div>`;
 }
 
-// Painel recolhível (acima da barra de filtros, no Kanban e na Lista) que configura a aba
-// ATIVA: quais filtros ficam DISPONÍVEIS na barra ao vivo (metadado da view; só o editor
-// muda) e os PRÉ-DETERMINADOS de entrada (origem Pessoal por-usuário x Equipe compartilhada,
-// esta só o editor). Extraído do ViewEditorModal — que hoje cuida só de Nome/Quem pode
-// ver/Agrupar por. Montar com key=${view.id} no pai reinicializa o estado ao trocar de aba.
-// Salva available_filters+filters (PUT /kanban-views, só editor) e a preferência pessoal
-// (PUT /kanban-views/{id}/my-pref, sempre).
-function ViewFilterConfig({ view, coreAttrDefs, users, canEdit, apiBase, authHeaders, onSaved }) {
-  const listAttrs = (coreAttrDefs || []).filter((d) => d.type === 'list');
-  const initTeam = (view && view.filters) || {};
-  const initPersonal = (view && view.pref && view.pref.personal_filters) || {};
-  const initUsePersonal = !!(view && view.pref && view.pref.use_personal);
-  const initActive = initUsePersonal ? initPersonal : initTeam;  // origem mostrada ao abrir
-
+// Painel recolhível (acima da barra, no Kanban e na Lista) com a configuração GERAL do
+// AGRUPAMENTO: quais TIPOS de filtro existem nesta aba (available_filters da view). Só é
+// renderizado para quem pode editar a visualização. Os VALORES pré-determinados NÃO vivem
+// mais aqui — são salvos a partir dos filtros ATUAIS da barra pelos botões "Salvar filtros
+// pessoal/equipe" acima da barra. Montar com key=${view.id} reinicializa o estado por aba.
+function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, authHeaders, onSaved }) {
+  // Filtros por CAMPO DE PROTOCOLO (pf:<scope>:<key>) + ATRIBUTO DE CONTATO (cattr:<key>).
+  const attrFilterKeys = [
+    ...(filterFields || []).map((d) => [`pf:${d.scope}:${d.key}`, d.label]),
+    ...(contactAttrDefs || []).map((d) => [`cattr:${d.key}`, d.label]),
+  ];
+  // Tipos de filtro que podem existir na aba. null na view = TODOS (à prova de futuro).
+  const ALL_FILTER_KEYS = ['status', 'atendente', 'q', 'periodo', ...attrFilterKeys.map(([k]) => k)];
+  const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
   const [open, setOpen] = useState(false);
-  const [usePersonal, setUsePersonal] = useState(initUsePersonal);  // toggle origem dos filtros
-  const [fStatusOn, setFStatusOn] = useState(initActive.status != null);
-  const [fStatus, setFStatus] = useState(initActive.status || '');
-  const [fQOn, setFQOn] = useState(initActive.q != null);
-  const [fQ, setFQ] = useState(initActive.q || '');
-  const [fAssignOn, setFAssignOn] = useState(initActive.assignee_user_id != null);
-  const [fAssign, setFAssign] = useState(initActive.assignee_user_id != null ? String(initActive.assignee_user_id) : '');
-  const [fDateOn, setFDateOn] = useState(!!initActive.date);
-  const [fDatePreset, setFDatePreset] = useState((initActive.date && initActive.date.preset) || '7 dias');
-  const [fAttrs, setFAttrs] = useState((initActive.attrs && typeof initActive.attrs === 'object') ? { ...initActive.attrs } : {});
+  const [availSet, setAvailSet] = useState(() => new Set(initAvail == null ? ALL_FILTER_KEYS : initAvail));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [okMsg, setOkMsg] = useState('');
-  // Buffer das DUAS origens; os campos visíveis editam só a origem ativa. Ao alternar,
-  // os campos são salvos no buffer de saída e o buffer de entrada é carregado nos campos.
-  const bufRef = useRef({ team: { ...initTeam }, personal: { ...initPersonal } });
-
-  // Filtros de EQUIPE são read-only para quem não pode editar a visualização.
-  const fieldsRO = !usePersonal && !canEdit;
-
-  // Filtros DISPONÍVEIS nesta aba (metadado da VIEW; só o editor muda). null na view = TODOS.
-  // Chaves: status | atendente | q | periodo | attr:<key>.
-  const ALL_FILTER_KEYS = ['status', 'atendente', 'q', 'periodo', ...listAttrs.map((d) => `attr:${d.key}`)];
-  const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
-  const [availSet, setAvailSet] = useState(() => new Set(initAvail == null ? ALL_FILTER_KEYS : initAvail));
   const isAvail = (key) => availSet.has(key);
   const toggleAvail = (key) => { setOkMsg(''); setAvailSet((s) => {
     const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n;
   }); };
 
-  const setAttr = (key, val) => { setOkMsg(''); setFAttrs((s) => {
-    const next = { ...s };
-    if (val === '' || val == null) delete next[key]; else next[key] = val;
-    return next;
-  }); };
-
-  const buildFilters = () => {
-    const f = {};
-    if (isAvail('status') && fStatusOn) f.status = fStatus;
-    if (isAvail('q') && fQOn && fQ.trim()) f.q = fQ.trim();
-    if (isAvail('atendente') && fAssignOn && fAssign) f.assignee_user_id = +fAssign;
-    if (isAvail('periodo') && fDateOn) f.date = { preset: fDatePreset, from: '', to: '' };
-    const attrs = {};
-    for (const [k, v] of Object.entries(fAttrs)) if (isAvail(`attr:${k}`) && v != null && v !== '') attrs[k] = v;
-    if (Object.keys(attrs).length) f.attrs = attrs;
-    return f;
-  };
-
-  const loadFiltersIntoFields = (f) => {
-    f = f || {};
-    setFStatusOn(f.status != null); setFStatus(f.status || '');
-    setFQOn(f.q != null); setFQ(f.q || '');
-    setFAssignOn(f.assignee_user_id != null);
-    setFAssign(f.assignee_user_id != null ? String(f.assignee_user_id) : '');
-    setFDateOn(!!f.date); setFDatePreset((f.date && f.date.preset) || '7 dias');
-    setFAttrs((f.attrs && typeof f.attrs === 'object') ? { ...f.attrs } : {});
-  };
-
-  const switchSource = (toPersonal) => {
-    if (toPersonal === usePersonal) return;
-    setOkMsg('');
-    bufRef.current[usePersonal ? 'personal' : 'team'] = buildFilters();  // guarda edições atuais
-    setUsePersonal(toPersonal);
-    loadFiltersIntoFields(bufRef.current[toPersonal ? 'personal' : 'team']);
-  };
-
   const save = async () => {
     setErr(''); setOkMsg(''); setSaving(true);
-    // Captura as edições atuais na origem ativa antes de ler os dois buffers.
-    bufRef.current[usePersonal ? 'personal' : 'team'] = buildFilters();
-    const teamFilters = bufRef.current.team;
-    const personalFilters = bufRef.current.personal;
     try {
-      // Metadados de filtro da EQUIPE (available_filters + filters): só quem pode editar.
-      // O body NÃO leva name/scope/group/ACL → o backend preserva (logic.update_kanban_view).
-      if (canEdit) {
-        // available_filters: todos habilitados → null (todos, à prova de futuro); senão a lista.
-        const enabled = ALL_FILTER_KEYS.filter((k) => availSet.has(k));
-        const available_filters = enabled.length === ALL_FILTER_KEYS.length ? null : enabled;
-        const r = await fetch(`${apiBase}/kanban-views/${view.id}`, {
-          method: 'PUT',
-          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ available_filters, filters: teamFilters }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!(j && j.ok)) { setErr((j && j.error) || 'Falha ao salvar.'); setSaving(false); return; }
-      }
-      // Preferência do PRÓPRIO usuário (origem + filtros pessoais), sempre.
-      const pr = await fetch(`${apiBase}/kanban-views/${view.id}/my-pref`, {
+      // available_filters: todos habilitados → null (todos, à prova de futuro); senão a lista.
+      // O body NÃO leva filters → o backend preserva os VALORES pré-determinados da equipe.
+      const enabled = ALL_FILTER_KEYS.filter((k) => availSet.has(k));
+      const available_filters = enabled.length === ALL_FILTER_KEYS.length ? null : enabled;
+      const r = await fetch(`${apiBase}/kanban-views/${view.id}`, {
         method: 'PUT',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ use_personal: usePersonal, personal_filters: personalFilters }),
+        body: JSON.stringify({ available_filters }),
       });
-      const pj = await pr.json().catch(() => ({}));
-      if (!(pj && pj.ok)) { setErr((pj && pj.error) || 'Falha ao salvar preferência.'); setSaving(false); return; }
+      const j = await r.json().catch(() => ({}));
+      if (!(j && j.ok)) { setErr((j && j.error) || 'Falha ao salvar.'); setSaving(false); return; }
       setSaving(false); setOkMsg('Configuração salva.');
       onSaved && onSaved();
     } catch (_) { setErr('Falha ao salvar.'); setSaving(false); }
   };
 
-  const fieldCls = 'wa-field px-3 py-2 rounded-md text-[13px]';
   return html`
     <div class="mb-3 rounded-lg bg-wa-panel border border-wa-border">
       <button type="button" onClick=${() => setOpen((o) => !o)}
@@ -1136,94 +1275,18 @@ function ViewFilterConfig({ view, coreAttrDefs, users, canEdit, apiBase, authHea
         <span>⚙ Configurar filtros da aba</span>
       </button>
       ${open ? html`
-      <div class="px-3 pb-3 border-t border-wa-border">
-        ${canEdit ? html`
-        <div class="mb-4 mt-3">
-          <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros disponíveis nesta aba</span>
-          <div class="text-[11px] text-wa-secondary mb-2">Só os filtros marcados aparecem na barra de filtros e podem ser pré-determinados.</div>
-          <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
-            ${[['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
-               ...listAttrs.map((d) => [`attr:${d.key}`, d.label])].map(([key, lbl]) => html`
-              <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
-              </label>`)}
-          </div>
-        </div>` : null}
-
-        <div class="mb-2 ${canEdit ? '' : 'mt-3'}">
-          <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros pré-determinados desta aba</span>
-          <div class="flex items-center gap-4 text-[13px] text-wa-text">
-            <label class="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="radio" name=${`filtersrc-${view.id}`} checked=${usePersonal} onChange=${() => switchSource(true)} /> Pessoal
-            </label>
-            <label class="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="radio" name=${`filtersrc-${view.id}`} checked=${!usePersonal} onChange=${() => switchSource(false)} /> Equipe
-            </label>
-          </div>
-          <div class="text-[11px] text-wa-secondary mt-1">
-            ${usePersonal
-              ? 'Ao entrar nesta aba, você verá os SEUS filtros pessoais.'
-              : (canEdit
-                  ? 'Ao entrar nesta aba, você (e a equipe) verá os filtros definidos abaixo.'
-                  : 'Ao entrar nesta aba, você verá os filtros definidos pela equipe (somente leitura).')}
-          </div>
+      <div class="px-3 pb-3 pt-3 border-t border-wa-border">
+        <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros disponíveis nesta aba</span>
+        <div class="text-[11px] text-wa-secondary mb-2">Só os tipos de filtro marcados aparecem na barra de filtros deste agrupamento.</div>
+        <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
+          ${[['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
+             ...attrFilterKeys].map(([key, lbl]) => html`
+            <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
+            </label>`)}
         </div>
-        <div class="space-y-2 mb-4">
-          ${isAvail('status') ? html`
-          <div class="flex items-center gap-2">
-            <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fStatusOn} disabled=${fieldsRO} onChange=${(e) => { setOkMsg(''); setFStatusOn(e.target.checked); }} /> Status
-            </label>
-            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fStatusOn} value=${fStatus} onChange=${(e) => { setOkMsg(''); setFStatus(e.target.value); }}>
-              <option value="">Todos</option>
-              <option value="aberto">Aberto</option>
-              <option value="fechado">Fechado</option>
-            </select>
-          </div>` : null}
-          ${isAvail('q') ? html`
-          <div class="flex items-center gap-2">
-            <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fQOn} disabled=${fieldsRO} onChange=${(e) => { setOkMsg(''); setFQOn(e.target.checked); }} /> Buscar
-            </label>
-            <input class="${fieldCls} flex-1" type="text" disabled=${fieldsRO || !fQOn} value=${fQ}
-              placeholder="nome ou telefone" onInput=${(e) => { setOkMsg(''); setFQ(e.target.value); }} />
-          </div>` : null}
-          ${isAvail('atendente') ? html`
-          <div class="flex items-center gap-2">
-            <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fAssignOn} disabled=${fieldsRO} onChange=${(e) => { setOkMsg(''); setFAssignOn(e.target.checked); }} /> Atendente
-            </label>
-            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fAssignOn} value=${fAssign} onChange=${(e) => { setOkMsg(''); setFAssign(e.target.value); }}>
-              <option value="">Qualquer</option>
-              ${(users || []).map((u) => html`<option key=${u.id} value=${String(u.id)}>${u.name || `Usuário #${u.id}`}</option>`)}
-            </select>
-          </div>` : null}
-          ${isAvail('periodo') ? html`
-          <div class="flex items-center gap-2">
-            <label class="inline-flex items-center gap-1.5 text-[13px] text-wa-text w-28">
-              <input type="checkbox" checked=${fDateOn} disabled=${fieldsRO} onChange=${(e) => { setOkMsg(''); setFDateOn(e.target.checked); }} /> Período
-            </label>
-            <select class="${fieldCls} flex-1" disabled=${fieldsRO || !fDateOn} value=${fDatePreset} onChange=${(e) => { setOkMsg(''); setFDatePreset(e.target.value); }}>
-              ${DATE_PRESETS.map(([lbl]) => html`<option key=${lbl} value=${lbl}>Últimos: ${lbl}</option>`)}
-              <option value="tudo">Tudo</option>
-            </select>
-          </div>` : null}
-          ${listAttrs.filter((d) => isAvail(`attr:${d.key}`)).length ? html`
-            <div class="pt-1">
-              <div class="text-[12px] text-wa-secondary mb-1">Atributos (lista)</div>
-              ${listAttrs.filter((d) => isAvail(`attr:${d.key}`)).map((d) => html`
-                <div key=${d.key} class="flex items-center gap-2 mb-1">
-                  <span class="text-[13px] text-wa-text w-28 truncate" title=${d.label}>${d.label}</span>
-                  <select class="${fieldCls} flex-1" disabled=${fieldsRO} value=${fAttrs[d.key] || ''} onChange=${(e) => setAttr(d.key, e.target.value)}>
-                    <option value="">— sem filtro —</option>
-                    ${(d.options || []).map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
-                  </select>
-                </div>`)}
-            </div>` : null}
-        </div>
-
-        ${err ? html`<div class="mb-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}
-        <div class="flex items-center justify-end gap-3">
+        ${err ? html`<div class="mt-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}
+        <div class="flex items-center justify-end gap-3 mt-3">
           ${okMsg ? html`<span class="text-[12px] text-wa-teal">${okMsg}</span>` : null}
           <button onClick=${save} disabled=${saving}
             class="px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[13px] font-medium">${saving ? 'Salvando…' : 'Salvar configuração da aba'}</button>
@@ -1234,19 +1297,23 @@ function ViewFilterConfig({ view, coreAttrDefs, users, canEdit, apiBase, authHea
 
 // Editor de visualização (criar/editar uma aba de "Agrupar por"). Cuida só dos METADADOS:
 // Nome, Quem pode ver (ACL de grupos/usuários) e Agrupar por (nativos + atributos lista).
-// Os filtros DISPONÍVEIS e PRÉ-DETERMINADOS saíram para o painel "Configurar filtros da aba"
-// (ViewFilterConfig, acima da barra). Salva via POST/PUT /kanban-views SEM tocar em
+// Os TIPOS de filtro da aba saíram para o painel "Configurar filtros da aba"
+// (ViewGroupingConfig, acima da barra), e os VALORES pré-determinados para os botões
+// "Salvar visualização pessoal/equipe". Salva via POST/PUT /kanban-views SEM tocar em
 // filters/available_filters (o backend preserva no update e usa defaults no create).
-function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUser, api, onSaved, onCancel }) {
+function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser, api, onSaved, onCancel }) {
   const editing = !!(view && view.id != null);
   // Pode editar os METADADOS + filtros de equipe? Criar (view=null) sempre pode (vira pessoal).
   const canEditMeta = !view ? true
     : (canTeam || (view.scope === 'personal'
         && (!currentUser || view.owner_user_id === currentUser.id)));
-  const listAttrs = (coreAttrDefs || []).filter((d) => d.type === 'list');
+  const protoGroupFields = (groupFields || []).filter((d) => d.scope === 'protocolo');
+  const atendGroupFields = (groupFields || []).filter((d) => d.scope === 'atendimento');
   const initGroup = () => {
     if (!view) return 'status';
-    return view.group_by === 'attr' ? `attr:${view.group_attr_key || ''}` : view.group_by;
+    if (view.group_by === 'pfield') return `pfield:${view.group_field_scope || ''}:${view.group_attr_key || ''}`;
+    if (view.group_by === 'attr') return 'status';  // legado (atributo de conversa) → cai em Status
+    return view.group_by;
   };
   // ACL "Quem pode ver": grupos (roles) + usuários (3 estados: padrão/incluir/excluir).
   const initRoleKeys = (view && Array.isArray(view.visibility_roles)) ? view.visibility_roles : [];
@@ -1289,19 +1356,24 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
 
   const save = async () => {
     setErr('');
-    const gb = groupSel.startsWith('attr:') ? 'attr' : groupSel;
-    const gak = groupSel.startsWith('attr:') ? groupSel.slice(5) : null;
+    const isPf = groupSel.startsWith('pfield:');
+    const pfParts = isPf ? groupSel.split(':') : [];   // ['pfield', scope, key]
+    const gb = isPf ? 'pfield' : groupSel;
+    const gfs = isPf ? (pfParts[1] || null) : null;
+    const gak = isPf ? (pfParts[2] || null) : null;
     const acl = aclBody();  // { scope derivado, visibility_roles, users_include, users_exclude }
     if (!name.trim()) { setErr('Informe um nome para a visualização.'); return; }
-    if (gb === 'attr' && !gak) { setErr('Selecione um atributo (lista) para agrupar.'); return; }
+    if (gb === 'pfield' && (!gfs || !gak)) { setErr('Selecione um campo de opção para agrupar.'); return; }
     if (acl.scope === 'team' && !canTeam) { setErr('Sem permissão para compartilhar (visualização de equipe).'); return; }
     setSaving(true);
     try {
       // Só METADADOS. O body NÃO leva filters/available_filters → o backend preserva no
-      // update e usa defaults ({}/null=todos) no create. Esses vivem no painel "Configurar
-      // filtros da aba" (ViewFilterConfig), acima da barra de filtros.
+      // update e usa defaults ({}/null=todos) no create. Os TIPOS de filtro vivem no painel
+      // "Configurar filtros da aba" (ViewGroupingConfig) e os VALORES nos botões "Salvar
+      // filtros pessoal/equipe", acima da barra de filtros.
       const body = {
-        name: name.trim(), scope: acl.scope, group_by: gb, group_attr_key: gak,
+        name: name.trim(), scope: acl.scope, group_by: gb,
+        group_attr_key: gak, group_field_scope: gfs,
         visibility_roles: acl.visibility_roles,
         visibility_users_include: acl.visibility_users_include,
         visibility_users_exclude: acl.visibility_users_exclude,
@@ -1321,7 +1393,7 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
   };
 
   const fieldCls = 'wa-field px-3 py-2 rounded-md text-[13px]';
-  const title = editing ? 'Editar visualização' : 'Nova visualização';
+  const title = editing ? 'Editar visualização' : 'Novo agrupamento';
   return html`
     <div class="fixed inset-0 bg-black/50 z-[75] flex items-center justify-center p-4">
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-lg w-full p-6 max-h-[85vh] overflow-auto">
@@ -1375,8 +1447,11 @@ function ViewEditorModal({ view, coreAttrDefs, users, roles, canTeam, currentUse
             <option value="atendente">Atendente</option>
             <option value="data">Data</option>
           </optgroup>
-          ${listAttrs.length ? html`<optgroup label="Atributos (lista)">
-            ${listAttrs.map((d) => html`<option key=${d.key} value=${`attr:${d.key}`}>${d.label}</option>`)}
+          ${protoGroupFields.length ? html`<optgroup label="Campos do protocolo">
+            ${protoGroupFields.map((d) => html`<option key=${`protocolo:${d.key}`} value=${`pfield:protocolo:${d.key}`}>${d.label}</option>`)}
+          </optgroup>` : null}
+          ${atendGroupFields.length ? html`<optgroup label="Campos de resolver atendimento">
+            ${atendGroupFields.map((d) => html`<option key=${`atendimento:${d.key}`} value=${`pfield:atendimento:${d.key}`}>${d.label}</option>`)}
           </optgroup>` : null}
         </select>
         ${groupSel === 'data' ? html`
