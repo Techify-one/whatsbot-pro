@@ -127,6 +127,42 @@ def test_falha_na_secao_nao_derruba_o_turno(world):
     assert SECTION not in spec.base_prompt
 
 
+class _FakeHandler:
+    def __init__(self, active: bool):
+        self._active = active
+
+    def is_tool_active(self, name: str) -> bool:
+        return self._active
+
+
+def test_secao_so_injeta_com_transferir_agente_acionavel(world):
+    """Review plano 30 (F6×F3): a tool nasce OFF/pode estar deletada — anunciar
+    destinos que o LLM não consegue acionar induz alucinação. Com handler
+    informando a tool inativa, a seção não é injetada; ativa, é."""
+    from ai_engine import dynamic_registry
+
+    contact, conv = world
+    conversation_repo.set_agent(conv["id"], ROUTER)
+    dynamic_registry.invalidate()
+
+    spec_off = agent_factory.build_for_contact(_FakeHandler(False), contact)
+    assert SECTION not in spec_off.base_prompt
+
+    spec_on = agent_factory.build_for_contact(_FakeHandler(True), contact)
+    assert SECTION in spec_on.base_prompt
+
+
+def test_secao_respeita_tool_names_do_roteador(world):
+    """Roteador cujo tool_names NÃO inclui transferir_agente não ganha seção."""
+    contact, conv = world
+    agent_repo.save(
+        ROUTER, display_name="Roteador F6", prompt=f"Prompt inline de {ROUTER}.",
+        model_config={}, tool_names=["save_contact_info"], enabled=True,
+        description="", is_router=True, routing_targets=None, hooks_config={})
+    spec = _bind_and_build(contact, conv, ROUTER)
+    assert SECTION not in spec.base_prompt
+
+
 def test_roteador_sem_destinos_nao_injeta_secao_vazia(world):
     contact, conv = world
     for key in (VENDAS, SUPORTE):

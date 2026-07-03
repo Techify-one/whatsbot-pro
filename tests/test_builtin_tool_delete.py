@@ -114,6 +114,53 @@ def test_delete_endpoint_builtin_nao_deletavel_segue_bloqueado(build_app):
     assert "save_contact_info" not in ai_builtin_tools.deleted_builtin_tools()
 
 
+def test_recriacao_como_code_in_db_registra_apesar_do_tombstone(_engine_ready):
+    """Via de recuperação documentada no ConfirmModal (D8): recriar a builtin
+    deletada como tool code-in-DB. O tombstone barra só a BASELINE on-disk; o
+    caminho do installer (register_ai_tools, tombstone_exempt) registra."""
+    from agent.tool_registry import ToolRegistry
+
+    try:
+        ai_builtin_tools.tombstone_builtin(NAME)
+        tool_repo.delete(NAME)
+        with get_engine().begin() as conn:
+            conn.execute(sa_delete(tool_overrides).where(tool_overrides.c.name == NAME))
+
+        registry = ToolRegistry()
+        # Baseline on-disk continua bloqueada…
+        registry.register_tool(TRANSFERIR_AGENTE_TOOL, execute)
+        assert NAME not in registry.known_tool_names()
+        # …mas a recriação code-in-DB (caminho do installer) registra.
+        registered = registry.register_ai_tools([(TRANSFERIR_AGENTE_TOOL, execute)])
+        assert registered == 1
+        assert NAME in registry.known_tool_names()
+        assert tool_override_repo.get(NAME) is not None
+    finally:
+        _restore_seeded()
+
+
+def test_toggle_enabled_nao_bumpa_versao_nem_vira_editado(_engine_ready):
+    """Ligar/desligar via PUT /api/ai/tools (save) não é edição: sem bump de
+    versão — senão o builtin nasce-OFF ligado pela UI virava 'editado' (v2) e
+    o boot passava a executar o código do BANCO in-process."""
+    row = tool_repo.get(NAME)
+    assert row is not None
+    v0 = row["version"]
+    toggled = tool_repo.save(
+        NAME, description=row["description"], code=row["code"],
+        dependencies=row["dependencies"], enabled=not row["enabled"])
+    assert toggled["version"] == v0, "toggle de enabled bumpou a versão"
+    assert toggled["enabled"] == (not row["enabled"])
+    # Edição REAL continua bumpando.
+    edited = tool_repo.save(
+        NAME, description=row["description"], code=row["code"] + "\n# edit",
+        dependencies=row["dependencies"], enabled=row["enabled"])
+    assert edited["version"] == v0 + 1
+    # Restaura o código/versão seedados pros próximos testes (delete + re-seed).
+    tool_repo.delete(NAME)
+    _restore_seeded()
+
+
 def test_boot_nao_quebra_com_agente_referenciando_tool_tombada(build_app):
     """Agente com ``tool_names`` incluindo a tool deletada não quebra o boot:
     ``select_active_tools`` simplesmente não encontra o schema (interseção)."""

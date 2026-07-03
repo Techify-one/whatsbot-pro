@@ -157,7 +157,7 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Estado:** ✅ Concluída (2026-07-03)
 - **O que foi feito:** o ternário exclusivo do roteamento do `new_message` em [useConversationWsEvents.js](../web/static/js/components/contacts/hooks/useConversationWsEvents.js) virou OR-fallback: `belongsToOpen = (msgConvId != null && msgConvId === selectedConvIdRef.current) || (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current)`. O ramo legado (sem conversa selecionada → match por phone) ficou intacto.
 - **Como foi feito / decisões:** exatamente a expressão prescrita no plano — preserva o objetivo do commit 89e41a4 (id correto continua roteando primeiro) e adiciona a rede (phone, channel), que identifica unicamente a conversa aberta (índice único parcial `uq_atend_open_contact_inbox`). Não extraí o predicado pra módulo puro (mudança mínima e defensiva; o hook não tem harness de teste próprio).
-- **Problemas / pendências:** trade-off conhecido e aceito pelo plano: se o operador estiver vendo uma conversa FECHADA antiga do mesmo (phone, channel), uma mensagem nova da conversa aberta agora aparece nessa visão (antes era descartada). Comportamento de defesa em profundidade, preferível a perder cards.
+- **Problemas / pendências:** ~~trade-off do OR-fallback amplo~~ **revisado no review final**: o OR-fallback puro do plano vazava mensagens com `conversation_id` divergente pra thread aberta sempre que (phone, canal) casassem — incluindo payloads SEM `channel_id` (ex.: `system_notices` emite `conversation_id` sem canal → `msgChannel` caía em `'default'` e casava com a thread default por acidente) e mensagens reais de outra conversa (disparando `markAsRead` errado). Endurecido: com id divergente, só **cards painel-only** (`PANEL_CARD_ROLES`) **com canal explícito no payload** caem na rede (phone, channel); mensagem real com id divergente volta a ser descartada (como no developer). A classe de bug original (card `tool_call` com id mal resolvido) continua coberta — o broadcast de tool_call sempre carrega `channel_id` explícito.
 - **Verificação:** dedupe conferido — `sameMessage` colapsa por `ts+role` ou `content+role` (janela 30s); cards de tool têm conteúdo distinto e, após F1, `ts` do banco (cada INSERT tem `time.time()` próprio) → não colapsam. `node --test` de todos os módulos puros do frontend: 153 passed; `check_imports.mjs`: 317 imports OK; `node --check` no hook: sintaxe OK.
 
 ---
@@ -300,6 +300,24 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 - **Sem migration nova** (D7/D8). Tombstone do WS3 = chave `deleted_builtin_tools` na tabela `config` (já existente), gravada via `config_repo`.
 
 ---
+
+## 7.5 Review final multi-agente (2026-07-03) — correções aplicadas pós-fases
+
+Workflow de review adversarial (5 dimensões × refutação) sobre o diff do branch. Findings **corrigidos** no commit de review:
+
+1. **(high, confirmado c/ reprodução) Tombstone bloqueava a via de recuperação documentada** — recriar `transferir_agente` como tool code-in-DB (prometido no ConfirmModal, D8) era pulado silenciosamente pelo gate por-nome em `register_tool`, com `install_status='ok'` enganoso. Fix: `register_ai_tools` registra com `tombstone_exempt=True` (o tombstone barra só a baseline on-disk). Teste: `test_recriacao_como_code_in_db_registra_apesar_do_tombstone`.
+2. **(high) Toggle na UI unificada bumpava a versão** — ligar o builtin nasce-OFF via `PUT /api/ai/tools` (branch `row.code`) fazia `tool_repo.save` bumpar pra v2 ⇒ `register_builtin_overrides` tratava como "editado" e passava a **executar o código do banco in-process** (e a cópia congelada deixava de seguir updates do disco). Fix: `tool_repo.save` com dedup — save idêntico exceto `enabled` não bumpa versão nem grava history. Teste: `test_toggle_enabled_nao_bumpa_versao_nem_vira_editado`.
+3. **(medium) `get_router()` não filtra `enabled`** — roteador desabilitado deixava o spoke em deadlock (bloqueado pra todos os destinos, e o próprio roteador rejeitado pelo check de enabled). Fix: spoke rule só com roteador `enabled` (senão degrada pro P4). Teste: `test_roteador_desabilitado_nao_trava_spoke`.
+4. **(medium) Seção F6 injetada com a tool indisponível** — o prompt anunciava destinos que o LLM não conseguia acionar (tool nasce OFF/desabilitada/deletada/fora do `tool_names`). Fix: gate `_transfer_tool_available` (novo `is_tool_active` no registry/handler). Testes: `test_secao_so_injeta_com_transferir_agente_acionavel`, `test_secao_respeita_tool_names_do_roteador`.
+5. **(medium, confirmado) OR-fallback F1b vazava mensagens entre threads/canais** — ver status F1b (fix cirúrgico com `PANEL_CARD_ROLES` + canal explícito).
+6. **(low) DELETE de builtin deletável sem row `ai_tools`** caía no 404 genérico — agora entra no fluxo de tombstone mesmo com a row ausente; row `kind='code'` recriada segue o fluxo genérico de tool de código.
+
+**Findings avaliados e NÃO corrigidos (com racional):**
+- *(high) O bloqueio F5 consome o `call_limit=1` da `transferir_agente`* — spoke que tenta destino proibido gasta a única chamada do turno e só devolve ao roteador na PRÓXIMA mensagem. Real, mas o plano trava "Não mexer em call_limit=1 nem no cap de depth" (F5). Mitigado pela F6 (o roteador conhece os destinos) e pelo prompt do spoke (a UI orienta "devolva ao roteador"). Registrado como melhoria futura (ex.: não contar chamada bloqueada no limite).
+- *(low) Lista "Agentes disponíveis" do erro destino-inexistente é global (ignora allowlist/spoke)* — exigiria reordenar o `execute`; baixo impacto com a F6 no prompt do roteador.
+- *(low) Classificação do "atual" via `conv.active_agent_key` pode divergir do agente que realmente roda* — simplificação já documentada no status F5.
+- *(low) Fail-open na leitura do tombstone durante o seed pode ressuscitar a row numa falha transitória de config* — aceito (config e ai_tools compartilham o mesmo banco; falha de um com o outro saudável é improvável).
+- *(low) "Instalação nova" inferida pela ausência da row* — é a própria definição do D7; instalação que nunca teve a tool ganha o default novo por design.
 
 ## 8. Checklist de verificação (aplicar a cada mudança)
 
