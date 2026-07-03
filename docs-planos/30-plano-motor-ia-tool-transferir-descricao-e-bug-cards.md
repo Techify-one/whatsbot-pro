@@ -1,6 +1,6 @@
 # Plano 30 — Motor de IA: tool `transferir_agente` (OFF-default · excluível · spoke→router) · descrição do agente no roteador · bug dos cards de tool ao vivo
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-03 · **Escopo:** médio (5 workstreams: 1 bug de UI real-time + 4 melhorias no hub-and-spoke; 1 migration nova)
+> **Status:** EXECUTADO (branch feat/plano-30, 2026-07-03) · **Data:** 2026-07-03 · **Escopo:** médio (5 workstreams: 1 bug de UI real-time + 4 melhorias no hub-and-spoke; 1 migration nova)
 >
 > **Origem:** pedido do Thiago nesta sessão, em cima de uma investigação read-only concluída (nenhum código alterado) + workflow de 4 investigadores paralelos. Continuação natural do [Plano 29](29-plano-motor-agentes-guardrails-e-postgres-only.md) (que montou o hub-and-spoke). Aqui: (WS1) card painel-only `tool_call` some ao vivo e só volta no F5; (WS2) `transferir_agente` deve **nascer desligada**; (WS3) a tool deve ter **botão Excluir de verdade**; (WS4) **subagente só devolve pro roteador**; (WS5) a **descrição** de cada agente deve chegar ao roteador.
 > **Método:** leitura do código real no branch `developer` + workflow multi-agente. Todos os `arquivo:linha` abaixo foram verificados (head Alembic = `0036_atend_open_unique`; nova migration encadeia em `0037`).
@@ -321,13 +321,13 @@ Workflow de review adversarial (5 dimensões × refutação) sobre o diff do bra
 
 ## 8. Checklist de verificação (aplicar a cada mudança)
 
-- [ ] **WS1:** card `tool_call` aparece ao vivo (sem F5) com contato multi-conversa; single-channel intacto
-- [ ] **WS1b:** `node --test` de `web/static/js/services/messages.js` verde; card sobrevive a id divergente
-- [ ] **WS2:** banco novo nasce com `transferir_agente` OFF; banco existente **inalterado**; ligar/desligar na UI persiste no restart
-- [ ] **WS3:** Excluir some a tool; após restart do worker **não volta**; nenhuma outra tool afetada; agente que referenciava não quebra o boot; sem botão de reinstalar (recriação manual documentada no confirm)
-- [ ] **WS3:** botão Excluir legível no modo escuro
-- [ ] **WS4:** `execute()` — router→allowlist ok, spoke→router ok, spoke→outro bloqueado com mensagem clara; sem router não bloqueia
-- [ ] **WS5:** prompt do roteador contém a seção de destinos; lista = allowlist aceita por `execute()`; falha ao buscar agentes não derruba o turno
-- [ ] **Geral:** `tests/test_endpoints.py` verde no Postgres (`WHATSBOT_TEST_DB_URL`); `pytest tests/ -q` verde
-- [ ] **Geral:** nenhum segredo em URL; reload / back-forward do painel sem estado preso
+- [x] **WS1:** card `tool_call` aparece ao vivo (sem F5) com contato multi-conversa; single-channel intacto — `tests/test_tool_call_broadcast.py` (reproduziu o bug antes do fix)
+- [x] **WS1b:** `node --test` verde (153 passed, inclui `messages.js`); card painel-only sobrevive a id divergente (com canal explícito no payload — ver review §7.5 item 5)
+- [x] **WS2:** banco novo nasce com `transferir_agente` OFF (dois seeds); banco existente **inalterado** (ensure não regride, seed pula rows presentes); ligar/desligar na UI persiste no restart (default espelha `ai_tools` + toggle sem bump de versão)
+- [x] **WS3:** Excluir some a tool; após restart **não volta** (tombstone nos dois caminhos de re-seed); nenhuma outra tool afetada; agente que referenciava não quebra o boot (testado); sem botão de reinstalar — recriação via tool code-in-DB documentada no confirm E funcional (`tombstone_exempt`, review §7.5 item 1)
+- [x] **WS3:** botão Excluir legível no modo escuro (mesmas classes do delete de tool code; modal 100% `wa-*`)
+- [x] **WS4:** `execute()` — router→allowlist ok, spoke→router ok, spoke→outro bloqueado com mensagem citando a rota de escape; sem router não bloqueia; roteador DESABILITADO também não bloqueia (review §7.5 item 3)
+- [x] **WS5:** prompt do roteador contém a seção de destinos; lista = allowlist aceita por `execute()` (teste de coerência F5×F6); falha ao buscar agentes não derruba o turno; seção só injeta com a tool acionável (review §7.5 item 4)
+- [x] **Geral:** `pytest tests/ -q` no Postgres (`whatsbot_test_p30`): **verde exceto 1 falha PRÉ-EXISTENTE** — `test_legacy_suite[test_endpoints.py]` quebra em `developer` limpo (711fa21) com `create_kanban_view() got an unexpected keyword argument 'group_field_scope'` (plugin protocolos/kanban, alheio a este plano; provável dependência do zip do plugin — ver memória do projeto)
+- [x] **Geral:** nenhum segredo em URL; mudanças de UI aditivas (help text, botão, modal) — sem estado novo de navegação
 ```
