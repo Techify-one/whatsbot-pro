@@ -434,6 +434,18 @@ def test_agent_turn_routing_hop(build_app):
     have the first turn's stubbed run call ``transferir_agente(agente='vendas')``,
     and verify the second hop produced the final reply + a SECOND usage row."""
     phone = "5511976000005"
+
+    # Plano 30 F3 (D3): ``transferir_agente`` nasce DESLIGADA em instalação nova,
+    # e o assunto deste teste é a MÁQUINA de routing (que pressupõe a tool ligada
+    # pelo operador) — liga os dois gates ANTES do boot do app pra tool entrar no
+    # registry e no schema como antes.
+    from agent import ai_builtin_tools
+    from db.repositories import tool_override_repo, tool_repo
+    ai_builtin_tools.seed_builtin_tools()
+    tool_repo.set_enabled("transferir_agente", True)
+    tool_override_repo.ensure("transferir_agente", None, default_enabled=True)
+    tool_override_repo.upsert("transferir_agente", enabled=True)
+
     built = build_app(["gowa"], settings_overrides={"message_batch_delay": 0})
 
     # Seed a handoff target distinct from the default agent.
