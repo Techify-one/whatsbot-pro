@@ -42,11 +42,9 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   const [user, setUser] = useState(null);
   const [users, setUsers] = useState([]);   // for "Transferir" — degrades on 403
   const [busy, setBusy] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [convDefs, setConvDefs] = useState([]);   // conversation-scoped attribute defs
   const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
   const [missingAttrs, setMissingAttrs] = useState(null);   // { list, target } blocking resolve
-  const menuRef = useRef(null);
 
   // Identity (permission gating + assign-me).
   useEffect(() => {
@@ -115,13 +113,6 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   }, [load]);
   useWebSocket({ onConversationChanged });
 
-  // Close the transfer menu on outside click.
-  useEffect(() => {
-    function onDoc(e) { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); }
-    if (menuOpen) document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [menuOpen]);
-
   if (!conv) return null;
 
   const isOpen = conv.status === 'open';
@@ -176,13 +167,12 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   }
 
   const btn = 'px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 whitespace-nowrap';
-  const canTransfer = isOpen && can('conversation.assign') && users.length > 0;
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
       <!-- Copiar link do atendimento (permalink /conversations/<id>) — plano 24 -->
       ${!sandbox && conversationId != null ? html`
-        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link do atendimento" />
+        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link da conversa" />
       ` : null}
       <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
@@ -190,7 +180,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
           disabled=${busy}
           onClick=${onStatusClick}
           class=${btn}
-          title=${isOpen ? 'Encerrar atendimento' : 'Reabrir atendimento'}
+          title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
         >
           ${isOpen ? 'Resolver' : 'Reabrir'}
         </button>
@@ -212,37 +202,13 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
               disabled=${busy}
               onClick=${() => run(() => assignMeConversation(conv.id))}
               class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50 whitespace-nowrap"
-              title="Assumir este atendimento"
+              title="Assumir esta conversa"
             >
               Atribuir a mim
             </button>`}
       ` : (conv.assignee_user_id != null ? html`
         <span class="text-[12px] text-wa-secondary whitespace-nowrap">${userLabel(conv.assignee_user_id)}</span>
       ` : null)}
-
-      <!-- Transferir (somente quem pode listar usuários) -->
-      ${canTransfer ? html`
-        <div class="relative" ref=${menuRef}>
-          <button disabled=${busy} onClick=${() => setMenuOpen(o => !o)} class=${btn} title="Transferir para outro responsável">
-            Transferir ▾
-          </button>
-          ${menuOpen ? html`
-            <div class="absolute right-0 mt-1 bg-wa-bg rounded-lg shadow-lg border border-wa-border py-1 min-w-[180px] max-h-[260px] overflow-y-auto z-50">
-              <button
-                onClick=${() => { setMenuOpen(false); run(() => assignConversation(conv.id, null)); }}
-                class="w-full text-left px-3 py-1.5 text-[13px] text-wa-secondary hover:bg-wa-hover"
-              >Não atribuída</button>
-              ${users.map(u => html`
-                <button
-                  key=${u.id}
-                  onClick=${() => { setMenuOpen(false); run(() => assignConversation(conv.id, u.id)); }}
-                  class="w-full text-left px-3 py-1.5 text-[13px] text-wa-text hover:bg-wa-hover ${conv.assignee_user_id === u.id ? 'text-wa-teal font-medium' : ''}"
-                >${u.name || u.email || `#${u.id}`}</button>
-              `)}
-            </div>
-          ` : null}
-        </div>
-      ` : null}
 
       <!-- Extension point: plugins can inject extra conversation actions here. -->
       <${Slot} name="conversation.header.actions" ctx=${{ conv, user }} />

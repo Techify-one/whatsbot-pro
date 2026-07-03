@@ -21,18 +21,14 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
-# Initialize SQLite database before importing Settings
+# Initialize the database (Postgres-only, plano 29) before importing Settings
 from config.settings import get_data_dir
 from db import init_db
-from db.migrate_json import needs_migration, migrate
 
 data_dir = get_data_dir()
 storages_dir = data_dir / "storages"
 storages_dir.mkdir(exist_ok=True)
 init_db(storages_dir=storages_dir)
-
-if needs_migration(data_dir):
-    migrate(data_dir)
 
 from config.settings import Settings
 from gowa.manager import GOWAManager

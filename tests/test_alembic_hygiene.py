@@ -56,6 +56,50 @@ def test_single_alembic_head():
     )
 
 
+def test_linear_chain_single_parent_reaches_all_revisions():
+    """The revision graph must be ONE linear chain: no branch points, no orphans.
+
+    This is the direct detector of the "janela paralela" incident (plano 29 /
+    migration-0034 landmine): ``0034_message_sent_by`` and
+    ``0034_conversation_origin`` briefly shared ``down_revision =
+    0033_core_atendimento``. A DB that upgraded through the window recorded the
+    head WITHOUT applying the sibling — ``alembic upgrade head`` never runs it
+    again, and the live schema silently drifts from ``db/tables.py`` (the
+    ``messages.sent_by_*`` 500). ``test_single_alembic_head`` alone does NOT
+    catch it once the graph is re-linearized; this test fails the moment two
+    revisions share a parent, BEFORE any database steps through the window.
+    """
+    script_dir = _load_script_dir()
+    revisions = list(script_dir.walk_revisions())  # head → base
+
+    children_of: dict[str | None, list[str]] = defaultdict(list)
+    for rev in revisions:
+        down = rev.down_revision
+        assert not isinstance(down, (tuple, list)), (
+            f"revision {rev.revision} has multiple down_revisions {down!r} "
+            "(merge revision) — the graph must stay a single linear chain."
+        )
+        children_of[down].append(rev.revision)
+
+    branch_points = {
+        parent: sorted(children)
+        for parent, children in children_of.items()
+        if len(children) > 1
+    }
+    assert not branch_points, (
+        f"parallel revisions detected (same down_revision): {branch_points}. "
+        "A DB that upgrades through this window records the head without "
+        "applying the sibling — linearize BEFORE merging (see the "
+        "0034_message_sent_by / 0034_conversation_origin incident)."
+    )
+
+    # Single head + no branch points + no merges ⇒ the graph is ONE linear chain
+    # (Alembic fails at map-load on a dangling down_revision, and an orphaned
+    # side-chain would surface here as a second head).
+    heads = script_dir.get_heads()
+    assert len(heads) == 1, f"expected 1 head, found: {heads}"
+
+
 def test_no_unexpected_duplicate_sequence_prefixes():
     by_seq: dict[str, list[str]] = defaultdict(list)
     for path in sorted(VERSIONS_DIR.glob("*.py")):

@@ -3,22 +3,18 @@
 Covers gaps NOT exercised by tests/test_endpoints.py: empty/whitespace content,
 length limits (short_code 40, content 5000), PUT on a missing id, short_code that
 normalizes to empty ('/'), and the autocomplete-feeding GET shape. Standalone:
-spins its own temp SQLite DB + TestClient, mirroring test_endpoints.py.
+roda contra o Postgres de teste (schema resetado), mirroring test_endpoints.py.
 """
 
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_tmp = tempfile.mkdtemp(prefix="wb_qr_edge_")
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/edge.db"
-
 from unittest.mock import MagicMock
 
-from db.connection import init_db
-init_db()
+from tests.pg import init_test_engine
+init_test_engine(reset=True)
 
 from config.settings import Settings
 from agent.handler import AgentHandler

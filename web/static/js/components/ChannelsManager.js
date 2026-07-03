@@ -296,7 +296,7 @@ export default function ChannelsManager({ initialEntity }) {
   }
 
   async function handleDelete(channel) {
-    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de atendimentos é preservado e pode ser restaurado depois.`)) return;
+    if (!confirm(`Arquivar o canal "${channel.display_name || channel.id}"? Ele sai da lista, mas o histórico de conversas é preservado e pode ser restaurado depois.`)) return;
     setBusyId(channel.id); setError('');
     const res = await deleteChannel(channel.id);
     setBusyId('');
@@ -359,7 +359,7 @@ export default function ChannelsManager({ initialEntity }) {
     <div>
       <div class="flex items-center justify-between mb-4 gap-3">
         <p class="text-[13px] text-wa-secondary">
-          Canais de mensagens conectados ao WhatsBot. Cada canal usa um provider
+          Canais de mensagens conectados ao WhatsBot-Pro. Cada canal usa um provider
           (GOWA, WhatsApp Cloud, Telegram ou Teste) com suas próprias credenciais.
         </p>
         ${!creating ? html`
