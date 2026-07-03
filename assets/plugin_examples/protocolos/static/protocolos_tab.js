@@ -135,6 +135,19 @@ function _monthLabel(ym) {
   try { const [y, m] = ym.split('-'); return new Date(+y, +m - 1, 1).toLocaleDateString('pt-BR', { month: 'short', year: 'numeric' }); }
   catch (e) { return ym; }
 }
+// Semana inicia na SEGUNDA-FEIRA (ISO). A chave da semana é o 'YYYY-MM-DD' da segunda (ordena
+// como string). Rótulo: "Semana de DD/MM/AAAA".
+function _weekStartYmd(epochSec) {
+  const d = new Date(epochSec * 1000);
+  d.setHours(0, 0, 0, 0);
+  const dow = (d.getDay() + 6) % 7;  // Seg=0 … Dom=6
+  d.setDate(d.getDate() - dow);
+  return ymd(d);
+}
+function _weekLabel(wk) {
+  try { return `Semana de ${new Date(`${wk}T00:00:00`).toLocaleDateString('pt-BR')}`; }
+  catch (e) { return wk; }
+}
 
 // Tipos de campo de protocolo com OPÇÕES fixas (viram colunas de Kanban / filtro dropdown).
 const OPTION_TYPES = new Set(['select', 'radio', 'checkboxes']);
@@ -196,9 +209,40 @@ function buildGrouping(view, { users, groupFields, rows, apiPost }) {
     }
     const dayOf = (r) => (r.opened_at ? ymd(new Date(r.opened_at * 1000)) : null);
     const monOf = (r) => { if (!r.opened_at) return null; const d = new Date(r.opened_at * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-    const keyOf = mode === 'mes' ? monOf : dayOf;
-    const labelOf = mode === 'mes' ? _monthLabel : _ymdLabel;
-    const prefix = mode === 'mes' ? 'm:' : 'd:';
+    const weekOf = (r) => (r.opened_at ? _weekStartYmd(r.opened_at) : null);
+    const keyerFor = (g) => (g === 'mes' ? monOf : (g === 'semana' ? weekOf : dayOf));
+    const labelerFor = (g) => (g === 'mes' ? _monthLabel : (g === 'semana' ? _weekLabel : _ymdLabel));
+    const prefixFor = (g) => (g === 'mes' ? 'm:' : (g === 'semana' ? 'w:' : 'd:'));
+
+    if (mode === 'personalizado') {
+      // Janela [from, to] (inclusiva por dia) + granularidade escolhida. Uma coluna por
+      // sub-período com cards; quem cai fora da janela vai p/ "Fora do período".
+      const grain = (view && view.group_date_grain) || 'dia';
+      const fromE = dayStartEpoch(view && view.group_date_from);
+      const toE = dayEndEpoch(view && view.group_date_to);
+      const inWin = (t) => (fromE == null || t >= fromE) && (toE == null || t <= toE);
+      const keyOf = keyerFor(grain);
+      const labelOf = labelerFor(grain);
+      const prefix = prefixFor(grain);
+      const inRows = (rows || []).filter((r) => r.opened_at && inWin(r.opened_at));
+      const distinct = Array.from(new Set(inRows.map(keyOf).filter(Boolean))).sort().reverse();
+      const cols = distinct.map((k) => ({ id: prefix + k, label: labelOf(k) }));
+      if ((rows || []).some((r) => !inWin(r.opened_at || 0))) cols.push({ id: '__outofrange__', label: 'Fora do período' });
+      return {
+        readOnly: true,
+        columns: cols.length ? cols : [{ id: '__outofrange__', label: 'Fora do período' }],
+        columnIdOf: (r) => {
+          const t = r.opened_at || 0;
+          if (!inWin(t)) return '__outofrange__';
+          const k = keyOf(r); return k ? prefix + k : '__outofrange__';
+        },
+      };
+    }
+
+    // dia | semana | mes — bucketiza todos os cards carregados por período.
+    const keyOf = keyerFor(mode);
+    const labelOf = labelerFor(mode);
+    const prefix = prefixFor(mode);
     const distinct = Array.from(new Set((rows || []).map(keyOf).filter(Boolean))).sort().reverse();
     const cols = distinct.map((k) => ({ id: prefix + k, label: labelOf(k) }));
     if ((rows || []).some((r) => !r.opened_at)) cols.push({ id: '__nodate__', label: 'Sem data' });
@@ -781,9 +825,11 @@ function ProtocolosList({ api, mode }) {
   }
 
   // Obrigatórios do PROTOCOLO faltando (mesma regra do backend _missing_required):
-  // OBS (coluna) + extras das defs `required`; checkbox sempre conta como preenchido.
+  // extras das defs `required` (obs incluso) + o rótulo Atendente (assignee nativo);
+  // checkbox sempre conta como preenchido.
   function missingRequiredProto(row) {
-    const eff = { obs: (row && row.obs) || '', ...((row && row.fields) || {}) };
+    const eff = { ...((row && row.fields) || {}) };
+    for (const d of cols) if (d.type === 'atendente') eff[d.key] = (row && row.assignee_user_id);
     return cols.some((d) => d.required && !isFilledProto(d, eff[d.key]));
   }
 
@@ -833,8 +879,6 @@ function ProtocolosList({ api, mode }) {
       get: (r) => (r.assignee_name || '').toLowerCase(), render: (r) => r.assignee_name || '—' },
     { key: 'status', label: 'Status', nowrap: true,
       get: (r) => r.status || '', render: (r) => (r.status === 'aberto' ? 'ABERTO' : 'FECHADO') },
-    { key: 'obs', label: 'Observações',
-      get: (r) => (r.obs || '').toLowerCase(), render: (r) => r.obs || '—' },
   ], []);
 
   const sorted = useMemo(() => {
@@ -1068,12 +1112,13 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
   const atendimentos = data.atendimentos || [];
   const fechado = at.status === 'fechado';
 
-  // Estado local dos campos do protocolo, pré-preenchido (OBS na coluna obs; extras em
-  // at.fields). Editável enquanto aberto; serve de fonte também p/ a visão read-only.
+  // Estado local dos campos do protocolo, pré-preenchido (extras — obs incluso — em
+  // at.fields; o rótulo Atendente vem do assignee nativo). Editável enquanto aberto; serve
+  // de fonte também p/ a visão read-only.
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of protoDefs) {
-      const cur = d.key === 'obs' ? at.obs : (at.fields || {})[d.key];
+      const cur = d.type === 'atendente' ? at.assignee_user_id : (at.fields || {})[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
       else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
         ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
@@ -1170,7 +1215,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
                 ${readOnlyInfo.map((d) => html`<div key=${d.key}>
-                  <span class="text-wa-secondary">${d.label}:</span> <span class="text-wa-text">${fmtCell(vals[d.key], d)}</span>
+                  <span class="text-wa-secondary">${d.label}:</span> <span class="text-wa-text">${d.type === 'atendente' ? (at.assignee_name || '—') : fmtCell(vals[d.key], d)}</span>
                 </div>`)}
               </div>` : html`<div class="text-[12px] text-wa-secondary">Sem dados preenchidos.</div>`}
           </div>`
@@ -1199,7 +1244,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
           </div>`}
 
         <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
-        <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat. As colunas estão agrupadas em <span class="text-wa-teal font-medium">Informações do atendimento</span> e <span class="text-amber-600 font-medium">Atributos personalizados</span>.</div>
+        <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat.</div>
         <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
           storageKey="whatsbot_proto_atend_cols_modal" onRowClick=${openAtend} />
       </div>
@@ -1286,10 +1331,14 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
             </label>`)}
         </div>
         ${err ? html`<div class="mt-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}
-        <div class="flex items-center justify-end gap-3 mt-3">
-          ${okMsg ? html`<span class="text-[12px] text-wa-teal">${okMsg}</span>` : null}
+        <div class="flex flex-wrap items-center gap-2 mt-3">
+          <button type="button" onClick=${() => { setOkMsg(''); setAvailSet(new Set(ALL_FILTER_KEYS)); }}
+            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Selecionar todos</button>
+          <button type="button" onClick=${() => { setOkMsg(''); setAvailSet(new Set()); }}
+            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Limpar</button>
+          ${okMsg ? html`<span class="text-[12px] text-wa-teal ml-auto">${okMsg}</span>` : null}
           <button onClick=${save} disabled=${saving}
-            class="px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[13px] font-medium">${saving ? 'Salvando…' : 'Salvar configuração da aba'}</button>
+            class="${okMsg ? '' : 'ml-auto'} px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[13px] font-medium">${saving ? 'Salvando…' : 'Salvar configuração da aba'}</button>
         </div>
       </div>` : null}
     </div>`;
@@ -1333,6 +1382,9 @@ function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser
   });
   const [groupSel, setGroupSel] = useState(initGroup());
   const [dateMode, setDateMode] = useState((view && view.group_date_mode) || 'faixas');
+  const [dateFrom, setDateFrom] = useState((view && view.group_date_from) || '');
+  const [dateTo, setDateTo] = useState((view && view.group_date_to) || '');
+  const [dateGrain, setDateGrain] = useState((view && view.group_date_grain) || 'dia');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -1378,6 +1430,9 @@ function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser
         visibility_users_include: acl.visibility_users_include,
         visibility_users_exclude: acl.visibility_users_exclude,
         group_date_mode: gb === 'data' ? dateMode : null,
+        group_date_from: (gb === 'data' && dateMode === 'personalizado') ? (dateFrom || null) : null,
+        group_date_to: (gb === 'data' && dateMode === 'personalizado') ? (dateTo || null) : null,
+        group_date_grain: (gb === 'data' && dateMode === 'personalizado') ? dateGrain : null,
       };
       const url = editing ? `${api.apiBase}/kanban-views/${view.id}` : `${api.apiBase}/kanban-views`;
       const r = await fetch(url, {
@@ -1455,11 +1510,27 @@ function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser
           </optgroup>` : null}
         </select>
         ${groupSel === 'data' ? html`
-          <select class="${fieldCls} w-full mb-4" value=${dateMode} onChange=${(e) => setDateMode(e.target.value)}>
+          <select class="${fieldCls} w-full mb-2" value=${dateMode} onChange=${(e) => setDateMode(e.target.value)}>
             <option value="faixas">Faixas relativas (Hoje, Ontem, …)</option>
             <option value="dia">Por dia</option>
+            <option value="semana">Por semana</option>
             <option value="mes">Por mês</option>
-          </select>` : html`<div class="mb-4"></div>`}
+            <option value="personalizado">Período personalizado</option>
+          </select>
+          ${dateMode === 'personalizado' ? html`
+            <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
+              <span class="block text-[12px] text-wa-secondary mb-1.5">Período (de/até) e granularidade</span>
+              <div class="flex flex-wrap items-center gap-2">
+                <input type="date" class="${fieldCls}" value=${dateFrom} onInput=${(e) => setDateFrom(e.target.value)} />
+                <span class="text-wa-secondary">→</span>
+                <input type="date" class="${fieldCls}" value=${dateTo} onInput=${(e) => setDateTo(e.target.value)} />
+                <select class="${fieldCls}" value=${dateGrain} onChange=${(e) => setDateGrain(e.target.value)}>
+                  <option value="dia">Por dia</option>
+                  <option value="semana">Por semana</option>
+                  <option value="mes">Por mês</option>
+                </select>
+              </div>
+            </div>` : html`<div class="mb-2"></div>`}` : html`<div class="mb-4"></div>`}
         ` : html`<div class="text-[13px] text-wa-secondary mb-4">Sem permissão para editar esta visualização. Ajuste os filtros da aba no painel "Configurar filtros da aba", acima da barra de filtros.</div>`}
 
         ${err ? html`<div class="mb-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}

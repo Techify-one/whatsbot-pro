@@ -211,6 +211,9 @@ async def create_kanban_view(body: dict, request: Request):
         group_by=(body or {}).get("group_by") or "status",
         group_attr_key=(body or {}).get("group_attr_key"),
         group_date_mode=(body or {}).get("group_date_mode"),
+        group_date_from=(body or {}).get("group_date_from"),
+        group_date_to=(body or {}).get("group_date_to"),
+        group_date_grain=(body or {}).get("group_date_grain"),
         filters=(body or {}).get("filters") or {},
         available_filters=(body or {}).get("available_filters"),
         column_order=(body or {}).get("column_order"),
@@ -244,6 +247,9 @@ async def update_kanban_view(vid: int, body: dict, request: Request):
         group_by=(body or {}).get("group_by"),
         group_attr_key=(body or {}).get("group_attr_key"),
         group_date_mode=(body or {}).get("group_date_mode"),
+        group_date_from=(body or {}).get("group_date_from"),
+        group_date_to=(body or {}).get("group_date_to"),
+        group_date_grain=(body or {}).get("group_date_grain"),
         filters=(body or {}).get("filters"), **extra)
     if err:
         return _err(err, status=404 if "não encontrada" in err else 400)

@@ -35,7 +35,6 @@ const BASE = [
   { key: '__inicio', label: 'Início', base: true, group: 'atendimento' },
   { key: '__fim', label: 'Fim', base: true, group: 'atendimento' },
   { key: '__atendente', label: 'Atendente', base: true, group: 'atendimento' },
-  { key: '__obs', label: 'Observações', base: true, group: 'atendimento' },
 ];
 
 export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs = [],
@@ -44,14 +43,15 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
                                 startField = 'started_at', endField = 'ended_at',
                                 onRowClick = null,
                                 emptyText = 'Nenhum atendimento vinculado ainda.' }) {
-  // Conjunto de colunas: fixos (group 'atendimento') + rótulos EXTRAS do plugin (group
+  // Conjunto de colunas: fixos (group 'atendimento') + rótulos do plugin (obs incluso, group
   // 'atendimento', lidos de c.fields) + atributos do core (group 'atributo', lidos de
-  // c.attrs). Defs fixas que cheguem em fieldDefs são ignoradas (já cobertas pela base).
+  // c.attrs). O tipo "atendente" NÃO vira coluna aqui (a base __atendente já mostra o atendente
+  // do ciclo; o rótulo atendente é só de entrada).
   const cols = useMemo(() => {
     const out = [...BASE];
     const seen = new Set();
     for (const d of (fieldDefs || [])) {
-      if (d && d.key && !d.fixed && !seen.has(d.key)) {
+      if (d && d.key && !d.fixed && d.type !== 'atendente' && !seen.has(d.key)) {
         seen.add(d.key);
         out.push({ key: d.key, label: d.label || d.key, type: d.type, group: 'atendimento', src: 'fields' });
       }
@@ -86,15 +86,14 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
     .map((g) => ({ ...g, cols: visCols.filter((c) => c.group === g.id) }))
     .filter((g) => g.cols.length);
   const showGroupHeader = visGroups.length > 1;
-  // Colunas achatadas na ordem dos grupos; marca a 1ª de cada grupo (≠ 1º) p/ um separador
-  // visual (borda à esquerda) entre "atendimento" e "atributos".
-  const flatCols = visGroups.flatMap((g, gi) => g.cols.map((c, ci) => ({ ...c, _sep: gi > 0 && ci === 0 })));
+  // Colunas achatadas na ordem dos grupos. Sem separador visual entre "atendimento" e
+  // "atributos" (a divisão da seção de atributos personalizados foi removida da UI).
+  const flatCols = visGroups.flatMap((g) => g.cols.map((c) => ({ ...c, _sep: false })));
 
   function cell(c, col) {
     if (col.key === '__inicio') return fmtTs(c[startField]);
     if (col.key === '__fim') return fmtTs(c[endField]);
     if (col.key === '__atendente') return c.assignee_name || '—';
-    if (col.key === '__obs') return c.obs || '—';
     const src = col.src === 'attrs' ? (c.attrs || {}) : (c.fields || {});
     const v = src[col.attrKey || col.key];
     if (col.type === 'checkbox') return v === true ? 'Sim' : (v === false ? 'Não' : '—');
@@ -140,8 +139,8 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
             <thead>
               ${showGroupHeader ? html`
                 <tr class="text-left">
-                  ${visGroups.map((g, gi) => html`<th key=${g.id} colspan=${g.cols.length}
-                    class="py-1 pr-2 text-[10px] uppercase tracking-wide font-semibold ${gi > 0 ? 'border-l border-wa-border pl-2' : ''} ${groupCls(g.id)}">${g.label}</th>`)}
+                  ${visGroups.map((g) => html`<th key=${g.id} colspan=${g.cols.length}
+                    class="py-1 pr-2 text-[10px] uppercase tracking-wide font-semibold ${groupCls(g.id)}">${g.id === 'atributo' ? '' : g.label}</th>`)}
                 </tr>` : null}
               <tr class="text-wa-secondary text-left">
                 ${flatCols.map((col) => html`<th key=${col.key}

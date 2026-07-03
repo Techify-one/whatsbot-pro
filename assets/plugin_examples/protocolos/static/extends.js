@@ -16,7 +16,7 @@ import { ResolveForm } from '/plugins/protocolos/static/resolve_form.js';
 import { ProtocolosTab } from '/plugins/protocolos/static/protocolos_tab.js';
 // Helpers do core p/ ler as definições de atributos de atendimento e gravar os valores
 // (mesma rota da aba "Informações do atendimento"). Carregam auth como qualquer chamada core.
-import { getCustomAttributes, updateConversationInfo } from '/static/js/services/api.js';
+import { getCustomAttributes, updateConversationInfo, getConversation } from '/static/js/services/api.js';
 
 const html = htm.bind(h);
 
@@ -51,7 +51,21 @@ export default function register(api) {
     } catch (_) { /* sem atributos → segue sem essa seção */ }
 
     // Valores atuais p/ pré-preencher (o que foi salvo na aba "Informações do atendimento").
-    const initialValues = (atend && atend.custom_attributes) || {};
+    const initialValues = { ...((atend && atend.custom_attributes) || {}) };
+
+    // Semear o rótulo "Atendente (nativo)" com o assignee ATUAL da conversa. Alguns call
+    // sites passam só { id } → busca no core quando o objeto não traz assignee_user_id.
+    // (Sem seed, resolver poderia LIMPAR a atribuição existente — o backend só reatribui
+    //  quando o valor muda, então seed correto = re-asserção idempotente.)
+    const atendenteDef = defs.find((d) => d.type === 'atendente');
+    if (atendenteDef) {
+      let cur = atend && atend.assignee_user_id;
+      if (cur === undefined) {
+        try { const c = await getConversation(atend.id); cur = (c && c.ok && c.data) ? c.data.assignee_user_id : null; }
+        catch (_) { cur = null; }
+      }
+      initialValues[atendenteDef.key] = (cur == null ? '' : cur);
+    }
 
     let result = { fields: {}, custom_attributes: {} };
     if (defs.length || attrDefs.length) {
