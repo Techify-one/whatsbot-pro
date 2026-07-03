@@ -289,7 +289,8 @@ async def run_turn(handler, sender: str, text: str, *,
         agent_spec = await _resolve_agent_spec(handler, contact, sender)
     except agent_factory.AgentResolutionError as e:
         handler._emit_resolution_error(contact, sender, e)
-        return ProcessResult(reply="")
+        # aborted: já sinalizado com card próprio — não é mudez do motor.
+        return ProcessResult(reply="", aborted=True)
     set_execution_agent_key(agent_spec.agent_key)
     set_current_step_agent(agent_spec.agent_key)
     # The AI is now handling this message: attribute the conversation to it so
@@ -305,7 +306,9 @@ async def run_turn(handler, sender: str, text: str, *,
         "filter.system_prompt", system_prompt_str, {"phone": sender}
     )
     if system_prompt_str is None:
-        return ProcessResult(reply="")
+        # aborted: silêncio intencional de plugin (contrato do filter) — não é
+        # mudez do motor (plano 31 F4).
+        return ProcessResult(reply="", aborted=True)
 
     messages = [
         {"role": "system", "content": system_prompt_str},
@@ -315,7 +318,8 @@ async def run_turn(handler, sender: str, text: str, *,
         "filter.llm.messages", messages, {"phone": sender}
     )
     if messages is None:
-        return ProcessResult(reply="")
+        # aborted: idem — plugin cancelou o turno de propósito.
+        return ProcessResult(reply="", aborted=True)
 
     active_tools = [] if disable_tools else handler._select_active_tools(agent_spec)
     active_tools = await apply_filter(

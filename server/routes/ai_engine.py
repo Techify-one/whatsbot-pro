@@ -303,7 +303,7 @@ def register_routes(app, deps):
         # A1 (plano 31 F6): a regex de render (agent_factory._PLACEHOLDER_RE) só
         # casa {identificador} — um nome fora do padrão nunca renderiza (vira
         # peso morto no banco). Paridade com o NAME_RE do VariablesEditor.js.
-        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$", name or ""):
+        if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,63}", name or ""):
             return _err("Nome inválido: use letras, números e _ (começando por "
                         "letra, máx. 64 caracteres).", status=400)
         row = await asyncio.to_thread(

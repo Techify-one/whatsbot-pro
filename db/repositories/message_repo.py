@@ -86,7 +86,11 @@ def get_by_conversation(conversation_id: int) -> list[dict]:
 
 def get_context(contact_id: int, limit: int) -> list[dict]:
     """Return the last N eligible messages for LLM context."""
-    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
+    # "error" incluído (plano 31 review): cards painel-only de erro persistidos
+    # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
+    # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
+    excluded = ("transcription", "tool_call", "system_notice",
+                "conversation_event", "system", "error")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
@@ -109,7 +113,11 @@ def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
     não mistura threads de outros canais (plano 31 F3; ``get_by_conversation``
     não filtra nem limita, por isso a variante dedicada).
     """
-    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
+    # "error" incluído (plano 31 review): cards painel-only de erro persistidos
+    # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
+    # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
+    excluded = ("transcription", "tool_call", "system_notice",
+                "conversation_event", "system", "error")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)

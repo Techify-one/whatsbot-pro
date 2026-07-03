@@ -983,11 +983,18 @@ def register_routes(app, deps):
         note_text = f"🔧 Análise de melhoria\n\n{analysis}"
 
         # Espelha o private_note: resolve o canal da conversa marcada e usa a
-        # ROW retornada por add_message (get_last era racy por contact.id+ts).
+        # ROW retornada pelo save (get_last era racy por contact.id+ts). Com um
+        # conv_id validado, o INSERT vai DIRETO naquela conversa (padrão do
+        # system_notices) — add_message resolveria a conversa mais recente do
+        # inbox, que pode não ser a marcada (ex.: conversa fechada de QA).
         note_channel = _channel_for(phone, conv_id)
 
         def _save():
             contact = agent_handler._get_contact(phone, channel_id=note_channel)
+            if conv_id is not None:
+                return message_repo.add(
+                    contact.id, "system", note_text,
+                    conversation_id=int(conv_id))
             return contact.add_message("system", note_text)
 
         saved = await asyncio.to_thread(_save)
