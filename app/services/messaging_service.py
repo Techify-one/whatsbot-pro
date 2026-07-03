@@ -842,9 +842,11 @@ class MessagingService:
                                     else:
                                         await self._send_with_typing_guard(channel_id, phone, result.reply)
                                         await self.maybe_emit_ai_takeover(phone, channel_id)
-                                else:
+                                elif not result.aborted:
                                     # A5 (plano 31 F4): reply vazio calava sem rastro —
                                     # loga e grava um card painel-only pro operador ver.
+                                    # aborted=True (filter/resolução) NÃO gera card: é
+                                    # silêncio intencional ou já sinalizado.
                                     logger.warning(
                                         "[Batch] IA não produziu resposta para %s "
                                         "(nada enviado — possível max_tokens baixo)", phone)
@@ -1005,8 +1007,9 @@ class MessagingService:
                         else:
                             await self._send_with_typing_guard(channel_id, phone, result.reply)
                             await self.maybe_emit_ai_takeover(phone, channel_id)
-                    else:
-                        # A5 (plano 31 F4): mesmo tratamento do caminho texto.
+                    elif not result.aborted:
+                        # A5 (plano 31 F4): mesmo tratamento do caminho texto
+                        # (aborted intencional não gera card).
                         logger.warning(
                             "[Batch] IA não produziu resposta para %s (%s) "
                             "(nada enviado — possível max_tokens baixo)",

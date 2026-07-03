@@ -17,10 +17,16 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class ProcessResult:
-    """Result of an agent turn with optional tool call metadata."""
+    """Result of an agent turn with optional tool call metadata.
+
+    ``aborted=True`` marks a DELIBERATE empty reply (filter abort / agent
+    resolution error already sinalizado) — callers must not treat it as the
+    engine having run and produced nothing (plano 31 F4).
+    """
     reply: str
     tool_calls: list[dict] = dataclasses.field(default_factory=list)
     contact_info: dict | None = None
+    aborted: bool = False
 
 
 class AgentHandler:

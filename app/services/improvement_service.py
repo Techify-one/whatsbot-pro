@@ -269,9 +269,13 @@ def generate_improvement(handler, phone: str, target_message: dict,
     )
 
     # Plano 22: there is no global ``handler.model`` — the chat model comes from
-    # the resolved agent. Prefer the ACTIVE agent of the turn (last of the
-    # chain), then the live resolution, then DEFAULT_MODEL.
-    active_agent = agent_rows.get(chain[-1]) if chain else None
+    # the resolved agent. Prefer the ACTIVE agent of the turn: the execution's
+    # own agent_key (last hop — correct even on router revisits, where the
+    # deduped chain ends elsewhere), then the last of the chain, then the live
+    # resolution, then DEFAULT_MODEL.
+    active_key = (execution or {}).get("agent_key") or (chain[-1] if chain else None)
+    active_agent = agent_rows.get(active_key) or (agent_repo.get(active_key)
+                                                  if active_key else None)
     active_model = dict((active_agent or {}).get("model_config") or {}).get("model")
     analysis_model = (handler.improvement_model
                       or active_model

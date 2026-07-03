@@ -33,6 +33,24 @@ def test_adjacent_identical_assistant_collapse(build_app):
     assert saved.count("mesma resposta") == 3
 
 
+def test_error_card_excluded_from_llm_context(build_app):
+    """Plano 31 review: cards painel-only role='error' (reply vazio F4, falha de
+    resolução) NUNCA entram no contexto do LLM — OpenAI/AGNO só aceitam
+    system/user/assistant/tool e o turno crasharia."""
+    build_app(["gowa"])
+    from agent.memory import ContactMemory
+
+    phone = "5511931000003"
+    mem = ContactMemory(phone)
+    mem.add_message("user", "oi")
+    mem.add_message("error", "⚠️ A IA não produziu resposta para a última mensagem.")
+    mem.add_message("user", "tem alguém aí?")
+
+    ctx = mem.get_context_messages(50)
+    assert all(m["role"] != "error" for m in ctx), ctx
+    assert [m["role"] for m in ctx] == ["user", "user"]
+
+
 def test_non_adjacent_identical_assistant_kept(build_app):
     build_app(["gowa"])
     from agent.memory import ContactMemory

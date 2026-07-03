@@ -97,6 +97,49 @@ def test_improve_card_lands_in_flagged_conversation(build_app):
     assert _conv_count(contact.id) == before
 
 
+def test_improve_card_lands_in_flagged_conversation_even_if_not_latest(build_app):
+    """Plano 31 review: o INSERT vai DIRETO na conversa marcada — mesmo quando
+    OUTRA conversa do mesmo inbox é mais recente (o resolve por 'mais recente
+    do inbox' do add_message escolheria a errada)."""
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    phone = "5511932000005"
+
+    contact = handler._get_contact(phone)
+    contact.add_message("user", "pergunta")
+    saved = contact.add_message("assistant", "resposta antiga")
+    conv_a = saved["conversation_id"]
+
+    # Fabrica uma conversa B FECHADA e mais recente no mesmo inbox (estado
+    # legítimo: várias fechadas por contato/inbox são permitidas).
+    from db.engine import get_engine
+    from db.tables import atendimentos
+    from sqlalchemy import insert, select
+
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            select(atendimentos).where(atendimentos.c.id == conv_a)
+        ).mappings().first()
+        vals = dict(row)
+        vals.pop("id")
+        vals.update(status="closed",
+                    display_id=row["display_id"] + 987654,
+                    last_activity_at=row["last_activity_at"] + 9999)
+        conv_b = conn.execute(
+            insert(atendimentos).values(**vals)).inserted_primary_key[0]
+
+    fake = _FakeClient(_fake_llm_response(_ANALYSIS))
+    with patch.object(handler, "_get_client", return_value=fake):
+        r = built.client.post(f"/api/contacts/{phone}/improve", json={
+            "message": {"content": "resposta antiga", "ts": saved["ts"],
+                        "conversation_id": conv_a},
+            "feedback": "",
+        })
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["conversation_id"] == conv_a
+    assert r.json()["data"]["conversation_id"] != conv_b
+
+
 def test_improve_foreign_conversation_id_ignored(build_app):
     """conversation_id de OUTRO contato não injeta card em conversa alheia."""
     built = build_app(["gowa"])

@@ -64,7 +64,7 @@ function VariableForm({ editing, onSave, onCancel, busy }) {
         ${reservedParam ? html`
           <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
             Este nome também ajusta o parâmetro <code class="font-mono">${reservedParam}</code> do modelo
-            (tuning global, ou por agente com o sufixo <code class="font-mono">_&lt;agente&gt;</code>),
+            (tuning global, ou por agente com o sufixo <code class="font-mono">${'_<agente>'}</code>),
             além de substituir <code class="font-mono">{nome}</code> nos prompts.
             ${reservedParam === 'max_tokens' ? html`
               ${' '}Valores baixos podem zerar a resposta em modelos de raciocínio

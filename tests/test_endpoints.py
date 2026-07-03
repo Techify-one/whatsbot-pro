@@ -2274,6 +2274,8 @@ r = client.put("/api/ai/variables/1comeca_numero", json={"value": "x"})
 check("P31 PUT variável começando por número -> 400", r.status_code == 400)
 r = client.put("/api/ai/variables/" + "a" * 65, json={"value": "x"})
 check("P31 PUT variável nome >64 chars -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/p31_x%0A", json={"value": "x"})
+check("P31 PUT variável com newline final (%0A) -> 400", r.status_code == 400)
 r = client.get("/api/ai/variables")
 check("P31 variável inválida não foi persistida",
       not any(v["name"] == "nome-invalido" for v in r.json()["data"]))
