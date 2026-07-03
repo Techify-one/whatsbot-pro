@@ -25,6 +25,14 @@ import { upsertConversationRow, convRowToSidebarRow } from '../../../services/co
 import { typingKey } from '../ContactList.js';
 import { useWebSocket } from '../../../hooks/useWebSocket.js';
 
+// Papéis painel-only (cards que nunca vão ao WhatsApp — ver CLAUDE.md). Só
+// eles ganham o fallback (phone, channel) quando o conversation_id do payload
+// diverge da thread aberta (plano 30 F1b).
+const PANEL_CARD_ROLES = new Set([
+  'tool_call', 'system_notice', 'transcription', 'private_note', 'error',
+  'conversation_event', 'system',
+]);
+
 /**
  * @param {Object} opts - WS event props + cross-hook state/refs/setters.
  */
@@ -390,15 +398,31 @@ export function useConversationWsEvents(opts) {
     const msgConvId = message.conversation_id;
     const msgChannel = newMessage.channel_id || message.channel_id || 'default';
 
+    // Canal EXPLÍCITO do payload (sem o default 'default' de msgChannel) — o
+    // fallback painel-only abaixo exige canal declarado pra não casar um
+    // payload sem channel_id (ex.: system notice de outro canal) com a thread
+    // aberta do canal 'default' por acidente.
+    const explicitChannel = newMessage.channel_id || message.channel_id || null;
     let belongsToOpen;
     if (selectedConvIdRef.current != null) {
-      // OR-fallback (defesa em profundidade): casa por conversation_id quando o
-      // payload traz o id da thread aberta, senão pela identidade (phone, channel)
-      // — (phone, channel) identifica unicamente a conversa ABERTA, então um card
-      // painel-only com id divergente (bug histórico do tool_call) ainda chega à
-      // thread certa em vez de ser descartado até o F5.
-      belongsToOpen = (msgConvId != null && msgConvId === selectedConvIdRef.current)
-        || (phone === selectedRef.current && msgChannel === selectedChannelIdRef.current);
+      if (msgConvId != null && msgConvId === selectedConvIdRef.current) {
+        belongsToOpen = true;
+      } else if (msgConvId == null) {
+        // Sem conversation_id no payload — comportamento clássico (phone, channel).
+        belongsToOpen = (phone === selectedRef.current
+          && msgChannel === selectedChannelIdRef.current);
+      } else {
+        // conversation_id DIVERGENTE da thread aberta. Rede de segurança
+        // (defesa em profundidade do plano 30 F1b) SÓ para cards painel-only
+        // com canal explícito: a classe de bug era o card tool_call sair com
+        // id mal resolvido. Mensagem REAL com id divergente pertence a OUTRA
+        // conversa — aceitar vazaria conteúdo entre threads/canais e
+        // dispararia markAsRead da conversa errada.
+        belongsToOpen = PANEL_CARD_ROLES.has(message.role)
+          && explicitChannel != null
+          && phone === selectedRef.current
+          && explicitChannel === selectedChannelIdRef.current;
+      }
     } else {
       // Legacy contact-only open thread (no conversation) — route by phone.
       belongsToOpen = (phone === selectedRef.current);

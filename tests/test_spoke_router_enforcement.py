@@ -109,6 +109,19 @@ def test_sem_roteador_nao_bloqueia_spoke(hub):
     assert r.startswith("Transferência registrada"), r
 
 
+def test_roteador_desabilitado_nao_trava_spoke(hub):
+    """Review plano 30: get_router() não filtra enabled — um roteador
+    DESABILITADO não pode receber a conversa (o check de enabled rejeita), e
+    sem este fix o spoke ficava em deadlock (bloqueado pra todos os destinos).
+    Roteador desabilitado ⇒ degrada pro P4 (sem trava)."""
+    ctx, conv = hub
+    _save_agent(ROUTER, is_router=True, routing_targets=[VENDAS, SUPORTE],
+                enabled=False)
+    _set_current(conv, VENDAS)
+    r = transferir_agente.execute(ctx, {"agente": SUPORTE})
+    assert r.startswith("Transferência registrada"), r
+
+
 def test_conversa_sem_agente_ativo_segue_legado(hub):
     """Sem active_agent_key não dá pra classificar o atual — sem enforcement."""
     ctx, conv = hub

@@ -202,6 +202,25 @@ def _resolve_active_agent(contact) -> dict | None:
     return dynamic_registry.get_default_agent()
 
 
+def _transfer_tool_available(handler, agent: dict) -> bool:
+    """``transferir_agente`` está acionável por ESTE agente neste turno?
+
+    Falso quando o ``tool_names`` do agente exclui a tool, ou quando ela não
+    está ativa no registry (nasce OFF no plano 30 F3, pode ter sido desativada
+    ou deletada). ``handler`` ausente (chamadas antigas/testes) ou falha de
+    introspecção assumem disponível (comportamento anterior).
+    """
+    tool_names = agent.get("tool_names")
+    if tool_names is not None and "transferir_agente" not in tool_names:
+        return False
+    if handler is None:
+        return True
+    try:
+        return bool(handler.is_tool_active("transferir_agente"))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _router_destinations_section(router: dict) -> str:
     """Seção "Agentes disponíveis para transferência" do prompt do roteador.
 
@@ -259,9 +278,12 @@ def build_for_contact(handler, contact) -> AgentSpec:
         # destinos com as descrições dos agentes (ai_agents.description) — a
         # MESMA allowlist que transferir_agente.execute aceita (fonte única em
         # router_destinations, F5). Seção ADITIVA ao prompt inline (se o humano
-        # já listou agentes à mão, as duas coexistem — sem dedupe). Defensivo:
-        # falha aqui nunca derruba o turno.
-        if agent.get("is_router"):
+        # já listou agentes à mão, as duas coexistem — sem dedupe). Só injeta
+        # quando transferir_agente está de fato acionável pelo agente (a tool
+        # nasce OFF no F3 e pode estar desabilitada/deletada/fora do
+        # tool_names — anunciar destinos sem a tool induz alucinação).
+        # Defensivo: falha aqui nunca derruba o turno.
+        if agent.get("is_router") and _transfer_tool_available(handler, agent):
             try:
                 rendered += _router_destinations_section(agent)
             except Exception as e:  # noqa: BLE001

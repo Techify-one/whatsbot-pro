@@ -96,10 +96,12 @@ def execute(ctx, args: dict) -> str | None:
                             f"deste roteador: {', '.join(targets)}.")
             elif current:
                 # Spoke (D4): o único destino válido é o roteador. Sem roteador
-                # configurado (P4), não bloqueia — instalação sem hub-and-spoke
-                # mantém o comportamento legado.
+                # configurado — ou com o roteador DESABILITADO, que nem pode
+                # receber a conversa (o check de enabled acima rejeitaria) —
+                # não bloqueia (P4): instalação sem hub-and-spoke ativo mantém
+                # o comportamento legado em vez de virar deadlock.
                 router = agent_repo.get_router()
-                if router and target != router["agent_key"]:
+                if router and router.get("enabled") and target != router["agent_key"]:
                     return (
                         "Erro: agentes especializados só transferem a conversa "
                         "de volta ao roteador. Devolva usando transferir_agente "
