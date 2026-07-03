@@ -29,6 +29,20 @@ from plugins.context import ToolContext
 logger = logging.getLogger(__name__)
 
 
+def _builtin_tombstoned(name: str) -> bool:
+    """Builtin deletada de verdade pelo operador? (plano 30 WS3 — tombstone).
+
+    Import lazy + defensivo: falha de leitura NUNCA bloqueia um registro
+    (fail-open pro comportamento legado — a tool registra).
+    """
+    try:
+        from agent import ai_builtin_tools
+        return (ai_builtin_tools.is_builtin(name)
+                and name in ai_builtin_tools.deleted_builtin_tools())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _default_enabled(name: str) -> bool:
     """Default de ``tool_overrides.enabled`` na primeira criação da row.
 
@@ -94,6 +108,12 @@ class ToolRegistry:
                 "Tool name collision: '%s' already registered by %s; ignoring %s",
                 name, existing_pid or "core", plugin_id or "core",
             )
+            return
+        if _builtin_tombstoned(name):
+            # Builtin DELETADA pelo operador (plano 30 WS3): não registra nem
+            # recria a row tool_overrides — o delete_orphans do boot limpa o
+            # resto. Sem este skip a tool ressuscitaria a cada restart.
+            logger.info("Builtin '%s' deletada pelo operador; registro pulado", name)
             return
         # Pluck WhatsBot-only metadata so the schema we pass to the LLM proxy is
         # a clean tool spec.

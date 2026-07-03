@@ -110,6 +110,19 @@ def upsert_override(
 upsert = upsert_override  # type: ignore[assignment]
 
 
+def delete(name: str) -> int:
+    """Remove a row de UMA tool (plano 30 WS3 — delete real de builtin).
+
+    Usado pelo DELETE de builtin tombada: sem isso a row ficaria órfã até o
+    ``delete_orphans`` do próximo boot e a tool ainda apareceria em /api/tools.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(sa_delete(tool_overrides).where(
+            tool_overrides.c.name == name
+        ))
+    return result.rowcount or 0
+
+
 def delete_for_plugin(plugin_id: str) -> int:
     """Remove all overrides belonging to a plugin. Used when plugin is deleted."""
     with get_engine().begin() as conn:

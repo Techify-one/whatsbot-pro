@@ -192,11 +192,11 @@ WAVE 1              F6               ← WS5 depende da fonte de destinos defini
 **Pronto quando:** clicar Excluir em `transferir_agente` → some da lista; após restart do worker **continua sumida**; a tool não aparece no schema do LLM; nenhuma outra tool é afetada.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _(onde ficou o tombstone; como fez o skip nos dois caminhos de re-seed; reinstalar ou não)_
-- **Problemas / pendências:** _(risco alto: confirmar que não quebra o boot se a tool sumir enquanto um agente ainda a referencia em tool_names)_
-- **Verificação:** _(delete → restart → confirmar ausência; suíte)_
+**Estado:** ✅ Concluída (2026-07-03)
+- **O que foi feito:** (1) tombstone em [agent/ai_builtin_tools.py](../agent/ai_builtin_tools.py): `TOMBSTONE_CONFIG_KEY="deleted_builtin_tools"` (JSON array na tabela `config`), `deleted_builtin_tools()`, `tombstone_builtin(name)` (idempotente) e `DELETABLE_BUILTINS = {"transferir_agente"}`; (2) skip nos DOIS caminhos de re-seed: `seed_builtin_tools` pula nomes tombados e `ToolRegistry.register_tool` ([agent/tool_registry.py](../agent/tool_registry.py), helper `_builtin_tombstoned` com import lazy) não registra nem recria a row de override — o `delete_orphans` do boot limpa o resto; `register_builtin_overrides` também pula (defensivo); (3) `tool_override_repo.delete(name)` novo; (4) rota `DELETE /api/ai/tools/{name}` ([server/routes/ai_engine.py](../server/routes/ai_engine.py)): builtin em `DELETABLE_BUILTINS` → tombstone + delete `ai_tools` + delete `tool_overrides` + unregister/refresh no processo vivo + `schedule_restart`; builtin fora da allowlist → 400 como antes; (5) frontend [ToolsUnified.js](../web/static/js/components/ai/ToolsUnified.js): botão Excluir liberado via `DELETABLE_BUILTINS` (Set espelhando o backend) e `ConfirmModal` com texto específico pra builtin ("definitiva pela interface" + como recriar — D8).
+- **Como foi feito / decisões:** tombstone na `config` (sem migration, D7/D8); escopo restrito a `transferir_agente` via allowlist `DELETABLE_BUILTINS` (infra generaliza depois); sem botão/rota de reinstalar (D8) — documentado no ConfirmDialog. Imports da rota são lazy dentro da função pra não tocar o cabeçalho compartilhado do arquivo (fronteira com o plano 31, que edita os endpoints de variáveis no mesmo arquivo).
+- **Problemas / pendências:** risco alto do plano coberto por teste: agente com `tool_names` referenciando a tool deletada não quebra o boot (`select_active_tools` filtra por interseção) nem o turno; app novo com tombstone presente sobe sem erro e sem a tool.
+- **Verificação:** [tests/test_builtin_tool_delete.py](../tests/test_builtin_tool_delete.py) (5 testes: roundtrip do tombstone; os dois re-seeds pulam; endpoint deletável 200 com efeito imediato; `save_contact_info` segue bloqueada 400; boot com agente referenciando tool tombada). 8 passed junto com os defaults do F3. Botão Excluir usa as mesmas classes dark-safe do delete de tool code (`text-red-500`/`hover:bg-wa-hover`); modal 100% `wa-*`.
 
 ---
 
