@@ -1,6 +1,6 @@
 # Plano 31 — Correções de QA: card da "Gerar melhoria" no lugar certo (+ análise multi‑agente), variáveis (validação/limpeza) e robustez do motor (mudez silenciosa, anti‑repetição)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-03 · **Escopo:** médio (7 correções em 3 frentes: feature "Gerar melhoria", feature Variáveis, robustez do motor; 1 migration nova)
+> **Status:** ✅ EXECUTADO (branch `feat/plano-31`, 2026-07-03) · **Escopo:** médio (7 correções em 3 frentes: feature "Gerar melhoria", feature Variáveis, robustez do motor; 1 migration nova — `0037_drop_ai_variables_category`)
 >
 > **Origem:** relatórios de QA do Thiago ([QA-motor-agentes.md](QA-motor-agentes.md), [30-resultados-teste-variaveis.md] resumido em sessão, [checklist-testar-tool-dependencias.md](checklist-testar-tool-dependencias.md)) + investigação read‑only concluída nesta sessão (workflow de 5 verificadores paralelos, nenhum código alterado). Todas as decisões de escopo já foram tomadas pelo usuário (ver §0).
 > **Método:** leitura do código real no branch `developer` + verificação `arquivo:linha` de cada achado. Head Alembic hoje = `0036_atend_open_unique` (plano 30 **não** adiciona migration) → a migration nova deste plano encadeia em `0037` (**a confirmar o head no momento da execução**).
@@ -186,11 +186,11 @@ WAVE 1
 **Pronto quando:** um `/improve` com `conversation_id` de uma conversa de inbox ≠ default grava o card **naquela** conversa (nenhuma conversa nova criada); sem `conversation_id`, comportamento idêntico ao atual. Golden de caracterização atualizado.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — nome real do repo de conversa pós‑rename)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(golden + repro multi‑canal)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `improve_message` lê `conv_id = target.get("conversation_id") or body.get("conversation_id")`, valida posse (`conversation_repo.get(conv_id)` existe E `conv.contact_id == contact_repo.get_by_phone(phone).id` — senão `conv_id=None`), resolve `note_channel = _channel_for(phone, conv_id)`, e `_save()` espelha o `private_note`: `_get_contact(phone, channel_id=note_channel)` + usa a ROW retornada por `add_message` (nada de `get_last` racy). `note_msg` montado com o MESMO shape de antes (role/content/ts/status/msg_id/conversation_id/_id) e broadcast com `channel_id`.
+- **Como foi feito / decisões:** repo pós-rename confirmado = `conversation_repo` (tabela `atendimentos` em db/tables). Fallback D9 intacto: sem `conversation_id`/inválido → `_channel_for(phone, None)` = "default" (goldens single-channel byte-idênticos).
+- **Problemas / pendências:** nenhum.
+- **Verificação:** goldens de `test_sandbox_improve_characterization.py` verdes SEM regenerar; novos testes `test_improve_conversation_scope.py`: card cai na conversa de inbox ≠ default sem criar conversa nova, e `conversation_id` de outro contato é ignorado (posse).
 
 ---
 
@@ -211,11 +211,11 @@ WAVE 1
 **Pronto quando:** no fluxo router→spoke, a análise cita o prompt do **router e** do spoke, lista as tools por agente, e o histórico é o da conversa marcada (não mistura canais). Single‑channel: idêntico em conteúdo ao atual (um agente só, fallback `get_context`).
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(confirmar semântica de `get_by_conversation`; forma da reconstrução de cadeia)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(repro router→spoke; golden)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `generate_improvement(handler, phone, target, feedback, *, conversation_id=None)` (delegate do handler idem); canal resolvido de `conversation_repo.get_with_channel` (D9: sem id → default); histórico via nova `message_repo.get_context_by_conversation(conv_id, limit)` (P4 confirmado: `get_by_conversation` NÃO filtra painel-only nem limita — a variante nova replica o filtro/limite exatos do `get_context`; fallback `get_context` sem id); cadeia reconstruída por `_agent_chain` (`routing_steps[0].from + [s.to]`, dedupe preservando ordem; fallback `execution.agent_key`, fallback agente ativo); `_find_tools_used_around` virou `_find_execution_around` + `_tools_used` (agora com `agent_key` por step); seção "## Agentes do turno" com sub-bloco por agente (display_name, tag ROTEADOR, ferramentas ATRIBUÍDAS pela allowlist `tool_names` — None = todas as habilitadas —, ferramentas USADAS pelo agente, prompt); `analysis_system` reescrito descrevendo multi-agente + limitação explícita ("mensagens do histórico não são atribuíveis a um agente"); modelo da análise prefere o agente ATIVO (último da cadeia) → resolução anterior.
+- **Como foi feito / decisões:** **convenção do contrato de fronteira seguida**: cada agente aparece com o prompt INLINE CRU renderizado (`agent_repo.get(key)["prompt"]` → `render_template` com `ai_variables`), NÃO o prompt enriquecido de runtime (`_build_system_prompt` saiu da análise — isso também blinda contra a seção dinâmica do WS5 do plano 30). `build_for_contact` continua sendo chamado só para fallback de cadeia vazia e modelo. Steps legados sem `agent_key`: em turno single-agent são atribuídos ao único agente; senão viram bloco "sem atribuição".
+- **Problemas / pendências:** limitação conhecida (D2, aceita): mensagens do histórico não têm `agent_key` — declarada no prompt da análise em vez de mudar schema.
+- **Verificação:** `test_improve_conversation_scope.py::test_improve_analysis_shows_router_and_spoke` — análise cita prompt do router E do spoke na ordem, com `{p31_var}` renderizado, tools por agente, e histórico só da conversa marcada (mensagem do canal default NÃO vaza); goldens single-channel intactos; `test_improve_stays_sync_isolated` continua verde (função sync).
 
 ---
 
@@ -232,11 +232,11 @@ WAVE 1
 **Pronto quando:** com `max_tokens` baixo, o bot **responde** (piso aplicado) OU, se ainda vazio, aparece **warning no log** (e card, se P2=sim). UI mostra o aviso. `tests/test_model_factory.py` continua verde (ajustar expectativas se o piso alterar algum caso).
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(valor do piso; se card painel‑only entrou)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(test_model_factory verde; teste manual de max_tokens baixo)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** (1) piso em `build_kwargs` (`MIN_MAX_TOKENS=256` / `MIN_MAX_TOKENS_REASONING=1024`, condicional a `reasoning_effort` — P1 opção (b) conforme recomendação); (2) `logger.warning` de reply vazio nos DOIS entry points (`run_async`/`run_sync` em agno_engine.py, onde `sender`/`model_id`/`usage` estão disponíveis — cobre os 2 pontos de retorno vazio de `_extract_reply` e o pós-followup); (3) `else` nos dois call sites `if result.reply:` (messaging_service.py ~835 texto e ~978 mídia) com warning + **card painel-only `role="error"`** (P2 = sim) broadcast com `channel_id`; (4) texto de ajuda sob o input `max_tokens` no AgentsManager.js citando os pisos.
+- **Como foi feito / decisões:** P1 = (b) piso condicional 256/1024; P2 card = sim (inline nos dois `else`, sem helper compartilhado para não sair da região do contrato de fronteira); card usa a row de `add_message` no broadcast (roles painel-only não reabrem conversa). Teste de alias em test_model_factory ajustado (777→1777) porque usava `thinking_level` junto — o clamp de reasoning agora se aplica (previsto no plano: "ajustar expectativas").
+- **Problemas / pendências:** nenhum. Não há servidor dev meu rodando (worktree próprio), então o aviso de reload de `ai_engine/*` não se aplica aqui.
+- **Verificação:** `tests/test_model_factory.py` → 20 passed (5 casos novos de piso); characterization/endpoints re-rodados verdes (ver F7/checklist); UI usa classes `wa-*` (legível no dark).
 
 ---
 
@@ -251,11 +251,11 @@ WAVE 1
 **Pronto quando:** setar `frequency_penalty=0.5` (config/variável/agente) reflete no kwargs do modelo (unit test) e no comportamento ao vivo. Se o dedup entrar: histórico com 3 respostas idênticas manda 1 ao LLM, painel inalterado.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(dedup entrou ou não; confirmação do OpenAILike)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(test_model_factory + teste ao vivo do penalty)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `frequency_penalty`/`presence_penalty` adicionados a `_TUNING_KEYS` e `_FLOAT_KEYS` (mesma cascata model_config > `{param}_{agent_key}` > global); dedup de contexto implementado em `ContactMemory.get_context_messages` (colapsa assistant idênticas ADJACENTES, só na montagem do contexto — histórico/painel intactos).
+- **Como foi feito / decisões:** P2 dedup = sim (leve, adjacentes-only, guard `isinstance(str)` para content de imagem em lista). P5: `OpenAILike` (base `OpenAIChat` do agno 2.x) tem `frequency_penalty`/`presence_penalty` como campos de 1ª classe — **verificado programaticamente** instanciando `OpenAILike(..., frequency_penalty=0.5, presence_penalty=0.3)`; não precisou de `request_params`.
+- **Problemas / pendências:** teste ao vivo contra o proxy Techify não foi executado (sem servidor/tráfego real neste ambiente); risco baixo dado que o campo é nativo do wrapper e a API é OpenAI-compatível.
+- **Verificação:** `tests/test_model_factory.py` → 24 passed (4 casos de penalty); novo `tests/test_context_dedup.py` → 2 passed (colapsa adjacentes / preserva não-adjacentes; persistência inalterada).
 
 ---
 
@@ -270,11 +270,11 @@ WAVE 1
 **Pronto quando:** `PUT /api/ai/variables/nome-invalido` → 400; criar `temperature` na UI mostra o aviso. `tests/test_endpoints.py` cobre o 400 (novo check).
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(bloquear ou avisar em A4)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(test_endpoints + teste manual UI)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** A1: `save_variable` (server/routes/ai_engine.py) valida `^[a-zA-Z][a-zA-Z0-9_]{0,63}$` → `_err(400)` (paridade com o `NAME_RE` do front). A4: `VariablesEditor.js` ganhou `RESERVED_PARAMS` (os 6 canônicos pós-F5: temperature, top_p, max_tokens, reasoning_effort, frequency_penalty, presence_penalty) + `reservedParamOf()` (match exato ou prefixo `<param>_` = forma por-agente) e um aviso âmbar não-bloqueante no form (criação E edição), com a dica do A5 anexada quando o parâmetro é `max_tokens`.
+- **Como foi feito / decisões:** P3 = **avisar** (não bloquear), conforme recomendação — `{param}_{agent_key}` é o mecanismo legítimo de tuning por agente. Aliases (`max_output_tokens` etc.) ficam FORA da lista: em `ai_variables` eles não têm efeito de tuning (§2.4 do plano — só são normalizados dentro de `model_config`). Backend não ganhou check de reservado (P3 = avisar ⇒ item 3 opcional descartado).
+- **Problemas / pendências:** nenhum. Aviso usa amber-50/200/700 (cobertas pelo fallback dark do custom.css, mesmo padrão dos avisos do AgentsManager).
+- **Verificação:** checks novos no test_endpoints.py (válido→200; hífen/começa-com-número/>64 chars→400; inválido não persiste) — verdes no run da fase (ver checklist final); syntax-check JS ok.
 
 ---
 
@@ -291,11 +291,11 @@ WAVE 1
 **Pronto quando:** migration `upgrade`/`downgrade` round‑trip verde no Postgres de teste; CRUD de variáveis funciona sem `category`; `tests/test_endpoints.py` verde.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(head Alembic confirmado; nome do arquivo)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(migration round‑trip + test_endpoints)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `category` removida do endpoint (`save_variable` não repassa mais `body.get("category")`), do repo (`variable_repo.save(name, value)`, upsert sem a coluna), do schema (`db/tables.py` `ai_variables` sem a Column) e do banco via migration `20260703_0037_drop_ai_variables_category.py` (`revision="0037_drop_ai_variables_category"`, `down_revision="0036_atend_open_unique"`).
+- **Como foi feito / decisões:** head Alembic confirmado no momento da execução = `0036_atend_open_unique` (o plano 30 não criou migration, como combinado). Migration guardada por `sa.inspect` (idempotente) e reversível (downgrade re-adiciona `Text NOT NULL server_default ""`), no estilo da 0036. `VariableForm` confirmado sem leitura de `category`; únicas outras referências a "category" no core são de templates WhatsApp (channels/conversations — não relacionadas) e da migration histórica 0007 (imutável).
+- **Problemas / pendências:** nenhum.
+- **Verificação:** round-trip `upgrade head → downgrade -1 → upgrade head` verde no Postgres de teste (whatsbot_test_p31); checks P31-F7 no test_endpoints (resposta e GET sem `category`); test_schema_drift/test_alembic_hygiene verdes no run final.
 
 ---
 
@@ -333,19 +333,19 @@ WAVE 1
 
 ## 7. Checklist de verificação
 
-- [ ] `python -m pytest tests/characterization/test_sandbox_improve_characterization.py` verde (golden do improve atualizado)
-- [ ] `python tests/test_endpoints.py` verde (improve single‑channel inalterado; novo 400 de nome inválido; CRUD de variáveis sem `category`)
-- [ ] `WHATSBOT_TEST=1 venv/bin/python tests/test_model_factory.py` verde (piso + penalties)
-- [ ] **Repro D.A (F2):** contato com conversa ativa em inbox ≠ default → "Gerar melhoria" → card na conversa real, **sem** conversa fantasma no inbox 1
-- [ ] **Regressão single‑channel (F2):** contato no inbox default → card cai na conversa dele como antes
-- [ ] **Repro C1+ (F3):** fluxo router→spoke → análise cita o prompt do router **e** do spoke + tools por agente; histórico só da conversa marcada
-- [ ] **A5 (F4):** `max_tokens` baixo → bot responde (piso) ou warning no log + (se P2) card painel‑only; UI mostra aviso
-- [ ] **12.2 (F5):** `frequency_penalty` setado chega ao modelo; (se P2) dedup manda 1 assistant idêntica ao LLM, painel inalterado
-- [ ] **A1/A4 (F6):** `PUT` de nome inválido → 400; UI avisa nome reservado
-- [ ] **A2 (F7):** migration `0037` `upgrade`/`downgrade` round‑trip verde no Postgres (`WHATSBOT_TEST_DB_URL`); `category` sumiu de API/UI/schema
-- [ ] Modo escuro legível nos avisos novos (F4/F6)
-- [ ] Worker reiniciado após mudanças em `ai_engine/*` (dev)
-- [ ] Sem segredo em log/URL; card `system`/`error` continua painel‑only (não vai ao WhatsApp)
+- [x] `python -m pytest tests/characterization/test_sandbox_improve_characterization.py` verde (goldens preservados SEM regenerar — comportamento single-channel byte-idêntico)
+- [x] `python tests/test_endpoints.py` verde — **1028 passed, 0 failed** (improve single-channel inalterado; novos 400 de nome inválido; CRUD de variáveis sem `category`)
+- [x] `venv/bin/python tests/test_model_factory.py` verde — **24 passed** (piso + penalties)
+- [x] **Repro D.A (F2):** `test_improve_conversation_scope.py::test_improve_card_lands_in_flagged_conversation` — card na conversa de inbox ≠ default, contagem de conversas inalterada (sem fantasma)
+- [x] **Regressão single‑channel (F2):** goldens `sandbox_improve_endpoint_happy` etc. verdes sem mudança
+- [x] **Repro C1+ (F3):** `test_improve_analysis_shows_router_and_spoke` — prompt do router E do spoke (ordem preservada, variável renderizada), tools por agente, histórico só da conversa marcada
+- [x] **A5 (F4):** piso 256/1024 aplicado no `build_kwargs`; warning em `run_async`/`run_sync` + `else` com warning e card `error` painel-only nos 2 call sites; UI avisa no input (verificação ao vivo com modelo real não executada — sem servidor neste ambiente)
+- [x] **12.2 (F5):** penalties chegam ao kwargs (unit) e `OpenAILike` os aceita como campos nativos (verificado por instanciação); dedup adjacente coberto por `test_context_dedup.py` (painel inalterado)
+- [x] **A1/A4 (F6):** PUT nome inválido → 400 (3 variantes testadas); UI avisa nome reservado (+ dica A5 p/ max_tokens)
+- [x] **A2 (F7):** round-trip `upgrade → downgrade -1 → upgrade` verde no `whatsbot_test_p31`; `category` fora de API/repo/schema; `test_schema_drift`/`test_alembic_hygiene` verdes
+- [x] Modo escuro: avisos novos usam `wa-*`/amber-50/200/700 (cobertos pelo fallback `html.dark` do custom.css)
+- [x] Worker dev: N/A neste ambiente (worktree isolado sem servidor rodando); ao aplicar no dev do usuário, reiniciar o worker após `ai_engine/*`
+- [x] Sem segredo em log/URL; cards `system`/`error` continuam painel-only (roles excluídos de contexto/preview; nada vai ao WhatsApp)
 
 ---
 
