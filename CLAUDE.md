@@ -1,19 +1,18 @@
 # WhatsBot
 
-Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
+Bot de WhatsApp com IA para uso em servidor/cloud (Coolify/Docker) — **decisão de distribuição (plano 29 P1)**: o produto é server/cloud-first; o empacotamento EXE Windows ficou suspenso quando o banco virou Postgres-only (não há PG em máquina de usuário final). Os launchers dev de Windows/macOS continuam funcionando apontando para um Postgres remoto.
 
 ## Stack
 
 - **Python 3.11+** — linguagem principal
-- **SQLAlchemy 2.0 Core + Alembic** — camada de dados portável (Core, sem ORM declarativo)
-- **SQLite** — banco default (WAL mode, driver `sqlite3` da stdlib)
-- **PostgreSQL** — backend opcional via `psycopg[binary]`, configurável pela tela Settings → Banco
+- **SQLAlchemy 2.0 Core + Alembic** — camada de dados (Core, sem ORM declarativo)
+- **PostgreSQL** — banco único via `psycopg[binary]` (plano 29 Eixo C — Postgres-only). A env `DATABASE_URL` é obrigatória; sem ela o boot falha com erro acionável. SQLite foi removido
 - **GOWA** (go-whatsapp-web-multidevice v8.8.0) — bridge WhatsApp via REST, roda como subprocess
 - **Proxy LLM da Techify** (`https://llm.techify.one/api/v1`) — provider de LLM, API **compatível com OpenRouter/OpenAI**. Substituiu o OpenRouter direto: a chave é provisionada pelo wizard de 1ª execução e o crédito/recarga é gerido pela Techify. O base URL é configurável via env `LLM_API_BASE_URL`. A chave continua sendo persistida na config key `openrouter_api_key` (nome legado mantido por compatibilidade)
 - **AGNO** (`agno` 2.x) — framework de agentes usado como **motor de LLM** do agente. O loop de raciocínio + tool calling roda via `agno.agent.Agent`, apontado ao proxy Techify pelo model `OpenAILike`. Encapsulado em [agent/agno_engine.py](agent/agno_engine.py); o `AgentHandler` delega a ele preservando todos os hooks de plugin (filters/events), usage e execution tracking. Transcrição de áudio/descrição de imagem continuam em chamadas diretas ao cliente OpenAI (não são agênticas)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
 - **Preact + HTM + Tailwind CSS** — frontend web (sem build step, vendorizado local)
-- **PyInstaller** — empacotamento como EXE
+- **PyInstaller** — empacotamento como EXE (suspenso pós-Postgres-only — ver decisão de distribuição no topo; o tooling continua no repo)
 
 ## Arquitetura
 
@@ -24,19 +23,18 @@ gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
 agent/handler.py     → orquestra o processamento de mensagens (system prompt, filters/events, usage, save); delega o loop de LLM ao motor AGNO
 agent/agno_engine.py → motor AGNO: monta OpenAILike + Agent único, envolve cada tool em agno Function (filters/events preservados), extrai reply/usage
-agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no SQLite via repos)
+agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no banco via repos)
 agent/group_mentions.py → resolução de @menções em grupos (número ↔ nome, lista de membros, @todos)
 agent/tools/         → tools core do LLM (uma tool por arquivo, agregadas em CORE_TOOLS)
 config/settings.py   → load/save config + constantes do provider/Techify (LLM_API_BASE_URL, TECHIFY_*)
 server/avatars.py    → cache de fotos de perfil em disco (statics/avatars/<phone>.jpg) + broadcast avatar_updated
 server/balance_monitor.py → consulta saldo de crédito do proxy (/credits) e emite low_balance via WS
 db/                  → módulo de banco de dados (SQLAlchemy 2.0 Core)
-  engine.py          → factory do Engine, URL resolution (env > arquivo > sqlite default), PRAGMAs SQLite
+  engine.py          → factory do Engine; URL exclusivamente da env DATABASE_URL (fail-fast Postgres-only)
   tables.py          → MetaData + 20 Table objects (Core, sem mapper/Session): 13 core + 7 ai_* (motor AGNO)
-  upsert.py          → helper dialect-agnóstico (INSERT ... ON CONFLICT)
+  upsert.py          → helper de INSERT ... ON CONFLICT (dialect postgresql)
   connection.py      → init_db(): cria engine + roda Alembic upgrade
-  migration_postgres.py → migra dados SQLite → Postgres (usado pelo endpoint admin)
-  migrate_json.py    → migração one-time de JSON legado → banco
+  pg_maintenance.py  → repair_postgres_sequences (re-ancora sequences em MAX(pk))
   alembic/           → migrations Alembic (env.py + versions/)
   repositories/      → data access layer (um arquivo por domínio)
     config_repo.py   → get_all(), get(), set(), set_many(), delete_prefix()
@@ -83,6 +81,7 @@ Setup inicial (1ª vez no Linux):
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
+# criar o .env na raiz com DATABASE_URL=postgresql+psycopg://user:senha@host:5432/whatsbot
 ./linux_start.sh
 ```
 
@@ -92,19 +91,14 @@ O `windows_start.bat` e o `macos_start.command` fazem o setup sozinhos (baixam P
 
 A camada de dados usa **SQLAlchemy 2.0 Core** (sem ORM declarativo). Cada tabela é um `Table` em [db/tables.py](db/tables.py) e os repositórios constroem statements via `select()/insert()/update()/delete()`. Repos rodam síncronos e são chamados das rotas via `asyncio.to_thread`.
 
-### Escolha do backend
+### URL do banco (Postgres-only — plano 29)
 
-A URL é resolvida na ordem:
+O banco é **exclusivamente PostgreSQL** e a URL vem **exclusivamente da env `DATABASE_URL`** (`postgresql+psycopg://user:senha@host:5432/whatsbot`). Sem a env, ou com URL de outro dialeto, `resolve_database_url()` levanta `RuntimeError` com mensagem acionável no boot — não existe mais fallback SQLite nem o override `storages/database.json` (a tela Settings → Banco e o endpoint de migração SQLite→Postgres foram removidos).
 
-1. Variável de ambiente `DATABASE_URL` (cobre Docker/Coolify — `.env`).
-2. Arquivo local `storages/database.json` (Windows / EXE — gerenciado pela UI).
-3. Fallback: `sqlite:///storages/whatsbot.db`.
-
-Para trocar para Postgres no Windows: Settings → Banco → cola a URL `postgresql+psycopg://user:senha@host:5432/whatsbot` → "Migrar agora". O endpoint `POST /api/admin/migrate-to-postgres` recebe a URL, valida que o destino está vazio, aplica Alembic, copia tabela a tabela (incluindo `plugin_*`), grava em `database.json` e dispara restart. SQLite original fica preservado para rollback (basta apagar/editar `database.json` e reiniciar).
-
-Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arquivo `database.json` é ignorado quando a env está presente.
-
-**Docker Swarm com múltiplas réplicas (ou rolling update entre tasks): `DATABASE_URL` apontando para Postgres compartilhado é obrigatório.** Volumes nomeados em Swarm são locais por nó, não compartilhados entre réplicas — SQLite local resulta em DBs divergentes (escritas vão pra uma réplica, leituras vêm de outra). Coolify e single-container não sofrem disso.
+- **Dev local**: o `.env` na raiz (gitignored) define `DATABASE_URL`; `linux_start.sh` carrega automaticamente.
+- **Docker/Coolify**: setar `DATABASE_URL` nas envs do container.
+- O engine usa `pool_pre_ping=True` (sobrevive a quedas idle) e `prepare_threshold=None` no psycopg (compatível com PgBouncer em transaction mode — Neon/Supabase).
+- `POST /api/admin/repair-sequences` re-ancora as sequences em `MAX(pk)` (útil após import manual de dados).
 
 ### Tabelas
 
@@ -128,20 +122,9 @@ Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arq
 | `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |
 | `tool_overrides` | Override por-tool (enabled, description, display_label). Row criada automaticamente para cada tool registrada (core + plugin) |
 
-### Configuração SQLite
-
-Quando o engine é SQLite (default), as PRAGMAs são aplicadas via `event.listens_for("connect")` em [db/engine.py](db/engine.py):
-
-- `PRAGMA journal_mode=WAL` — permite leituras concorrentes
-- `PRAGMA foreign_keys=ON` — integridade referencial
-- `PRAGMA busy_timeout=5000` — espera até 5s em lock contention
-- `connect_args={"check_same_thread": False}` — reuso entre threads compatível com `asyncio.to_thread`
-
-Em Postgres essas pragmas não se aplicam (são SQLite-only); o engine usa `pool_pre_ping=True` para sobreviver a quedas idle de conexão.
-
 ### Padrão de acesso
 
-Repos usam o padrão dialect-agnóstico baseado em `Table` objects:
+Repos usam o padrão baseado em `Table` objects:
 
 ```python
 from sqlalchemy import select
@@ -160,9 +143,9 @@ Regras:
 
 - Leitura: `with get_engine().connect() as conn:` (sem transação implícita).
 - Escrita: `with get_engine().begin() as conn:` (auto-commit no exit, rollback em exceção).
-- UPSERT: usar `db.upsert.upsert()` / `db.upsert.upsert_ignore()` — escolhe `sqlite.insert()` ou `postgresql.insert()` automaticamente.
+- UPSERT: usar `db.upsert.upsert()` / `db.upsert.upsert_ignore()` (`INSERT ... ON CONFLICT` do dialect postgresql).
 - Nunca usar `?` ou `%s` direto — bind params nomeados (`:phone`) via `sqlalchemy.text()` ou expressões Core.
-- Migrations: Alembic ([db/alembic/versions](db/alembic/versions)). Para um schema change, rode `alembic revision --autogenerate -m "msg"` e revise. `init_db()` aplica `alembic upgrade head` no boot; DBs legados sem `alembic_version` são automaticamente stampados em `0001_baseline` antes do upgrade.
+- Migrations: Alembic ([db/alembic/versions](db/alembic/versions)), sem batch-mode (Postgres tem `ALTER TABLE` completo). Para um schema change, rode `alembic revision --autogenerate -m "msg"` e revise. `init_db()` aplica `alembic upgrade head` no boot.
 
 `db.connection.get_db()` ainda existe como shim deprecated retornando `engine.raw_connection()`, mas é apenas para plugins de terceiros não migrados. Código novo (core ou plugin oficial) usa `get_engine()`.
 
@@ -243,7 +226,16 @@ Pontos-chave da integração:
 - **Reply**: `_extract_reply` pega a ÚLTIMA mensagem `assistant` sem tool calls de `run_output.messages` (fallback: `run_output.content`). Isso evita que o AGNO concatene um "chatter" pré-tool com a resposta final — crítico com `split_messages` (saída JSON array) ligado.
 - **Transcrição/descrição de mídia** continuam em chamadas diretas ao cliente OpenAI no handler (não são agênticas) — o cliente OpenAI segue vivo só para isso e para `test_api_key`.
 
-O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py) — também single-agent. O **prompt de cada agente é inline** (coluna `ai_agents.prompt`): cada agente escreve o próprio prompt no formulário do agente (tela Engine de IA → Agentes), sem seleção de template compartilhado. `build_for_contact` lê `agent["prompt"]` direto (fallback para o seed `DEFAULT_SYSTEM_PROMPT` quando vazio) e resolve `{placeholder}` via `ai_variables`. A coluna `prompt_key` e a tabela `ai_prompts` são legado e não participam mais da resolução.
+O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py) — também single-agent. O **prompt de cada agente é inline** (coluna `ai_agents.prompt`): cada agente escreve o próprio prompt no formulário do agente (tela Configurações de IA → Agentes), sem seleção de template compartilhado. `build_for_contact` lê `agent["prompt"]` direto (fallback para o seed `DEFAULT_SYSTEM_PROMPT` quando vazio) e resolve `{placeholder}` via `ai_variables`. A coluna `prompt_key` e a tabela `ai_prompts` são legado e não participam mais da resolução.
+
+### Guardrails e routing hub-and-spoke (plano 29 Eixo A/B)
+
+Multi-agente segue o padrão **hub-and-spoke** (portado do nexus `gerenciamento-ia`): **um único roteador** (`is_router`, enforced por semântica radio em `agent_repo.save` + índice único parcial `ux_ai_agents_single_router`, migration 0035) roteia via `transferir_agente`; spokes devolvem ao roteador com motivo; **só o roteador tem `transfer_to_human`** (convenção via `tool_names`, com aviso na UI quando um spoke a seleciona).
+
+- **Routing within-turn** ([ai_engine/routing.py](ai_engine/routing.py)): `run_with_routing` é puro (sem DB) e retorna `(result, steps, halted)`. `steps` = `{from, to, depth, reason}` — o `reason` é o motivo real da `transferir_agente`, threadado ao próximo hop como msg sintética `[REDIRECIONAMENTO de {agente}]\nMotivo: …` ([app/services/agent_run_service.py](app/services/agent_run_service.py)). **Revisita é permitida** (`roteador→comercial→roteador` no mesmo turno; `is_reinvoke` sinaliza re-invocação), barrando só `A→A` imediato; profundidade limitada por `ai_max_route_depth` (config, default 5). Cap estourado com handoff pendente → o caller força `transfer_to_human` (motivo "Limite de roteamento atingido…") + `track_step("routing_halted")`.
+- **Guardrails de tool** ([ai_engine/hooks.py](ai_engine/hooks.py)): `requires_prior_call` (str ou lista) é **success-aware** — prior que retornou falha (`_FAILURE_MARKERS`/prefixo "erro") não libera; mensagens de bloqueio citam a rota de escape (`transferir_agente`); `ai_tool_call_limit_per_tool` (config, 0=off) aplica um `call_limit` default a toda tool sem limite próprio.
+- **Teto global**: `Agent(tool_call_limit=…)` do AGNO (overflow gracioso) — env `WHATSBOT_TOOL_CALL_LIMIT` > config `ai_tool_call_limit_total` (default 25; 0 desliga).
+- **Gate de humano** ([app/services/messaging_service.py](app/services/messaging_service.py) `_conversation_ai_active`): a IA cala quando `ai_active=0`, OU a conversa tem `assignee_user_id` humano sem `active_agent_key`, OU o contato tem a tag `transferido_atendente` (`TRANSFER_TAG`). Reabrir com IA ligada / toggle-ai enable limpa a tag (`_clear_transfer_tag` em `conversation_service`).
 
 ## Fotos de perfil (avatars)
 
@@ -299,8 +291,7 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 | POST | `/api/plugins/restart` | Restart manual do servidor |
 | `*` | `/api/plugins/{id}/*` | Endpoints REST mountados pelo plugin (router próprio) |
 | GET | `/api/admin/database` | Info do backend atual (dialect, URL redacted, caminho do config) |
-| POST | `/api/admin/migrate-to-postgres` | Inicia migração SQLite → Postgres. Body: `{postgres_url}`. Status via WS `db_migration_progress` |
-| GET | `/api/admin/migrate-to-postgres/status` | Snapshot polling do estado da migração |
+| POST | `/api/admin/repair-sequences` | Re-ancora as sequences do Postgres em MAX(pk) (recovery pós-import manual) |
 | WS | `/ws` | WebSocket para eventos real-time |
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
@@ -337,7 +328,7 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 
 - Python com type hints nas assinaturas de função
 - Logging via `logging` stdlib (nunca print)
-- Operações bloqueantes (GOWA, LLM/proxy Techify, SQLite) usam `asyncio.to_thread()` no backend FastAPI
+- Operações bloqueantes (GOWA, LLM/proxy Techify, banco) usam `asyncio.to_thread()` no backend FastAPI
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
@@ -363,10 +354,8 @@ Telas de plugin (`storages/plugins/<id>/static/*.js`) seguem as MESMAS regras �
 
 ## Dados do projeto
 
-Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
-- `storages/whatsbot.db` — banco SQLite (default; configs, contatos, mensagens, usage, tags)
-- `storages/database.json` — override do backend (`{"url": "postgresql+psycopg://..."}`); ausente = SQLite
-- `storages/` — dados do GOWA (sessão WhatsApp) + banco de dados da aplicação
+Dados de banco vivem no Postgres apontado por `DATABASE_URL`; no filesystem (raiz do projeto em dev, bind mounts no Docker) ficam:
+- `storages/` — dados do GOWA (sessão WhatsApp) + plugins do usuário
 - `logs/` — logs com rotação
 - `statics/senditems/` — mídia enviada pelo operador
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
@@ -617,21 +606,17 @@ Use o slash command `/new-plugin` no Claude Code. O comando lê os arquivos de r
 - Export: `GET /api/plugins/<id>/export` retorna um `.zip` da pasta (excluindo `__pycache__/` e arquivos `.db`).
 - Import: `POST /api/plugins/import` (multipart) valida o `plugin.yaml` na raiz, checa colisão de `id` e path traversal, extrai em `storages/plugins/<id>/`. Plugin importado fica `enabled=0` — usuário ativa pela UI.
 
-## Migração de dados legados
-
-Para instalações que usavam a versão anterior (armazenamento em JSON), o sistema detecta automaticamente na inicialização se o banco está vazio e existem arquivos JSON legados (`contacts/*.json`, `config.json`). Nesse caso, executa a migração via `db/migrate_json.py`. Os arquivos JSON originais não são deletados.
-
 ## Testes automatizados
 
-Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient com banco SQLite temporário. GOWA e o LLM (proxy Techify) são mockados.
+Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient. GOWA e o LLM (proxy Techify) são mockados. A suíte roda **contra um Postgres de teste** (plano 29 C3): a URL vem de `WHATSBOT_TEST_DB_URL` (env, ou a linha correspondente no `.env` da raiz) e o helper central [tests/pg.py](tests/pg.py) recria o schema (`DROP SCHEMA public CASCADE` + `alembic upgrade head`) uma vez por processo. **Trava de segurança**: o nome do banco precisa conter `test` (ex.: `whatsbot_test`) — impossível apontar a suíte pro banco vivo por engano (`WHATSBOT_TEST_DB_ALLOW_ANY=1` desliga a trava).
 
 ```bash
-# Rodar testes (não precisa de servidor rodando)
-source venv/Scripts/activate
-python tests/test_endpoints.py
+# Rodar testes (não precisa de servidor rodando; precisa de WHATSBOT_TEST_DB_URL)
+venv/bin/python -m pytest tests/ -q
+venv/bin/python tests/test_endpoints.py
 ```
 
-Os testes criam um banco temporário (SQLite por default; setar `WHATSBOT_TEST_DB_URL=postgresql+psycopg://...` para rodar contra Postgres), inserem dados de teste (contatos, mensagens, tags, usage), e validam ~196 checagens (helper `check(...)`) cobrindo:
+Os testes inserem dados de teste (contatos, mensagens, tags, usage) e validam ~990 checagens (helper `check(...)`) cobrindo:
 - Health, Auth (com e sem senha), Config (GET/PUT/test-key, `group_reply_mode`), Status, Balance
 - Contacts (list, detail, search, archived, send, retry, image, audio, presence, read, toggle-ai, update info, **pin/unpin**, **unread/mark-all-read/mark-all-unread**, **unread-count**, **@menção em grupo / has_unread_mention**, **react/delete de mensagem**, **members** de grupo)
 - Tags (CRUD + contact tags)
@@ -701,8 +686,7 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **Archive status é chat-level**: o webhook do GOWA **não** inclui campo de archive no payload. Para saber se um chat é arquivado, consultar `GET /chats` e verificar o campo `archived` no item com o `jid` correspondente
 - **Debug do subprocess GOWA**: por padrão o stdout/stderr do GOWA vão para `DEVNULL` (sem custo). Para diagnosticar mensagens descartadas (payloads vazios, tipos não decodificados, templates HSM da Cloud API, etc.), setar a env `WHATSBOT_GOWA_DEBUG=1` (no Coolify ou outro ambiente) e reiniciar o container. Com a flag ativa, o GOWA é iniciado com `--debug=true` e os logs são gravados em `logs/gowa.log` (truncado quando passa de ~10 MB). Acessível via `GET /api/gowa-logs?limit=N` (default 500, max 5000). A resposta inclui `debug_enabled`, `log_path`, `size` e `lines[]`. Desligar setando `WHATSBOT_GOWA_DEBUG=0` ou removendo a variável + reiniciando
 - **Mensagens HSM via Cloud API (linked device limitation)**: contas Business via WhatsApp Cloud API enviam mensagens template (`<hsm tag="..."/>`, ex: Mercado Livre, OTP, notificações). Por design do WhatsApp, esses templates **não são entregues com conteúdo para linked devices** — só para o device primário. O GOWA recebe um `placeholderMessage` com `type: MASK_LINKED_DEVICES` (sem body/media), e o webhook chega só com metadata (`chat_id`, `from`, `id`, `timestamp`). Não é bug — é limitação estrutural. Para confirmar, ativar `WHATSBOT_GOWA_DEBUG=1` e procurar `placeholderMessage` ou `<hsm tag=` em `/api/gowa-logs`
-- **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
-- **Auto-criação do banco**: na inicialização, `init_db()` resolve a URL (env > `storages/database.json` > sqlite default), cria o engine e roda `alembic upgrade head`. SQLite vazio é criado do zero; DBs SQLite legados (sem `alembic_version`) são automaticamente stampados no baseline antes do upgrade — não há recriação destrutiva
+- **Bootstrap do banco**: na inicialização, `init_db()` exige `DATABASE_URL` Postgres na env (fail-fast com mensagem acionável se ausente/inválida), cria o engine e roda `alembic upgrade head`. Banco vazio nasce direto via Alembic — não há recriação destrutiva
 - **`statics/` precisa de pasta persistente no deploy (estilo Chatwoot)**: `statics/` está no `.gitignore` E `.dockerignore`, e é criada vazia em runtime dentro do container. A mídia enviada pelo operador (`statics/senditems/`) e o cache de avatares (`statics/avatars/`) vivem no **disco local da instância** — não no banco. Por isso o [Dockerfile](Dockerfile) **NÃO** declara `VOLUME` (um `VOLUME` no Dockerfile cria volume **anônimo**, que o Coolify/`docker run` sem `-v` **descarta ao recriar o container num redeploy** — daria 404 `{"detail":"Not Found"}` nas imagens já enviadas, e a leitura "parece persistente" engana). A persistência é feita por **bind mount de pasta real da instalação**: `docker-compose.yaml` mapeia `./data/{storages,statics,logs}` → `/app/...` (pastas visíveis no host, pré-criadas pelo `docker_start.sh`); no **Coolify**, configurar **Persistent Storage** mapeando `/app/storages` e `/app/statics` (ou ao menos `/app/statics/senditems`) para host path/volume. Em dev (`linux_start.sh`, processo direto, sem container) os arquivos já ficam em `statics/` da raiz do checkout. Avatares são cache auto-recuperável (re-baixados do GOWA), então o painel cai num placeholder 200 em vez de 404 (rota `GET /statics/avatars/{name}` em [server/app.py](server/app.py)); imagem perdida no chat renderiza placeholder "indisponível". **Atenção (DB compartilhado + disco local):** se duas instâncias dividem o MESMO banco (ex.: Postgres remoto) mas têm `statics/` separados, a mídia enviada por uma não aparece na outra (o `media_path` está no banco compartilhado, mas o arquivo só existe no disco de quem enviou) → "Imagem indisponível". Storage de mídia é **per-instância** por design; multi-réplica com mídia compartilhada exigiria storage de rede de verdade (volume por-nó não basta)
 - **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: `gowa`, `telegram` e `whatsapp_cloud` (os três providers de canal nativos da UI — seus frontends são parte do core e não podem divergir). Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o repositório de versionamento `whatsbot-pro-plugins` (cada um em `plugins/<id>/` com `.zip` + `.json`) e são instalados via `Importar (.zip)`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
 - **Restart de plugin requer supervisor**: `enable`/`disable` chama `os._exit(0)` após um delay curto. Em Docker, `restart: unless-stopped` (compose) faz o container relançar; em dev, `restart.py` toca `server/_reload_trigger.py` (`.py` dentro de um `--reload-dir`, casa com o include default `*.py` do uvicorn) — o watchfiles reinicia o worker antes do `os._exit` rodar. O arquivo é regenerado em runtime e está no `.gitignore`. Em EXE Windows, o `update.py` relança. Sem supervisor, o servidor cai e não volta sozinho.

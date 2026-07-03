@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 
 from channels import ai_settings
-from db.repositories import contact_repo, conversation_repo
+from db.repositories import contact_repo, conversation_repo, tag_repo
 from agent import group_mentions
 from server import system_notices
 from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
@@ -1075,15 +1075,30 @@ class MessagingService:
 
 
 def _conversation_ai_active(contact) -> bool:
-    """Per-conversation AI gate (plano 01 Fase 2, fatia 2).
+    """Per-conversation AI gate (plano 01 Fase 2, fatia 2 · plano 29 A5).
 
     Returns the active conversation's ``ai_active`` flag, defaulting to True
     (fail-open) — um erro de resolução ou ausência de conversa NUNCA silencia o
     bot. Permite pausar a IA numa conversa específica sem mexer no contato.
+
+    Plano 29 A5 — gate de humano desacoplado do flag: mesmo com ``ai_active``
+    dessincronizado em 1, a IA NÃO responde quando (a) a conversa aberta tem um
+    humano atribuído (``assignee_user_id``) sem agente de IA vinculado, ou
+    (b) o contato carrega a tag de transferência (:data:`TRANSFER_TAG`,
+    criada por ``transfer_to_human`` e limpa quando a IA reassume).
     """
+    from agent.tools.transfer_to_human import TRANSFER_TAG
     try:
         conv = conversation_repo.get_open_for_contact(contact.id)
-        return bool(conv["ai_active"]) if conv else True
+        if conv:
+            if not conv["ai_active"]:
+                return False
+            if conv.get("assignee_user_id") is not None \
+                    and not conv.get("active_agent_key"):
+                return False  # humano no comando — flag dessincronizado não fala mais alto
+        if TRANSFER_TAG in (tag_repo.get_contact_tags(contact.id) or []):
+            return False  # belt-and-suspenders: transferido pra atendente
+        return True
     except Exception:
         logger.exception("Falha no gate ai_active para %s", getattr(contact, "phone", "?"))
         return True

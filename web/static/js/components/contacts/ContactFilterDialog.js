@@ -13,6 +13,7 @@
 import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
+import { OptionListSelect } from '../OptionListSelect.js';
 
 const html = htm.bind(h);
 
@@ -87,38 +88,12 @@ function useCloseOnOutside(open, setOpen, ref) {
   }, [open]);
 }
 
-// Dropdown custom de multi-seleção (checkboxes) — evita o `<select multiple>` nativo.
+// Multi-seleção da barra de filtros → delega ao seletor PADRÃO do app (OptionListSelect):
+// busca sempre visível e rodapé "Limpar seleção". options: [{ value, label }].
 function MultiSelect({ options, selected, onChange, placeholder = '+ Selecione uma opção...' }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useCloseOnOutside(open, setOpen, ref);
-
-  const sel = new Set(selected || []);
-  const toggle = (v) => {
-    const next = new Set(sel);
-    if (next.has(v)) next.delete(v); else next.add(v);
-    onChange(options.filter(o => next.has(o.value)).map(o => o.value));
-  };
-
-  const chosen = options.filter(o => sel.has(o.value));
-  const summary = chosen.length === 0
-    ? placeholder
-    : (chosen.length <= 2 ? chosen.map(o => o.label).join(', ') : `${chosen.length} selecionados`);
-
-  return html`<div ref=${ref} class="relative flex-1 min-w-0">
-    <button type="button" onClick=${() => setOpen(o => !o)}
-      class="${FIELD} w-full flex items-center justify-between gap-1.5 text-left">
-      <span class="truncate ${chosen.length === 0 ? 'text-wa-secondary' : ''}">${summary}</span>
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="shrink-0 text-wa-secondary"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-    </button>
-    ${open ? html`<div class="absolute z-[80] mt-1 left-0 right-0 max-h-[220px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
-      ${options.length === 0 ? html`<div class="px-2.5 py-1.5 text-[13px] text-wa-secondary">Nenhuma opção</div>` : null}
-      ${options.map(o => html`<label key=${o.value}
-        class="flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-wa-text hover:bg-wa-hover cursor-pointer">
-        <input type="checkbox" checked=${sel.has(o.value)} onChange=${() => toggle(o.value)} class="shrink-0" />
-        <span class="truncate">${o.label}</span>
-      </label>`)}
-    </div>` : null}
+  return html`<div class="flex-1 min-w-0">
+    <${OptionListSelect} options=${options} value=${selected} multiple=${true}
+      onChange=${onChange} placeholder=${placeholder} float=${true} />
   </div>`;
 }
 

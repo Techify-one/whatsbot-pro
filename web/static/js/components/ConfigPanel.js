@@ -2,7 +2,6 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { markAllUnread, markAllRead } from '../services/api.js';
-import { DatabaseSettings } from './DatabaseSettings.js';
 
 const html = htm.bind(h);
 
@@ -39,7 +38,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
-  // (marcar-atendimentos | avisos | avancado | banco). Roda uma vez, quando o
+  // (marcar-atendimentos | avisos | avancado). Roda uma vez, quando o
   // conteúdo já montou (config carregada).
   const sectionScrolledRef = useRef(false);
   useEffect(() => {
@@ -72,12 +71,12 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     try {
       const res = await markAllUnread();
       if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} atendimento(s) marcado(s) como não lido(s).`);
+        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como não lida(s).`);
       } else {
-        onNotify(res.error || 'Erro ao marcar atendimentos.');
+        onNotify(res.error || 'Erro ao marcar conversas.');
       }
     } catch (e) {
-      onNotify('Erro de conexão ao marcar atendimentos.');
+      onNotify('Erro de conexão ao marcar conversas.');
     } finally {
       setMarkingAllUnread(false);
       setConfirmUnreadAll(false);
@@ -89,12 +88,12 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     try {
       const res = await markAllRead();
       if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} atendimento(s) marcado(s) como lido(s).`);
+        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como lida(s).`);
       } else {
-        onNotify(res.error || 'Erro ao marcar atendimentos.');
+        onNotify(res.error || 'Erro ao marcar conversas.');
       }
     } catch (e) {
-      onNotify('Erro de conexão ao marcar atendimentos.');
+      onNotify('Erro de conexão ao marcar conversas.');
     } finally {
       setMarkingAllRead(false);
       setConfirmReadAll(false);
@@ -140,13 +139,13 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
     <div class="flex flex-col gap-4 flex-1">
 
       <!-- Section: Marcar atendimentos -->
-      <${Section} id="marcar-atendimentos" title="Marcar atendimentos">
+      <${Section} id="marcar-atendimentos" title="Marcar conversas">
         <!-- Mark all read / unread -->
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para um atendimento específico, use o botão direito sobre o contato na lista.</span>
+          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para uma conversa específica, use o botão direito sobre o contato na lista.</span>
           ${confirmUnreadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODOS os atendimentos como não lidos?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como não lidas?</span>
               <span class="text-xs text-amber-700">Reacende o indicador verde em todos os contatos do painel. Não afeta o WhatsApp do celular.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -165,7 +164,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             </div>
           ` : confirmReadAll ? html`
             <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODOS os atendimentos como lidos?</span>
+              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como lidas?</span>
               <span class="text-xs text-amber-700">Remove o indicador verde de não lido de todos os contatos do painel.</span>
               <div class="flex gap-2 mt-1">
                 <button
@@ -202,7 +201,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       <!-- Section: Avisos de sistema no chat (plano 12) -->
       <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
-          Registra no fio do atendimento, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todos os atendimentos — nada é gravado nem exibido.
+          Registra no fio da conversa, como uma mensagem de sistema, os eventos da conversa (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
         </span>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -236,9 +235,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
               onChange=${(e) => setSystemNoticeConvLabels(e.target.checked)}
               class="w-4 h-4 rounded border-wa-border accent-wa-teal"
             />
-            Etiquetas do atendimento
+            Etiquetas da conversa
           </label>
-          <span class="text-xs text-wa-secondary">Adicionar ou remover etiquetas de um atendimento.</span>
+          <span class="text-xs text-wa-secondary">Adicionar ou remover etiquetas de uma conversa.</span>
         </div>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -250,7 +249,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
             Status e arquivo
           </label>
-          <span class="text-xs text-wa-secondary">Resolver, reabrir (inclusive automática ao receber mensagem), arquivar e iniciar atendimento.</span>
+          <span class="text-xs text-wa-secondary">Resolver, reabrir (inclusive automática ao receber mensagem), arquivar e iniciar conversa.</span>
         </div>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -262,7 +261,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
             IA e atributos
           </label>
-          <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu o atendimento", trocar o agente ativo e definir atributos.</span>
+          <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu a conversa", trocar o agente ativo e definir atributos.</span>
         </div>
       <//>
 
@@ -343,10 +342,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           ` : null}
         </div>
       <//>
-
-      <div id="banco" class="scroll-mt-4">
-        <${DatabaseSettings} onNotify=${onNotify} />
-      </div>
 
       <!-- Save Button (sticky) -->
       <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">

@@ -250,6 +250,8 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
   // Routing targets: other agents only (can't route to itself).
   const selfKey = isNew ? trimmedKey : agent.agent_key;
   const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== selfKey);
+  // Único roteador (plano 29 Eixo B): salvar este como roteador rebaixa o atual.
+  const currentRouter = otherAgents.find(a => a.is_router);
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
@@ -363,6 +365,12 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
               Lista todas as tools registradas (core, plugin e code-in-DB). Deixe "Todas" marcado para herdar o registry inteiro.
             </div>
           ` : null}
+          ${!isRouter && !allTools && toolNames.includes('transfer_to_human') ? html`
+            <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mt-2">
+              Convenção hub-and-spoke: deixe <code>transfer_to_human</code> apenas no <b>roteador</b>.
+              Agentes especializados devolvem com <code>transferir_agente</code> (destino: o roteador) e ele decide escalar.
+            </div>
+          ` : null}
         </div>
 
         <div>
@@ -380,6 +388,13 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
           <input type="checkbox" checked=${isRouter} onChange=${(e) => setIsRouter(e.target.checked)} />
           <span class="text-[14px] text-wa-text">É roteador (handoff/routing)</span>
         </label>
+
+        ${isRouter && currentRouter ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Só pode existir <b>um</b> roteador. Ao salvar, o roteador atual
+            (<b>${currentRouter.display_name || currentRouter.agent_key}</b>) deixará de ser roteador.
+          </div>
+        ` : null}
 
         ${isRouter ? html`
           <div>
@@ -571,7 +586,7 @@ export default function AgentsManager({ initialEntity }) {
 
   async function handleDelete(a) {
     if (a.agent_key === 'default') return;
-    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Atendimentos vinculados voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Conversas vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
     setError('');
     const res = await deleteAgent(a.agent_key);
     if (res && res.ok) {
@@ -605,7 +620,7 @@ export default function AgentsManager({ initialEntity }) {
       <div class="flex items-center justify-between mb-4 gap-2">
         <p class="text-[13px] text-wa-secondary">
           Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
-          na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nos atendimentos.
+          na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
         </p>
         ${!formOpen ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"

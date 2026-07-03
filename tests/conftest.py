@@ -10,9 +10,9 @@ Key invariants copied verbatim from the legacy bootstrap:
 * ``WHATSBOT_TEST=1`` is set *before* ``server.app`` is imported, so
   ``bootstrap_gowa_upgrade`` is a no-op and the suite never dirties
   ``storages/plugins``.
-* The engine is initialized on a fresh temp SQLite DB, OR — when
-  ``WHATSBOT_TEST_DB_URL`` is set — against that URL (Postgres in CI), running
-  the Alembic upgrade exactly like ``db.connection._run_alembic_upgrade``.
+* The engine is initialized against the Postgres TEST database
+  (``WHATSBOT_TEST_DB_URL``, resolved by ``tests.pg`` — schema reset once per
+  session + Alembic head). Postgres-only (plano 29 C3): no SQLite leg.
 * The GOWA client is a ``MagicMock`` whose lookup methods return *concrete*
   values (not bare Mocks) so contact persistence doesn't try to save a Mock.
 * The app's lifespan is patched to a no-op to avoid background tasks.
@@ -180,25 +180,17 @@ def pytest_configure(config) -> None:
 # ── Engine bootstrap (session-scoped, once per process) ────────────────────
 
 @pytest.fixture(scope="session")
-def _engine_ready() -> Path | None:
-    """Initialize the global engine on a temp SQLite DB (or WHATSBOT_TEST_DB_URL).
+def _engine_ready() -> None:
+    """Initialize the global engine on the Postgres TEST database (plano 29 C3).
 
-    Returns the SQLite db path when used, else None (Postgres leg).
+    Requires ``WHATSBOT_TEST_DB_URL`` (env, or a line in the repo-root ``.env``).
+    The schema is DROPPED and recreated once per session, then migrated to head —
+    the Postgres equivalent of the old per-process temp SQLite. No SQLite leg.
     """
-    from db import init_db, init_engine
+    from tests.pg import init_test_engine
 
-    test_url = os.environ.get("WHATSBOT_TEST_DB_URL", "").strip()
-    if test_url:
-        init_engine(test_url)
-        from db.connection import _run_alembic_upgrade
-
-        _run_alembic_upgrade()
-        return None
-
-    tmpdir = tempfile.mkdtemp(prefix="whatsbot_pytest_")
-    db_path = Path(tmpdir) / "whatsbot.db"
-    init_db(db_path)
-    return db_path
+    init_test_engine(reset=True)
+    return None
 
 
 # ── Canonical seed data (mirrors test_endpoints._seed_data) ────────────────

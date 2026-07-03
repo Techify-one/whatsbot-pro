@@ -102,7 +102,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" placeholder="ex: Atendimento WhatsApp" value=${displayName}
+            type="text" placeholder="ex: Suporte WhatsApp" value=${displayName}
             onInput=${(e) => setDisplayName(e.target.value)} />
         </div>
 
@@ -118,7 +118,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
           <div>
             <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
             <p class="text-[12px] text-wa-secondary mb-2">
-              Escolha quais tipos de atendimento deste número viram atendimento. Os tipos
+              Escolha quais tipos de conversa deste número viram conversa. Os tipos
               desmarcados são ignorados (não aparecem no painel).
             </p>
             <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
@@ -181,7 +181,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-1">Agentes desta caixa de entrada</label>
           <p class="text-[12px] text-wa-secondary mb-2">
-            Os agentes selecionados veem os atendimentos deste canal e recebem as mensagens que caírem aqui.
+            Os agentes selecionados veem as conversas deste canal e recebem as mensagens que caírem aqui.
             Administradores veem todos os canais.
           </p>
           <${AgentPicker} users=${users} selected=${agentIds} onChange=${setAgentIds} />

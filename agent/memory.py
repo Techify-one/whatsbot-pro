@@ -34,7 +34,7 @@ def resolve_inbox_id(channel_id: str) -> int:
 
 
 class TagRegistry:
-    """Global tag registry backed by SQLite tags table."""
+    """Global tag registry backed by the tags table."""
 
     def __init__(self):
         self._tags: dict[str, dict] = {}
@@ -81,10 +81,10 @@ class TagRegistry:
 
 
 class ContactMemory:
-    """Persistent per-contact memory backed by SQLite.
+    """Persistent per-contact memory backed by the database.
 
     Maintains an in-memory cache of contact metadata for fast access.
-    Messages and usage are stored directly in SQLite (not cached in memory).
+    Messages and usage are stored directly in the database (not cached in memory).
     """
 
     def __init__(self, phone: str, default_ai_enabled: bool = True, *,
@@ -140,11 +140,11 @@ class ContactMemory:
 
     @property
     def messages(self) -> list[dict]:
-        """Lazy-load all messages from SQLite."""
+        """Lazy-load all messages from the database."""
         return message_repo.get_all(self.id)
 
     def save(self):
-        """Persist current contact metadata to SQLite."""
+        """Persist current contact metadata to the database."""
         self.updated_at = time.time()
         contact_repo.update(
             self.id,

@@ -142,7 +142,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
           <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
         </svg>
-        ${isPinned ? 'Desafixar atendimento' : 'Fixar atendimento'}
+        ${isPinned ? 'Desafixar conversa' : 'Fixar conversa'}
       </button>
       ` : null}
 
@@ -190,9 +190,9 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           ${showAssign ? html`
             <div class="border-t border-wa-border">
               ${convLoading ? html`
-                <div class="px-4 py-[8px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando atendimento...</div>
+                <div class="px-4 py-[8px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
               ` : !conv ? html`
-                <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhum atendimento para este contato</div>
+                <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma conversa para este contato</div>
               ` : html`
                 ${(currentUserId != null && assigneeId !== currentUserId) ? html`
                   <button
@@ -247,7 +247,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       >
         ${isOpen === false ? html`
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
-          Reabrir atendimento
+          Reabrir conversa
         ` : html`
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
           ${convLoading ? 'Carregando...' : 'Marcar como resolvida'}
@@ -287,7 +287,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
             <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
           </svg>
-          ${confirmDeleteConv ? 'Confirmar exclusão do atendimento?' : 'Apagar atendimento'}
+          ${confirmDeleteConv ? 'Confirmar exclusão da conversa?' : 'Apagar conversa'}
         </button>
         ` : null}
       </div>

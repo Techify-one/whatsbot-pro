@@ -41,6 +41,9 @@ class PluginManifest:
     name: str
     version: str
     description: str = ""
+    # Short blurb (≤ ~3 lines) shown on the plugin card. Falls back to a
+    # truncated ``description`` when the manifest omits it (see ``short_blurb``).
+    short_description: str = ""
     author: str = ""
     whatsbot_api_version: str = "*"
     # Module names the loader imports per capability. Recognized keys:
@@ -77,6 +80,7 @@ class PluginManifest:
             "name": self.name,
             "version": self.version,
             "description": self.description,
+            "short_description": self.short_blurb(),
             "author": self.author,
             "whatsbot_api_version": self.whatsbot_api_version,
             "screens": self.screens,
@@ -88,6 +92,28 @@ class PluginManifest:
             "frontend_extends": self.frontend_extends,
             "frontend_api_version": self.frontend_api_version,
         }
+
+    def short_blurb(self, max_len: int = 180) -> str:
+        """Short card blurb: the explicit ``short_description`` when present,
+        otherwise the first sentence of ``description`` truncated to ``max_len``.
+
+        The client still clamps this to 3 lines visually; this keeps the payload
+        small and gives legacy plugins (no ``short_description``) a sane preview.
+        """
+        text = (self.short_description or "").strip()
+        if text:
+            return text
+        full = " ".join((self.description or "").split())
+        if not full:
+            return ""
+        # Prefer cutting at the first sentence boundary when it's not too short.
+        dot = full.find(". ")
+        if 0 < dot + 1 <= max_len:
+            return full[: dot + 1]
+        if len(full) <= max_len:
+            return full
+        clipped = full[:max_len].rsplit(" ", 1)[0].rstrip(",;:. ")
+        return f"{clipped}…"
 
 
 def find_manifest_file(plugin_dir: Path) -> Path | None:
@@ -187,6 +213,7 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         name=str(name),
         version=version,
         description=str(data.get("description") or ""),
+        short_description=str(data.get("short_description") or ""),
         author=str(data.get("author") or ""),
         whatsbot_api_version=api_range,
         entry=entry_str,

@@ -16,6 +16,8 @@ description: >-
   registra uma nota privada de abertura. Substitui e aposenta o plugin de referência Extensão
   Demo. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.
+short_description: >-
+  Camada de protocolos (estilo Chatwoot) que agrupa os atendimentos de cada contato, com popup de campos configuraveis ao resolver e Kanban personalizavel. Substitui a Extensao Demo.
 author: WhatsBot
 entry:
   routes: routes      # REST: /api/plugins/protocolos/...
@@ -44,6 +46,7 @@ rbac:
     - { key: view, label: "Ver protocolos" }
     - { key: edit, label: "Editar campos/observações do protocolo" }
     - { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" }
+    - { key: create_views, label: "Criar novas visualizações (agrupamentos) no Kanban" }
     - { key: resolve, label: "Fechar/reabrir protocolo e resolver atendimento" }
     - { key: assign, label: "Atribuir/reatribuir protocolos" }
     - { key: config, label: "Configurar campos e avaliação do plugin" }

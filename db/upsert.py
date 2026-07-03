@@ -1,7 +1,7 @@
-"""Dialect-agnostic UPSERT helper.
+"""UPSERT helper (Postgres ``INSERT ... ON CONFLICT``).
 
-Both SQLite and Postgres expose ``INSERT ... ON CONFLICT`` but through different
-modules. This module picks the right one based on the currently bound engine.
+Plano 29 Eixo C: o app é Postgres-only, então o helper usa o ``insert`` do
+dialect postgresql direto — o branch por dialeto (SQLite) morreu.
 
 Usage:
     from db.upsert import upsert
@@ -19,19 +19,7 @@ from __future__ import annotations
 from typing import Iterable, Mapping, Sequence
 
 from sqlalchemy import Table
-
-from db.engine import get_engine
-
-
-def _insert_for_current_dialect():
-    dialect = get_engine().dialect.name
-    if dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert
-        return insert
-    if dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert
-        return insert
-    raise RuntimeError(f"Unsupported dialect for upsert: {dialect}")
+from sqlalchemy.dialects.postgresql import insert
 
 
 def upsert(
@@ -51,7 +39,6 @@ def upsert(
 
     The returned statement is executable against the active engine.
     """
-    insert = _insert_for_current_dialect()
     stmt = insert(table).values(values)
 
     if update_cols is None:
@@ -68,6 +55,5 @@ def upsert_ignore(
     conflict_cols: Sequence[str],
 ):
     """``INSERT ... ON CONFLICT DO NOTHING`` — replaces ``INSERT OR IGNORE``."""
-    insert = _insert_for_current_dialect()
     stmt = insert(table).values(values)
     return stmt.on_conflict_do_nothing(index_elements=list(conflict_cols))

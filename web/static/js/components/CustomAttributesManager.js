@@ -32,12 +32,12 @@ const KEY_RE = /^[a-z][a-z0-9_]*$/;
 // settable on create, immutable on update (same as attribute_key/type).
 const SCOPES = [
   ['contact', 'Contato'],
-  ['conversation', 'Atendimento'],
+  ['conversation', 'Conversa'],
 ];
 
 // Tab order mirrors the Chatwoot layout (Atendimentos first, then Contato).
 const SCOPE_TABS = [
-  ['conversation', 'Atendimentos'],
+  ['conversation', 'Conversas'],
   ['contact', 'Contato'],
 ];
 
@@ -169,7 +169,7 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
           </select>
           <div class="text-[12px] text-wa-secondary mt-1">
             ${appliesTo === 'conversation'
-              ? 'Aparece no painel "Informações do atendimento" — um valor por atendimento.'
+              ? 'Aparece no painel "Informações da conversa" — um valor por conversa.'
               : 'Aparece no painel "Informações do contato" — um valor por contato.'}
           </div>
         </div>
@@ -322,7 +322,7 @@ export default function CustomAttributesManager({ initialEntity }) {
     <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
-          Campos personalizados de contato e de atendimento. Aparecem nos painéis de informações e a IA pode preenchê-los.
+          Campos personalizados de contato e de conversa. Aparecem nos painéis de informações e a IA pode preenchê-los.
         </p>
         ${!creating && !editing ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"

@@ -7,18 +7,14 @@ the transferir_agente tool directly against a temp DB — no LLM / no HTTP neede
 """
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-_tmpdir = tempfile.mkdtemp(prefix="whatsbot_routing_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
-
-from db import init_db  # noqa: E402
-init_db(_db_path)
+from tests.pg import init_test_engine  # noqa: E402
+init_test_engine(reset=True)
 
 from sqlalchemy import update  # noqa: E402
 from db.engine import get_engine  # noqa: E402
@@ -177,6 +173,58 @@ check("execution.routing_steps persistido (JSON)",
 _steps = _full.get("steps") or []
 check("execution_steps.agent_key gravado por passo",
       {s.get("agent_key") for s in _steps} == {"triagem", "vendas"})
+
+print("\núnico roteador (plano 29 Eixo B):")
+# "triagem" é o roteador atual (seed lá em cima). Promover outro rebaixa ela.
+agent_repo.save("comercial", display_name="Comercial",
+                prompt="Você é o comercial.", model_config={"model": "test/model"},
+                tool_names=None, enabled=True,
+                is_router=True, routing_targets=["vendas"])
+_tri = agent_repo.get("triagem")
+_com = agent_repo.get("comercial")
+check("promover 2º roteador rebaixa o anterior (radio)",
+      _com["is_router"] and not _tri["is_router"])
+check("get_router devolve o único roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+_tri_hist = agent_repo.list_history("triagem")
+check("rebaixamento bumpa versão + snapshot do rebaixado",
+      _tri_hist and _tri_hist[0]["version"] == _tri["version"])
+
+# Cinto de segurança no banco: índice único parcial barra violação direta.
+import sqlalchemy.exc  # noqa: E402
+from sqlalchemy import text as _sql_text  # noqa: E402
+try:
+    with get_engine().begin() as cn:
+        cn.execute(_sql_text(
+            "UPDATE ai_agents SET is_router = 1 WHERE agent_key = 'triagem'"))
+    _violated = False
+except sqlalchemy.exc.IntegrityError:
+    _violated = True
+check("índice único parcial barra 2º roteador direto no banco", _violated)
+check("estado pós-violação: só 'comercial' segue roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+
+print("\ngating de transfer_to_human (plano 29 A6 — só o roteador escala):")
+from agent.tool_registry import ToolRegistry  # noqa: E402
+
+_reg = ToolRegistry()
+for _schema, _executor in CORE_TOOLS:
+    _reg.register_tool(_schema, _executor)
+_spoke_spec = agent_factory.AgentSpec(
+    agent_key="vendas", base_prompt="x",
+    tool_names=["transferir_agente", "save_contact_info"])
+_spoke_names = [(s.get("function") or {}).get("name")
+                for s in _reg.select_active_tools(_spoke_spec)]
+check("spoke sem transfer_to_human no tool_names NÃO recebe a tool",
+      "transfer_to_human" not in _spoke_names)
+check("spoke recebe transferir_agente (devolve pro roteador)",
+      "transferir_agente" in _spoke_names)
+_router_spec = agent_factory.AgentSpec(
+    agent_key="triagem", base_prompt="x", tool_names=None)
+_router_names = [(s.get("function") or {}).get("name")
+                 for s in _reg.select_active_tools(_router_spec)]
+check("roteador (tool_names=None) recebe transfer_to_human",
+      "transfer_to_human" in _router_names)
 
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

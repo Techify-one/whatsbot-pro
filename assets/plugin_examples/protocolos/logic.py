@@ -110,7 +110,7 @@ DEFAULT_EXTRA_DEFS = {
          "type": "select",
          "options": ["Interessado em contratar", "Suporte comercial",
                      "Não houve protocolo", "Sem retorno"], "required": False},
-        {"id": "def_tipo", "key": "tipo", "label": "Tipo protocolo", "type": "radio",
+        {"id": "def_tipo", "key": "tipo", "label": "Tipo protocolo", "type": "select",
          "options": ["Suporte", "Comercial"], "required": False},
         {"id": "def_curso_interesse", "key": "curso_interesse", "label": "Curso de interesse",
          "type": "checkbox", "options": [], "required": False},
@@ -246,13 +246,21 @@ def required_keys(scope: str) -> list[str]:
     return [d["key"] for d in get_field_defs(scope) if d.get("required")]
 
 
+def _is_multi(d: dict) -> bool:
+    """Campo cujo VALOR é uma LISTA de opções: 'checkboxes' (sempre) ou 'select' com
+    ``multiple`` ligado (a "Lista de seleção" em modo múltiplo). Single select/radio/text
+    continuam string."""
+    ft = (d or {}).get("type") or "text"
+    return ft == "checkboxes" or (ft == "select" and bool((d or {}).get("multiple")))
+
+
 def _is_filled_extra(d: dict, v) -> bool:
-    """Um valor conta como "preenchido"? checkbox (bool) sempre; checkboxes (lista) só
+    """Um valor conta como "preenchido"? checkbox (bool) sempre; multi-opção (lista) só
     quando não-vazia; os demais quando string não-vazia."""
     ftype = d.get("type") or "text"
     if ftype == "checkbox":
         return True
-    if ftype == "checkboxes":
+    if _is_multi(d):
         return isinstance(v, list) and len(v) > 0
     return v is not None and str(v).strip() != ""
 
@@ -267,7 +275,7 @@ def _coerce_extra(d: dict, value) -> tuple:
     label = d.get("label") or d.get("key")
     if ftype == "checkbox":
         return bool(value), None
-    if ftype == "checkboxes":
+    if _is_multi(d):
         if value is None or value == "":
             vals = []
         elif isinstance(value, list):
@@ -350,12 +358,13 @@ def _missing_required(scope: str, eff: dict) -> str | None:
 
 # ── Campos EXTRAS (valores normalizados, 1 linha por atendimento-ciclo + def) ────
 
-def _extra_value_type(ftype: str) -> str:
-    """Tipo de VALOR no JSON auto-descritivo: boolean (checkbox), list (checkboxes) ou
-    string (demais — inclui number/date, guardados como texto)."""
-    if ftype == "checkbox":
+def _extra_value_type(d: dict) -> str:
+    """Tipo de VALOR no JSON auto-descritivo: boolean (checkbox), list (multi-opção:
+    checkboxes ou select múltiplo) ou string (demais — inclui number/date, guardados
+    como texto)."""
+    if (d or {}).get("type") == "checkbox":
         return "boolean"
-    if ftype == "checkboxes":
+    if _is_multi(d):
         return "list"
     return "string"
 
@@ -364,7 +373,7 @@ def _extras_payload(d: dict, value) -> dict:
     """JSON auto-descritivo gravado na linha — permite recuperar o rótulo (label)
     e o tipo direto do banco mesmo depois da definição ser apagada."""
     return {
-        "type": _extra_value_type(d.get("type") or "text"),
+        "type": _extra_value_type(d),
         "name": d.get("key"),
         "label": d.get("label") or d.get("key"),
         "value": value,
@@ -457,7 +466,7 @@ def _mirror_value(d: dict, value):
     ftype = d.get("type") or "text"
     if ftype == "checkbox":
         return bool(value)
-    if ftype == "checkboxes":
+    if _is_multi(d):
         return ", ".join(str(x) for x in value) if isinstance(value, list) else ("" if value is None else str(value))
     return "" if value is None else str(value)
 
@@ -615,8 +624,30 @@ def _f_protocolo_closed(actor=None, **_) -> str:
     return f"🏁 {actor} finalizou o protocolo." if actor else "🏁 Protocolo finalizado."
 
 
+# ── Redação "atendimento" dos avisos de STATUS do core (só enquanto o plugin ativo) ──
+# O core, por padrão, chama a entidade de "conversa". Enquanto o plugin de protocolos
+# está ATIVO, a entidade passa a ser um "atendimento" — então sobrescrevemos (no registry
+# do core, mesmo mecanismo dos plugins) os formatters do grupo "status" para exibir
+# "atendimento". Desativar o plugin → o core volta a "conversa" no próximo boot.
+def _f_atend_status_closed(actor=None, **_) -> str:
+    return f"✅ {actor} resolveu o atendimento." if actor else "✅ Atendimento resolvido."
+
+
+def _f_atend_status_open(actor=None, **_) -> str:
+    return f"🔄 {actor} reabriu o atendimento." if actor else "🔄 Atendimento reaberto."
+
+
+def _f_atend_status_reopened_auto(**_) -> str:
+    return "🔄 Atendimento reaberto automaticamente (cliente enviou mensagem)."
+
+
+def _f_atend_status_reopened_auto_agent(**_) -> str:
+    return "🔄 Atendimento reaberto automaticamente (resposta enviada)."
+
+
 def register_system_notices() -> None:
-    """Registra (idempotente) o grupo + os 2 tipos de aviso do protocolo no core.
+    """Registra (idempotente) o grupo + os 2 tipos de aviso do protocolo no core, e
+    sobrescreve os avisos de STATUS do core para a redação "atendimento".
     Best-effort: falha (ex.: ``server`` ausente nos testes) nunca quebra o startup."""
     try:
         from plugins.context import register_notice_group, register_notice
@@ -624,6 +655,11 @@ def register_system_notices() -> None:
                               config_key=_NOTICE_CONFIG_KEY, default=True)
         register_notice("protocolo_opened", _NOTICE_GROUP, _f_protocolo_opened)
         register_notice("protocolo_closed", _NOTICE_GROUP, _f_protocolo_closed)
+        # Reusa o grupo "status" do core (mantém o mesmo toggle system_notice_status).
+        register_notice("status_closed", "status", _f_atend_status_closed)
+        register_notice("status_open", "status", _f_atend_status_open)
+        register_notice("status_reopened_auto", "status", _f_atend_status_reopened_auto)
+        register_notice("status_reopened_auto_agent", "status", _f_atend_status_reopened_auto_agent)
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos: register_system_notices falhou: %s", e)
 
@@ -988,6 +1024,7 @@ def _view_dict(row) -> dict:
     d = dict(row)
     d["filters"] = _safe_json(d.get("filters"))  # JSON TEXT → dict
     d["available_filters"] = _avail_list(d.get("available_filters"))  # JSON array | None (=todos)
+    d["column_order"] = _avail_list(d.get("column_order"))  # ordem das colunas (list[str] | None)
     # ACL de visibilidade (quem pode ver): grupos (role keys) + usuários incluídos/excluídos.
     d["visibility_roles"] = _avail_list(d.get("visibility_roles"))          # list[str] | None
     d["visibility_users_include"] = _int_list(d.get("visibility_users_include"))  # list[int] | None
@@ -1052,8 +1089,8 @@ def list_kanban_views(*, user_id: int | None = None, role_keys=None) -> list[dic
         pref_rows = []
         if user_id is not None:
             pref_rows = conn.execute(
-                text(f"SELECT view_id, use_personal, personal_filters FROM {_PREFS_TABLE} "
-                     "WHERE user_id = :uid"),
+                text(f"SELECT view_id, use_personal, personal_filters, personal_column_order "
+                     f"FROM {_PREFS_TABLE} WHERE user_id = :uid"),
                 {"uid": int(user_id)},
             ).mappings().all()
     prefs = {int(p["view_id"]): _pref_dict(p) for p in pref_rows}
@@ -1062,7 +1099,9 @@ def list_kanban_views(*, user_id: int | None = None, role_keys=None) -> list[dic
         d = _view_dict(r)
         if not _view_visible(d, user_id, role_keys):
             continue
-        d["pref"] = prefs.get(int(d["id"]), {"use_personal": False, "personal_filters": {}})
+        d["pref"] = prefs.get(int(d["id"]),
+                              {"use_personal": False, "personal_filters": {},
+                               "personal_column_order": None})
         out.append(d)
     return out
 
@@ -1091,7 +1130,7 @@ def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode) ->
 
 def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_key=None,
                        group_date_mode=None, filters=None, available_filters=None,
-                       visibility_roles=None, visibility_users_include=None,
+                       column_order=None, visibility_roles=None, visibility_users_include=None,
                        visibility_users_exclude=None,
                        owner_user_id=None) -> tuple[dict | None, str | None]:
     name = (name or "").strip()
@@ -1108,6 +1147,7 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
     ts = now()
     fjson = json.dumps(filters if isinstance(filters, dict) else {})
     afjson = json.dumps([str(x) for x in available_filters]) if isinstance(available_filters, list) else None
+    cojson = _dump_str_list(column_order)  # ordem das colunas ([]/None → NULL = ordem padrão)
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
     with make_plugin_db() as conn:
@@ -1117,13 +1157,14 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
         conn.execute(
             text(f"INSERT INTO {_VIEWS_TABLE} "
                  "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
-                 " filters, available_filters, visibility_roles, visibility_users_include, "
-                 " visibility_users_exclude, position, created_at, updated_at) "
-                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :af, :vr, :vi, "
-                 " :ve, :pos, :ts, :ts)"),
+                 " filters, available_filters, column_order, visibility_roles, "
+                 " visibility_users_include, visibility_users_exclude, position, "
+                 " created_at, updated_at) "
+                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :af, :co, :vr, "
+                 " :vi, :ve, :pos, :ts, :ts)"),
             {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
-             "gak": gak, "gdm": gdm, "filters": fjson, "af": afjson, "vr": vroles, "vi": vinc,
-             "ve": vexc, "pos": int(pos), "ts": ts},
+             "gak": gak, "gdm": gdm, "filters": fjson, "af": afjson, "co": cojson,
+             "vr": vroles, "vi": vinc, "ve": vexc, "pos": int(pos), "ts": ts},
         )
         # Re-seleciona a linha recém-criada de forma portável (SQLite/Postgres): created_at
         # + name (ts é um float preciso do time.time desta chamada) ordenado por id DESC.
@@ -1138,7 +1179,8 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
 
 def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_key=None,
                        group_date_mode=None, filters=None, available_filters=_UNSET,
-                       visibility_roles=_UNSET, visibility_users_include=_UNSET,
+                       column_order=_UNSET, visibility_roles=_UNSET,
+                       visibility_users_include=_UNSET,
                        visibility_users_exclude=_UNSET) -> tuple[dict | None, str | None]:
     cur = get_kanban_view(vid)
     if not cur:
@@ -1152,6 +1194,9 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     # available_filters: _UNSET = mantém atual; None = TODOS (NULL); lista = allow-list.
     af_src = cur.get("available_filters") if available_filters is _UNSET else available_filters
     afjson = json.dumps([str(x) for x in af_src]) if isinstance(af_src, list) else None
+    # column_order: _UNSET = mantém atual; lista/None substitui ([]/None → NULL = ordem padrão).
+    co_src = cur.get("column_order") if column_order is _UNSET else column_order
+    cojson = _dump_str_list(co_src)
     # ACL de visibilidade: _UNSET = mantém atual; lista/None substitui.
     vr_src = cur.get("visibility_roles") if visibility_roles is _UNSET else visibility_roles
     vi_src = cur.get("visibility_users_include") if visibility_users_include is _UNSET else visibility_users_include
@@ -1173,12 +1218,12 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
         conn.execute(
             text(f"UPDATE {_VIEWS_TABLE} SET name = :name, scope = :scope, group_by = :gby, "
                  "group_attr_key = :gak, group_date_mode = :gdm, filters = :filters, "
-                 "available_filters = :af, visibility_roles = :vr, "
+                 "available_filters = :af, column_order = :co, visibility_roles = :vr, "
                  "visibility_users_include = :vi, visibility_users_exclude = :ve, "
                  "updated_at = :ts WHERE id = :id"),
             {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
-             "filters": fjson, "af": afjson, "vr": vrjson, "vi": vijson, "ve": vejson,
-             "ts": ts, "id": int(vid)},
+             "filters": fjson, "af": afjson, "co": cojson, "vr": vrjson, "vi": vijson,
+             "ve": vejson, "ts": ts, "id": int(vid)},
         )
     _broadcast_changed(None, None)
     return get_kanban_view(vid), None
@@ -1205,11 +1250,12 @@ def _pref_dict(row) -> dict:
     """Linha de preferência → dict com personal_filters decodificado. Default de equipe
     (use_personal False, sem filtros pessoais) quando a linha não existe."""
     if not row:
-        return {"use_personal": False, "personal_filters": {}}
+        return {"use_personal": False, "personal_filters": {}, "personal_column_order": None}
     d = dict(row)
     return {
         "use_personal": bool(d.get("use_personal")),
         "personal_filters": _safe_json(d.get("personal_filters")),
+        "personal_column_order": _avail_list(d.get("personal_column_order")),  # list[str] | None
     }
 
 
@@ -1217,42 +1263,47 @@ def get_user_view_pref(view_id: int, user_id: int | None) -> dict:
     """Preferência (pessoal x equipe) de UM usuário para UMA aba. Ausente ou sem identidade
     (legado/open) → default de EQUIPE: {use_personal: False, personal_filters: {}}."""
     if user_id is None:
-        return {"use_personal": False, "personal_filters": {}}
+        return {"use_personal": False, "personal_filters": {}, "personal_column_order": None}
     with make_plugin_db() as conn:
         row = conn.execute(
-            text(f"SELECT use_personal, personal_filters FROM {_PREFS_TABLE} "
-                 "WHERE user_id = :uid AND view_id = :vid"),
+            text(f"SELECT use_personal, personal_filters, personal_column_order "
+                 f"FROM {_PREFS_TABLE} WHERE user_id = :uid AND view_id = :vid"),
             {"uid": int(user_id), "vid": int(view_id)},
         ).mappings().first()
     return _pref_dict(row)
 
 
 def upsert_user_view_pref(view_id: int, user_id: int | None, *, use_personal=None,
-                          personal_filters=None) -> dict:
+                          personal_filters=None, personal_column_order=None) -> dict:
     """Cria/atualiza a preferência de (user_id, view_id) via UPSERT no índice único.
-    Merge parcial: campos None não são alterados (igual a update_kanban_view). Retorna a
-    pref resultante. user_id None (sem identidade) → no-op, devolve o default de equipe."""
+    Merge parcial: campos None não são alterados (igual a update_kanban_view). Para a ordem
+    das colunas, None mantém e [] limpa (volta à ordem padrão). Retorna a pref resultante.
+    user_id None (sem identidade) → no-op, devolve o default de equipe."""
     if user_id is None:
-        return {"use_personal": False, "personal_filters": {}}
+        return {"use_personal": False, "personal_filters": {}, "personal_column_order": None}
     cur = get_user_view_pref(view_id, user_id)
     up = cur["use_personal"] if use_personal is None else bool(use_personal)
     pf = cur["personal_filters"] if personal_filters is None else (
         personal_filters if isinstance(personal_filters, dict) else {})
+    pco = cur.get("personal_column_order") if personal_column_order is None else personal_column_order
     pjson = json.dumps(pf, ensure_ascii=False)
+    pcojson = _dump_str_list(pco)  # [] / None → NULL = ordem padrão
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
             text(f"INSERT INTO {_PREFS_TABLE} "
-                 "(user_id, view_id, use_personal, personal_filters, created_at, updated_at) "
-                 "VALUES (:uid, :vid, :up, :pf, :ts, :ts) "
+                 "(user_id, view_id, use_personal, personal_filters, personal_column_order, "
+                 " created_at, updated_at) "
+                 "VALUES (:uid, :vid, :up, :pf, :pco, :ts, :ts) "
                  "ON CONFLICT (user_id, view_id) DO UPDATE SET "
                  "use_personal = excluded.use_personal, "
                  "personal_filters = excluded.personal_filters, "
+                 "personal_column_order = excluded.personal_column_order, "
                  "updated_at = excluded.updated_at"),
             {"uid": int(user_id), "vid": int(view_id),
-             "up": 1 if up else 0, "pf": pjson, "ts": ts},
+             "up": 1 if up else 0, "pf": pjson, "pco": pcojson, "ts": ts},
         )
-    return {"use_personal": up, "personal_filters": pf}
+    return {"use_personal": up, "personal_filters": pf, "personal_column_order": _avail_list(pcojson)}
 
 
 def set_atendimento_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:

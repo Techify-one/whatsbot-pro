@@ -7,7 +7,6 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { Slot } from '../../plugins/Slot.js';
-import { getRouteOverride } from '../../plugins/registry.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { CORE_TAB_PATHS, pluginTabId } from './screenRegistry.js';
 
@@ -87,9 +86,9 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
           <${MenuItem} gated=${can('execution.read')} active=${tab === 'executions'} href=${CORE_TAB_PATHS.executions} onClick=${() => { onTabChange('executions'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`}
           >Execuções</${MenuItem}>
-          <${MenuItem} gated=${can('conversation.read') && !getRouteOverride('attendances')} active=${tab === 'attendances'} href=${CORE_TAB_PATHS.attendances} onClick=${() => { onTabChange('attendances'); close(); }}
-            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 5h6v6H4V5zm0 8h6v6H4v-6zm8-8h8v6h-8V5zm0 8h8v6h-8v-6z"/></svg>`}
-          >Atendimentos</${MenuItem}>
+          <!-- A aba "Atendimentos" (kanban/lista) é EXCLUSIVA do plugin protocolos:
+               ele a provê via overrideRoute('attendances') + slot gear.menu.items.
+               Com o plugin desativado não há aba — as conversas ficam no hub de Contatos. -->
           <${MenuItem} gated=${can('conversation.read')} active=${tab === 'contatos'} href=${CORE_TAB_PATHS.contatos} onClick=${() => { onTabChange('contatos'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`}
           >Contatos</${MenuItem}>
@@ -153,7 +152,7 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
           >Auditoria</${MenuItem}>
           <${MenuItem} gated=${can('agent.manage')} active=${tab === 'ai'} href=${CORE_TAB_PATHS.ai} onClick=${() => { onTabChange('ai'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a2 2 0 0 1 2 2v1h3a2 2 0 0 1 2 2v2h1a2 2 0 0 1 0 4h-1v2a2 2 0 0 1-2 2h-3v1a2 2 0 0 1-4 0v-1H7a2 2 0 0 1-2-2v-2H4a2 2 0 0 1 0-4h1V7a2 2 0 0 1 2-2h3V4a2 2 0 0 1 2-2zm-3 7a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1zm6 0a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1z"/></svg>`}
-          >Engine de IA</${MenuItem}>
+          >Configurações de IA</${MenuItem}>
           <${MenuItem} gated=${can('plugins.manage')} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>`}
           >Gerenciar Plugins</${MenuItem}>
