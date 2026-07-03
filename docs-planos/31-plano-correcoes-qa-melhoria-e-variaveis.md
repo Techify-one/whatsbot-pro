@@ -349,6 +349,23 @@ WAVE 1
 
 ---
 
+## 8. Pós-execução — review adversarial (commit `4c704a2`)
+
+Após as 7 fases, um review multi-agente (5 dimensões × verificação cética 2-de-2) sobre o diff do branch confirmou 6 defeitos, todos corrigidos no mesmo branch:
+
+| Sev | Onde | Defeito | Fix |
+|-----|------|---------|-----|
+| high | `message_repo.get_context*` | role `error` NÃO estava na lista de exclusão do contexto → o card do F4 viraria `Message(role="error")` → `KeyError` no OpenAILike → bot mudo por N turnos (pior: loop de cards) | `"error"` adicionado às duas tuplas `excluded` (protege também o card pré-existente de `_emit_resolution_error`) |
+| medium | `messaging_service` else F4 | Card "verifique max_tokens" disparava em silêncio INTENCIONAL (aborts de `filter.system_prompt`/`filter.llm.messages` — ex.: plugin horario_funcionamento — e `AgentResolutionError` já sinalizado) | `ProcessResult.aborted=True` nos 3 aborts deliberados de `agent_run_service`; call sites viram `elif not result.aborted` |
+| medium | `contacts.py` `_save` F2 | `add_message` resolve a conversa MAIS RECENTE do inbox — com conversa fechada marcada + outra mais recente, o card ia pra errada (e o broadcast dessincronizava do painel) | com `conv_id` validado, INSERT direto via `message_repo.add(..., conversation_id=conv_id)` (padrão `system_notices`) |
+| low | `improvement_service` | agente "ativo" = `chain[-1]` errava em revisita ao roteador (dedupe remove a última participação) → modelo da análise do spoke em vez do router | prefere `execution.agent_key` (último hop real), fallback `chain[-1]` |
+| low | `ai_engine.py` validação A1 | `re.match` + `$` aceita newline final (`PUT /variables/x%0A` criava o peso morto) | `re.fullmatch` |
+| low | `VariablesEditor.js` | htm não decodifica entidades — usuário via `_&lt;agente&gt;` literal | interpolação JS `${'_<agente>'}` |
+
+2 achados foram refutados na verificação (dedup de nudges idênticos: por design, só adjacentes; variáveis legadas com nome inválido: DELETE continua permitido — a validação é só no PUT). Regressões novas: `test_error_card_excluded_from_llm_context`, `test_improve_card_lands_in_flagged_conversation_even_if_not_latest`, check `%0A → 400`.
+
+---
+
 ## Apêndice — arquivos‑chave (por fase)
 
 **MELHORIA (F1/F2/F3):**
