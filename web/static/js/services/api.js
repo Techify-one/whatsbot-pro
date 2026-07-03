@@ -248,9 +248,10 @@ export async function reactToMessage(phone, msgId, emoji, conversationId = null)
 }
 
 // Generate an AI-quality improvement analysis for a flagged AI reply.
-export async function generateImprovement(phone, { message, feedback = '' }) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/improve`,
-    { message, feedback });
+export async function generateImprovement(phone, { message, feedback = '', conversationId = null }) {
+  const body = { message, feedback };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/improve`, body);
 }
 
 export async function sendPrivateMessage(phone, text, opts = {}) {
