@@ -75,24 +75,24 @@ def _f_assigned(actor=None, target=None, **_) -> str:
     tgt = _q(target) or "alguém"
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} atribuiu o atendimento para {tgt}.",
-        f"🧑‍💼 Atendimento atribuído para {tgt}.",
+        f"🧑‍💼 {actor} atribuiu a conversa para {tgt}.",
+        f"🧑‍💼 Conversa atribuída para {tgt}.",
     )
 
 
 def _f_assigned_me(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} assumiu o atendimento.",
-        "🧑‍💼 Atendimento assumido.",
+        f"🧑‍💼 {actor} assumiu a conversa.",
+        "🧑‍💼 Conversa assumida.",
     )
 
 
 def _f_unassigned(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🧑‍💼 {actor} removeu a atribuição do atendimento.",
-        "🧑‍💼 Atribuição do atendimento removida.",
+        f"🧑‍💼 {actor} removeu a atribuição da conversa.",
+        "🧑‍💼 Atribuição da conversa removida.",
     )
 
 
@@ -115,63 +115,63 @@ def _f_tag_removed(actor=None, tag=None, **_) -> str:
 def _f_conv_label_added(actor=None, label=None, **_) -> str:
     return _with_actor(
         actor,
-        f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" ao atendimento.',
-        f'🏷️ Etiqueta "{_q(label)}" adicionada ao atendimento.',
+        f'🏷️ {actor} adicionou a etiqueta "{_q(label)}" à conversa.',
+        f'🏷️ Etiqueta "{_q(label)}" adicionada à conversa.',
     )
 
 
 def _f_conv_label_removed(actor=None, label=None, **_) -> str:
     return _with_actor(
         actor,
-        f'🏷️ {actor} removeu a etiqueta "{_q(label)}" do atendimento.',
-        f'🏷️ Etiqueta "{_q(label)}" removida do atendimento.',
+        f'🏷️ {actor} removeu a etiqueta "{_q(label)}" da conversa.',
+        f'🏷️ Etiqueta "{_q(label)}" removida da conversa.',
     )
 
 
 def _f_status_closed(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"✅ {actor} resolveu o atendimento.",
-        "✅ Atendimento resolvido.",
+        f"✅ {actor} resolveu a conversa.",
+        "✅ Conversa resolvida.",
     )
 
 
 def _f_status_open(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🔄 {actor} reabriu o atendimento.",
-        "🔄 Atendimento reaberto.",
+        f"🔄 {actor} reabriu a conversa.",
+        "🔄 Conversa reaberta.",
     )
 
 
 def _f_status_reopened_auto(**_) -> str:
-    return "🔄 Atendimento reaberto automaticamente (cliente enviou mensagem)."
+    return "🔄 Conversa reaberta automaticamente (cliente enviou mensagem)."
 
 
 def _f_status_reopened_auto_agent(**_) -> str:
-    return "🔄 Atendimento reaberto automaticamente (resposta enviada)."
+    return "🔄 Conversa reaberta automaticamente (resposta enviada)."
 
 
 def _f_archived(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🗄️ {actor} arquivou o atendimento.",
-        "🗄️ Atendimento arquivado.",
+        f"🗄️ {actor} arquivou a conversa.",
+        "🗄️ Conversa arquivada.",
     )
 
 
 def _f_unarchived(actor=None, **_) -> str:
     return _with_actor(
         actor,
-        f"🗄️ {actor} desarquivou o atendimento.",
-        "🗄️ Atendimento desarquivado.",
+        f"🗄️ {actor} desarquivou a conversa.",
+        "🗄️ Conversa desarquivada.",
     )
 
 
 def _f_created(display_id=None, **_) -> str:
     if display_id:
-        return f"💬 Atendimento #{display_id} iniciado."
-    return "💬 Atendimento iniciado."
+        return f"💬 Conversa #{display_id} iniciada."
+    return "💬 Conversa iniciada."
 
 
 def _f_ai_on(actor=None, **_) -> str:
@@ -191,7 +191,7 @@ def _f_ai_off(actor=None, **_) -> str:
 
 
 def _f_ai_takeover(**_) -> str:
-    return "🤖 A IA assumiu o atendimento."
+    return "🤖 A IA assumiu a conversa."
 
 
 def _f_agent_changed(actor=None, agent=None, **_) -> str:
@@ -208,8 +208,8 @@ def _f_attribute_set(actor=None, attribute=None, value=None, count=None, **_) ->
     if count and count > 1:
         return _with_actor(
             actor,
-            f"📋 {actor} atualizou {count} atributos do atendimento.",
-            f"📋 {count} atributos do atendimento atualizados.",
+            f"📋 {actor} atualizou {count} atributos da conversa.",
+            f"📋 {count} atributos da conversa atualizados.",
         )
     return _with_actor(
         actor,
@@ -269,7 +269,7 @@ def _seed_core_notices() -> None:
     # Grupos (config_key auto-derivado = system_notice_<key>, exceto onde diverge).
     register_notice_group("assignment", "Atribuição")
     register_notice_group("tags", "Tags")
-    register_notice_group("conv_labels", "Etiquetas do atendimento")
+    register_notice_group("conv_labels", "Etiquetas da conversa")
     register_notice_group("status", "Status e arquivo")
     register_notice_group("ai", "IA e atributos")
     # Tipos -> (grupo, formatter).

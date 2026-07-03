@@ -40,7 +40,7 @@ export function ChannelPickerModal({ phoneDisplay, channels = [], onPick, onClos
 
         <h2 class="text-base font-semibold text-wa-text mb-1">Escolha a caixa de entrada</h2>
         <p class="text-sm text-wa-secondary mb-4">
-          Iniciar atendimento com <span class="text-wa-text font-medium">${phoneDisplay}</span> por:
+          Iniciar conversa com <span class="text-wa-text font-medium">${phoneDisplay}</span> por:
         </p>
 
         ${channels.length === 0 ? html`

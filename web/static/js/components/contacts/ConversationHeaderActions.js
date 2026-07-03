@@ -182,7 +182,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     <div class="flex items-center gap-1.5 shrink-0">
       <!-- Copiar link do atendimento (permalink /conversations/<id>) — plano 24 -->
       ${!sandbox && conversationId != null ? html`
-        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link do atendimento" />
+        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link da conversa" />
       ` : null}
       <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
       ${can('conversation.resolve') ? html`
@@ -190,7 +190,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
           disabled=${busy}
           onClick=${onStatusClick}
           class=${btn}
-          title=${isOpen ? 'Encerrar atendimento' : 'Reabrir atendimento'}
+          title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
         >
           ${isOpen ? 'Resolver' : 'Reabrir'}
         </button>
@@ -212,7 +212,7 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
               disabled=${busy}
               onClick=${() => run(() => assignMeConversation(conv.id))}
               class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50 whitespace-nowrap"
-              title="Assumir este atendimento"
+              title="Assumir esta conversa"
             >
               Atribuir a mim
             </button>`}

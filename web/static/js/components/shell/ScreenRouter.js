@@ -13,7 +13,6 @@ import { Dashboard } from '../Dashboard.js';
 import { Sandbox } from '../Sandbox.js';
 import { Contacts } from '../Contacts.js';
 import ContactsListScreen from '../ContactsListScreen.js';
-import { Attendances } from '../attendances/Attendances.js';
 import ChannelsManager from '../ChannelsManager.js';
 import { CostsDashboard } from '../CostsDashboard.js';
 import { Executions } from '../Executions.js';
@@ -89,7 +88,7 @@ export function ScreenRouter({
   }
   if (tab === 'ai') {
     return html`<div class="max-w-5xl mx-auto p-4">
-        <${PageHeader} title="Engine de IA" onBack=${() => setTab('contacts')} />
+        <${PageHeader} title="Configurações de IA" onBack=${() => setTab('contacts')} />
         <${AgentEngine} initialEntity=${entFor('ai')} />
       </div>`;
   }
@@ -140,10 +139,12 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'attendances') {
-    return html`<div class="mx-auto p-4 max-w-none">
-        <${PageHeader} title="Atendimentos" onBack=${() => setTab('contacts')} />
-        <${Attendances} />
-      </div>`;
+    // A aba "Atendimentos" (kanban/lista) é EXCLUSIVA do plugin protocolos, que a
+    // provê via overrideRoute('attendances') — tratado no topo (activeRouteOverride).
+    // Se chegamos aqui, o plugin está desligado: não há tela nativa. Volta ao hub de
+    // conversas (Contatos) em vez de cair no fallback Sandbox.
+    queueMicrotask(() => setTab('contacts'));
+    return null;
   }
   if (tab === 'channels') {
     return html`<div class="max-w-5xl mx-auto p-4">

@@ -286,7 +286,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // Tab-title badge — gated by the "tab notification" preference.
   useEffect(() => {
     const tabBadge = getNotifPref('tab');
-    document.title = (tabBadge && unreadConvos > 0) ? `(${unreadConvos}) WhatsBot` : 'WhatsBot';
+    document.title = (tabBadge && unreadConvos > 0) ? `(${unreadConvos}) WhatsBot-Pro` : 'WhatsBot-Pro';
   }, [unreadConvos, notifVersion]);
 
   // Browser notification + sound on a new INBOUND message (from a contact).
@@ -303,7 +303,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
       if (!preview) {
         preview = m.media_type ? 'Enviou uma mídia' : 'Nova mensagem';
       }
-      showBrowserNotification('WhatsBot — nova mensagem', preview.slice(0, 140));
+      showBrowserNotification('WhatsBot-Pro — nova mensagem', preview.slice(0, 140));
     }
   }, [newMessage]);
 
