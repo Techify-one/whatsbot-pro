@@ -103,13 +103,18 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     setImproveLoading(true);
     setImproveError('');
     try {
+      // Anchor the analysis card to the flagged reply's own conversation
+      // (multi-canal); mirrors the messagePermalink convId resolution above.
+      const msg = improveDialog.message;
+      const convId = msg.conversation_id != null ? msg.conversation_id : conversationId;
       const res = await generateImprovement(phone, {
         message: {
-          content: improveDialog.message.content,
-          ts: improveDialog.message.ts,
-          _id: improveDialog.message._id,
+          content: msg.content,
+          ts: msg.ts,
+          _id: msg._id,
         },
         feedback: improveText.trim(),
+        conversationId: convId,
       });
       if (res && res.ok) {
         setImproveDialog(null);
