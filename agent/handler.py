@@ -327,14 +327,18 @@ class AgentHandler:
                 "Falha ao gravar card de erro de resolução para %s", sender)
 
     def generate_improvement(self, phone: str, target_message: dict,
-                             feedback: str) -> str:
+                             feedback: str, *,
+                             conversation_id: int | None = None) -> str:
         """One-shot quality analysis of an AI reply flagged as incorrect.
 
         Delegates to ``app.services.improvement_service`` (Fase B5). DIRECT,
-        non-agentic LLM call via the ISOLATED SYNC client (``_get_client``)."""
+        non-agentic LLM call via the ISOLATED SYNC client (``_get_client``).
+        ``conversation_id`` (plano 31 F3) escopa a análise à conversa da
+        resposta marcada (canal + histórico); ``None`` = comportamento legado."""
         from app.services import improvement_service
         return improvement_service.generate_improvement(
-            self, phone, target_message, feedback)
+            self, phone, target_message, feedback,
+            conversation_id=conversation_id)
 
     def _ensure_conversation_agent(self, contact, agent_spec) -> None:
         """Attribute the active conversation to the AI agent that is answering so

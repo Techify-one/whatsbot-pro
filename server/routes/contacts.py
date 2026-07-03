@@ -954,24 +954,57 @@ def register_routes(app, deps):
         feedback = (body.get("feedback") or "").strip()
         if not (target.get("content") or "").strip():
             return _err("Mensagem inválida para análise.")
+
+        # D.A (plano 31 F2): o card vai na conversa da resposta marcada, não no
+        # inbox default. Valida posse do conversation_id (nunca injetar card em
+        # conversa de outro contato); inválido/ausente → fallback default (D9).
+        conv_id = target.get("conversation_id") or body.get("conversation_id")
+        if conv_id is not None:
+            def _owned():
+                try:
+                    conv = conversation_repo.get(int(conv_id))
+                except (TypeError, ValueError):
+                    return False
+                if not conv:
+                    return False
+                row = contact_repo.get_by_phone(phone)
+                return bool(row) and conv.get("contact_id") == row["id"]
+            if not await asyncio.to_thread(_owned):
+                conv_id = None
+
         try:
             analysis = await asyncio.to_thread(
-                agent_handler.generate_improvement, phone, target, feedback)
+                agent_handler.generate_improvement, phone, target, feedback,
+                conversation_id=conv_id)
         except Exception as e:
             logger.exception("Falha ao gerar análise de melhoria para %s", phone)
             return _err(f"Erro ao gerar análise: {e}", status=500)
 
         note_text = f"🔧 Análise de melhoria\n\n{analysis}"
 
-        def _save():
-            contact = agent_handler._get_contact(phone)
-            contact.add_message("system", note_text)
-            return message_repo.get_last(contact.id)
+        # Espelha o private_note: resolve o canal da conversa marcada e usa a
+        # ROW retornada por add_message (get_last era racy por contact.id+ts).
+        note_channel = _channel_for(phone, conv_id)
 
-        note_msg = await asyncio.to_thread(_save)
-        if not note_msg:
+        def _save():
+            contact = agent_handler._get_contact(phone, channel_id=note_channel)
+            return contact.add_message("system", note_text)
+
+        saved = await asyncio.to_thread(_save)
+        if not saved:
             return _err("Falha ao salvar a análise.", status=500)
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+        note_msg = {
+            "role": "system",
+            "content": note_text,
+            "ts": saved.get("ts", time.time()),
+            "status": None,
+            "msg_id": None,
+            "conversation_id": saved.get("conversation_id"),
+        }
+        if saved.get("id"):
+            note_msg["_id"] = saved["id"]
+        await ws_manager.broadcast("new_message", {
+            "phone": phone, "channel_id": note_channel, "message": note_msg})
         return _ok(note_msg)
 
     async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True,
