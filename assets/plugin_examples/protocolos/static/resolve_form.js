@@ -4,15 +4,13 @@
 // Preact/htm via importmap; cores wa-*/.wa-field (modo escuro).
 
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
-// Componente core que renderiza UM atributo personalizado por tipo (text/number/
-// date/list/checkbox/link), dark-mode-safe. Reusado aqui p/ os atributos do core
-// não-espelho (is_system=0) — mesma aparência da aba "Informações do atendimento".
-import { CustomAttributeField } from '/static/js/components/contacts/CustomAttributeField.js';
 // Seletor de lista PADRÃO do app (busca sempre visível + "Limpar seleção"), compartilhado
 // com os atributos do core e a barra de filtros — um único componente, um só padrão.
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
+// Lista de atendentes atribuíveis (mesma de "Atribuir atendente") p/ o tipo "atendente".
+import { getAssignableAgents } from '/static/js/services/api.js';
 
 const html = htm.bind(h);
 
@@ -21,9 +19,35 @@ const html = htm.bind(h);
 export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
   || (d.type === 'select' && d.multiple)));
 
+// Cache module-level dos atendentes atribuíveis (lista pequena, reusada em vários campos).
+let _assignableUsers = null;
+
+// Seletor de ATENDENTE nativo: os mesmos usuários de "Atribuir atendente" + "Não atribuído".
+// value = uid (número) ou vazio quando não atribuído; onChange devolve number|null.
+export function AttendantSelect({ value, onChange }) {
+  const [users, setUsers] = useState(_assignableUsers || []);
+  useEffect(() => {
+    if (_assignableUsers) return undefined;
+    let alive = true;
+    getAssignableAgents().then((r) => {
+      if (alive && r && r.ok && r.data) { _assignableUsers = r.data.users || []; setUsers(_assignableUsers); }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const cur = value == null ? '' : String(value);
+  return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${cur}
+    onChange=${(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
+    <option value="">Não atribuído</option>
+    ${users.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
+  </select>`;
+}
+
 // Um campo, renderizado conforme `def.type`. value/onChange controlados pelo pai.
 export function FieldInput({ def, value, onChange }) {
   const t = def.type || 'text';
+  if (t === 'atendente') {
+    return html`<${AttendantSelect} value=${value} onChange=${onChange} />`;
+  }
   if (t === 'textarea') {
     return html`<textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] min-h-[80px]"
       value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
@@ -89,6 +113,7 @@ export function LabeledField({ def, value, onChange }) {
 
 function isFilled(def, v) {
   if (def.type === 'checkbox') return true; // bool é sempre "preenchido"
+  if (def.type === 'atendente') return v != null && String(v).trim() !== '';
   if (isMultiDef(def)) return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
@@ -97,9 +122,10 @@ function isFilled(def, v) {
 // atuais da atendimento (`initialValues` = conversations.custom_attributes, o que foi salvo
 // na aba "Informações do atendimento"):
 //   1. `defs`     — rótulos do protocolo (escopo atendimento: OBS + extras), via FieldInput.
-//   2. `attrDefs` — atributos personalizados do core NÃO-espelho (is_system=0), via o
-//                   CustomAttributeField do core. (Os espelhados do plugin chegam como
-//                   is_system=1 e são filtrados fora no extends.js p/ não duplicar.)
+//   2. `attrDefs` — atributos personalizados do core NÃO-espelho (is_system=0),
+//                   renderizados pelo MESMO LabeledField/FieldInput dos rótulos do
+//                   protocolo (mesmo estilo de label e espaçamento). (Os espelhados do
+//                   plugin chegam como is_system=1 e são filtrados fora no extends.js.)
 // Os botões de finalizar ("Resolver" e "Resolver e ir ao protocolo") só habilitam
 // quando todos os obrigatórios (dos dois conjuntos) estão preenchidos. onOk devolve
 // { fields, custom_attributes, goTo } — goTo=true só no botão "ir ao protocolo".
@@ -153,18 +179,19 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
           </div>` : null}
 
         ${attrDefs.length ? html`
-          <div class="${defs.length ? 'mt-4 pt-4 border-t border-wa-border' : ''}">
-            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-amber-600 mb-2">Atributos personalizados</div>` : null}
-            <div class="space-y-4">
-              ${attrDefs.map((a) => html`<${CustomAttributeField} key=${a.id} def=${a}
-                value=${attrVals[a.attribute_key]}
-                onChange=${(v) => setAttrVals((s) => {
-                  const next = { ...s };
-                  if (v === null || v === undefined || v === '') delete next[a.attribute_key];
-                  else next[a.attribute_key] = v;
-                  return next;
-                })} />`)}
-            </div>
+          <div class="${defs.length ? 'mt-3' : ''} space-y-3">
+            ${attrDefs.map((a) => html`<${LabeledField} key=${a.id}
+              def=${{ key: a.attribute_key, label: a.display_name || a.attribute_key,
+                      type: a.type === 'list' ? 'select' : (a.type === 'link' ? 'text' : (a.type || 'text')),
+                      options: a.options || [], multiple: false,
+                      required: a.required, regex_cue: a.regex_cue }}
+              value=${attrVals[a.attribute_key]}
+              onChange=${(v) => setAttrVals((s) => {
+                const next = { ...s };
+                if (v === null || v === undefined || v === '') delete next[a.attribute_key];
+                else next[a.attribute_key] = v;
+                return next;
+              })} />`)}
           </div>` : null}
 
         ${!allRequired ? html`

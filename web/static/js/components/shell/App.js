@@ -82,6 +82,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // overrides) so route-override resolution and <Slot>s re-render once the async
   // extends modules register (they load after first paint).
   const [extVersion, setExtVersion] = useState(0);
+  // True once the plugin frontend-extension modules have finished loading (or the
+  // manifest fetch failed). Gates the `attendances → contacts` fallback in
+  // ScreenRouter so a hard reload doesn't bounce to the home page during the async
+  // window before a route-override (e.g. protocolos) has registered.
+  const [extensionsLoaded, setExtensionsLoaded] = useState(false);
   const [tab, setTabState] = useState(() => tabFromPath([]));
   const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
@@ -129,7 +134,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/plugins/manifest', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (!res || !res.ok) return;
+        if (!res || !res.ok) { setExtensionsLoaded(true); return; }  // no plugins → fallback applies
         const plugins = res.data.plugins || [];
         const screens = plugins.flatMap(p =>
           (p.screens || [])
@@ -138,11 +143,13 @@ export function App({ onLogout, hasPassword, currentUser }) {
         );
         setPluginScreens(screens);
         // Load plugin frontend-extension modules (filters / UI slots / route overrides).
-        loadPluginExtensions(plugins);
+        // Only after they register (or fail) do we let ScreenRouter treat a missing
+        // route-override as "plugin disabled" (see extensionsLoaded gating).
+        loadPluginExtensions(plugins).finally(() => setExtensionsLoaded(true));
         // Re-evaluate tab now that we know about plugin paths.
         setTabState(tabFromPath(screens));
       })
-      .catch(() => { /* ignore */ });
+      .catch(() => { setExtensionsLoaded(true); /* fetch failed → fallback applies */ });
   }, []);
 
   // Re-render when the extension registry mutates (extends modules register after
@@ -403,6 +410,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
           tab=${tab}
           setTab=${setTab}
           activeRouteOverride=${activeRouteOverride}
+          extensionsLoaded=${extensionsLoaded}
           activePluginScreen=${activePluginScreen}
           currentUser=${currentUser}
           config=${config}

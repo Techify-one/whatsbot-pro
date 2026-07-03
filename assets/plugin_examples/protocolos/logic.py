@@ -37,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 
 from plugins.context import broadcast, make_plugin_db
 from db.repositories import (config_repo, contact_repo, conversation_repo,
-                             custom_attribute_repo)
+                             custom_attribute_repo, user_repo)
 from db.tables import conversations as _conversations_tbl
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 PLUGIN_ID = "protocolos"
 SCOPES = ("protocolo", "atendimento")
 EXTRA_SCOPES = ("protocolo", "atendimento")  # ambos têm rótulos extras
-FIELD_TYPES = {"text", "textarea", "number", "date", "select", "checkboxes", "radio", "checkbox"}
+FIELD_TYPES = {"text", "textarea", "number", "date", "select", "checkboxes", "radio", "checkbox",
+               "atendente"}
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,48}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
@@ -53,6 +54,8 @@ _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
 _CA_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.custom_attrs_backfilled"
 # Liga/desliga o espelho dos campos de resolução no core (conversations.custom_attributes).
 _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
+# One-time: obs deixou de ser rótulo FIXO (coluna própria) e virou rótulo EXTRA comum.
+_OBS_MIGRATE_FLAG = f"plugin.{PLUGIN_ID}.obs_to_extra_migrated"
 
 # Visualizações personalizadas do Kanban (abas de "Agrupar por"). Nome interno (não vem
 # de input) → seguro em f-string SQL.
@@ -63,7 +66,23 @@ _PREFS_TABLE = "plugin_protocolos_user_view_prefs"
 _UNSET = object()
 _VIEW_GROUP_BY = {"status", "atendente", "data", "attr"}
 _VIEW_SCOPES = {"personal", "team"}
-_VIEW_DATE_MODES = {"dia", "faixas", "mes"}
+# Sub-modos do agrupamento por Data. "personalizado" = janela (from/to) + granularidade.
+_VIEW_DATE_MODES = {"dia", "faixas", "mes", "semana", "personalizado"}
+# Granularidade do bucket quando o modo é "personalizado".
+_VIEW_DATE_GRAINS = {"dia", "semana", "mes"}
+_YMD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_ymd(s) -> bool:
+    """True se s é uma data 'YYYY-MM-DD' válida (usada na janela do modo personalizado)."""
+    if not isinstance(s, str) or not _YMD_RE.match(s):
+        return False
+    try:
+        from datetime import datetime
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
 # Teto interno de varredura ao filtrar por atributo (o filtro é em Python, antes do corte
 # final) — limita o custo quando a aba usa filtro por atributo de atendimento.
 _ATTR_SCAN_CAP = 2000
@@ -81,28 +100,26 @@ def now() -> float:
     return time.time()
 
 
-# ── Rótulos FIXOS (não-deletáveis) ───────────────────────────────────────────
-# Único rótulo FIXO em cada escopo: OBS (texto digitado pelo operador). ID, Atendente,
-# Início e Fim NÃO são rótulos — vêm automáticos nas colunas (PK/FK, opened_at/started_at,
-# closed_at/ended_at, assignee_name do operador) e seguem exibidos no cabeçalho/tabela.
-FIXED_FIELD_DEFS = {
-    "protocolo": [
-        {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
-         "options": [], "required": False, "fixed": True, "readonly": False},
-    ],
-    "atendimento": [
-        {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
-         "options": [], "required": False, "fixed": True, "readonly": False},
-    ],
+# ── Rótulos FIXOS ────────────────────────────────────────────────────────────
+# Não há mais rótulos FIXOS: Observações virou um rótulo EXTRA comum (editável/removível),
+# semeado por DEFAULT_EXTRA_DEFS com id estável "fixed_obs". ID, Atendente, Início e Fim NÃO
+# são rótulos — vêm automáticos nas colunas (PK/FK, opened_at/started_at, closed_at/ended_at,
+# assignee_name) e seguem no cabeçalho/tabela. FIXED_FIELD_DEFS fica vazio (mantido só p/ compat
+# de get_fixed_defs/FIXED_KEYS).
+FIXED_FIELD_DEFS: dict[str, list[dict]] = {
+    "protocolo": [],
+    "atendimento": [],
 }
 
-# Keys reservadas pelos fixos por escopo (um extra nunca pode usá-las).
+# Keys reservadas pelos fixos por escopo (vazio agora — nenhuma key é reservada).
 FIXED_KEYS = {scope: {d["key"] for d in defs} for scope, defs in FIXED_FIELD_DEFS.items()}
 
 # Extras default por escopo. Valem até o operador editar na tela de config.
 # (As Observações de cada escopo são o rótulo FIXO OBS, não extras.)
 DEFAULT_EXTRA_DEFS = {
     "protocolo": [
+        {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
+         "options": [], "required": False},
         {"id": "def_motivo_abertura", "key": "motivo_abertura", "label": "Motivo de abertura",
          "type": "select",
          "options": ["Entrou em contato", "Dúvida", "Reclamação", "Outro"], "required": False},
@@ -116,6 +133,8 @@ DEFAULT_EXTRA_DEFS = {
          "type": "checkbox", "options": [], "required": False},
     ],
     "atendimento": [
+        {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea",
+         "options": [], "required": False},
         {"id": "def_resultado", "key": "resultado", "label": "Resultado", "type": "select",
          "options": ["Resolvido", "Pendente", "Sem retorno"], "required": True},
     ],
@@ -189,16 +208,19 @@ def _normalize_extra_def(d: dict) -> dict:
     if ftype in ("select", "radio", "checkboxes") and not isinstance(opts, list):
         raise ValueError(f"Campo '{key}': opções devem ser uma lista")
     did = str((d or {}).get("id") or "").strip() or _new_def_id()
+    # "atendente" (atendente NATIVO): sem opções estáticas (a lista vem dos usuários),
+    # sem multi e sem regex — só o valor (uid) importa.
+    is_atendente = ftype == "atendente"
     return {
         "id": did,
         "key": key,
         "label": str(d.get("label") or key),
         "type": ftype,
-        "options": [str(o) for o in opts] if isinstance(opts, list) else [],
+        "options": [] if is_atendente else ([str(o) for o in opts] if isinstance(opts, list) else []),
         "required": bool(d.get("required")),
-        "regex_pattern": str(d.get("regex_pattern") or "").strip(),
-        "regex_cue": str(d.get("regex_cue") or "").strip(),
-        "multiple": bool(d.get("multiple")),
+        "regex_pattern": "" if is_atendente else str(d.get("regex_pattern") or "").strip(),
+        "regex_cue": "" if is_atendente else str(d.get("regex_cue") or "").strip(),
+        "multiple": False if is_atendente else bool(d.get("multiple")),
         "fixed": False,
     }
 
@@ -224,11 +246,17 @@ def set_field_defs(scope: str, defs: list) -> list[dict]:
     out: list[dict] = []
     seen_keys: set[str] = set()
     seen_ids: set[str] = set()
+    seen_atendente = False
     for d in defs:
         key = str((d or {}).get("key") or "").strip()
         if key in fixed_keys or (d or {}).get("fixed"):
             continue  # rótulo fixo não é gerenciado aqui (só o `required` acima)
         nd = _normalize_extra_def(d)
+        if nd["type"] == "atendente":
+            # Só UM rótulo Atendente por escopo (há um só atendente nativo).
+            if seen_atendente:
+                raise ValueError("Só é permitido um campo do tipo Atendente por escopo.")
+            seen_atendente = True
         if nd["key"] in seen_keys:
             raise ValueError(f"Campo duplicado: '{nd['key']}'")
         if nd["id"] in seen_ids:
@@ -260,6 +288,8 @@ def _is_filled_extra(d: dict, v) -> bool:
     ftype = d.get("type") or "text"
     if ftype == "checkbox":
         return True
+    if ftype == "atendente":
+        return v is not None and str(v).strip() not in ("", "0")
     if _is_multi(d):
         return isinstance(v, list) and len(v) > 0
     return v is not None and str(v).strip() != ""
@@ -275,6 +305,14 @@ def _coerce_extra(d: dict, value) -> tuple:
     label = d.get("label") or d.get("key")
     if ftype == "checkbox":
         return bool(value), None
+    if ftype == "atendente":
+        # Valor = uid do atendente nativo (int) ou None p/ "Não atribuído".
+        if value in (None, "", "0", 0):
+            return None, None
+        try:
+            return int(value), None
+        except (ValueError, TypeError):
+            return None, f"'{label}': atendente inválido."
     if _is_multi(d):
         if value is None or value == "":
             vals = []
@@ -334,11 +372,14 @@ def normalize_values(scope: str, values: dict) -> tuple[dict, str | None]:
 
 
 def _effective_values(scope: str, entity: dict) -> dict:
-    """Valores efetivos p/ checar `required`: OBS (coluna obs) + extras (entity['fields'])
-    — os únicos rótulos obrigatórios-ável. Usado nos pontos de fechamento."""
+    """Valores efetivos p/ checar `required`: extras (entity['fields'], já inclui obs) +
+    o valor do rótulo Atendente (lido do assignee_user_id nativo do protocolo). Usado nos
+    pontos de fechamento."""
     entity = entity or {}
-    eff = {"obs": entity.get("obs") or ""}
-    eff.update(entity.get("fields") or {})
+    eff = dict(entity.get("fields") or {})
+    for d in get_field_defs(scope):
+        if d.get("type") == "atendente":
+            eff[d["key"]] = entity.get("assignee_user_id")
     return eff
 
 
@@ -478,8 +519,8 @@ def sync_core_atendimento_defs() -> None:
     usuário) — best-effort, nunca quebra o fluxo de resolução."""
     try:
         for i, d in enumerate(get_field_defs("atendimento")):
-            if d.get("readonly"):
-                continue
+            if d.get("readonly") or d.get("type") == "atendente":
+                continue  # "atendente" já É a coluna nativa; não vira atributo do core
             custom_attribute_repo.ensure_system_definition(
                 attribute_key=d["key"], display_name=d.get("label") or d["key"],
                 type=_core_attr_type(d.get("type")), applies_to="conversation", position=i)
@@ -493,7 +534,8 @@ def mirror_atendimento_to_core(conversation_id: int, clean: dict) -> None:
     try:
         if not config_repo.get(_MIRROR_FLAG, True):
             return
-        defs = {d["key"]: d for d in get_field_defs("atendimento") if not d.get("readonly")}
+        defs = {d["key"]: d for d in get_field_defs("atendimento")
+                if not d.get("readonly") and d.get("type") != "atendente"}
         partial = {k: _mirror_value(defs[k], v)
                    for k, v in (clean or {}).items() if k in defs}
         if not partial:
@@ -688,25 +730,36 @@ def update_protocolo_fields(atid: int, values: dict, assignee_user_id: int | Non
     at = get_protocolo(atid)
     if not at:
         return None, "Protocolo não encontrado."
-    # OBS vai na coluna fixa; os demais rótulos extras vão na tabela do protocolo.
+    # Todos os rótulos extras (obs incluso) vão na tabela de extras do protocolo. O rótulo
+    # "atendente" NÃO é extra: seu valor é roteado p/ o assignee NATIVO (ver abaixo).
     # Salvar parcial é permitido (required só é exigido ao FECHAR) → mescla com o atual.
-    merged = {**(at.get("fields") or {}), "obs": at.get("obs") or "", **(values or {})}
+    merged = {**(at.get("fields") or {}), **(values or {})}
     clean, _err = normalize_values("protocolo", merged)
-    obs_val = str(clean.get("obs") or "")
     extra_defs = get_extra_defs("protocolo")
     ts = now()
     with make_plugin_db() as conn:
+        # Atendente do protocolo NÃO é mais sobrescrito por "quem só edita campos": muda só
+        # pelo rótulo Atendente (abaixo) ou no Finalizar. Aqui só toca o updated_at.
         conn.execute(
-            text("UPDATE plugin_protocolos_protocolos SET obs = :obs, "
-                 "assignee_user_id = COALESCE(:auid, assignee_user_id), "
-                 "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END, "
-                 "updated_at = :ts WHERE id = :id"),
-            {"obs": obs_val, "auid": assignee_user_id, "aname": assignee_name or "",
-             "ts": ts, "id": atid},
+            text("UPDATE plugin_protocolos_protocolos SET updated_at = :ts WHERE id = :id"),
+            {"ts": ts, "id": atid},
         )
         for d in extra_defs:
+            if d.get("type") == "atendente":
+                continue  # não é extra — vira atribuição nativa
             if d["key"] in clean:
                 upsert_extra(conn, "protocolo", atid, d, clean[d["key"]])
+    # Rótulo "atendente" (se existir e veio no payload) → atribui o atendente NATIVO do
+    # protocolo (grava direto, permite limpar, e propaga p/ as conversas).
+    at_def = next((d for d in get_field_defs("protocolo") if d.get("type") == "atendente"), None)
+    if at_def and at_def["key"] in (values or {}):
+        uid = clean.get(at_def["key"])
+        if uid != at.get("assignee_user_id"):  # só reatribui quando de fato mudou
+            uname = ""
+            if uid is not None:
+                u = user_repo.get(int(uid)) or {}
+                uname = str(u.get("name") or u.get("email") or "")
+            assign_protocolo(atid, uid, assignee_name=uname)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -741,6 +794,14 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     if err:
         return None, err
     ts = now()
+    # Atendente do protocolo: se existe rótulo Atendente e ele JÁ definiu um atendente
+    # (at.assignee_user_id, gravado no salvar antes de finalizar), mantém-se esse; senão
+    # marca automaticamente quem finalizou (sem campo, ou campo "não atribuído"/vazio).
+    at_def = next((d for d in get_field_defs("protocolo") if d.get("type") == "atendente"), None)
+    if at_def and at.get("assignee_user_id") is not None:
+        clo_uid, clo_name = None, ""     # None/'' → COALESCE/CASE mantêm o atual (o do campo)
+    else:
+        clo_uid, clo_name = assignee_user_id, assignee_name
     with make_plugin_db() as conn:
         conn.execute(
             text("UPDATE plugin_protocolos_protocolos SET status = 'fechado', "
@@ -748,7 +809,7 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
                  "assignee_user_id = COALESCE(:auid, assignee_user_id), "
                  "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END "
                  "WHERE id = :id"),
-            {"ts": ts, "auid": assignee_user_id, "aname": assignee_name or "", "id": atid},
+            {"ts": ts, "auid": clo_uid, "aname": clo_name or "", "id": atid},
         )
     _broadcast_changed(at["contact_id"], atid)
     # Card de sistema "Protocolo finalizado" ancorado na atendimento MAIS RECENTE do
@@ -960,9 +1021,7 @@ def _attach_latest_atendimento(items: list[dict]) -> None:
             a["atendimento_fields"] = {}
             a["atendimento_attrs"] = {}
             continue
-        cf = dict(atend_extras.get(lc["id"], {}))
-        if lc.get("obs"):
-            cf["obs"] = lc["obs"]
+        cf = dict(atend_extras.get(lc["id"], {}))  # obs já vem aqui (rótulo extra)
         a["atendimento_fields"] = cf
         a["atendimento_attrs"] = core_attrs.get(lc["conversation_id"], {}) if lc.get("conversation_id") else {}
 
@@ -1114,7 +1173,9 @@ def get_kanban_view(vid: int) -> dict | None:
     return _view_dict(row) if row else None
 
 
-def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode) -> str | None:
+def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode,
+                   group_date_from=None, group_date_to=None,
+                   group_date_grain=None) -> str | None:
     if not (name or "").strip():
         return "Informe um nome para a visualização."
     if scope not in _VIEW_SCOPES:
@@ -1123,13 +1184,23 @@ def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode) ->
         return "Agrupamento inválido."
     if group_by == "attr" and not _KEY_RE.match(group_attr_key or ""):
         return "Selecione um atributo (lista) válido para agrupar."
-    if group_by == "data" and (group_date_mode or "") not in _VIEW_DATE_MODES:
-        return "Selecione um modo de data válido (dia, faixas ou mês)."
+    if group_by == "data":
+        if (group_date_mode or "") not in _VIEW_DATE_MODES:
+            return "Selecione um modo de data válido (faixas, dia, semana, mês ou período personalizado)."
+        if group_date_mode == "personalizado":
+            if not (_valid_ymd(group_date_from) and _valid_ymd(group_date_to)):
+                return "Informe as datas de início e fim do período personalizado."
+            if group_date_from > group_date_to:
+                return "A data de início não pode ser maior que a data de fim."
+            if (group_date_grain or "") not in _VIEW_DATE_GRAINS:
+                return "Selecione uma granularidade válida (dia, semana ou mês)."
     return None
 
 
 def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_key=None,
-                       group_date_mode=None, filters=None, available_filters=None,
+                       group_date_mode=None,
+                       group_date_from=None, group_date_to=None, group_date_grain=None,
+                       filters=None, available_filters=None,
                        column_order=None, visibility_roles=None, visibility_users_include=None,
                        visibility_users_exclude=None,
                        owner_user_id=None) -> tuple[dict | None, str | None]:
@@ -1141,7 +1212,9 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
     if vroles or vinc:
         scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
-                         group_attr_key=group_attr_key, group_date_mode=group_date_mode)
+                         group_attr_key=group_attr_key, group_date_mode=group_date_mode,
+                         group_date_from=group_date_from, group_date_to=group_date_to,
+                         group_date_grain=group_date_grain)
     if err:
         return None, err
     ts = now()
@@ -1150,6 +1223,11 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
     cojson = _dump_str_list(column_order)  # ordem das colunas ([]/None → NULL = ordem padrão)
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
+    # Janela + granularidade: só valem quando data + personalizado; senão NULL.
+    _custom = group_by == "data" and gdm == "personalizado"
+    gdf = (group_date_from or None) if _custom else None
+    gdt = (group_date_to or None) if _custom else None
+    gdg = (group_date_grain or None) if _custom else None
     with make_plugin_db() as conn:
         pos = conn.execute(
             text(f"SELECT COALESCE(MAX(position), -1) + 1 AS p FROM {_VIEWS_TABLE}")
@@ -1157,13 +1235,16 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
         conn.execute(
             text(f"INSERT INTO {_VIEWS_TABLE} "
                  "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
+                 " group_date_from, group_date_to, group_date_grain, "
                  " filters, available_filters, column_order, visibility_roles, "
                  " visibility_users_include, visibility_users_exclude, position, "
                  " created_at, updated_at) "
-                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :filters, :af, :co, :vr, "
+                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :gdf, :gdt, :gdg, "
+                 " :filters, :af, :co, :vr, "
                  " :vi, :ve, :pos, :ts, :ts)"),
             {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
-             "gak": gak, "gdm": gdm, "filters": fjson, "af": afjson, "co": cojson,
+             "gak": gak, "gdm": gdm, "gdf": gdf, "gdt": gdt, "gdg": gdg,
+             "filters": fjson, "af": afjson, "co": cojson,
              "vr": vroles, "vi": vinc, "ve": vexc, "pos": int(pos), "ts": ts},
         )
         # Re-seleciona a linha recém-criada de forma portável (SQLite/Postgres): created_at
@@ -1178,7 +1259,9 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
 
 
 def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_key=None,
-                       group_date_mode=None, filters=None, available_filters=_UNSET,
+                       group_date_mode=None,
+                       group_date_from=None, group_date_to=None, group_date_grain=None,
+                       filters=None, available_filters=_UNSET,
                        column_order=_UNSET, visibility_roles=_UNSET,
                        visibility_users_include=_UNSET,
                        visibility_users_exclude=_UNSET) -> tuple[dict | None, str | None]:
@@ -1190,6 +1273,9 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     group_by = group_by or cur["group_by"]
     group_attr_key = cur.get("group_attr_key") if group_attr_key is None else group_attr_key
     group_date_mode = cur.get("group_date_mode") if group_date_mode is None else group_date_mode
+    group_date_from = cur.get("group_date_from") if group_date_from is None else group_date_from
+    group_date_to = cur.get("group_date_to") if group_date_to is None else group_date_to
+    group_date_grain = cur.get("group_date_grain") if group_date_grain is None else group_date_grain
     fjson = json.dumps(filters if isinstance(filters, dict) else (cur.get("filters") or {}))
     # available_filters: _UNSET = mantém atual; None = TODOS (NULL); lista = allow-list.
     af_src = cur.get("available_filters") if available_filters is _UNSET else available_filters
@@ -1208,20 +1294,30 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     if vrjson or vijson:
         scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
-                         group_attr_key=group_attr_key, group_date_mode=group_date_mode)
+                         group_attr_key=group_attr_key, group_date_mode=group_date_mode,
+                         group_date_from=group_date_from, group_date_to=group_date_to,
+                         group_date_grain=group_date_grain)
     if err:
         return None, err
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
+    # Janela + granularidade: só valem quando data + personalizado; senão NULL.
+    _custom = group_by == "data" and gdm == "personalizado"
+    gdf = (group_date_from or None) if _custom else None
+    gdt = (group_date_to or None) if _custom else None
+    gdg = (group_date_grain or None) if _custom else None
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(
             text(f"UPDATE {_VIEWS_TABLE} SET name = :name, scope = :scope, group_by = :gby, "
-                 "group_attr_key = :gak, group_date_mode = :gdm, filters = :filters, "
+                 "group_attr_key = :gak, group_date_mode = :gdm, "
+                 "group_date_from = :gdf, group_date_to = :gdt, group_date_grain = :gdg, "
+                 "filters = :filters, "
                  "available_filters = :af, column_order = :co, visibility_roles = :vr, "
                  "visibility_users_include = :vi, visibility_users_exclude = :ve, "
                  "updated_at = :ts WHERE id = :id"),
             {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
+             "gdf": gdf, "gdt": gdt, "gdg": gdg,
              "filters": fjson, "af": afjson, "co": cojson, "vr": vrjson, "vi": vijson,
              "ve": vejson, "ts": ts, "id": int(vid)},
         )
@@ -1462,8 +1558,8 @@ def ensure_cycle_exists(conversation_id: int, contact_id: int, protocolo_id: int
 def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str = "",
                      assignee_user_id: int | None = None) -> tuple[dict | None, str | None]:
     """Fecha o ciclo ABERTO da atendimento (Fim + OBS + extras). Cria+fecha um se não houver.
-    OBS vai na coluna fixa; cada rótulo extra vai numa linha de campos_extras. Grava o
-    AGENTE que resolveu (assignee_user_id + assignee_name) no ciclo."""
+    Cada rótulo extra (obs incluso) vai numa linha de campos_extras. Grava o AGENTE que
+    resolveu (assignee_user_id + assignee_name) no ciclo."""
     atend = conversation_repo.get(conversation_id)
     if not atend:
         return None, "Atendimento não encontrada."
@@ -1478,20 +1574,35 @@ def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str =
     if err:
         return None, err
     ts = now()
-    obs_val = str(clean.get("obs") or "")
     extra_defs = get_extra_defs("atendimento")
+    # Atendente do CICLO (coluna "Atendente" do histórico): se o rótulo Atendente veio
+    # PREENCHIDO, ELE manda; senão marca automaticamente quem resolveu (editor). Campo
+    # ausente OU "Não atribuído" (None) mantém o automático — regra pedida pelo usuário.
+    at_def = next((d for d in get_field_defs("atendimento") if d.get("type") == "atendente"), None)
+    field_submitted = bool(at_def and at_def["key"] in (values or {}))
+    field_uid = clean.get(at_def["key"]) if field_submitted else None
+    cyc_uid, cyc_name = assignee_user_id, assignee_name
+    if field_uid is not None:
+        _u = user_repo.get(int(field_uid)) or {}
+        cyc_uid, cyc_name = field_uid, str(_u.get("name") or _u.get("email") or "")
     with make_plugin_db() as conn:
         conn.execute(
-            text("UPDATE plugin_protocolos_atendimentos SET obs = :obs, ended_at = :ts, "
+            text("UPDATE plugin_protocolos_atendimentos SET ended_at = :ts, "
                  "assignee_user_id = COALESCE(:auid, assignee_user_id), "
                  "assignee_name = CASE WHEN :aname <> '' THEN :aname ELSE assignee_name END, "
                  "updated_at = :ts WHERE id = :id"),
-            {"obs": obs_val, "ts": ts, "auid": assignee_user_id,
-             "aname": assignee_name or "", "id": cycle["id"]},
+            {"ts": ts, "auid": cyc_uid,
+             "aname": cyc_name or "", "id": cycle["id"]},
         )
         for d in extra_defs:
+            if d.get("type") == "atendente":
+                continue  # não é extra — vira atribuição nativa da conversa (abaixo)
             if d["key"] in clean:
                 upsert_extra(conn, "atendimento", cycle["id"], d, clean[d["key"]])
+    # Rótulo "atendente" → atribui o atendente NATIVO DESTA conversa (set_assignee + WS),
+    # quando veio no payload e de fato mudou.
+    if field_submitted and field_uid != atend.get("assignee_user_id"):
+        _propagate_assignee_to_conversations([conversation_id], field_uid)
     # Espelha os mesmos campos no core (conversations.custom_attributes) — integra
     # atendimento↔protocolo e sobrevive se o plugin for desativado.
     mirror_atendimento_to_core(conversation_id, clean)
@@ -1569,6 +1680,10 @@ def on_startup(ctx, payload: dict) -> None:
         _maybe_backfill_custom_attrs()  # custom_attributes do ext_demo → Protocolos
     except Exception as e:  # noqa: BLE001
         logger.warning("protocolos: backfill de custom_attributes falhou: %s", e)
+    try:
+        _maybe_migrate_obs_to_extra()  # obs FIXO (coluna) → rótulo EXTRA (tabela de extras)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: migração obs→extra falhou: %s", e)
     sync_core_atendimento_defs()  # atributos de atendimento do core p/ os campos espelhados
 
 
@@ -1584,19 +1699,17 @@ def _safe_json(s) -> dict:
 
 def _backfill_blob(conn, scope: str, owner_id: int, blob: dict, by_key: dict,
                    obs_table: str, ts: float) -> None:
-    """Migra um blob `fields` legado: observacao/observacoes → coluna obs; demais keys
-    → tabela de extras do escopo (key com def atual → seu def_id; senão def_id órfão,
-    nunca exibido). ON CONFLICT DO NOTHING + guard de obs vazio = idempotente."""
+    """Migra um blob `fields` legado: observacao/observacoes → rótulo EXTRA obs (def_id
+    estável 'fixed_obs'); demais keys → tabela de extras do escopo (key com def atual → seu
+    def_id; senão def_id órfão, nunca exibido). ON CONFLICT DO NOTHING = idempotente.
+    (`obs_table` mantido por compat de assinatura — obs não vai mais p/ coluna.)"""
     table, owner_col = _EXTRAS_TABLE[scope]
     for k, v in blob.items():
         if k in ("observacao", "observacoes"):
-            conn.execute(
-                text(f"UPDATE {obs_table} SET obs = :o, updated_at = :ts "
-                     f"WHERE id = :id AND (obs IS NULL OR obs = '')"),
-                {"o": str(v or ""), "ts": ts, "id": owner_id})
-            continue
-        d = by_key.get(k) or {"id": "orphan_" + str(k), "key": str(k),
-                              "label": str(k), "type": "text"}
+            d = {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea"}
+        else:
+            d = by_key.get(k) or {"id": "orphan_" + str(k), "key": str(k),
+                                  "label": str(k), "type": "text"}
         conn.execute(
             text(f"INSERT INTO {table} ({owner_col}, def_id, payload, created_at, updated_at) "
                  f"VALUES (:oid, :did, :p, :ts, :ts) "
@@ -1630,6 +1743,43 @@ def _maybe_backfill() -> None:
                            a_by_key, "plugin_protocolos_protocolos", ts)
     config_repo.set(_BACKFILL_FLAG, True)
     logger.info("protocolos: backfill de campos extras concluído")
+
+
+def _maybe_migrate_obs_to_extra() -> None:
+    """UMA vez: obs deixou de ser rótulo FIXO (coluna própria `obs`) e virou rótulo EXTRA
+    comum. (a) Se a config de defs de um escopo foi customizada e não tem `obs`, prepende a
+    def obs (id estável 'fixed_obs') p/ ela continuar aparecendo (o default já inclui obs via
+    DEFAULT_EXTRA_DEFS). (b) Move o valor da coluna `obs` das duas entidades p/ a tabela de
+    extras do escopo (def_id 'fixed_obs'). Idempotente: ON CONFLICT DO NOTHING + flag."""
+    if config_repo.get(_OBS_MIGRATE_FLAG, False):
+        return
+    obs_def = {"id": "fixed_obs", "key": "obs", "label": "Observações", "type": "textarea"}
+    # (a) config de defs já customizada sem obs → prepend.
+    for scope in EXTRA_SCOPES:
+        raw = config_repo.get(_defs_key(scope), None)
+        if isinstance(raw, list) and not any((d or {}).get("key") == "obs" for d in raw):
+            config_repo.set(_defs_key(scope),
+                            [{**obs_def, "options": [], "required": False}] + list(raw))
+    # (b) valor da coluna obs → tabela de extras do escopo (def_id 'fixed_obs').
+    src = {"protocolo": "plugin_protocolos_protocolos",
+           "atendimento": "plugin_protocolos_atendimentos"}
+    ts = now()
+    with make_plugin_db() as conn:
+        for scope, src_tbl in src.items():
+            table, owner_col = _EXTRAS_TABLE[scope]
+            rows = conn.execute(
+                text(f"SELECT id, obs FROM {src_tbl} WHERE obs IS NOT NULL AND obs <> ''")
+            ).mappings().all()
+            for r in rows:
+                conn.execute(
+                    text(f"INSERT INTO {table} ({owner_col}, def_id, payload, created_at, updated_at) "
+                         f"VALUES (:oid, :did, :p, :ts, :ts) "
+                         f"ON CONFLICT ({owner_col}, def_id) DO NOTHING"),
+                    {"oid": r["id"], "did": "fixed_obs",
+                     "p": json.dumps(_extras_payload(obs_def, str(r["obs"])), ensure_ascii=False),
+                     "ts": ts})
+    config_repo.set(_OBS_MIGRATE_FLAG, True)
+    logger.info("protocolos: migração obs→extra concluída")
 
 
 # ── Backfill dos dados do ext_demo (conversations.custom_attributes → Protocolos) ──
@@ -1837,9 +1987,12 @@ def send_protocol_on_close(at: dict) -> None:
                 res = outbound.send_text(channel_id, phone, text_n)
                 ok = bool(getattr(res, "ok", False))
                 mid = getattr(res, "external_msg_id", None)
+                # reopen=False: a mensagem de avaliação é enviada no FECHAR — não deve
+                # reabrir o atendimento (a conversa voltaria p/ "Abertas"). O WhatsApp já
+                # foi enviado acima; aqui é só a persistência/exibição no painel.
                 msg = agent_handler.save_operator_message(
                     phone, text_n, status="operator" if ok else "failed",
-                    msg_id=mid, channel_id=channel_id)
+                    msg_id=mid, channel_id=channel_id, reopen=False)
                 broadcast("new_message", {"phone": phone, "message": msg})
             except Exception as e:  # noqa: BLE001
                 logger.warning("protocolos: falha ao enviar link de protocolo: %s", e)
@@ -1880,7 +2033,12 @@ def _check_before_status(payload: dict):
         return payload
     cid = payload.get("conversation_id")
     cycle = get_latest_cycle(cid)
-    err = _missing_required("atendimento", _effective_values("atendimento", cycle or {}))
+    eff = _effective_values("atendimento", cycle or {})
+    # Rótulo Atendente (escopo atendimento) reflete o assignee NATIVO da conversa (não o do ciclo).
+    at_def = next((d for d in get_field_defs("atendimento") if d.get("type") == "atendente"), None)
+    if at_def:
+        eff[at_def["key"]] = (conversation_repo.get(cid) or {}).get("assignee_user_id")
+    err = _missing_required("atendimento", eff)
     if err:
         logger.info("protocolos: recusando fechar atendimento %s — %s", cid, err)
         return None  # → HTTP 403

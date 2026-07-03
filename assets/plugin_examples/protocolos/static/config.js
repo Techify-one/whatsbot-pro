@@ -15,7 +15,7 @@ const html = htm.bind(h);
 const TYPES = [
   ['text', 'Texto'], ['textarea', 'Área de texto'], ['number', 'Número'], ['date', 'Data'],
   ['select', 'Lista de seleção'], ['checkboxes', 'Caixa de seleção'],
-  ['checkbox', 'Caixa (sim/não)'],
+  ['checkbox', 'Caixa (sim/não)'], ['atendente', 'Atendente (nativo)'],
 ];
 // Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
 const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação']];
@@ -109,12 +109,14 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const fieldBuilder = html`
     <div class="space-y-4">
       <p class="text-[13px] text-wa-secondary">
-        O rótulo <b>fixo</b> Observações não pode ser removido (ID, Atendente, Início e Fim
-        são preenchidos automaticamente, não são rótulos). Crie rótulos <b>extras</b> (texto,
-        seleção, etc.); os do <b>Protocolo</b> e os de <b>Resolver atendimento</b> são
-        armazenados separadamente. Um campo <b>Obrigatório</b> deve estar sempre preenchido
-        para fechar/resolver (caixas de seleção são exceção). Apagar um rótulo extra o some do
-        menu e do histórico — o dado fica recuperável apenas pelo banco.
+        Crie rótulos (texto, seleção, etc.); <b>todos são editáveis e removíveis</b>, inclusive
+        <b>Observações</b> (ID, Atendente, Início e Fim são preenchidos automaticamente, não são
+        rótulos). O tipo <b>Atendente (nativo)</b> liga o valor ao atendente real do atendimento
+        — equivale a atribuir/mover no Kanban por atendente (só um por aba). Os do
+        <b>Protocolo</b> e os de <b>Resolver atendimento</b> são armazenados separadamente. Um
+        campo <b>Obrigatório</b> deve estar sempre preenchido para fechar/resolver (caixas de
+        seleção são exceção). Apagar um rótulo o some do menu e do histórico — o dado fica
+        recuperável apenas pelo banco.
       </p>
       ${loading ? html`<div class="text-[13px] text-wa-secondary">Carregando…</div>` : html`
         <div class="space-y-3">

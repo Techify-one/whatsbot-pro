@@ -1598,6 +1598,41 @@ _, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
 check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
 _, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
 check("validação: data mode inválido -> erro", _ev_date is not None)
+
+# 3b) Novos modos de data: "semana" e "personalizado" (janela de/até + granularidade).
+_vw, _ewk = _alogic.create_kanban_view(name="Por semana", scope="team", group_by="data",
+                                       group_date_mode="semana", owner_user_id=101)
+check("create view data 'semana' -> ok", _ewk is None and bool(_vw and _vw.get("id")))
+_vp, _epc = _alogic.create_kanban_view(name="Período custom", scope="team", group_by="data",
+                                       group_date_mode="personalizado", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="semana",
+                                       owner_user_id=101)
+check("create view data 'personalizado' -> ok", _epc is None and bool(_vp and _vp.get("id")))
+check("personalizado -> round-trip from/to/grain",
+      _vp and _vp.get("group_date_from") == "2026-06-01" and _vp.get("group_date_to") == "2026-06-30"
+      and _vp.get("group_date_grain") == "semana")
+_, _ep_range = _alogic.create_kanban_view(name="p-range", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-30",
+                                          group_date_to="2026-06-01", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado from > to -> erro", _ep_range is not None)
+_, _ep_grain = _alogic.create_kanban_view(name="p-grain", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-01",
+                                          group_date_to="2026-06-30", group_date_grain="ano", owner_user_id=1)
+check("validação: personalizado granularidade inválida -> erro", _ep_grain is not None)
+_, _ep_nodate = _alogic.create_kanban_view(name="p-nodate", group_by="data",
+                                           group_date_mode="personalizado", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado sem datas -> erro", _ep_nodate is not None)
+# Modo não-personalizado NÃO persiste janela (from/to/grain são limpos → NULL).
+_vn, _evn = _alogic.create_kanban_view(name="Só mês", scope="team", group_by="data",
+                                       group_date_mode="mes", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="dia", owner_user_id=101)
+check("modo não-personalizado -> janela ignorada (NULL)",
+      _evn is None and _vn and _vn.get("group_date_from") is None and _vn.get("group_date_grain") is None)
+# update de personalizado -> mês limpa a janela persistida.
+_vp2, _eup = _alogic.update_kanban_view(_vp["id"], group_date_mode="mes")
+check("update personalizado -> mês limpa janela",
+      _eup is None and _vp2 and _vp2.get("group_date_from") is None and _vp2.get("group_date_grain") is None)
+
 _, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
 check("validação: nome vazio -> erro", _ev_name is not None)
 
@@ -1639,6 +1674,42 @@ check("cattr filter -> substring case-insensitive",
 check("pf filter -> exato (não substring)",
       _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
       and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
+# pf de QUALQUER tipo: campo de OPÇÃO (em option_keys) casa EXATO; campo de TEXTO casa SUBSTRING.
+check("pf filter -> texto=substring, opção=exato (option_keys)",
+      _alogic._row_matches_filter({"fields": {"obs": "Cliente VIP retornou"}}, "pf:protocolo:obs", "vip", set()) is True
+      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv",
+                                      {"protocolo:resultado"}) is False)
+
+# 7a-canal) Filtro por CANAL: resolve o canal da conversa MAIS RECENTE do protocolo
+# (protocolo → vínculo plugin → core atendimentos → inboxes → channels) e casa por igualdade
+# EXATA de channel_id. Ramo puro de _row_matches_filter (sem DB):
+check("canal filter -> igualdade exata de channel_id",
+      _alogic._row_matches_filter({"channel_id": "canal_teste_filtro"}, "canal", "canal_teste_filtro") is True
+      and _alogic._row_matches_filter({"channel_id": "outro"}, "canal", "canal_teste_filtro") is False
+      and _alogic._row_matches_filter({"channel_id": ""}, "canal", "canal_teste_filtro") is False)
+# list_channels(): reaproveita channel_repo.list_all (não-arquivados), shape {id,name,provider}.
+from db.repositories import (channel_repo as _chan_repo, inbox_repo as _inbox_repo,
+                             contact_inbox_repo as _ci_repo)
+_chan_repo.create(id="canal_teste_filtro", provider="test", display_name="Canal Filtro Teste")
+_chrow = next((c for c in _alogic.list_channels() if c["id"] == "canal_teste_filtro"), None)
+check("list_channels -> shape {id,name,provider}",
+      _chrow is not None and _chrow.get("name") == "Canal Filtro Teste" and _chrow.get("provider") == "test")
+# Seed REAL do encadeamento (channel→inbox→contact→contact_inbox→conversation→vínculo) p/
+# exercitar o JOIN de _attach_channels de ponta a ponta.
+_cinbox = _inbox_repo.get_or_create_for_channel("canal_teste_filtro", name="Canal Filtro Teste")
+_cct = _alogic.contact_repo.get_or_create("5511777770001")
+_cci = _ci_repo.get_or_create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                              source_id="5511777770001@s.whatsapp.net")
+_cconv = _alogic.conversation_repo.create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                                          contact_inbox_id=_cci["id"], origin="manual")
+_cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001", name="Cliente Canal")
+_alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
+_lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
+check("list_protocolos(canal filter) -> acha o protocolo do canal",
+      any(a["id"] == _cproto["id"] for a in _lc))
+_lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
+check("list_protocolos(canal filter) -> exclui canal diferente",
+      all(a["id"] != _cproto["id"] for a in _lc2))
 
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
@@ -3513,7 +3584,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/contacts", "/dashboard", "/attendances", "/audit", "/sandbox", "/costs",
+for path in ["/", "/contacts", "/dashboard", "/protocolos", "/attendances", "/audit", "/sandbox", "/costs",
              "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)

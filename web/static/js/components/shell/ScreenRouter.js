@@ -29,7 +29,7 @@ import { PageHeader } from './GearMenu.js';
 const html = htm.bind(h);
 
 export function ScreenRouter({
-  tab, setTab, activeRouteOverride, activePluginScreen, currentUser,
+  tab, setTab, activeRouteOverride, extensionsLoaded, activePluginScreen, currentUser,
   // Dashboard / config
   config, saving, handleSave, handleNotify, openWizard,
   // entity deep-link resolver: entFor(tab) → entity|null
@@ -141,8 +141,13 @@ export function ScreenRouter({
   if (tab === 'attendances') {
     // A aba "Atendimentos" (kanban/lista) é EXCLUSIVA do plugin protocolos, que a
     // provê via overrideRoute('attendances') — tratado no topo (activeRouteOverride).
-    // Se chegamos aqui, o plugin está desligado: não há tela nativa. Volta ao hub de
-    // conversas (Contatos) em vez de cair no fallback Sandbox.
+    // Enquanto as extensões de plugin ainda estão carregando (janela assíncrona do
+    // boot: fetch do manifest + import() do extends.js), NÃO redirecione: o override
+    // pode estar prestes a registrar. Sem esse gate, um F5 em /protocolos cairia no
+    // hub de Contatos antes do plugin subir (e perderia o ?detail).
+    if (!extensionsLoaded) return null;
+    // Extensões já carregadas e ainda sem override → o plugin está de fato desligado:
+    // não há tela nativa. Volta ao hub de conversas (Contatos) em vez do fallback Sandbox.
     queueMicrotask(() => setTab('contacts'));
     return null;
   }
