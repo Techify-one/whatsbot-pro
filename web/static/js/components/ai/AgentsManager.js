@@ -341,6 +341,10 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
               value=${maxTokens} onInput=${(e) => setMaxTokens(e.target.value)} />
           </div>
         </div>
+        <div class="text-[11px] text-wa-secondary -mt-1">
+          max_tokens: modelos de raciocínio gastam esse orçamento para "pensar" antes de responder —
+          valores baixos podem zerar a resposta. Piso aplicado: 256 (1024 quando reasoning_effort está definido).
+        </div>
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Tools disponíveis</label>
