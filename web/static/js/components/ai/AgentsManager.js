@@ -586,7 +586,7 @@ export default function AgentsManager({ initialEntity }) {
 
   async function handleDelete(a) {
     if (a.agent_key === 'default') return;
-    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Atendimentos vinculados voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
+    if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Conversas vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
     setError('');
     const res = await deleteAgent(a.agent_key);
     if (res && res.ok) {
@@ -620,7 +620,7 @@ export default function AgentsManager({ initialEntity }) {
       <div class="flex items-center justify-between mb-4 gap-2">
         <p class="text-[13px] text-wa-secondary">
           Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
-          na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nos atendimentos.
+          na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
         </p>
         ${!formOpen ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"

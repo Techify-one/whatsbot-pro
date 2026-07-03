@@ -10,8 +10,16 @@ import htm from 'htm';
 // date/list/checkbox/link), dark-mode-safe. Reusado aqui p/ os atributos do core
 // não-espelho (is_system=0) — mesma aparência da aba "Informações do atendimento".
 import { CustomAttributeField } from '/static/js/components/contacts/CustomAttributeField.js';
+// Seletor de lista PADRÃO do app (busca sempre visível + "Limpar seleção"), compartilhado
+// com os atributos do core e a barra de filtros — um único componente, um só padrão.
+import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 
 const html = htm.bind(h);
+
+// Campo cujo VALOR é uma LISTA: "Caixa de seleção" (checkboxes) sempre, ou "Lista de
+// seleção" (select) com `multiple` ligado. Espelha logic._is_multi no backend.
+export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
+  || (d.type === 'select' && d.multiple)));
 
 // Um campo, renderizado conforme `def.type`. value/onChange controlados pelo pai.
 export function FieldInput({ def, value, onChange }) {
@@ -21,11 +29,9 @@ export function FieldInput({ def, value, onChange }) {
       value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
   }
   if (t === 'select') {
-    return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-      value=${value || ''} onChange=${(e) => onChange(e.target.value)}>
-      <option value="">Selecione…</option>
-      ${(def.options || []).map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
-    </select>`;
+    // "Lista de seleção" (padrão do app); `def.multiple` habilita marcar várias (valor = lista).
+    return html`<${OptionListSelect} options=${def.options || []} value=${value}
+      multiple=${!!def.multiple} onChange=${onChange} />`;
   }
   if (t === 'radio') {
     return html`<div class="flex flex-wrap gap-4 pt-1">
@@ -83,7 +89,7 @@ export function LabeledField({ def, value, onChange }) {
 
 function isFilled(def, v) {
   if (def.type === 'checkbox') return true; // bool é sempre "preenchido"
-  if (def.type === 'checkboxes') return Array.isArray(v) ? v.length > 0 : !!v;
+  if (isMultiDef(def)) return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
@@ -104,7 +110,7 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
     for (const d of defs) {
       const cur = init0[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
-      else if (d.type === 'checkboxes') init[d.key] = Array.isArray(cur)
+      else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
         ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
       else init[d.key] = (cur == null ? '' : String(cur));
     }

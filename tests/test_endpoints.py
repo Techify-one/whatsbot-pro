@@ -1548,6 +1548,8 @@ _atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
 _atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "protocolos")
 check("protocolos rbac -> manage_team_views declarada",
       any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
+check("protocolos rbac -> create_views declarada",
+      any(p["key"] == "create_views" for p in _atd_rbac.get("permissions", [])))
 
 # 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
 _atd_manifest = _load_manifest(_atd_dir)
@@ -1575,17 +1577,25 @@ _sd, _sde = _alogic.delete_kanban_view(_by_gb["atendente"]["id"])
 check("seed 010 -> Atendente excluível",
       _sd and _sde is None and _alogic.get_kanban_view(_by_gb["atendente"]["id"]) is None)
 
-# 3) CRUD + validação.
-_v1, _e1 = _alogic.create_kanban_view(name="Por etapa", scope="personal", group_by="attr",
-                                      group_attr_key="etapa", filters={"status": "aberto"},
-                                      owner_user_id=101)
-check("create view pessoal -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
+# 3) CRUD + validação. Agrupar por CAMPO DE PROTOCOLO (pfield) usa os field-defs do plugin
+# (defaults: motivo_abertura/resultado = select). Atributo de conversa NÃO agrupa mais.
+_v1, _e1 = _alogic.create_kanban_view(name="Por motivo", scope="personal", group_by="pfield",
+                                      group_field_scope="protocolo", group_attr_key="motivo_abertura",
+                                      filters={"status": "aberto"}, owner_user_id=101)
+check("create view pessoal (pfield) -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
 check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
+check("pfield -> round-trip scope+key",
+      _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
+      and _v1.get("group_attr_key") == "motivo_abertura")
 _v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
                                       group_date_mode="mes", owner_user_id=101)
 check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
-_, _ev_attr = _alogic.create_kanban_view(name="x", group_by="attr", group_attr_key="", owner_user_id=1)
-check("validação: attr sem key -> erro", _ev_attr is not None)
+_, _ev_pf = _alogic.create_kanban_view(name="x", group_by="pfield",
+                                       group_field_scope="protocolo", group_attr_key="", owner_user_id=1)
+check("validação: pfield sem campo -> erro", _ev_pf is not None)
+_, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
+                                        group_field_scope="protocolo", group_attr_key="obs", owner_user_id=1)
+check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
 _, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
 check("validação: data mode inválido -> erro", _ev_date is not None)
 _, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
@@ -1604,60 +1614,104 @@ check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") ==
 _okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
 check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
 
-# 6) set_conversa_attr: branches de erro (sem e2e de conversa — coberto manualmente).
-_, _esa = _alogic.set_atendimento_attr(99999, "etapa", "Proposta")
-check("set_atendimento_attr -> protocolo inexistente -> erro", _esa is not None)
+# 6) set_protocolo_field: erros + gravação num campo de opção do protocolo (drag do Kanban).
+_, _esa = _alogic.set_protocolo_field(99999, "protocolo", "motivo_abertura", "Dúvida")
+check("set_protocolo_field -> protocolo inexistente -> erro", _esa is not None)
+_, _esa2 = _alogic.set_protocolo_field(99999, "protocolo", "obs", "x")
+check("set_protocolo_field -> campo não-opção -> erro", _esa2 is not None)
+_proto_sf = _alogic.ensure_protocolo_for_contact(70001, phone="5511999990001", name="Cliente Teste")
+_pw, _pwe = _alogic.set_protocolo_field(_proto_sf["id"], "protocolo", "motivo_abertura", "Dúvida")
+check("set_protocolo_field -> grava valor de opção",
+      _pwe is None and _pw and (_pw.get("fields") or {}).get("motivo_abertura") == "Dúvida")
 
-# 7) attr_filters: caminho do filtro por atributo aceito sem quebrar (lista vazia/segura).
-_lf = _alogic.list_protocolos(attr_filters={"etapa": "Proposta"}, limit=50)
-check("list_protocolos(attr_filters) -> retorna lista", isinstance(_lf, list))
+# 7) attr_filters namespaceados: pf:<scope>:<key> (campo de protocolo) + cattr:<key> (contato).
+_lf = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Dúvida"}, limit=50)
+check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf))
+_lf2 = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Reclamação"}, limit=50)
+check("list_protocolos(pf filter) -> exclui valor diferente",
+      all(a["id"] != _proto_sf["id"] for a in _lf2))
+_lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
+check("list_protocolos(cattr filter) -> retorna lista", isinstance(_lf3, list))
 
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
 check("pref ausente -> default equipe",
-      _p0 == {"use_personal": False, "personal_filters": {}})
+      _p0 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 _p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
                                     personal_filters={"status": "fechado"})
 check("upsert pref -> retorna pessoal",
-      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"}})
+      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"},
+              "personal_column_order": None})
 _p1r = _alogic.get_user_view_pref(_v2["id"], 101)
 check("pref persistida -> personal_filters round-trip",
       _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
 _p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
 check("upsert parcial -> flip use_personal mantém filters",
-      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"}})
+      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"},
+              "personal_column_order": None})
 _p999 = _alogic.get_user_view_pref(_v2["id"], 999)
-check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}})
+check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
 _lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
 _lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
 check("list anexa pref do chamador 101",
       _lv101.get(_v2["id"], {}).get("use_personal") is True)
 check("list anexa pref default p/ 999",
-      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}})
+      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 check("get_user_view_pref(uid=None) -> default equipe",
-      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}})
+      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 _vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
                                        group_by="status", owner_user_id=101)
 _alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
 _alogic.delete_kanban_view(_vp["id"])
 check("delete_kanban_view -> prefs limpas",
-      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}})
+      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 
 # 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
 check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
 _va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
-                                       available_filters=["status", "attr:curso"], owner_user_id=101)
+                                       available_filters=["status", "cattr:curso"], owner_user_id=101)
 check("create available_filters -> round-trip lista",
-      _eva is None and _va.get("available_filters") == ["status", "attr:curso"])
+      _eva is None and _va.get("available_filters") == ["status", "cattr:curso"])
 _vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
 check("update sem available_filters -> mantém lista (sentinela)",
-      _vau.get("available_filters") == ["status", "attr:curso"])
+      _vau.get("available_filters") == ["status", "cattr:curso"])
 _vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
 check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
 _vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
 check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
 _alogic.delete_kanban_view(_va["id"])
+
+# 7c-bis) column_order (EQUIPE, na view) + personal_column_order (PESSOAL, na pref): ordem das
+# colunas do Kanban. Mesma mecânica de available_filters (sentinela _UNSET no update, [] limpa).
+_vco, _evco = _alogic.create_kanban_view(name="Ordem colunas", scope="team", group_by="status",
+                                         column_order=["fechado", "aberto"], owner_user_id=101)
+check("create column_order -> round-trip lista",
+      _evco is None and _vco.get("column_order") == ["fechado", "aberto"])
+_vsem, _ = _alogic.create_kanban_view(name="Sem ordem", scope="team", group_by="status",
+                                      owner_user_id=101)
+check("view sem column_order -> None (ordem padrão)", _vsem.get("column_order") is None)
+_alogic.delete_kanban_view(_vsem["id"])
+_vcou, _ = _alogic.update_kanban_view(_vco["id"], name="Ordem colunas v2")
+check("update sem column_order -> mantém lista (sentinela)",
+      _vcou.get("column_order") == ["fechado", "aberto"])
+_vcou2, _ = _alogic.update_kanban_view(_vco["id"], column_order=["aberto", "fechado"])
+check("update com column_order -> troca lista", _vcou2.get("column_order") == ["aberto", "fechado"])
+_vcou3, _ = _alogic.update_kanban_view(_vco["id"], column_order=[])
+check("update column_order=[] -> None (ordem padrão)", _vcou3.get("column_order") is None)
+# personal_column_order via my-pref (preferência do PRÓPRIO usuário, gated só por `view`).
+_alogic.upsert_user_view_pref(_vco["id"], 202, personal_column_order=["fechado", "aberto"])
+check("personal_column_order -> round-trip",
+      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+_lv_pco = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=202)}
+check("list anexa personal_column_order do chamador",
+      _lv_pco.get(_vco["id"], {}).get("personal_column_order") == ["fechado", "aberto"])
+_alogic.upsert_user_view_pref(_vco["id"], 202, use_personal=True)  # merge parcial
+check("merge parcial (só use_personal) -> personal_column_order preservado",
+      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+check("get_user_view_pref(uid=None) -> personal_column_order None",
+      _alogic.get_user_view_pref(_vco["id"], None).get("personal_column_order") is None)
+_alogic.delete_kanban_view(_vco["id"])
 
 # 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
 _vacl, _eacl = _alogic.create_kanban_view(
@@ -1704,6 +1758,25 @@ check("manage_team_views -> user COM perm permitido",
 _urepo.delete(_tvu_id)
 _rrepo.delete_plugin_permissions("protocolos")
 
+# 8b) Gate de CRIAÇÃO de visualizações (create_views) — a rota exige create_views OU
+# manage_team_views. Aqui validamos que a permissão está no catálogo RBAC (acheck).
+_rrepo.upsert_plugin_permission("plugin.protocolos.create_views",
+                                "Criar novas visualizações (agrupamentos) no Kanban",
+                                "protocolos", "Protocolos")
+_cvu = _urepo.create(email="createviews@test.com", name="CV",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_cvu_id = _cvu["id"]
+_cv_req = _types.SimpleNamespace(
+    state=_types.SimpleNamespace(user={"id": _cvu_id}),
+    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
+check("create_views -> user SEM perm negado",
+      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is False)
+_urepo.set_custom_permissions(_cvu_id, ["plugin.protocolos.create_views"])
+check("create_views -> user COM perm permitido",
+      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is True)
+_urepo.delete(_cvu_id)
+_rrepo.delete_plugin_permissions("protocolos")
+
 # 9) Tipos de campo NOVOS: número, data, regex (text/textarea/number) e "caixa de seleção"
 # configurável única/múltipla. Testado direto na logic (scope protocolo não sincroniza core).
 _alogic.set_field_defs("protocolo", [
@@ -1746,6 +1819,35 @@ check("_missing_required revalida tipo+required no fechamento",
       _alogic._missing_required("protocolo", {"cursos": [], "obs": ""}) is not None)
 check("_missing_required ok quando preenchido",
       _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": ""}) is None)
+
+# 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
+# (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).
+check("select múltiplo -> value_type list",
+      _alogic._extra_value_type({"type": "select", "multiple": True}) == "list")
+check("select single -> value_type string",
+      _alogic._extra_value_type({"type": "select"}) == "string")
+check("seed: nenhum campo default é radio (migrado p/ select)",
+      all(d.get("type") != "radio"
+          for defs in _alogic.DEFAULT_EXTRA_DEFS.values() for d in defs))
+_alogic.set_field_defs("protocolo", [
+    {"key": "origem", "label": "Origem", "type": "select", "options": ["Site", "Loja", "Telefone"]},
+    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B", "C"], "multiple": True},
+])
+_psel = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+check("select múltiplo -> multiple persistido", _psel.get("motivos", {}).get("multiple") is True)
+_cm, _ecm = _alogic.normalize_values("protocolo", {"motivos": ["A", "C"], "origem": "Site"})
+check("select múltiplo -> valor vira LISTA", _ecm is None and _cm.get("motivos") == ["A", "C"])
+check("select single -> valor string", _cm.get("origem") == "Site")
+_, _eminv = _alogic.normalize_values("protocolo", {"motivos": ["Z"]})
+check("select múltiplo -> opção inválida barrada", _eminv is not None)
+_alogic.set_field_defs("protocolo", [
+    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B"],
+     "multiple": True, "required": True},
+])
+_, _emreq = _alogic.normalize_values("protocolo", {"motivos": []})
+check("select múltiplo obrigatório vazio -> erro", _emreq is not None and "Motivos" in _emreq)
+_cmr, _ecmr = _alogic.normalize_values("protocolo", {"motivos": ["A"]})
+check("select múltiplo obrigatório preenchido -> ok", _ecmr is None and _cmr.get("motivos") == ["A"])
 _alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2184,7 +2286,7 @@ _sncm.add_message("user", "início")  # cria conversa (+ aviso 'created', autor=
 _snconv = _conv_repo.get_open_for_contact(_sncm.id)
 _sn_phone = _sncm.phone
 check("create -> aviso 'created' no fio",
-      any("iniciado" in c for c in _notices(_snconv["id"])))
+      any("iniciada" in c for c in _notices(_snconv["id"])))
 
 # (a) status close/open -> grupo status, com autor nomeado
 _n = len(_notices(_snconv["id"]))
@@ -2192,8 +2294,8 @@ client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "close
 client.post(f"/api/conversations/{_snconv['id']}/status", json={"status": "open"}, headers=_snhdr)
 _after = _notices(_snconv["id"])
 check("status close/open -> 2 avisos", len(_after) - _n == 2)
-check("status_closed -> 'Mgr resolveu'", any("Mgr resolveu o atendimento" in c for c in _after[_n:]))
-check("status_open -> 'Mgr reabriu'", any("Mgr reabriu o atendimento" in c for c in _after[_n:]))
+check("status_closed -> 'Mgr resolveu'", any("Mgr resolveu a conversa" in c for c in _after[_n:]))
+check("status_open -> 'Mgr reabriu'", any("Mgr reabriu a conversa" in c for c in _after[_n:]))
 
 # (b) GATE: grupo status OFF => nada grava
 _sn_cfg.set("system_notice_status", False)
@@ -2221,8 +2323,8 @@ client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": False}, he
 client.post(f"/api/conversations/{_snconv['id']}/ai", json={"active": True}, headers=_snhdr)
 _after = _notices(_snconv["id"])
 check("ai off/on -> 3 avisos (ai off + assumiu + ai on)", len(_after) - _n == 3)
-check("ai off -> card 'assumiu o atendimento'",
-      any("assumiu o atendimento" in c for c in _after[_n:]))
+check("ai off -> card 'assumiu a conversa'",
+      any("assumiu a conversa" in c for c in _after[_n:]))
 
 # (e) agent_changed -> grupo ai
 _n = len(_notices(_snconv["id"]))
@@ -2268,8 +2370,8 @@ check("toggle-ai contato -> 1 aviso (grupo ai)", len(_notices(_snconv["id"])) - 
 _conv_repo.set_status(_snconv["id"], "closed")
 _n = len(_notices(_snconv["id"]))
 _sncm.add_message("user", "oi de novo")
-check("auto-reopen -> aviso 'reaberto automaticamente'",
-      any("reaberto automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
+check("auto-reopen -> aviso 'reaberta automaticamente'",
+      any("reaberta automaticamente" in c for c in _notices(_snconv["id"])[_n:]))
 
 # (j2) auto-reabertura pelo atendente: resposta (assistant) numa conversa closed
 _conv_repo.set_status(_snconv["id"], "closed")
@@ -2284,7 +2386,7 @@ _sn.emit_conversation_notice(event_type="ai_takeover", conversation_id=_snconv["
                              contact_id=_sncm.id, phone=_sn_phone)
 check("ai_takeover emitido -> has_event True", _sn.has_event(_snconv["id"], "ai_takeover") is True)
 check("ai_takeover -> card 'IA assumiu'",
-      any("IA assumiu o atendimento" in c for c in _notices(_snconv["id"])))
+      any("IA assumiu a conversa" in c for c in _notices(_snconv["id"])))
 
 # (l) exclusões: conversation_event fora do contexto do LLM
 _snctx = _sn_msg_repo.get_context(_sncm.id, 200)
