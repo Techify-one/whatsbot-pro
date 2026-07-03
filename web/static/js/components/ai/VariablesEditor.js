@@ -15,6 +15,21 @@ const html = htm.bind(h);
 
 const NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 
+// Parâmetros de tuning do modelo (ai_engine/model_factory _TUNING_KEYS): uma
+// variável com um desses nomes (ou com o sufixo _<agente>) TAMBÉM altera o
+// parâmetro do modelo, além de substituir {nome} nos prompts — é o mecanismo
+// legítimo de tuning por variável, então só avisamos (não bloqueia).
+const RESERVED_PARAMS = ['temperature', 'top_p', 'max_tokens', 'reasoning_effort',
+  'frequency_penalty', 'presence_penalty'];
+
+function reservedParamOf(name) {
+  const n = (name || '').trim();
+  for (const p of RESERVED_PARAMS) {
+    if (n === p || n.startsWith(p + '_')) return p;
+  }
+  return null;
+}
+
 function VariableForm({ editing, onSave, onCancel, busy }) {
   const [name, setName] = useState(editing ? editing.name : '');
   const [value, setValue] = useState(editing ? (editing.value || '') : '');
@@ -23,6 +38,7 @@ function VariableForm({ editing, onSave, onCancel, busy }) {
   const nameErr = isNew && name && !NAME_RE.test(name.trim())
     ? 'Use letras, números e _ (começando por letra).' : '';
   const canSave = !busy && (editing || (name.trim() && !nameErr));
+  const reservedParam = reservedParamOf(editing ? editing.name : name);
 
   function submit() {
     if (!canSave) return;
@@ -43,6 +59,17 @@ function VariableForm({ editing, onSave, onCancel, busy }) {
               onInput=${(e) => setName(e.target.value)} />
             ${nameErr ? html`<div class="text-[12px] text-red-500 mt-1">${nameErr}</div>` : null}
             <div class="text-[11px] text-wa-secondary mt-1">Use no prompt como <code class="font-mono">{${name.trim() || 'nome'}}</code>.</div>
+          </div>
+        ` : null}
+        ${reservedParam ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Este nome também ajusta o parâmetro <code class="font-mono">${reservedParam}</code> do modelo
+            (tuning global, ou por agente com o sufixo <code class="font-mono">_&lt;agente&gt;</code>),
+            além de substituir <code class="font-mono">{nome}</code> nos prompts.
+            ${reservedParam === 'max_tokens' ? html`
+              ${' '}Valores baixos podem zerar a resposta em modelos de raciocínio
+              (piso aplicado: 256; 1024 com reasoning_effort).
+            ` : null}
           </div>
         ` : null}
         <div>
