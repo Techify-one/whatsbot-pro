@@ -842,6 +842,28 @@ class MessagingService:
                                     else:
                                         await self._send_with_typing_guard(channel_id, phone, result.reply)
                                         await self.maybe_emit_ai_takeover(phone, channel_id)
+                                elif not result.aborted:
+                                    # A5 (plano 31 F4): reply vazio calava sem rastro —
+                                    # loga e grava um card painel-only pro operador ver.
+                                    # aborted=True (filter/resolução) NÃO gera card: é
+                                    # silêncio intencional ou já sinalizado.
+                                    logger.warning(
+                                        "[Batch] IA não produziu resposta para %s "
+                                        "(nada enviado — possível max_tokens baixo)", phone)
+                                    try:
+                                        empty_msg = contact.add_message(
+                                            "error",
+                                            "⚠️ A IA não produziu resposta para a última "
+                                            "mensagem. Verifique o max_tokens do agente "
+                                            "(modelos de raciocínio precisam de orçamento alto).")
+                                        await ws_manager.broadcast("new_message", {
+                                            "phone": phone, "channel_id": channel_id,
+                                            "message": empty_msg,
+                                        })
+                                    except Exception:
+                                        logger.exception(
+                                            "[Batch] Falha ao gravar card de resposta "
+                                            "vazia para %s", phone)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
@@ -985,6 +1007,27 @@ class MessagingService:
                         else:
                             await self._send_with_typing_guard(channel_id, phone, result.reply)
                             await self.maybe_emit_ai_takeover(phone, channel_id)
+                    elif not result.aborted:
+                        # A5 (plano 31 F4): mesmo tratamento do caminho texto
+                        # (aborted intencional não gera card).
+                        logger.warning(
+                            "[Batch] IA não produziu resposta para %s (%s) "
+                            "(nada enviado — possível max_tokens baixo)",
+                            phone, media_label)
+                        try:
+                            empty_msg = contact.add_message(
+                                "error",
+                                "⚠️ A IA não produziu resposta para a última "
+                                "mensagem. Verifique o max_tokens do agente "
+                                "(modelos de raciocínio precisam de orçamento alto).")
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone, "channel_id": channel_id,
+                                "message": empty_msg,
+                            })
+                        except Exception:
+                            logger.exception(
+                                "[Batch] Falha ao gravar card de resposta "
+                                "vazia para %s", phone)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

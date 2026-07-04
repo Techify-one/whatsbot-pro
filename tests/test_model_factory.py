@@ -41,10 +41,29 @@ check("mc: top_p", k["top_p"] == 0.9)
 check("mc: max_tokens", k["max_tokens"] == 500)
 
 # Aliases: max_output_tokens→max_tokens, thinking_level→reasoning_effort
-k = mf.build_kwargs({"model": "m", "max_output_tokens": 777, "thinking_level": "high"},
+# (valor acima do piso de raciocínio — o clamp do piso tem testes próprios abaixo)
+k = mf.build_kwargs({"model": "m", "max_output_tokens": 1777, "thinking_level": "high"},
                     fallback_model="x", default_max_tokens=D)
-check("alias max_output_tokens→max_tokens", k["max_tokens"] == 777)
+check("alias max_output_tokens→max_tokens", k["max_tokens"] == 1777)
 check("alias thinking_level→reasoning_effort", k.get("reasoning_effort") == "high")
+
+# A5 (plano 31 F4): piso de max_tokens — valor baixo demais não emudece o bot
+k = mf.build_kwargs({"model": "m", "max_tokens": 10}, fallback_model="x", default_max_tokens=D)
+check("piso: max_tokens=10 sobe pro piso (sem reasoning)",
+      k["max_tokens"] == mf.MIN_MAX_TOKENS == 256)
+k = mf.build_kwargs({"model": "m", "max_tokens": 10, "reasoning_effort": "high"},
+                    fallback_model="x", default_max_tokens=D)
+check("piso: max_tokens=10 + reasoning sobe pro piso de raciocínio",
+      k["max_tokens"] == mf.MIN_MAX_TOKENS_REASONING == 1024)
+k = mf.build_kwargs({"model": "m", "max_tokens": 500, "reasoning_effort": "low"},
+                    fallback_model="x", default_max_tokens=D)
+check("piso: 500 + reasoning -> 1024", k["max_tokens"] == 1024)
+k = mf.build_kwargs({"model": "m", "max_tokens": 2000, "reasoning_effort": "high"},
+                    fallback_model="x", default_max_tokens=D)
+check("piso: acima do piso passa intacto (2000 + reasoning)", k["max_tokens"] == 2000)
+k = mf.build_kwargs({"model": "m"}, fallback_model="x", default_max_tokens=D,
+                    variables={"max_tokens": "32"})
+check("piso: var global baixa também é clampada", k["max_tokens"] == 256)
 
 # Cascade: variável global usada quando model_config não traz
 k = mf.build_kwargs({"model": "m"}, fallback_model="x", default_max_tokens=D,
@@ -63,6 +82,19 @@ check("cascade: model_config vence var", k["temperature"] == 0.9)
 
 # _agent_key nunca vaza para os kwargs do OpenAILike
 check("_agent_key não vaza", "_agent_key" not in k)
+
+# 12.2 (plano 31 F5): frequency/presence penalties na mesma cascata de tuning
+k = mf.build_kwargs({"model": "m", "frequency_penalty": 0.5, "presence_penalty": 0.3},
+                    fallback_model="x", default_max_tokens=D)
+check("penalty: model_config frequency_penalty", k["frequency_penalty"] == 0.5)
+check("penalty: model_config presence_penalty", k["presence_penalty"] == 0.3)
+k = mf.build_kwargs({"model": "m", "_agent_key": "vendas"}, fallback_model="x",
+                    default_max_tokens=D,
+                    variables={"frequency_penalty": "0.2", "frequency_penalty_vendas": "0.9"})
+check("penalty: per-agent vence global (coerce str→float)", k["frequency_penalty"] == 0.9)
+k = mf.build_kwargs({"model": "m"}, fallback_model="x", default_max_tokens=D)
+check("penalty: ausente não emite kwarg",
+      "frequency_penalty" not in k and "presence_penalty" not in k)
 
 # Valor de variável inválido é ignorado (não quebra)
 k = mf.build_kwargs({"model": "m"}, fallback_model="x", default_max_tokens=D,

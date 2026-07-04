@@ -429,7 +429,22 @@ class ContactMemory:
                 if m["role"] == "assistant" and m.get("status") == "operator":
                     content = f"[Mensagem do operador humano]: {content}"
                 result.append({"role": m["role"], "content": content})
-        return result
+
+        # 12.2 (plano 31 F5): colapsa respostas ASSISTANT idênticas ADJACENTES —
+        # um loop degenerado ("mesma resposta 3x seguidas") não se realimenta
+        # pelo contexto. Vale SÓ para a montagem do contexto do LLM; o histórico
+        # persistido e o painel não mudam.
+        deduped: list[dict] = []
+        for m in result:
+            if (deduped
+                    and m.get("role") == "assistant"
+                    and deduped[-1].get("role") == "assistant"
+                    and isinstance(m.get("content"), str)
+                    and m.get("content")
+                    and m["content"] == deduped[-1].get("content")):
+                continue
+            deduped.append(m)
+        return deduped
 
     def set_wa_name(self, wa_name: str) -> None:
         """Set contact name from WhatsApp pushName if no manual name exists."""

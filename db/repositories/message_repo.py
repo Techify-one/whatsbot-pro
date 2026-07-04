@@ -86,12 +86,43 @@ def get_by_conversation(conversation_id: int) -> list[dict]:
 
 def get_context(contact_id: int, limit: int) -> list[dict]:
     """Return the last N eligible messages for LLM context."""
-    excluded = ("transcription", "tool_call", "system_notice", "conversation_event", "system")
+    # "error" incluído (plano 31 review): cards painel-only de erro persistidos
+    # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
+    # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
+    excluded = ("transcription", "tool_call", "system_notice",
+                "conversation_event", "system", "error")
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
             .where(
                 (messages.c.contact_id == contact_id)
+                & (~messages.c.role.in_(excluded))
+                & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
+            )
+            .order_by(messages.c.ts.desc())
+            .limit(limit)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in reversed(rows)]
+
+
+def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
+    """Last N eligible messages of ONE conversation, LLM-context style.
+
+    Mesmo filtro de elegibilidade de :func:`get_context` (roles painel-only e
+    envios failed excluídos), mas escopado por ``conversation_id`` — multi-canal
+    não mistura threads de outros canais (plano 31 F3; ``get_by_conversation``
+    não filtra nem limita, por isso a variante dedicada).
+    """
+    # "error" incluído (plano 31 review): cards painel-only de erro persistidos
+    # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
+    # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
+    excluded = ("transcription", "tool_call", "system_notice",
+                "conversation_event", "system", "error")
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages)
+            .where(
+                (messages.c.conversation_id == conversation_id)
                 & (~messages.c.role.in_(excluded))
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )

@@ -42,13 +42,13 @@ def as_map() -> dict[str, str]:
     return {r.name: r.value for r in rows}
 
 
-def save(name: str, value: str, category: str = "") -> dict:
+def save(name: str, value: str) -> dict:
     now = time.time()
-    values = {"name": name, "value": value, "category": category, "updated_at": now}
+    values = {"name": name, "value": value, "updated_at": now}
     with get_engine().begin() as conn:
         conn.execute(upsert(
             ai_variables, values, conflict_cols=["name"],
-            update_cols=["value", "category", "updated_at"],
+            update_cols=["value", "updated_at"],
         ))
     return values
 

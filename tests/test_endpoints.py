@@ -2257,6 +2257,31 @@ client.put("/api/ai/agents/p22_tmp", json={
 r = client.delete("/api/ai/agents/p22_tmp")
 check("P22 excluir agente não-default -> 200", r.status_code == 200)
 
+# ── P31 F6 (A1): backend valida o nome da variável (só {identificador} renderiza) ──
+r = client.put("/api/ai/variables/p31_nome_valido", json={"value": "acme"})
+check("P31 PUT variável válida -> 200", r.status_code == 200)
+# P31 F7 (A2): coluna morta 'category' removida de API/repo/schema (migration 0037).
+check("P31 resposta do PUT sem 'category'",
+      "category" not in (r.json().get("data") or {}))
+_v31 = next((v for v in client.get("/api/ai/variables").json()["data"]
+             if v["name"] == "p31_nome_valido"), None)
+check("P31 GET variables lista a criada", _v31 is not None)
+check("P31 GET variables sem campo 'category'",
+      _v31 is not None and "category" not in _v31)
+r = client.put("/api/ai/variables/nome-invalido", json={"value": "x"})
+check("P31 PUT variável com hífen -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/1comeca_numero", json={"value": "x"})
+check("P31 PUT variável começando por número -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/" + "a" * 65, json={"value": "x"})
+check("P31 PUT variável nome >64 chars -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/p31_x%0A", json={"value": "x"})
+check("P31 PUT variável com newline final (%0A) -> 400", r.status_code == 400)
+r = client.get("/api/ai/variables")
+check("P31 variável inválida não foi persistida",
+      not any(v["name"] == "nome-invalido" for v in r.json()["data"]))
+r = client.delete("/api/ai/variables/p31_nome_valido")
+check("P31 DELETE variável -> 200", r.status_code == 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h-bis. Avisos de sistema no chat (plano 12)
 # ═══════════════════════════════════════════════════════════════════
