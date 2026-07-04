@@ -509,6 +509,13 @@ async def run_async(handler, contact, sender, messages, active_tools,
         "completion_tokens": (usage or {}).get("completion_tokens", 0),
         "has_tool_calls": bool(executed),
     })
+    if not reply:
+        # A5 (plano 31 F4): an empty reply used to leave zero trace in the logs.
+        logger.warning(
+            "Empty reply from %s for %s (completion_tokens=%s, tools=%d) — "
+            "possível max_tokens baixo demais (modelos de raciocínio gastam o "
+            "orçamento pensando)",
+            model_id, sender, (usage or {}).get("completion_tokens"), len(executed))
     return EngineResult(reply=reply, executed_tools=executed, usage=usage)
 
 
@@ -557,4 +564,11 @@ def run_sync(handler, contact, sender, messages, active_tools,
         "completion_tokens": (usage or {}).get("completion_tokens", 0),
         "has_tool_calls": bool(executed),
     })
+    if not reply:
+        # A5 (plano 31 F4): see run_async — surface the silent-mute case.
+        logger.warning(
+            "Empty reply from %s for %s (completion_tokens=%s, tools=%d) — "
+            "possível max_tokens baixo demais (modelos de raciocínio gastam o "
+            "orçamento pensando)",
+            model_id, sender, (usage or {}).get("completion_tokens"), len(executed))
     return EngineResult(reply=reply, executed_tools=executed, usage=usage)

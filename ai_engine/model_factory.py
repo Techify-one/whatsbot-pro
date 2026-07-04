@@ -19,14 +19,22 @@ Aliases are normalised: ``max_output_tokens``/``max_completion_tokens`` →
 
 from __future__ import annotations
 
-_TUNING_KEYS = ("temperature", "top_p", "max_tokens", "reasoning_effort")
+_TUNING_KEYS = ("temperature", "top_p", "max_tokens", "reasoning_effort",
+                "frequency_penalty", "presence_penalty")
 _ALIASES = {
     "max_output_tokens": "max_tokens",
     "max_completion_tokens": "max_tokens",
     "thinking_level": "reasoning_effort",
 }
-_FLOAT_KEYS = ("temperature", "top_p")
+_FLOAT_KEYS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
 _INT_KEYS = ("max_tokens",)
+
+# A5 (plano 31 F4): a too-low max_tokens silently mutes the bot — on reasoning
+# models the cap is the TOTAL budget (reasoning + completion), so a low value
+# yields an empty completion with no error. Clamp to a conservative floor,
+# higher when reasoning_effort is set (the case that actually goes mute).
+MIN_MAX_TOKENS = 256
+MIN_MAX_TOKENS_REASONING = 1024
 
 
 def _normalize(mc: dict | None) -> dict:
@@ -73,9 +81,12 @@ def build_kwargs(model_config: dict | None, *, fallback_model: str | None,
             except (TypeError, ValueError):
                 pass
     try:
-        kwargs["max_tokens"] = int(params.get("max_tokens") or default_max_tokens)
+        max_tokens = int(params.get("max_tokens") or default_max_tokens)
     except (TypeError, ValueError):
-        kwargs["max_tokens"] = default_max_tokens
+        max_tokens = default_max_tokens
+    floor = (MIN_MAX_TOKENS_REASONING if params.get("reasoning_effort")
+             else MIN_MAX_TOKENS)
+    kwargs["max_tokens"] = max(max_tokens, floor)
     if params.get("reasoning_effort"):
         kwargs["reasoning_effort"] = str(params["reasoning_effort"])
     return kwargs
