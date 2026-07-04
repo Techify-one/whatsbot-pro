@@ -53,6 +53,7 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(null); // plugin id
+  const [descOpen, setDescOpen] = useState(null); // plugin id do popup "descrição completa"
   const [importing, setImporting] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [exporting, setExporting] = useState({}); // { [pluginId]: pct (0-100) }
@@ -305,8 +306,19 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
                   </div>
                   <${StatusBadge} plugin=${p} />
                 </div>
-                ${p.description ? html`
-                  <div class="text-[13px] mt-2 text-wa-text">${p.description}</div>
+                ${(p.short_description || p.description) ? html`
+                  <button
+                    type="button"
+                    onClick=${() => setDescOpen(p.id)}
+                    title="Clique para ver a descrição completa"
+                    class="block w-full text-left text-[13px] mt-2 text-wa-text hover:text-wa-teal cursor-pointer"
+                  >
+                    <span
+                      class="block overflow-hidden"
+                      style="display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;"
+                    >${p.short_description || p.description}</span>
+                    <span class="text-[12px] text-wa-teal mt-0.5 inline-block">ver mais</span>
+                  </button>
                 ` : null}
                 ${(p.dependencies && p.dependencies.length) ? html`
                   <div class="text-[11px] mt-2 text-wa-secondary">
@@ -360,6 +372,33 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
             `)}
           </div>`
       }
+
+      ${descOpen ? (() => {
+        const dp = plugins.find(p => p.id === descOpen);
+        if (!dp) return null;
+        return html`
+          <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center"
+               onClick=${() => setDescOpen(null)}>
+            <div class="bg-wa-bg rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto"
+                 onClick=${e => e.stopPropagation()}>
+              <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between">
+                <div>
+                  <div class="font-medium">${dp.name || dp.id}</div>
+                  <div class="text-[12px] text-wa-secondary">
+                    <code>${dp.id}</code>${dp.version ? html` · v${dp.version}` : null}
+                    ${dp.author ? html` · ${dp.author}` : null}
+                  </div>
+                </div>
+                <button class="text-wa-secondary hover:text-wa-text"
+                        onClick=${() => setDescOpen(null)}>×</button>
+              </div>
+              <div class="p-4 text-[14px] text-wa-text whitespace-pre-line leading-relaxed">
+                ${dp.description || dp.short_description || 'Sem descrição.'}
+              </div>
+            </div>
+          </div>
+        `;
+      })() : null}
 
       ${settingsOpen ? html`
         <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">

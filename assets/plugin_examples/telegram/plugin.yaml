@@ -7,6 +7,8 @@ description: >-
   em um canal "telegram" na tela Canais. Recebe por long-poll (sem host público,
   ideal p/ desktop/EXE) ou por webhook. Construído 100% sobre o ponto de extensão
   de canal — prova do sistema multi-canal dinâmico, sem tocar no core.
+short_description: >-
+  Caixa de entrada do Telegram via Bot API: crie um bot no @BotFather e cole o token num canal 'telegram'. Recebe por long-poll ou webhook, sem tocar no core.
 author: WhatsBot
 entry:
   channels: channels
