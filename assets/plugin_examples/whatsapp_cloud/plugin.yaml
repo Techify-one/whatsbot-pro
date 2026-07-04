@@ -6,6 +6,8 @@ description: >-
   Provider de canal para a WhatsApp Cloud API oficial da Meta (Graph API).
   Adiciona o provider "whatsapp_cloud" à tela Canais do core — sem QR, com
   suporte a templates (HSM) para mensagens fora da janela de 24h.
+short_description: >-
+  Provider de canal para a WhatsApp Cloud API oficial da Meta (Graph API): sem QR e com suporte a templates (HSM) para mensagens fora da janela de 24h.
 author: WhatsBot
 entry:
   channels: channels
