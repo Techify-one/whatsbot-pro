@@ -7,13 +7,11 @@
   "plugin_ids": {
     "save_contact_info": null,
     "set_custom_attribute": null,
-    "transfer_to_human": null,
-    "transferir_agente": null
+    "transfer_to_human": null
   },
   "registered": [
     "save_contact_info",
     "set_custom_attribute",
-    "transfer_to_human",
-    "transferir_agente"
+    "transfer_to_human"
   ]
 }

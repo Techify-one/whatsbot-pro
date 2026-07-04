@@ -381,6 +381,10 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
           <label class="block text-[12px] text-wa-secondary mb-1">Descrição</label>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y" rows="2"
             value=${description} onInput=${(e) => setDescription(e.target.value)}></textarea>
+          <div class="text-[11px] text-wa-secondary mt-1">
+            Usada pelo roteador para decidir o destino da transferência — escreva curto e objetivo
+            (ex.: "Vendas e planos", "Suporte técnico de instalação").
+          </div>
         </div>
 
         <label class="flex items-center gap-2 cursor-pointer">
