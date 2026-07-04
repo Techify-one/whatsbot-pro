@@ -48,12 +48,17 @@ def list_all() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def ensure(name: str, plugin_id: str | None) -> None:
+def ensure(name: str, plugin_id: str | None, *,
+           default_enabled: bool = True) -> None:
     """Insert a default row on the first time a tool is registered.
 
     No-op when a row for ``name`` already exists. Always refreshes ``plugin_id``
     on conflict so a tool moving between core/plugin or between plugins ends up
     pointing at the current source.
+
+    ``default_enabled`` (plano 30 WS2) só vale para a PRIMEIRA criação da row —
+    ``update_cols=['plugin_id']`` garante que rows existentes nunca regridem,
+    então tools off-by-default nascem desligadas apenas em instalação nova.
     """
     now = time.time()
     with get_engine().begin() as conn:
@@ -62,7 +67,7 @@ def ensure(name: str, plugin_id: str | None) -> None:
             {
                 "name": name,
                 "plugin_id": plugin_id,
-                "enabled": 1,
+                "enabled": 1 if default_enabled else 0,
                 "description": None,
                 "display_label": None,
                 "updated_at": now,
@@ -103,6 +108,19 @@ def upsert_override(
 
 # Public name preserved.
 upsert = upsert_override  # type: ignore[assignment]
+
+
+def delete(name: str) -> int:
+    """Remove a row de UMA tool (plano 30 WS3 — delete real de builtin).
+
+    Usado pelo DELETE de builtin tombada: sem isso a row ficaria órfã até o
+    ``delete_orphans`` do próximo boot e a tool ainda apareceria em /api/tools.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(sa_delete(tool_overrides).where(
+            tool_overrides.c.name == name
+        ))
+    return result.rowcount or 0
 
 
 def delete_for_plugin(plugin_id: str) -> int:

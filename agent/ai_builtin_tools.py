@@ -51,6 +51,65 @@ BUILTIN_MODULES: dict[str, types.ModuleType] = {
     "transferir_agente": _m_agent,
 }
 
+# Tools que NASCEM DESLIGADAS numa instalação nova (plano 30 D3/D7). O conjunto
+# é consultado pelos DOIS seeds (``seed_builtin_tools`` → ``ai_tools.enabled`` e
+# ``default_override_enabled`` → ``tool_overrides.enabled``) para os gates nunca
+# divergirem no nascimento. Bancos existentes não são tocados — os seeds só
+# criam rows ausentes.
+OFF_BY_DEFAULT_TOOLS: set[str] = {"transferir_agente"}
+
+# Builtins com delete REAL liberado pela UI (plano 30 WS3/D2 — escopo inicial
+# deliberadamente mínimo; a infra de tombstone generaliza depois se precisar).
+DELETABLE_BUILTINS: set[str] = {"transferir_agente"}
+
+# Tombstone (plano 30 WS3): nomes de builtins DELETADOS pelo operador, em
+# ``config`` como JSON array. Sem ele o boot re-seedaria a tool pelos dois
+# caminhos (seed_builtin_tools re-insere a row ai_tools; register_tool/ensure
+# recria a row tool_overrides). Sem rota de "reinstalar" (D8) — pra voltar,
+# recriar como tool code-in-DB ou remover o nome desta chave direto no banco.
+TOMBSTONE_CONFIG_KEY = "deleted_builtin_tools"
+
+
+def deleted_builtin_tools() -> set[str]:
+    """Nomes de builtins tombados (deletados de verdade pela UI)."""
+    try:
+        from db.repositories import config_repo
+        raw = config_repo.get(TOMBSTONE_CONFIG_KEY, None)
+        if isinstance(raw, list):
+            return {str(n) for n in raw}
+    except Exception as e:  # noqa: BLE001 — leitura best-effort
+        logger.warning("deleted_builtin_tools: leitura falhou (%s)", e)
+    return set()
+
+
+def tombstone_builtin(name: str) -> None:
+    """Marca um builtin como deletado (idempotente)."""
+    from db.repositories import config_repo
+    current = deleted_builtin_tools()
+    if name in current:
+        return
+    config_repo.set(TOMBSTONE_CONFIG_KEY, sorted(current | {name}))
+
+
+def default_override_enabled(name: str) -> bool:
+    """Default de ``tool_overrides.enabled`` na PRIMEIRA criação da row.
+
+    Fora de :data:`OFF_BY_DEFAULT_TOOLS` o default segue ligado. Para as
+    off-by-default, o default espelha a row ``ai_tools`` do momento: numa
+    instalação nova (sem row ainda) nasce OFF; quando o operador ligou a tool
+    pela UI unificada (``ai_tools.enabled=1``) e a row de override foi limpa
+    pelo ``delete_orphans`` enquanto a tool esteve desregistrada, a recriação
+    no boot seguinte respeita a intenção do operador (senão o "ligar" nunca
+    sobreviveria ao restart — os dois gates divergiriam).
+    """
+    if name not in OFF_BY_DEFAULT_TOOLS:
+        return True
+    try:
+        row = tool_repo.get(name)
+        return bool(row and row.get("enabled"))
+    except Exception:  # noqa: BLE001 — nasce OFF em caso de dúvida (D3)
+        return False
+
 
 def _schema_in(namespace: dict, name: str) -> dict | None:
     """Find the OpenAI tool-schema dict for ``name`` in a module namespace.
@@ -102,11 +161,16 @@ def seed_builtin_tools() -> None:
     """Insert the built-in tool rows from the current on-disk source (idempotent).
 
     Only inserts rows that don't exist yet — never overwrites operator edits.
-    Seeded rows start enabled, at version 1, install_status='ok' (the trusted
-    on-disk code is what actually runs until the operator edits it).
+    Seeded rows start at version 1, install_status='ok' (the trusted on-disk
+    code is what actually runs until the operator edits it). Rows start enabled,
+    EXCETO as de :data:`OFF_BY_DEFAULT_TOOLS`, que nascem desligadas (plano 30
+    D3) — vale só para instalações novas, já que rows existentes são puladas.
     """
+    tombstoned = deleted_builtin_tools()
     for name, module in BUILTIN_MODULES.items():
         try:
+            if name in tombstoned:
+                continue  # deletada pelo operador — não ressuscita (plano 30 WS3)
             if tool_repo.get(name) is not None:
                 continue
             source = inspect.getsource(module)
@@ -117,7 +181,7 @@ def seed_builtin_tools() -> None:
                 description=description,
                 code=source,
                 dependencies=[],
-                enabled=True,
+                enabled=name not in OFF_BY_DEFAULT_TOOLS,
                 kind="builtin",
             )
             tool_repo.set_status(name, "ok", None)
@@ -133,7 +197,13 @@ def register_builtin_overrides(handler) -> None:
     ``refresh_tool_overrides``. Disabled rows are unregistered; edited rows
     (version > 1) override the baseline with their DB code (fail-closed).
     """
+    tombstoned = deleted_builtin_tools()
     for name in BUILTIN_MODULES:
+        if name in tombstoned:
+            # Deletada pelo operador (plano 30 WS3): o registro nem aconteceu
+            # (register_tool pula tombstone) — só garante que não sobrou nada.
+            handler.unregister_tool(name)
+            continue
         try:
             row = tool_repo.get(name)
         except Exception as e:  # noqa: BLE001

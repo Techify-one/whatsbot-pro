@@ -454,18 +454,6 @@ class MessagingService:
         settings = self.settings
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        # Resolve the open conversation once so each tool_call card routes to the SAME
-        # thread the reply does. The panel matches ``new_message`` by conversation_id
-        # first, then by (phone, channel_id); WITHOUT these two fields a tool_call card
-        # silently misses the open thread on any non-"default" channel (e.g. Telegram),
-        # since ``channel_id`` defaulted to "default" and there was no conversation_id.
-        # Best-effort — a failed resolve just falls back to the phone-only match.
-        conv_id = None
-        try:
-            _conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact.id)
-            conv_id = _conv["id"] if _conv else None
-        except Exception:
-            logger.debug("[ToolCall] conversation resolve failed for %s", phone)
         for tc in tool_calls:
             tool_name = tc.get("tool", "unknown")
             args = tc.get("args", {})
@@ -481,10 +469,29 @@ class MessagingService:
                 lines.append(f"→ {result.strip()}")
             content = "\n".join(lines)
 
-            contact.add_message("tool_call", content)
-            tc_message = {"role": "tool_call", "content": content, "ts": time.time()}
-            if conv_id is not None:
-                tc_message["conversation_id"] = conv_id
+            # The live payload mirrors the SAVED row (private_note pattern in
+            # server/routes/contacts.py): ``add_message`` resolves the
+            # conversation inbox-aware, so its ``conversation_id`` is the thread
+            # the panel has open. Resolving via ``get_open_for_contact`` here
+            # returned the newest open conversation of ANY channel — with two
+            # open threads the id diverged and the panel dropped the card. The
+            # saved ``ts`` also keeps the panel's ts+role dedupe from colliding.
+            saved = None
+            try:
+                saved = await asyncio.to_thread(
+                    contact.add_message, "tool_call", content)
+            except Exception as e:
+                logger.error("[ToolCall] failed to save tool_call card for %s: %s",
+                             phone, e)
+            tc_message = {
+                "role": "tool_call",
+                "content": content,
+                "ts": (saved or {}).get("ts", time.time()),
+            }
+            if saved and saved.get("conversation_id") is not None:
+                tc_message["conversation_id"] = saved["conversation_id"]
+            if saved and saved.get("id"):
+                tc_message["_id"] = saved["id"]
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
                 "channel_id": channel_id,

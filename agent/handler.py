@@ -129,6 +129,10 @@ class AgentHandler:
         """Names of every tool currently registered (core + plugin)."""
         return self._tools.known_tool_names()
 
+    def is_tool_active(self, name: str) -> bool:
+        """Registrada e não desabilitada por override (entra no schema do LLM)."""
+        return self._tools.is_tool_active(name)
+
     def refresh_tool_overrides(self) -> None:
         """Re-read ``tool_overrides`` and rebuild the effective tool schemas."""
         self._tools.refresh_tool_overrides()
