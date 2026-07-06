@@ -6,9 +6,12 @@ the handler/engine consume.
 
 There is **no legacy path** anymore: :func:`build_for_contact` always resolves an
 :class:`AgentSpec` via a cascade (bound agent → default agent → in-code seed
-constants). It only raises :class:`AgentResolutionError` when the database is
-genuinely broken — the handler then isolates the failure to that one
-conversation (logs + a painel-only error card) without ever messaging the client.
+constants) and, as a last resort, an in-code **emergency floor**
+(:func:`_emergency_spec`). A malformed/duplo-codified DB row therefore *degrades*
+to a usable default (logged at ERROR) instead of taking the whole AI service down.
+It only raises :class:`AgentResolutionError` in the practically-impossible case
+where even the emergency floor cannot be constructed — the handler then isolates
+that one conversation (logs + a painel-only error card) without messaging the client.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from dataclasses import dataclass, field
 from db.repositories import (
     agent_repo, variable_repo, conversation_repo, inbox_repo,
 )
+from db.repositories._mapping import coerce_json
 from ai_engine import dynamic_registry
 
 logger = logging.getLogger(__name__)
@@ -52,11 +56,14 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class AgentResolutionError(Exception):
-    """Raised when no agent can be resolved for a contact (broken DB).
+    """Raised only when even the emergency floor cannot be built (last resort).
 
-    This is the rare, genuinely-broken case. The handler catches it, logs, writes
-    a painel-only error card to the affected conversation, and sends nothing to
-    the client — so one broken conversation never takes the whole service down.
+    Since plano 34 F2, a missing/disabled default agent or a malformed DB row no
+    longer raises — :func:`build_for_contact` degrades to :func:`_emergency_spec`
+    (logged at ERROR). This exception now signals the practically-impossible case
+    where constructing the floor itself fails. The handler still catches it, logs,
+    writes a painel-only error card, and sends nothing to the client — so one
+    broken conversation never takes the whole service down.
     """
 
 
@@ -71,6 +78,36 @@ class AgentSpec:
     @property
     def model(self) -> str | None:
         return self.model_config.get("model") or None
+
+
+def _emergency_spec() -> AgentSpec:
+    """Last-resort :class:`AgentSpec` built purely from the in-code seed constants.
+
+    Used by :func:`build_for_contact` when the DB row is missing/disabled or a
+    field is corrupt beyond recovery — so the AI still answers (degraded) instead
+    of the whole service going silent. Mirrors the happy-path ``model_config``
+    shape (``_agent_key``/``_hooks_config``) the engine expects.
+    """
+    return AgentSpec(
+        agent_key=DEFAULT_AGENT_KEY,
+        base_prompt=DEFAULT_SYSTEM_PROMPT,
+        model_config={
+            "model": DEFAULT_MODEL,
+            "_agent_key": DEFAULT_AGENT_KEY,
+            "_hooks_config": {},
+        },
+        tool_names=None,
+    )
+
+
+def _coerce_dict(value) -> dict:
+    """Tolerant container coercion: dict-ready OR JSON string → ``dict``, else ``{}``.
+
+    Reuses :func:`coerce_json` (N-layer, plano 34 F1) so a duplo-codified value
+    degrades in place instead of blowing up ``dict("...string...")``.
+    """
+    coerced = coerce_json(value, {})
+    return dict(coerced) if isinstance(coerced, dict) else {}
 
 
 def render_template(body: str, variables: dict[str, str]) -> str:
@@ -254,16 +291,22 @@ def build_for_contact(handler, contact) -> AgentSpec:
     """Resolve the DB-driven agent for a request. Always returns an ``AgentSpec``.
 
     Cascade: bound agent (conversation→inbox) → default agent → in-code seed
-    constants for any missing prompt/model. Raises :class:`AgentResolutionError`
-    only when nothing resolves (the default agent itself is missing/disabled, i.e.
-    a genuinely broken DB) — the handler isolates that to one conversation.
+    constants for any missing prompt/model → in-code **emergency floor**
+    (:func:`_emergency_spec`) when the default row is missing/disabled or a field
+    is corrupt beyond recovery (logged at ERROR). Raises :class:`AgentResolutionError`
+    only if even the emergency floor cannot be built — the handler isolates that
+    to one conversation.
     """
     try:
         agent = _resolve_active_agent(contact)
         if not agent or not agent.get("enabled"):
-            raise AgentResolutionError(
-                "agente default ausente ou desativado (banco inconsistente)"
+            # Piso de emergência (plano 34 F2): banco inconsistente NÃO derruba o
+            # atendimento — degrada para o AgentSpec default e loga alto e claro.
+            logger.error(
+                "AI engine: agente default ausente/desativado (banco inconsistente) "
+                "— usando piso de emergência"
             )
+            return _emergency_spec()
 
         body = agent.get("prompt") or ""
         if not body:
@@ -290,23 +333,39 @@ def build_for_contact(handler, contact) -> AgentSpec:
                 logger.warning(
                     "AI engine: seção de destinos do roteador falhou (%s)", e)
 
-        model_config = dict(agent.get("model_config") or {})
+        # Coerção tolerante do container (plano 34 F2): aceita dict pronto OU
+        # string JSON (duplo-codificada) via coerce_json, caindo em {} — assim um
+        # campo sujo degrada aqui em vez de estourar no dict(...).
+        model_config = _coerce_dict(agent.get("model_config"))
         if not model_config.get("model"):
             model_config["model"] = DEFAULT_MODEL
         # Let the model factory resolve per-agent tuning vars ({param}_{agent_key}).
         model_config["_agent_key"] = agent["agent_key"]
         # Declarative tool hooks (call_limit/requires_prior_call) enforced in the
         # AGNO entrypoint. Carried on model_config; the engine strips it out.
-        model_config["_hooks_config"] = agent.get("hooks_config") or {}
+        model_config["_hooks_config"] = _coerce_dict(agent.get("hooks_config"))
+
+        # tool_names: lista OU None (None = todas as tools). Coage string suja
+        # para None em vez de deixar o consumidor iterar caractere a caractere.
+        tool_names = coerce_json(agent.get("tool_names"), None)
+        if tool_names is not None and not isinstance(tool_names, list):
+            tool_names = None
 
         return AgentSpec(
             agent_key=agent["agent_key"],
             base_prompt=rendered,
             model_config=model_config,
-            tool_names=agent.get("tool_names"),
+            tool_names=tool_names,
         )
     except AgentResolutionError:
         raise
     except Exception as e:
-        logger.error("AI engine: build_for_contact failed (%s)", e)
-        raise AgentResolutionError(str(e)) from e
+        # Piso de emergência (plano 34 F2): qualquer falha inesperada de resolução
+        # degrada para o AgentSpec default em vez de silenciar o atendimento. Só
+        # levanta se nem o próprio piso puder ser construído (praticamente
+        # impossível) — mantendo a porta de "banco genuinamente quebrado".
+        logger.error("AI engine: build_for_contact failed (%s) — piso de emergência", e)
+        try:
+            return _emergency_spec()
+        except Exception:  # noqa: BLE001
+            raise AgentResolutionError(str(e)) from e

@@ -29,6 +29,28 @@ from plugins.restart import schedule_restart
 logger = logging.getLogger(__name__)
 
 
+def _coerce_agent_json_fields(row: dict) -> dict:
+    """Coage os campos JSON de um agente vindo do DB para tipos limpos (plano 34 F3).
+
+    Tolera linhas duplo-codificadas via ``coerce_json`` (N-camadas): usado no
+    patch-só-prompt (``save_agent_prompt``) para NUNCA repassar uma string crua ao
+    ``save()`` — o que gerava tripla codificação sobre uma linha já suja. As duas
+    rotas de gravação (``save_agent`` valida a entrada do usuário; esta saneia a
+    linha do DB) deixam de divergir no tratamento desses campos.
+    """
+    from db.repositories._mapping import coerce_json
+    mc = coerce_json(row.get("model_config"), {})
+    hc = coerce_json(row.get("hooks_config"), {})
+    tn = coerce_json(row.get("tool_names"), None)
+    rt = coerce_json(row.get("routing_targets"), None)
+    return {
+        "model_config": mc if isinstance(mc, dict) else {},
+        "hooks_config": hc if isinstance(hc, dict) else {},
+        "tool_names": tn if isinstance(tn, list) else None,
+        "routing_targets": rt if isinstance(rt, list) else None,
+    }
+
+
 def _emit_changed(kind: str, key: str) -> None:
     # Clear the config cache first so the very next message sees the edit, then
     # broadcast for any other listeners (plugins, multi-worker invalidation).
@@ -118,18 +140,21 @@ def register_routes(app, deps):
         existing = await asyncio.to_thread(agent_repo.get, agent_key)
         if not existing:
             return _err("Agente não encontrado.", status=404)
+        # Plano 34 F3: saneia os campos JSON da linha existente antes de repassá-los
+        # ao save() — uma linha suja não pode virar tripla codificação neste patch.
+        clean = _coerce_agent_json_fields(existing)
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
             display_name=existing.get("display_name") or "",
             prompt=body.get("prompt", ""),
             prompt_key=existing.get("prompt_key", ""),
-            model_config=existing.get("model_config") or {},
-            tool_names=existing.get("tool_names"),
+            model_config=clean["model_config"],
+            tool_names=clean["tool_names"],
             enabled=bool(existing.get("enabled", True)),
             description=existing.get("description", ""),
             is_router=bool(existing.get("is_router", False)),
-            routing_targets=existing.get("routing_targets"),
-            hooks_config=existing.get("hooks_config") or {},
+            routing_targets=clean["routing_targets"],
+            hooks_config=clean["hooks_config"],
             change_note=body.get("change_note"),
         )
         _emit_changed("agent", agent_key)
