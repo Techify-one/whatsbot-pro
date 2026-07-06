@@ -94,7 +94,8 @@ def set_status(channel_id: str, **fields) -> dict | None:
         conn.execute(
             sa_update(channels).where(channels.c.id == channel_id).values(**values)
         )
-    # own_phone / gowa_device_id / enabled feed the device→channel index.
+    # own_phone / gowa_device_id / enabled feed the device→channel index; the
+    # status sweep (plano 32 F4) writes own_phone/account_identity here.
     invalidate_device_cache()
     return get(channel_id)
 
@@ -153,8 +154,8 @@ def get_gowa_channel_for_device(session_id: str | None = None,
 
     Prefers ``session_id`` (the registered device string — stable and available even
     before login); falls back to the receiving number (``device_jid`` → digits)
-    matched against the channel's ``own_phone`` (set by the status poll once logged
-    in). Best-effort: ``None`` lets the caller keep the URL's channel (legacy
+    matched against the channel's ``own_phone`` (persisted by the status sweep once
+    logged in — plano 32 F4). Best-effort: ``None`` lets the caller keep the URL's channel (legacy
     behaviour), so this never makes routing worse.
     """
     m = _device_map()
