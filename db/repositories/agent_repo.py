@@ -1,9 +1,14 @@
 """Repository for ``ai_agents`` (config-in-DB agent definitions).
 
 One row per agent; in the single-agent MVP there is exactly one (``default``).
-``model_config`` and ``tool_names`` are stored as JSON-encoded TEXT and decoded
-on read. Every ``save`` bumps ``version`` and writes a snapshot to
-``ai_agents_history`` for rollback / change trail.
+The JSON columns (``model_config``/``tool_names``/``routing_targets``/
+``hooks_config``) are **native JSONB** (plano 34 F5): the repo hands the DB a
+native ``dict``/``list`` and SQLAlchemy serializes it exactly once — no manual
+``json.dumps`` — which structurally rules out the double-encoding that broke
+agent resolution. Reads still pass through ``coerce_json`` defensively (a no-op
+on the native value, and a last-resort peeler for any legacy dirty row).
+Every ``save`` bumps ``version`` and writes a snapshot to ``ai_agents_history``
+for rollback / change trail.
 """
 
 from __future__ import annotations
@@ -34,24 +39,25 @@ def _decode_json(value, fallback):
     return coerce_json(value, fallback)
 
 
-def _dump_json_field(value, default):
-    """Serialize a dict/list column to TEXT **exactly once** (plano 34 F3).
+def _native_json_field(value, default):
+    """Normalize a JSON column value to a **native** dict/list for a JSONB column.
 
-    Tolerates a value that arrived already-encoded as a JSON string: ``coerce_json``
-    (N-layer) peels it back to the object before we re-serialize, so a dirty caller
-    can never produce a double/triple-encoded row. ``default`` steers the empty case
-    (``{}`` for model_config/hooks_config, ``None`` for tool_names/routing_targets →
-    SQL NULL). On the happy path (a clean dict/list) the output is byte-identical to
-    the previous ``json.dumps(value or default)``.
+    Plano 34 F5: the columns are native JSONB now, so we hand SQLAlchemy the raw
+    object and let it serialize **exactly once** — never ``json.dumps`` here (that
+    would store a JSON *string* in the JSONB column, re-introducing the double
+    encoding). ``coerce_json`` (N-layer) still runs as a guard: a caller that passes
+    an already-encoded string gets peeled back to the object before it reaches the
+    DB. ``default`` steers the empty case (``{}`` for model_config/hooks_config,
+    ``None`` for tool_names/routing_targets → SQL NULL).
     """
-    coerced = coerce_json(value, default)
-    if coerced is None:
-        return None
-    return json.dumps(coerced, ensure_ascii=False)
+    return coerce_json(value, default)
 
 
 def _row_to_dict(row) -> dict:
     d = dict(row)
+    # JSONB (F5): psycopg already returns native dict/list, so coerce_json is a
+    # no-op passthrough here — kept as a last-resort peeler for any legacy row
+    # still holding a JSON-encoded string (defense in depth).
     d["model_config"] = coerce_json(d.get("model_config"), {})
     d["tool_names"] = coerce_json(d.get("tool_names"), None)
     d["routing_targets"] = coerce_json(d.get("routing_targets"), None)
@@ -101,8 +107,8 @@ def ensure(
         "display_name": display_name,
         "prompt": prompt,
         "prompt_key": prompt_key,
-        "model_config": _dump_json_field(model_config, {}),
-        "tool_names": _dump_json_field(tool_names, None),
+        "model_config": _native_json_field(model_config, {}),
+        "tool_names": _native_json_field(tool_names, None),
         "enabled": 1 if enabled else 0,
         "version": 1,
         "updated_at": now,
@@ -163,13 +169,13 @@ def save(
         "display_name": display_name,
         "prompt": prompt or "",
         "prompt_key": prompt_key or "",
-        "model_config": _dump_json_field(model_config, {}),
-        "tool_names": _dump_json_field(tool_names, None),
+        "model_config": _native_json_field(model_config, {}),
+        "tool_names": _native_json_field(tool_names, None),
         "enabled": 1 if enabled else 0,
         "description": description or "",
         "is_router": 1 if is_router else 0,
-        "routing_targets": _dump_json_field(routing_targets, None),
-        "hooks_config": _dump_json_field(hooks_config, {}),
+        "routing_targets": _native_json_field(routing_targets, None),
+        "hooks_config": _native_json_field(hooks_config, {}),
         "version": version,
         "updated_at": now,
     }
