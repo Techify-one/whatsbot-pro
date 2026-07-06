@@ -4324,6 +4324,79 @@ check("send (cloud com inbound recente) -> 200 dentro da janela", r.status_code 
 r = client.post("/api/contacts/5511999990001/send", json={"message": "gowa livre"})
 check("send (gowa) -> não bloqueado pela janela 24h", r.status_code == 200)
 
+# ═══════════════════════════════════════════════════════════════════
+#  Account-identity dedup (plano 32) — create/update 409 enforcement
+# ═══════════════════════════════════════════════════════════════════
+section("Account-identity dedup (plano 32)")
+
+# The cloud/telegram plugins are DISABLED in the hermetic test app, so their
+# provider classes aren't registered — register them into the live registry now
+# (as production does when they're enabled) to exercise the generic dedup
+# enforcement end to end. Appended at the very end so it can't affect earlier tests.
+import importlib.util as _p32_ilu
+
+
+def _p32_load_provider(prov, clsname):
+    p = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov / "channels.py"
+    spec = _p32_ilu.spec_from_file_location(f"_p32_{prov}", p)
+    m = _p32_ilu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return getattr(m, clsname)
+
+
+_p32_reg = app.state.deps.channel_registry
+_p32_reg.register_provider(_p32_load_provider("whatsapp_cloud", "WhatsAppCloudChannel"))
+_p32_reg.register_provider(_p32_load_provider("telegram", "TelegramChannel"))
+
+# whatsapp_cloud: two channels with the same phone_number_id -> 409
+_p32_cloud = {"access_token": "tokA", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_a", "provider": "whatsapp_cloud", "display_name": "Cloud A",
+    "credentials": _p32_cloud})
+check("dedup: 1º cloud (phone_number_id novo) -> 200", r.status_code == 200)
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_b", "provider": "whatsapp_cloud", "display_name": "Cloud B",
+    "credentials": {"access_token": "tokB", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
+check("dedup: 2º cloud mesmo phone_number_id -> 409", r.status_code == 409)
+
+# Different phone_number_id -> OK
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_c", "provider": "whatsapp_cloud", "display_name": "Cloud C",
+    "credentials": {"access_token": "tokC", "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
+check("dedup: cloud phone_number_id diferente -> 200", r.status_code == 200)
+
+# telegram: same bot_id (parsed from {bot_id}:{hash}) -> 409
+r = client.post("/api/channels", json={
+    "id": "p32_tg_a", "provider": "telegram", "display_name": "TG A",
+    "credentials": {"bot_token": "700700:AAA"}})
+check("dedup: 1º telegram (bot novo) -> 200", r.status_code == 200)
+r = client.post("/api/channels", json={
+    "id": "p32_tg_b", "provider": "telegram", "display_name": "TG B",
+    "credentials": {"bot_token": "700700:BBB"}})  # same bot_id 700700
+check("dedup: 2º telegram mesmo bot_id -> 409", r.status_code == 409)
+
+# Same numeric value across DIFFERENT providers/kinds is NOT a duplicate.
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_num", "provider": "whatsapp_cloud", "display_name": "Cloud Num",
+    "credentials": {"access_token": "tokN", "phone_number_id": "700700", "verify_token": "vtN"}})
+check("dedup: mesmo valor em provider/kind diferente -> 200 (não é duplicata)",
+      r.status_code == 200)
+
+# PUT edit-to-collide: change Cloud C's phone_number_id to the one Cloud A owns -> 409
+r = client.put("/api/channels/p32_cloud_c",
+               json={"credentials": {"phone_number_id": "PN_DEDUP_1"}})
+check("dedup: PUT editar credencial para colidir -> 409", r.status_code == 409)
+
+# PUT an unrelated field (no credential change) -> not blocked
+r = client.put("/api/channels/p32_cloud_c", json={"display_name": "Cloud C renomeado"})
+check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
+
+# PUT to the channel's OWN identity is not a self-conflict
+r = client.put("/api/channels/p32_cloud_c",
+               json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
+check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+
+
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")
 print(f"{'='*60}")
