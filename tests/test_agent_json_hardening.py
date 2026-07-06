@@ -23,6 +23,7 @@ Histórico de fases:
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -141,6 +142,80 @@ check("build_for_contact NÃO levanta (degrada p/ default)", not raised)
 check("cai no DEFAULT_MODEL quando não recupera",
       spec is not None and spec.model == agent_factory.DEFAULT_MODEL)
 
+_reset_default_clean()
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _with_error_log(fn):
+    """Roda ``fn`` capturando ERRORs do logger de agent_factory."""
+    cap = _LogCapture()
+    lg = logging.getLogger("agent.agent_factory")
+    lg.addHandler(cap)
+    try:
+        result = fn()
+    finally:
+        lg.removeHandler(cap)
+    return result, cap.records
+
+
+# ── F2: hooks_config duplo-codificado → coerção tolerante, sem raise ──────
+print("\nF2 — hooks_config duplo-codificado:")
+_write_raw(agent_repo.DEFAULT_AGENT_KEY, "hooks_config",
+           _double_encode({"transferir_agente": {"call_limit": 2}}))
+raised = False
+try:
+    spec = agent_factory.build_for_contact(handler, contact)
+except agent_factory.AgentResolutionError:
+    raised = True
+    spec = None
+check("build_for_contact NÃO levanta com hooks_config duplo", not raised)
+check("hooks_config recuperado no _hooks_config",
+      spec is not None
+      and spec.model_config.get("_hooks_config") == {"transferir_agente": {"call_limit": 2}})
+_reset_default_clean()
+
+# ── F2: routing_targets duplo-codificado → sem raise ──────────────────────
+print("\nF2 — routing_targets duplo-codificado (roteador):")
+agent_repo.save("triagem34", display_name="Triagem", prompt="Você é a triagem.",
+                model_config={"model": "t/t"}, tool_names=None, enabled=True,
+                is_router=True, routing_targets=["vendas"])
+_write_raw("triagem34", "routing_targets", _double_encode(["vendas", "suporte"]))
+# vincula o contato ao roteador para exercer a leitura de routing_targets
+_conv = conversation_repo.get_open_for_contact(c["id"])
+conversation_repo.set_agent(_conv["id"], "triagem34")
+dynamic_registry.invalidate()
+raised = False
+try:
+    spec = agent_factory.build_for_contact(handler, contact)
+except agent_factory.AgentResolutionError:
+    raised = True
+    spec = None
+check("build_for_contact NÃO levanta com routing_targets duplo", not raised)
+check("resolveu o roteador triagem34", spec is not None and spec.agent_key == "triagem34")
+# volta o contato para o default e limpa
+conversation_repo.set_agent(_conv["id"], None)
+_reset_default_clean()
+
+# ── F2: agente default desativado → piso de emergência + logger.error ─────
+print("\nF2 — agente default desativado → piso de emergência:")
+with get_engine().begin() as conn:
+    conn.execute(update(ai_agents)
+                 .where(ai_agents.c.agent_key == agent_repo.DEFAULT_AGENT_KEY)
+                 .values(enabled=0))
+dynamic_registry.invalidate()
+(spec, records) = _with_error_log(lambda: agent_factory.build_for_contact(handler, contact))
+check("piso: retorna AgentSpec (não levanta)", spec is not None)
+check("piso: agent_key = default", spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)
+check("piso: usa DEFAULT_MODEL", spec is not None and spec.model == agent_factory.DEFAULT_MODEL)
+check("piso: emite logger.error", any(r.levelno == logging.ERROR for r in records))
 _reset_default_clean()
 
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
