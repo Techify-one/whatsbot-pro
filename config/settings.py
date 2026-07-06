@@ -127,6 +127,10 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("transfer_alert_duration", default=5, exposed=True, writable=True),
     # max_executions is NOT seeded (no DEFAULT_CONFIG entry); GET falls back to 200.
     ConfigKey("max_executions", exposed=True, get_default=200, writable=True),
+    # audit_retention_days: dias de retenção da trilha de auditoria (lido por
+    # server.background.audit_purge_loop). NÃO seedado; GET cai em 365. Antes
+    # faltava aqui, então o campo do ConfigPanel nunca persistia (era inerte).
+    ConfigKey("audit_retention_days", exposed=True, get_default=365, writable=True),
     ConfigKey("default_ai_enabled", default=True, exposed=True, writable=True),
     # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
     # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —

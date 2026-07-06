@@ -15,11 +15,13 @@ import htm from 'htm';
 import {
   listAgents,
   saveAgent,
+  saveAgentPrompt,
   deleteAgent,
   getAgentHistory,
   rollbackAgent,
   listRegisteredTools,
 } from '../../services/api.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { ModelSelect } from '../ModelSelect.js';
 import { MarkdownEditor } from '../MarkdownEditor.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
@@ -132,7 +134,7 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, onOpenPromptHistory }) {
+function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, onCancel, busy, onOpenPromptHistory, canConfig, canPrompts }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
@@ -195,6 +197,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
   // be empty (it is the fallback every other agent inherits). Other agents may
   // leave it blank to fall back to the app default.
   const isDefault = !isNew && agent.agent_key === 'default';
+  // Prompts-only: usuário com agent.prompts.manage mas SEM agent.config.manage
+  // edita apenas o prompt (endpoint dedicado). A config do agente fica oculta.
+  const promptOnly = !canConfig && canPrompts;
 
   function toggleTool(name) {
     setToolNames(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
@@ -216,9 +221,11 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
     return out;
   }
 
-  const canSave = !busy && displayName.trim()
-    && (isNew ? (trimmedKey && !keyErr) : true)
-    && (!isDefault || !!model.trim());
+  const canSave = promptOnly
+    ? !busy
+    : (!busy && displayName.trim()
+        && (isNew ? (trimmedKey && !keyErr) : true)
+        && (!isDefault || !!model.trim()));
 
   // Step 1 — a save button opens the confirmation modal for that mode.
   function requestSave(mode) {
@@ -231,18 +238,23 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
   function confirmSave() {
     if (!canSave || !pendingMode) return;
     const finalKey = isNew ? trimmedKey : agent.agent_key;
-    onSave(finalKey, {
-      display_name: displayName.trim(),
-      prompt: prompt,
-      change_note: changeNote.trim() || null,
-      version_mode: pendingMode,
-      model_config: buildModelConfig(),
-      tool_names: allTools ? null : toolNames,
-      enabled,
-      description: description.trim(),
-      is_router: isRouter,
-      routing_targets: isRouter ? routingTargets : null,
-    });
+    if (promptOnly) {
+      // Sem agent.config.manage: salva apenas o prompt (endpoint dedicado).
+      onSavePrompt(finalKey, prompt);
+    } else {
+      onSave(finalKey, {
+        display_name: displayName.trim(),
+        prompt: prompt,
+        change_note: changeNote.trim() || null,
+        version_mode: pendingMode,
+        model_config: buildModelConfig(),
+        tool_names: allTools ? null : toolNames,
+        enabled,
+        description: description.trim(),
+        is_router: isRouter,
+        routing_targets: isRouter ? routingTargets : null,
+      });
+    }
     setChangeNote('');
     setPendingMode(null);
   }
@@ -274,29 +286,37 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
+          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] disabled:opacity-60"
+            type="text" value=${displayName} disabled=${!canConfig}
+            onInput=${(e) => setDisplayName(e.target.value)} />
         </div>
 
         <div>
           <div class="flex items-center justify-between mb-1 gap-2">
             <label class="block text-[12px] text-wa-secondary">Prompt do agente</label>
-            <button type="button"
-              class="px-2 py-1 rounded-md text-[11px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
-              disabled=${isNew}
-              title=${isNew ? 'Salve o agente para começar a versionar o prompt.' : 'Ver versões do prompt'}
-              onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
+            ${canPrompts ? html`
+              <button type="button"
+                class="px-2 py-1 rounded-md text-[11px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
+                disabled=${isNew}
+                title=${isNew ? 'Salve o agente para começar a versionar o prompt.' : 'Ver versões do prompt'}
+                onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
+            ` : null}
           </div>
-          <${MarkdownEditor}
-            value=${prompt}
-            onChange=${setPrompt}
-            placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis." />
-          <div class="text-[11px] text-wa-secondary mt-1">
-            Edite o texto já formatado (negrito, listas, títulos) usando a barra de ferramentas — não precisa escrever markdown na mão. Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
-          </div>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[13px] mt-2"
-            type="text" placeholder="Descreva a mudança do prompt (opcional)"
-            value=${changeNote} onInput=${(e) => setChangeNote(e.target.value)} />
+          ${canPrompts ? html`
+            <${MarkdownEditor}
+              value=${prompt}
+              onChange=${setPrompt}
+              placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis." />
+            <div class="text-[11px] text-wa-secondary mt-1">
+              Edite o texto já formatado (negrito, listas, títulos) usando a barra de ferramentas — não precisa escrever markdown na mão. Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
+            </div>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[13px] mt-2"
+              type="text" placeholder="Descreva a mudança do prompt (opcional)"
+              value=${changeNote} onInput=${(e) => setChangeNote(e.target.value)} />
+          ` : html`
+            <div class="wa-field w-full px-3 py-2 rounded-md text-[13px] whitespace-pre-wrap max-h-48 overflow-y-auto opacity-80">${prompt || '(sem prompt — usa o padrão do app)'}</div>
+            <div class="text-[11px] text-wa-secondary mt-1">Você não tem permissão para editar o prompt (agent.prompts.manage).</div>
+          `}
           ${placeholders.length > 0 ? html`
             <div class="mt-2">
               <div class="text-[11px] text-wa-secondary mb-1">Placeholders detectados (resolvidos pela aba <span class="font-medium">Variáveis</span>)</div>
@@ -309,6 +329,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
           ` : null}
         </div>
 
+        ${canConfig ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Modelo${isDefault ? ' (obrigatório)' : ''}</label>
           <${ModelSelect}
@@ -422,6 +443,11 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
               `}
           </div>
         ` : null}
+        ` : html`
+          <div class="text-[12px] text-wa-secondary bg-wa-panel border border-wa-border rounded-md px-3 py-2">
+            Você não tem permissão para editar a configuração do agente (modelo, tools, roteamento) — edição limitada ao prompt.
+          </div>
+        `}
 
         <div class="flex gap-2 justify-end items-center">
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
@@ -429,6 +455,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
           ${isNew ? html`
             <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
               onClick=${() => requestSave('amend')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+          ` : promptOnly ? html`
+            <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick=${() => requestSave('new')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar prompt'}</button>
           ` : html`
             <div class="relative flex">
               <button class="px-4 py-2 rounded-l-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
@@ -484,7 +513,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onCancel, busy, 
   `;
 }
 
-export default function AgentsManager({ initialEntity }) {
+export default function AgentsManager({ initialEntity, currentUser }) {
+  const canConfig = hasPermission(currentUser, 'agent.config.manage');
+  const canPrompts = hasPermission(currentUser, 'agent.prompts.manage');
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -585,6 +616,15 @@ export default function AgentsManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao salvar o agente.');
   }
 
+  // Prompts-only (sem agent.config.manage): salva só o prompt via endpoint dedicado.
+  async function handleSavePrompt(key, prompt) {
+    setBusy(true); setError('');
+    const res = await saveAgentPrompt(key, prompt);
+    setBusy(false);
+    if (res && res.ok) { setEditing(null); setCreating(null); load(); }
+    else setError((res && res.error) || 'Falha ao salvar o prompt.');
+  }
+
   function startDuplicate(a) {
     // Strip identity / versioning; keep the config so every field is pre-filled.
     const { agent_key, version, updated_at, ...rest } = a;
@@ -630,7 +670,7 @@ export default function AgentsManager({ initialEntity }) {
           Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
           na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
         </p>
-        ${!formOpen ? html`
+        ${!formOpen && canConfig ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
             onClick=${() => { setCreating(true); setEditing(null); setError(''); }}>+ Novo agente</button>
         ` : null}
@@ -642,14 +682,16 @@ export default function AgentsManager({ initialEntity }) {
         ${creating ? html`
           <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
             existingKeys=${agents.map(a => a.agent_key)}
-            tools=${tools}
-            onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
+            tools=${tools} canConfig=${canConfig} canPrompts=${canPrompts}
+            onSave=${handleSave} onSavePrompt=${handleSavePrompt}
+            onCancel=${() => setCreating(null)} busy=${busy} />
         ` : null}
 
         ${editing ? html`
           <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-            tools=${tools}
-            onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy}
+            tools=${tools} canConfig=${canConfig} canPrompts=${canPrompts}
+            onSave=${handleSave} onSavePrompt=${handleSavePrompt}
+            onCancel=${() => setEditing(null)} busy=${busy}
             onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
         ` : null}
       </div>

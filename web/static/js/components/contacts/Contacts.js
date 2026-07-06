@@ -18,6 +18,7 @@ import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
 import { useChannelPicker } from './hooks/useChannelPicker.js';
 import { useConversationWsEvents } from './hooks/useConversationWsEvents.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -222,6 +223,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
   const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
   const handleToggleAutoReply = useCallback(async (newValue) => {
@@ -327,7 +329,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 setContactData=${setContactData}
                 info=${info}
                 contact=${contactData}
-                onAvatarClick=${() => selected && setOpenPanel('contact')}
+                onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
                 currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
@@ -338,7 +340,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 onScrolledToMsg=${() => setScrollToMsg(null)}
               />`
           }
-          ${openPanel === 'contact' && selected ? html`
+          ${openPanel === 'contact' && selected && canReadContact ? html`
             <${ContactInfoPanel}
               phone=${selected}
               currentUser=${currentUser}
@@ -365,7 +367,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               phone=${selected}
               conversationId=${selectedConvId}
               onClose=${() => setOpenPanel(null)}
-              onOpenContactInfo=${() => selected && setOpenPanel('contact')}
+              onOpenContactInfo=${canReadContact ? () => selected && setOpenPanel('contact') : null}
               contactInfo=${info}
               convAttrPatch=${convAttrPatch}
             />
