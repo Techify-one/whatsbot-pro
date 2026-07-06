@@ -167,7 +167,8 @@ class ContactMemory:
         suffix = "g.us" if self.is_group else "s.whatsapp.net"
         return f"{self.phone}@{suffix}"
 
-    def _resolve_conversation(self, role: str) -> tuple[dict | None, int | None, str | None]:
+    def _resolve_conversation(self, role: str, *,
+                              reopen: bool | None = None) -> tuple[dict | None, int | None, str | None]:
         """Resolve (idempotent get-or-create + reopen-if-closed) the atendimento
         thread for a save. PURE — no side effects, so the caller decides WHEN the
         lifecycle reactions run (``add_message`` keeps them AFTER the INSERT,
@@ -187,8 +188,12 @@ class ContactMemory:
             # ('user') opens an 'inbound' conversation (shows on the sidebar at t=0
             # via the origin gate); anything else (AI/operator/panel-only) is 'outbound'.
             origin = "inbound" if role == "user" else "outbound"
+            # reopen=None → regra padrão (user/assistant reabrem; painel-only não). Um caller
+            # pode forçar reopen=False p/ NÃO reabrir uma conversa fechada (ex.: a mensagem
+            # de avaliação enviada no FECHAR do protocolo não deve reabrir o atendimento).
+            reopen_closed = (role in ("user", "assistant")) if reopen is None else bool(reopen)
             conv, transition = conversation_repo.resolve_for_contact_ex(
-                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
+                self.id, self._jid(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin)
             return conv, conv["id"], transition
         except Exception:
@@ -230,14 +235,15 @@ class ContactMemory:
                     status: str | None = None, msg_id: str | None = None,
                     reply_to_msg_id: str | None = None,
                     sent_by_user_id: int | None = None,
-                    sent_by_name: str | None = None) -> dict:
+                    sent_by_name: str | None = None,
+                    reopen: bool | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
         # tocar webhook.py. plano 25 Fase 2: the resolve is now a shared helper (also
         # used by the ingest's ensure_conversation_live); the lifecycle reactions stay
         # AFTER the INSERT — byte-identical ordering for any save not preceded by an
         # ingest materialization (user message row first, then the created notice card).
-        conv, conversation_id, transition = self._resolve_conversation(role)
+        conv, conversation_id, transition = self._resolve_conversation(role, reopen=reopen)
         saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,

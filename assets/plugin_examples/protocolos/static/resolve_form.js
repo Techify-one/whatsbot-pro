@@ -4,15 +4,13 @@
 // Preact/htm via importmap; cores wa-*/.wa-field (modo escuro).
 
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
-// Componente core que renderiza UM atributo personalizado por tipo (text/number/
-// date/list/checkbox/link), dark-mode-safe. Reusado aqui p/ os atributos do core
-// não-espelho (is_system=0) — mesma aparência da aba "Informações do atendimento".
-import { CustomAttributeField } from '/static/js/components/contacts/CustomAttributeField.js';
 // Seletor de lista PADRÃO do app (busca sempre visível + "Limpar seleção"), compartilhado
 // com os atributos do core e a barra de filtros — um único componente, um só padrão.
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
+// Lista de atendentes atribuíveis (mesma de "Atribuir atendente") p/ o tipo "atendente".
+import { getAssignableAgents } from '/static/js/services/api.js';
 
 const html = htm.bind(h);
 
@@ -21,9 +19,40 @@ const html = htm.bind(h);
 export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
   || (d.type === 'select' && d.multiple)));
 
+// Cache module-level dos atendentes atribuíveis (lista pequena, reusada em vários campos).
+let _assignableUsers = null;
+
+// Seletor de ATENDENTE nativo: os mesmos usuários de "Atribuir atendente" + "Não atribuído".
+// value = uid (número) ou vazio quando não atribuído; onChange devolve number|null.
+export function AttendantSelect({ value, onChange, fallbackUser = null }) {
+  const [users, setUsers] = useState(_assignableUsers || []);
+  useEffect(() => {
+    if (_assignableUsers) return undefined;
+    let alive = true;
+    getAssignableAgents().then((r) => {
+      if (alive && r && r.ok && r.data) { _assignableUsers = r.data.users || []; setUsers(_assignableUsers); }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const cur = value == null ? '' : String(value);
+  const hasCur = cur === '' || users.some((u) => String(u.id) === cur);
+  const extra = (!hasCur && fallbackUser && fallbackUser.id != null)
+    ? [{ id: fallbackUser.id, name: fallbackUser.name || fallbackUser.email || ('#' + fallbackUser.id), email: fallbackUser.email }]
+    : [];
+  return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${cur}
+    onChange=${(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
+    <option value="">Não atribuído</option>
+    ${extra.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
+    ${users.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
+  </select>`;
+}
+
 // Um campo, renderizado conforme `def.type`. value/onChange controlados pelo pai.
 export function FieldInput({ def, value, onChange }) {
   const t = def.type || 'text';
+  if (t === 'atendente') {
+    return html`<${AttendantSelect} value=${value} onChange=${onChange} fallbackUser=${def.fallbackUser} />`;
+  }
   if (t === 'textarea') {
     return html`<textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] min-h-[80px]"
       value=${value || ''} placeholder=${def.regex_cue || ''} onInput=${(e) => onChange(e.target.value)} />`;
@@ -89,51 +118,40 @@ export function LabeledField({ def, value, onChange }) {
 
 function isFilled(def, v) {
   if (def.type === 'checkbox') return true; // bool é sempre "preenchido"
+  if (def.type === 'atendente') return v != null && String(v).trim() !== '';
   if (isMultiDef(def)) return Array.isArray(v) ? v.length > 0 : !!v;
   return String(v == null ? '' : v).trim() !== '';
 }
 
-// Popup do beforeResolve. Mostra DOIS conjuntos, ambos pré-preenchidos com os valores
-// atuais da atendimento (`initialValues` = conversations.custom_attributes, o que foi salvo
-// na aba "Informações do atendimento"):
-//   1. `defs`     — rótulos do protocolo (escopo atendimento: OBS + extras), via FieldInput.
-//   2. `attrDefs` — atributos personalizados do core NÃO-espelho (is_system=0), via o
-//                   CustomAttributeField do core. (Os espelhados do plugin chegam como
-//                   is_system=1 e são filtrados fora no extends.js p/ não duplicar.)
+// Popup do beforeResolve. Mostra só os rótulos do protocolo (`defs` — escopo atendimento:
+// OBS + extras), pré-preenchidos com os valores atuais da atendimento (`initialValues` =
+// conversations.custom_attributes, o que foi salvo na aba "Informações do atendimento").
+// Os atributos personalizados de CONVERSA do core não fazem mais parte do plugin.
 // Os botões de finalizar ("Resolver" e "Resolver e ir ao protocolo") só habilitam
-// quando todos os obrigatórios (dos dois conjuntos) estão preenchidos. onOk devolve
-// { fields, custom_attributes, goTo } — goTo=true só no botão "ir ao protocolo".
-export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk, onCancel }) {
+// quando todos os obrigatórios estão preenchidos. onOk devolve { fields, goTo } —
+// goTo=true só no botão "ir ao protocolo".
+export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = null, onOk, onCancel }) {
   const init0 = initialValues || {};
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of defs) {
       const cur = init0[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
+      else if (d.type === 'atendente') {
+        // Valor PADRÃO = usuário conectado quando não há atendente já definido. Não impede
+        // trocar de atendente nem escolher "Não atribuído" depois — só semeia o campo.
+        const seeded = (cur == null || String(cur).trim() === '') ? defaultAssignee : cur;
+        init[d.key] = (seeded == null ? '' : seeded);
+      }
       else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
         ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
       else init[d.key] = (cur == null ? '' : String(cur));
     }
     return init;
   });
-  const [attrVals, setAttrVals] = useState(() => {
-    const init = {};
-    for (const a of attrDefs) {
-      const cur = init0[a.attribute_key];
-      if (cur !== undefined && cur !== null && cur !== '') init[a.attribute_key] = cur;
-    }
-    return init;
-  });
 
-  const missing = [
-    ...defs.filter((d) => d.required && !isFilled(d, vals[d.key])).map((d) => d.label || d.key),
-    ...attrDefs.filter((a) => a.required && !isFilled(a, attrVals[a.attribute_key]))
-      .map((a) => a.display_name || a.attribute_key),
-  ];
+  const missing = defs.filter((d) => d.required && !isFilled(d, vals[d.key])).map((d) => d.label || d.key);
   const allRequired = missing.length === 0;
-  // Com os DOIS conjuntos, rotula cada zona p/ deixar claro a origem: os campos de cima
-  // são informações da atendimento; abaixo da barra, atributos personalizados.
-  const showHeaders = defs.length > 0 && attrDefs.length > 0;
 
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4"
@@ -144,26 +162,10 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
 
         ${defs.length ? html`
           <div>
-            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-wa-teal mb-2">Informações do atendimento</div>` : null}
             <div class="space-y-3">
               ${defs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
                 value=${vals[d.key]}
                 onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
-            </div>
-          </div>` : null}
-
-        ${attrDefs.length ? html`
-          <div class="${defs.length ? 'mt-4 pt-4 border-t border-wa-border' : ''}">
-            ${showHeaders ? html`<div class="text-[10px] uppercase tracking-wide font-semibold text-amber-600 mb-2">Atributos personalizados</div>` : null}
-            <div class="space-y-4">
-              ${attrDefs.map((a) => html`<${CustomAttributeField} key=${a.id} def=${a}
-                value=${attrVals[a.attribute_key]}
-                onChange=${(v) => setAttrVals((s) => {
-                  const next = { ...s };
-                  if (v === null || v === undefined || v === '') delete next[a.attribute_key];
-                  else next[a.attribute_key] = v;
-                  return next;
-                })} />`)}
             </div>
           </div>` : null}
 
@@ -173,12 +175,12 @@ export function ResolveForm({ defs = [], attrDefs = [], initialValues = {}, onOk
           </div>` : null}
         <div class="mt-5 space-y-2">
           <div class="flex gap-2">
-            <button onClick=${() => onOk({ fields: vals, custom_attributes: attrVals, goTo: false })} disabled=${!allRequired}
+            <button onClick=${() => onOk({ fields: vals, goTo: false })} disabled=${!allRequired}
               class="flex-1 py-2.5 px-4 bg-wa-teal text-white rounded-lg disabled:opacity-50">Resolver</button>
             <button onClick=${onCancel}
               class="flex-1 py-2.5 px-4 bg-wa-panel hover:bg-wa-hover text-wa-text rounded-lg">Cancelar</button>
           </div>
-          <button onClick=${() => onOk({ fields: vals, custom_attributes: attrVals, goTo: true })} disabled=${!allRequired}
+          <button onClick=${() => onOk({ fields: vals, goTo: true })} disabled=${!allRequired}
             class="w-full py-2.5 px-4 rounded-lg border border-wa-teal text-wa-teal hover:bg-wa-teal/10 disabled:opacity-50 text-[14px] font-medium">
             Resolver e ir ao protocolo</button>
         </div>

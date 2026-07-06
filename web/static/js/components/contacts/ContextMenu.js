@@ -14,6 +14,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
   const can = (p) => hasPermission(currentUser, p);
+  const canEditContact = can('contact.read') && can('contact.write');
   const ref = useRef(null);
   const [showTags, setShowTags] = useState(false);
   const [showAssign, setShowAssign] = useState(false);
@@ -100,7 +101,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         ${conv.ai_active ? 'Desativar IA' : 'Ativar IA'}
       </button>
       ` : null}
-      ${can('contact.write') ? html`
+      ${canEditContact ? html`
       <button
         onClick=${() => { onEditContact(phone); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -134,7 +135,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       `) : null}
 
       <!-- Pin / Unpin -->
-      ${can('contact.write') ? html`
+      ${canEditContact ? html`
       <button
         onClick=${() => { onPin && onPin(phone, !isPinned); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -147,7 +148,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       ` : null}
 
       <!-- Tags toggle -->
-      ${can('contact.write') ? html`
+      ${canEditContact ? html`
       <button
         onClick=${() => setShowTags(prev => !prev)}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
@@ -261,7 +262,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
 
       <!-- Archive / Delete separator -->
       <div class="border-t border-wa-border">
-        ${can('contact.write') ? html`
+        ${canEditContact ? html`
         <button
           onClick=${() => { onArchive(phone, !isArchived); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"

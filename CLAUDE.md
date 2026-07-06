@@ -462,7 +462,7 @@ Referências (na Loja de Plugins, ver "Plugins de exemplo"): `auto_signature` (s
 
 ### RBAC de plugins
 
-Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo automaticamente no `PermissionPicker` agrupada por "Plugin: \<label\>" (`rbac.group`, default = nome do plugin). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
+Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo no `PermissionPicker` na área **Plugins** agrupada por `rbac.group` (default = nome do plugin) **enquanto o plugin estiver ativo** (desativar esconde do picker; ver "Disable" abaixo). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
 
 ```yaml
 rbac:
@@ -480,8 +480,8 @@ rbac:
   ```
 - **Esconda a screen** sem permissão com `requires: <key>` no manifest da screen (`screens[].requires`) — o GearMenu filtra (padrão "hide, don't disable"). O componente da screen recebe a prop `can(key)` (= `hasPermission(user, 'plugin.<id>.<key>')`).
 - **Decisão central**: [server/authz.py](server/authz.py) `check()`/`acheck()` resolvem RBAC e então aplicam o seam ABAC `filter.authz.decision` (`{user, permission_key, allow}` → pode rebaixar allow→deny). **Nenhum avaliador é embarcado no core (v1)** — regras por atributo (ex: horário) viram um plugin de filtro depois, sem tocar nos call sites.
-- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático) + linhas com `plugin_id IS NOT NULL`. `/api/roles` e a validação de criação de role/usuário usam o catálogo efetivo.
-- **Disable** mantém as linhas (atribuições sobrevivem ao toggle); **delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
+- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático, com `tier`/`group` de exibição via `domain.permission_catalog.PERMISSION_GROUPS`) + linhas de plugins **ATIVOS** (`plugin_id IS NOT NULL` ∧ `plugins.enabled=1`). O `PermissionPicker` renderiza dois tiers (**Sistema** × **Plugins**). `/api/roles` e a validação de criação de role/usuário usam o catálogo/keys efetivos.
+- **Disable** mantém as linhas mas as **ESCONDE do picker** (`list_catalog` filtra por plugin ativo); os grants sobrevivem ao toggle e voltam a aparecer ao reativar. Para não perder um grant escondido ao editar cargo/usuário com o plugin off, `_replace_role_permissions`/`set_custom_permissions` **preservam** as chaves em `hidden_plugin_permission_keys()`. **Delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
 
 ### Events e Filters (bus do plugin)
 

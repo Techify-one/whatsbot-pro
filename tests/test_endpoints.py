@@ -1158,8 +1158,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 28 permissions", _perm_count == 28)
-check("RBAC seed -> role_permissions populated (gestor 24 + atendente 5)", _rp_count == 29)
+check("RBAC seed -> 32 permissions", _perm_count == 32)
+check("RBAC seed -> role_permissions populated (gestor 28 + atendente 5)", _rp_count == 33)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1198,7 +1198,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 28 permissions", len([p for p in _perms if p != "*"]) == 28)
+check("admin me -> all 32 permissions", len([p for p in _perms if p != "*"]) == 32)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -1216,7 +1216,7 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 24 perms, no '*'", "*" not in _gperms and len(_gperms) == 24)
+check("gestor resolver -> 28 perms, no '*'", "*" not in _gperms and len(_gperms) == 28)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1225,8 +1225,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 28 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 28)
+check("GET /api/roles -> 3 roles + 32 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 32)
 
 r = client.get("/api/users")
 check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
@@ -1357,7 +1357,18 @@ check("POST /api/custom-attributes (no custom_attribute.manage) -> 403", r.statu
 r = client.get("/api/admin/database", headers=_chdr)
 check("GET /api/admin/database (no database.manage) -> 403", r.status_code == 403)
 r = client.get("/api/ai/agents", headers=_chdr)
-check("GET /api/ai/agents (no agent.manage) -> 403", r.status_code == 403)
+check("GET /api/ai/agents (no agent.config.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/variables", headers=_chdr)
+check("GET /api/ai/variables (no agent.variables.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/tools", headers=_chdr)
+check("GET /api/ai/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/default/prompt", json={"prompt": "x"}, headers=_chdr)
+check("PUT /api/ai/agents/default/prompt (no agent.prompts.manage) -> 403", r.status_code == 403)
+r = client.get("/api/tools", headers=_chdr)
+check("GET /api/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.post("/api/contacts/import",
+                files={"file": ("c.csv", "phone\n5511999\n", "text/csv")}, headers=_chdr)
+check("POST /api/contacts/import (no contact.import) -> 403", r.status_code == 403)
 
 # ── Switching modes + last-admin guard ────────────────────────────
 r = client.put(f"/api/users/{_cu_id}", json={
@@ -1381,9 +1392,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 24)
-check("GET /api/roles -> admin shows all 28",
-      len(_by_key["admin"]["permission_keys"]) == 28)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 28)
+check("GET /api/roles -> admin shows all 32",
+      len(_by_key["admin"]["permission_keys"]) == 32)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1437,7 +1448,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 24 perms", len(_rrepo.get_role_permissions("gestor")) == 24)
+check("gestor restored to 28 perms", len(_rrepo.get_role_permissions("gestor")) == 28)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio
@@ -1446,6 +1457,7 @@ from plugins.manifest import _parse_rbac as _parse_rbac
 from plugins.context import plugin_permission as _plugin_permission
 from plugins import events as _events
 from server import authz as _authz
+from server.deps import PermissionDeniedError as _PermissionDeniedError
 from fastapi import HTTPException as _HTTPException
 
 # 1) Manifest: parse + validate the rbac: block (invalid keys dropped).
@@ -1462,6 +1474,10 @@ check("manifest rbac -> invalid/dup keys dropped",
 check("manifest rbac absent -> {}", _parse_rbac(None, "x") == {})
 
 # 2) Repo: upsert plugin perms → catalog merge + keys + delete cascade.
+# O plugin precisa existir ATIVO para suas permissões aparecerem no catálogo
+# (list_catalog esconde permissões de plugins desativados/ausentes).
+from db.repositories import plugin_repo as _prepo
+_prepo.upsert("lembretes", "1.0.0", enabled=True)
 _rrepo.upsert_plugin_permission("plugin.lembretes.view", "Ver lembretes",
                                 "lembretes", "Lembretes")
 _rrepo.upsert_plugin_permission("plugin.lembretes.delete", "Excluir lembretes",
@@ -1475,6 +1491,21 @@ check("list_catalog -> core + plugin rows", _cat_view is not None
       and _cat_view["plugin_id"] == "lembretes" and _cat_view["group_label"] == "Lembretes")
 check("list_catalog -> core perms have plugin_id None",
       any(c["key"] == "conversation.read" and c["plugin_id"] is None for c in _catalog))
+# Agrupamento core/plugin (metadado de exibição): tier + group em cada item.
+_cat_by_key = {c["key"]: c for c in _catalog}
+check("list_catalog -> core perm tier=core + group",
+      _cat_by_key["conversation.read"]["tier"] == "core"
+      and _cat_by_key["conversation.read"]["group"] == "Atendimentos e conversas")
+check("list_catalog -> AI perms under 'IA e agente'",
+      _cat_by_key["agent.config.manage"]["group"] == "IA e agente"
+      and _cat_by_key["agent.prompts.manage"]["tier"] == "core")
+check("list_catalog -> templates shown under Plugins tier",
+      _cat_by_key["template.create"]["tier"] == "plugin"
+      and _cat_by_key["template.create"]["group"] == "Templates (WhatsApp Cloud)")
+check("list_catalog -> plugin perm carries tier=plugin",
+      _cat_view["tier"] == "plugin" and _cat_view["group"] == "Lembretes")
+check("list_catalog -> agent.manage removido do catálogo",
+      "agent.manage" not in _cat_by_key)
 
 # 3) /api/roles exposes plugin perms with metadata.
 _roles_payload = client.get("/api/roles").json()["data"]
@@ -1493,6 +1524,38 @@ check("create role -> valid plugin perm kept, bogus dropped",
       _lr_keys == ["plugin.lembretes.view"])
 client.delete(f"/api/roles/{_lr_id}")
 
+# 4b) Desativar o plugin ESCONDE suas permissões do picker mas PRESERVA os grants
+# (sobrevive ao ciclo desativar→editar→reativar). Ver rbac_repo.list_catalog +
+# set_role_permissions (hidden_plugin_permission_keys).
+r = client.post("/api/roles", json={"key": "lembrete_ops", "name": "Lembrete Ops",
+    "permission_keys": ["plugin.lembretes.view", "conversation.read"]})
+_lo_id = r.json()["data"]["role"]["id"]
+_prepo.set_enabled("lembretes", False)
+_cat_off = {c["key"] for c in _rrepo.list_catalog()}
+check("plugin desativado -> permissões somem do catálogo",
+      "plugin.lembretes.view" not in _cat_off and "plugin.lembretes.delete" not in _cat_off)
+check("plugin desativado -> chave ainda válida (grants persistem)",
+      "plugin.lembretes.view" in _rrepo.plugin_permission_keys())
+# Editar o cargo com o plugin OFF (picker manda só o que vê) NÃO apaga o grant escondido.
+r = client.put(f"/api/roles/{_lo_id}", json={"permission_keys": ["conversation.read"]})
+check("editar cargo com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+# Idem para usuário custom: editar sem ver o plugin preserva o grant escondido.
+_puo = _urepo.create(email="lembreteops@test.com", name="LO",
+                     password_hash=_hpa("supersecret"),
+                     permission_keys=["plugin.lembretes.view"], custom=True)
+_urepo.set_custom_permissions(_puo["id"], ["conversation.read"])
+check("editar usuário custom com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.user_permissions(_puo["id"]))
+client.delete(f"/api/users/{_puo['id']}")
+# Reativar traz a permissão de volta ao catálogo, com o grant intacto.
+_prepo.set_enabled("lembretes", True)
+_cat_on = {c["key"] for c in _rrepo.list_catalog()}
+check("reativar plugin -> permissão volta ao catálogo", "plugin.lembretes.view" in _cat_on)
+check("reativar plugin -> grant continua no cargo",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+client.delete(f"/api/roles/{_lo_id}")
+
 # 5) plugin_permission() dependency: infers id from path; default-allow legacy.
 _pu = _urepo.create(email="pluginuser@test.com", name="PU",
                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
@@ -1504,12 +1567,13 @@ def _freq(user=None, path="/api/plugins/lembretes/items/1"):
 # legacy/open (no user) -> allowed (no raise)
 _asyncio.run(_dep(_freq(user=None)))
 check("plugin_permission -> legacy/open allowed", True)
-# logged-in user WITHOUT the perm -> 403
+# logged-in user WITHOUT the perm -> raises PermissionDeniedError (rendered as the
+# unified {"ok": false, "error": "Permissão negada."} 403 envelope by the app handler).
 _denied = False
 try:
     _asyncio.run(_dep(_freq(user={"id": _pu_id})))
-except _HTTPException as e:
-    _denied = e.status_code == 403
+except _PermissionDeniedError:
+    _denied = True
 check("plugin_permission -> user without perm -> 403", _denied)
 # grant the perm to that user (custom) -> allowed
 _urepo.set_custom_permissions(_pu_id, ["plugin.lembretes.delete"])
@@ -1598,6 +1662,41 @@ _, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
 check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
 _, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
 check("validação: data mode inválido -> erro", _ev_date is not None)
+
+# 3b) Novos modos de data: "semana" e "personalizado" (janela de/até + granularidade).
+_vw, _ewk = _alogic.create_kanban_view(name="Por semana", scope="team", group_by="data",
+                                       group_date_mode="semana", owner_user_id=101)
+check("create view data 'semana' -> ok", _ewk is None and bool(_vw and _vw.get("id")))
+_vp, _epc = _alogic.create_kanban_view(name="Período custom", scope="team", group_by="data",
+                                       group_date_mode="personalizado", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="semana",
+                                       owner_user_id=101)
+check("create view data 'personalizado' -> ok", _epc is None and bool(_vp and _vp.get("id")))
+check("personalizado -> round-trip from/to/grain",
+      _vp and _vp.get("group_date_from") == "2026-06-01" and _vp.get("group_date_to") == "2026-06-30"
+      and _vp.get("group_date_grain") == "semana")
+_, _ep_range = _alogic.create_kanban_view(name="p-range", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-30",
+                                          group_date_to="2026-06-01", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado from > to -> erro", _ep_range is not None)
+_, _ep_grain = _alogic.create_kanban_view(name="p-grain", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-01",
+                                          group_date_to="2026-06-30", group_date_grain="ano", owner_user_id=1)
+check("validação: personalizado granularidade inválida -> erro", _ep_grain is not None)
+_, _ep_nodate = _alogic.create_kanban_view(name="p-nodate", group_by="data",
+                                           group_date_mode="personalizado", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado sem datas -> erro", _ep_nodate is not None)
+# Modo não-personalizado NÃO persiste janela (from/to/grain são limpos → NULL).
+_vn, _evn = _alogic.create_kanban_view(name="Só mês", scope="team", group_by="data",
+                                       group_date_mode="mes", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="dia", owner_user_id=101)
+check("modo não-personalizado -> janela ignorada (NULL)",
+      _evn is None and _vn and _vn.get("group_date_from") is None and _vn.get("group_date_grain") is None)
+# update de personalizado -> mês limpa a janela persistida.
+_vp2, _eup = _alogic.update_kanban_view(_vp["id"], group_date_mode="mes")
+check("update personalizado -> mês limpa janela",
+      _eup is None and _vp2 and _vp2.get("group_date_from") is None and _vp2.get("group_date_grain") is None)
+
 _, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
 check("validação: nome vazio -> erro", _ev_name is not None)
 
@@ -1639,6 +1738,42 @@ check("cattr filter -> substring case-insensitive",
 check("pf filter -> exato (não substring)",
       _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
       and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
+# pf de QUALQUER tipo: campo de OPÇÃO (em option_keys) casa EXATO; campo de TEXTO casa SUBSTRING.
+check("pf filter -> texto=substring, opção=exato (option_keys)",
+      _alogic._row_matches_filter({"fields": {"obs": "Cliente VIP retornou"}}, "pf:protocolo:obs", "vip", set()) is True
+      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv",
+                                      {"protocolo:resultado"}) is False)
+
+# 7a-canal) Filtro por CANAL: resolve o canal da conversa MAIS RECENTE do protocolo
+# (protocolo → vínculo plugin → core atendimentos → inboxes → channels) e casa por igualdade
+# EXATA de channel_id. Ramo puro de _row_matches_filter (sem DB):
+check("canal filter -> igualdade exata de channel_id",
+      _alogic._row_matches_filter({"channel_id": "canal_teste_filtro"}, "canal", "canal_teste_filtro") is True
+      and _alogic._row_matches_filter({"channel_id": "outro"}, "canal", "canal_teste_filtro") is False
+      and _alogic._row_matches_filter({"channel_id": ""}, "canal", "canal_teste_filtro") is False)
+# list_channels(): reaproveita channel_repo.list_all (não-arquivados), shape {id,name,provider}.
+from db.repositories import (channel_repo as _chan_repo, inbox_repo as _inbox_repo,
+                             contact_inbox_repo as _ci_repo)
+_chan_repo.create(id="canal_teste_filtro", provider="test", display_name="Canal Filtro Teste")
+_chrow = next((c for c in _alogic.list_channels() if c["id"] == "canal_teste_filtro"), None)
+check("list_channels -> shape {id,name,provider}",
+      _chrow is not None and _chrow.get("name") == "Canal Filtro Teste" and _chrow.get("provider") == "test")
+# Seed REAL do encadeamento (channel→inbox→contact→contact_inbox→conversation→vínculo) p/
+# exercitar o JOIN de _attach_channels de ponta a ponta.
+_cinbox = _inbox_repo.get_or_create_for_channel("canal_teste_filtro", name="Canal Filtro Teste")
+_cct = _alogic.contact_repo.get_or_create("5511777770001")
+_cci = _ci_repo.get_or_create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                              source_id="5511777770001@s.whatsapp.net")
+_cconv = _alogic.conversation_repo.create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                                          contact_inbox_id=_cci["id"], origin="manual")
+_cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001", name="Cliente Canal")
+_alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
+_lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
+check("list_protocolos(canal filter) -> acha o protocolo do canal",
+      any(a["id"] == _cproto["id"] for a in _lc))
+_lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
+check("list_protocolos(canal filter) -> exclui canal diferente",
+      all(a["id"] != _cproto["id"] for a in _lc2))
 
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
@@ -1823,9 +1958,38 @@ check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.g
 _, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
 check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
 check("_missing_required revalida tipo+required no fechamento",
-      _alogic._missing_required("protocolo", {"cursos": [], "obs": ""}) is not None)
+      _alogic._missing_required("protocolo", {"cursos": [], "obs": "", "atendente": 1}) is not None)
 check("_missing_required ok quando preenchido",
-      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": ""}) is None)
+      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": "", "atendente": 1}) is None)
+
+# 9a-bis) Atendente é rótulo FIXO + OBRIGATÓRIO nos 2 escopos, não-criável/removível como extra.
+for _sc in ("protocolo", "atendimento"):
+    _ats = [d for d in _alogic.get_field_defs(_sc) if d.get("type") == "atendente"]
+    check(f"atendente fixo -> existe exatamente 1 em '{_sc}'", len(_ats) == 1)
+    check(f"atendente fixo -> fixed+obrigatório em '{_sc}'",
+          _ats and _ats[0].get("fixed") is True and _ats[0].get("required") is True
+          and _ats[0].get("key") == "atendente")
+# Tentar CRIAR um campo atendente extra é ignorado (não vira extra; segue só o fixo).
+_atend_defs_before = _alogic.get_extra_defs("atendimento")  # p/ restaurar ao fim
+_alogic.set_field_defs("atendimento", [
+    {"key": "resp", "label": "Responsável", "type": "atendente"},
+    {"key": "obs", "label": "Observações", "type": "textarea"},
+])
+_at_after = [d for d in _alogic.get_field_defs("atendimento") if d.get("type") == "atendente"]
+check("criar atendente extra -> ignorado (segue 1 só, fixo)",
+      len(_at_after) == 1 and _at_after[0].get("fixed") is True)
+check("criar atendente extra -> não persistiu como extra",
+      all(d.get("type") != "atendente" for d in _alogic.get_extra_defs("atendimento")))
+# normalize_values NÃO exige atendente (coerção ok sem ele); o required é gate de fechamento.
+_cae, _eae = _alogic.normalize_values("atendimento", {"obs": "x"})
+check("normalize_values -> não bloqueia por atendente ausente", _eae is None)
+# _missing_required exige atendente (sem assignee -> erro; com -> ok).
+check("_missing_required atendimento -> sem atendente bloqueia",
+      _alogic._missing_required("atendimento", {"obs": "x"}) is not None)
+check("_missing_required atendimento -> com atendente ok",
+      _alogic._missing_required("atendimento", {"obs": "x", "atendente": 1}) is None)
+# Restaura os defs de atendimento como estavam antes deste bloco.
+_alogic.set_field_defs("atendimento", _atend_defs_before)
 
 # 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
 # (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).
@@ -3558,7 +3722,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/contacts", "/dashboard", "/attendances", "/audit", "/sandbox", "/costs",
+for path in ["/", "/contacts", "/dashboard", "/protocolos", "/attendances", "/audit", "/sandbox", "/costs",
              "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
