@@ -134,7 +134,10 @@ def _device_map() -> dict:
         dev = c.get("gowa_device_id") or c["id"]
         if dev:
             by_dev[str(dev)] = c["id"]
-        op = _digits(c.get("own_phone"))
+        # Normalize own_phone the same way get_gowa_channel_for_device normalizes the
+        # inbound JID (strip @suffix + :device part BEFORE digit-filtering — plano 32
+        # F4), so a stored "5511...:12" and an inbound "5511...:5@..." resolve equal.
+        op = _digits((str(c.get("own_phone") or "").split("@")[0]).split(":")[0])
         if op:
             by_phone[op] = c["id"]
     m = {"by_dev": by_dev, "by_phone": by_phone}

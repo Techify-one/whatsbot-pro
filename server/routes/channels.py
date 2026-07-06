@@ -266,11 +266,14 @@ def register_routes(app, deps):
                    else f"{provider}_{uuid.uuid4().hex[:8]}")
             while await asyncio.to_thread(channel_repo.get, cid):
                 cid = f"{provider}_{uuid.uuid4().hex[:8]}"
-        data = await svc.create(
-            deps, cid=cid, provider=provider,
-            display_name=body.get("display_name", "") or cid,
-            submitted_creds=submitted_creds, config=config,
-            gowa_device_id=gowa_device_id)
+        try:
+            data = await svc.create(
+                deps, cid=cid, provider=provider,
+                display_name=body.get("display_name", "") or cid,
+                submitted_creds=submitted_creds, config=config,
+                gowa_device_id=gowa_device_id)
+        except svc.DuplicateChannelError as e:
+            return _err(str(e), 409)
         return _ok(data)
 
     @app.put("/api/channels/{channel_id}")
@@ -281,7 +284,10 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
-        return _ok(await svc.update(deps, row, body))
+        try:
+            return _ok(await svc.update(deps, row, body))
+        except svc.DuplicateChannelError as e:
+            return _err(str(e), 409)
 
     @app.get("/api/channels/{channel_id}/members")
     async def get_channel_members(channel_id: str, request: Request):

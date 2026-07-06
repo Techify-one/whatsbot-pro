@@ -21,6 +21,10 @@ AUDIT_RETENTION_DAYS_DEFAULT = 365
 GHOST_SWEEP_INTERVAL = 600  # seconds (10 min)
 EMPTY_CONV_TTL_MINUTES_DEFAULT = 30
 
+# How often the account-identity sweep persists per-channel identity + refuses
+# duplicates connected post-QR (plano 32 F4).
+CHANNEL_IDENTITY_SWEEP_INTERVAL = 15  # seconds
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,6 +123,27 @@ async def status_poll_loop(deps):
         except Exception as e:
             logger.error("Status poll error: %s", e)
         await asyncio.sleep(5)
+
+
+async def channel_identity_sweep_loop(deps):
+    """Persist per-channel account identity + refuse post-QR duplicates (plano 32 F4).
+
+    Generic over providers: iterates the live channel instances in the registry and
+    lets :mod:`app.services.channel_identity` read each one's ``status()`` +
+    ``account_identity()``, persisting only what changed and refusing a channel that
+    paired to an account already owned by another channel. Defensive per-channel so
+    one bad channel never stalls the sweep."""
+    from app.services import channel_identity as ci
+    registry = getattr(deps, "channel_registry", None)
+    state = deps.state
+    while not state.stop_event.is_set():
+        try:
+            if registry is not None:
+                for cid, inst in list(registry.all_channels().items()):
+                    await asyncio.to_thread(ci.sweep_channel, cid, inst)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Channel identity sweep error: %s", e)
+        await asyncio.sleep(CHANNEL_IDENTITY_SWEEP_INTERVAL)
 
 
 async def qr_poll_loop(deps):
