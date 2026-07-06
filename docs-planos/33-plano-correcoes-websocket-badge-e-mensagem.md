@@ -196,7 +196,7 @@ WAVE 2
 
 #### Status de execução — Fase F4
 **Estado:** ✅ Concluída (2026-07-06)
-- **O que foi feito:** em [useConversationWsEvents.js](../web/static/js/components/contacts/hooks/useConversationWsEvents.js), extraído um helper module-level `optimisticDupIndex(message, list)` que só casa entradas **sem `msg_id`** via `sameMessage`. Aplicado aos DOIS call sites: o dedup do thread aberto (antes `findDuplicateIndex`) e o dedup do buffer de carregamento (antes `isDuplicateMessage`). Import trocado de `{isDuplicateMessage, findDuplicateIndex}` para `{sameMessage}`.
+- **O que foi feito:** helper `optimisticDupIndex(message, list)` que só casa entradas **sem `msg_id`** via `sameMessage`, aplicado aos DOIS call sites em [useConversationWsEvents.js](../web/static/js/components/contacts/hooks/useConversationWsEvents.js): o dedup do thread aberto (antes `findDuplicateIndex`) e o dedup do buffer de carregamento (antes `isDuplicateMessage`). **Nota (F5):** o helper foi depois movido para o módulo puro `services/messages.js` (exportado) para ser testável com `node --test`; o hook o importa de lá.
 - **Como foi feito / decisões:** framing (a) do plano (`!m.msg_id && sameMessage`), escolhido sobre "pular dedup quando o incoming tem msg_id" porque preserva o colapso do echo do operador: o otimista EXISTENTE (sem msg_id) é a entrada casada, e o echo incoming (com msg_id) funde nele (merge de msg_id/status em seguida). Dois inbounds distintos "ok"/"ok" (cada um com seu msg_id) não casam → APPEND. O caminho de reconciliação por msg_id (linhas ~455-467) fica intacto. NÃO alterei os merges buffer-vs-servidor (selection hook + reloadOpenThread), que dedupam contra dados autoritativos do DB por conteúdo — correto lá.
 - **Problemas / pendências:** o buffer de load só contém WS messages (todas com msg_id), então o dedup do buffer vira efetivamente no-op — seguro (o merge posterior contra o servidor dedupa; não há double-delivery de mesmo msg_id no bus). Áudio/mídia do operador: o otimista tem `_localId`/sem `msg_id` → ainda colapsa.
 - **Verificação:** 116 JS units verdes + `node --check`. Unit dedicado do dedup só-otimista em F5.
@@ -212,11 +212,11 @@ WAVE 2
 **Pronto quando:** `venv/bin/python -m pytest tests/ -q` verde no `WHATSBOT_TEST_DB_URL`; os JS units passam; o teste manual de reconnect documentado no status.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** (backend) novo `tests/test_transfer_broadcast.py` com 2 testes — o handoff da IA emite `conversation_updated` com `active_agent_key==target`+`conversation_id`+`contact_id` (F1), e um broadcast que levanta não derruba o handoff (best-effort). (JS) o helper `optimisticDupIndex` foi **movido de volta para o módulo puro** `services/messages.js` (exportado) e o hook passou a importá-lo — para ficar testável com `node --test` (o hook importa preact e não é importável no runner). 5 units novos em `messages.test.js` cobrindo APPEND de 2 inbounds com msg_id distinto, colapso do echo otimista sem msg_id, e o guard de regressão vs `findDuplicateIndex`.
+- **Como foi feito / decisões:** teste backend chama `transferir_agente.execute` direto (sem app/loop) e monkeypatcha `plugins.context.broadcast` (o `execute` faz `from plugins.context import broadcast` em call-time, então o patch é visto). Fixture `transfer_world` mirrora o `routing_world` dos testes de routing (seed_default_agent + roteador33/comercial33 + conversa aberta no roteador). NÃO toquei em `tests/test_endpoints.py` (arquivo multi-lane) — teste em arquivo próprio.
+- **Problemas / pendências:** nenhuma. Reconnect (F2/F3) segue validação manual (P3) — sem harness de socket real.
+- **Verificação:** `venv/bin/python -m pytest tests/test_transfer_broadcast.py -q` → 2 passed; `node --test web/static/js/services/*.test.js` → 120 passed (17 em messages.test.js). Suíte pytest completa: ver checklist final.
 
 ---
 

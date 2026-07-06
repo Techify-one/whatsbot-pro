@@ -19,7 +19,7 @@
 // with the selection hook's detail loader so reads gate on the same visibility.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
-import { sameMessage } from '../../../services/messages.js';
+import { optimisticDupIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
@@ -32,20 +32,6 @@ const PANEL_CARD_ROLES = new Set([
   'tool_call', 'system_notice', 'transcription', 'private_note', 'error',
   'conversation_event', 'system',
 ]);
-
-// Plano 33 F4 — index of an OPTIMISTIC bubble in `list` that `message` collapses
-// into, or -1. A "same content, same role, <30s" heuristic (sameMessage) must
-// only fold together an optimistic copy (no stable msg_id) and its server echo —
-// e.g. the operator's own send, whose optimistic bubble has no msg_id until the
-// echo carries one. Two DISTINCT inbound messages of identical content in
-// separate batches (e.g. "ok"/"ok") each already carry their OWN msg_id, so the
-// `!m.msg_id` guard stops the second from being swallowed into the first: they
-// are two real DB rows and must render as two bubbles. (The old content-only
-// findDuplicateIndex merged them, dropping the second until an F5.)
-function optimisticDupIndex(message, list) {
-  if (!Array.isArray(list)) return -1;
-  return list.findIndex(m => !m.msg_id && sameMessage(m, message));
-}
 
 /**
  * @param {Object} opts - WS event props + cross-hook state/refs/setters.

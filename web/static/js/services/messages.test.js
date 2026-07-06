@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  sameMessage, isDuplicateMessage, findDuplicateIndex, mediaPreviewLabel, DEDUP_WINDOW_S,
+  sameMessage, isDuplicateMessage, findDuplicateIndex, optimisticDupIndex,
+  mediaPreviewLabel, DEDUP_WINDOW_S,
 } from './messages.js';
 
 test('sameMessage: exact ts + role → dup', () => {
@@ -85,4 +86,35 @@ test('mediaPreviewLabel: contacts both singular and plural', () => {
 
 test('mediaPreviewLabel: unknown media_type falls back to text', () => {
   assert.equal(mediaPreviewLabel({ media_type: 'mystery', content: 'fallback' }), 'fallback');
+});
+
+// ── optimisticDupIndex (plano 33 F4) ──────────────────────────────────────
+
+test('optimisticDupIndex: two distinct inbound "ok" (each with a msg_id) → APPEND (-1)', () => {
+  // The already-settled "ok" carries a stable msg_id (A). A second, genuinely
+  // new inbound "ok" (msg_id B) within 30s must NOT be swallowed into it.
+  const list = [{ role: 'user', ts: 100, content: 'ok', msg_id: 'A' }];
+  const incoming = { role: 'user', ts: 105, content: 'ok', msg_id: 'B' };
+  assert.equal(optimisticDupIndex(incoming, list), -1);
+  // Regression guard: the old content-only predicate WOULD have merged them.
+  assert.equal(findDuplicateIndex(incoming, list), 0);
+});
+
+test('optimisticDupIndex: operator echo collapses into its optimistic bubble (no msg_id)', () => {
+  // The optimistic operator bubble has no msg_id yet; its server echo (msg_id C)
+  // must still fold in — this preserves the echo-collapse the operator relies on.
+  const list = [{ role: 'assistant', ts: 200, content: '[Áudio]' }];  // optimistic: no msg_id
+  const echo = { role: 'assistant', ts: 201, content: '[Áudio]', msg_id: 'C' };
+  assert.equal(optimisticDupIndex(echo, list), 0);
+});
+
+test('optimisticDupIndex: does not match a settled message that has a msg_id', () => {
+  const list = [{ role: 'assistant', ts: 300, content: 'oi', msg_id: 'D' }];
+  const incoming = { role: 'assistant', ts: 300, content: 'oi', msg_id: 'E' };
+  assert.equal(optimisticDupIndex(incoming, list), -1);
+});
+
+test('optimisticDupIndex: non-array list → -1', () => {
+  assert.equal(optimisticDupIndex({ role: 'user', ts: 1, content: 'x' }, undefined), -1);
+  assert.equal(optimisticDupIndex({ role: 'user', ts: 1, content: 'x' }, null), -1);
 });
