@@ -18,7 +18,8 @@ from db.tables import channels
 
 _STATUS_FIELDS = ("connected", "logged_in", "own_phone", "last_error",
                   "enabled", "display_name", "config", "gowa_device_id",
-                  "gowa_isolation", "provider", "archived")
+                  "gowa_isolation", "provider", "archived",
+                  "account_identity", "account_identity_kind")
 
 # Cached device→channel index for inbound routing (see get_gowa_channel_for_device).
 # Channels change rarely; a short TTL keeps the per-message webhook lookup off the DB.
