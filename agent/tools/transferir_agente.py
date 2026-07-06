@@ -111,6 +111,23 @@ def execute(ctx, args: dict) -> str | None:
         conversation_repo.set_agent(conv["id"], target)
         logger.info("Handoff: conversa %s -> agente '%s' (motivo=%s)",
                     conv["id"], target, args.get("motivo") or "-")
+        # plano 33 F1: paridade com o handoff MANUAL — o caminho manual
+        # (conversation_service.set_agent) emite ``conversation_updated`` com
+        # ``active_agent_key`` e por isso o badge da sidebar/board atualiza ao
+        # vivo; o handoff da IA só emitia o evento de domínio (que NÃO está no
+        # mapa de projeção WS). Emitimos o MESMO evento que o front já consome,
+        # com um payload NOVO (não mutar o DTO ConversationAgentChanged, que é
+        # compartilhado no fan-out de plugins e não tem ``active_agent_key``).
+        # Best-effort: um broadcast que falhe nunca pode derrubar o handoff.
+        try:
+            from plugins.context import broadcast
+            broadcast("conversation_updated",
+                      {"conversation_id": conv["id"],
+                       "contact_id": ctx.contact.id,
+                       "active_agent_key": target})
+        except Exception:
+            logger.debug("broadcast conversation_updated (handoff) falhou p/ conversa %s",
+                         conv["id"])
         # plano 23 Fase C1: handoff between AI agents is a TYPED domain event
         # (``conversation.agent_changed``), emitted via ``emit_domain``.
         # ``current_key`` is the agent that was answering before this hop (None if
