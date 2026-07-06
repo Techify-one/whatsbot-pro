@@ -151,13 +151,22 @@ async def alert_test(payload: dict = Body(default={})):
     if not token or not chat_id:
         return {"ok": False, "error": "Informe o token do bot e o chat_id."}
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = {
+        "chat_id": chat_id,
+        "text": "✅ WhatsBot: alerta de desconexão configurado com sucesso.",
+    }
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.post(url, json={
-                "chat_id": chat_id,
-                "text": "✅ WhatsBot: alerta de desconexão configurado com sucesso.",
-            })
-        data = resp.json()
+            resp = await client.post(url, json=body)
+            data = resp.json()
+            # Grupo virou supergrupo: o chat_id mudou. Persiste o novo id e reenvia
+            # uma vez — mesma cortesia da interceptação central do loop (alerts.py).
+            new_id = data.get("parameters", {}).get("migrate_to_chat_id") if not data.get("ok") else None
+            if new_id:
+                new_id = str(new_id)
+                await asyncio.to_thread(config_repo.set, _CFG + "disconnect_alert_chat_id", new_id)
+                resp = await client.post(url, json={**body, "chat_id": new_id})
+                data = resp.json()
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Falha ao contatar o Telegram: {e}"}
     if not data.get("ok"):

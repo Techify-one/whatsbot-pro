@@ -212,13 +212,27 @@ def _save_state(channel_id: str, **fields) -> None:
 
 # ── Telegram (Bot API direta — sem tocar no canal Telegram do sistema) ───────
 
-async def _tg_call(token: str, method: str, payload: dict) -> dict:
+async def _tg_call(token: str, method: str, payload: dict, _migrated: bool = False) -> dict:
     url = f"{TELEGRAM_API}/bot{token}/{method}"
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             resp = await client.post(url, json=payload)
         data = resp.json()
         if not data.get("ok"):
+            # Grupo promovido a supergrupo → o chat_id mudou. O Telegram devolve o novo
+            # id em ``parameters.migrate_to_chat_id``. Persistimos o novo id em config e
+            # reexecutamos a chamada UMA vez, transparente ao caller. Só migra chamadas
+            # que carregam ``chat_id`` (sendMessage/editMessageText/deleteMessage).
+            new_id = data.get("parameters", {}).get("migrate_to_chat_id")
+            if new_id and payload.get("chat_id") is not None and not _migrated:
+                new_id = str(new_id)
+                await asyncio.to_thread(
+                    config_repo.set, _CFG + "disconnect_alert_chat_id", new_id)
+                logger.info(
+                    "gowa alert: grupo virou supergrupo — chat_id %s → %s (auto-atualizado)",
+                    payload["chat_id"], new_id)
+                retry_payload = {**payload, "chat_id": new_id}
+                return await _tg_call(token, method, retry_payload, _migrated=True)
             logger.warning("gowa alert: Telegram %s falhou: %s", method, data.get("description"))
         return data
     except Exception as e:  # noqa: BLE001
@@ -381,12 +395,19 @@ async def _tick(deps) -> None:
     agg = await asyncio.to_thread(_load_state, AGGREGATE_KEY)
     signature = ",".join(sorted(c["id"] for c in down))
 
+    # O destino mudou (migração para supergrupo detectada na F1, ou troca manual do
+    # chat_id na tela): a mensagem anterior vive num chat que não é mais o atual.
+    # Tratamos como "sem mensagem existente" — não tentamos apagar/editar o msg antigo
+    # (ele está num chat defunto), só postamos a nova no destino corrente.
+    chat_changed = bool(agg.get("telegram_chat_id")) and agg.get("telegram_chat_id") != cfg["chat_id"]
+
     if not down:
         # Nada fora do ar (na lista monitorada). Se havia alerta ativo, apaga a msg de queda.
         old_mid = agg.get("telegram_message_id")
         if old_mid:
-            old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
-            await _tg_delete(cfg["token"], old_chat, int(old_mid))
+            if not chat_changed:
+                old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
+                await _tg_delete(cfg["token"], old_chat, int(old_mid))
             # A msg de "reconectado" SÓ sai se alguma caixa que estava caída realmente
             # voltou a logar. Se o alerta esvaziou porque o monitoramento foi DESLIGADO
             # (ou a caixa saiu da lista), nada reconectou de fato — só limpa o estado.
@@ -405,14 +426,15 @@ async def _tick(deps) -> None:
     last = float(agg.get("last_alert_ts") or 0)
     changed = (agg.get("down_signature") or "") != signature
     due = (now - last) >= cfg["interval_min"] * 60
-    has_msg = bool(agg.get("telegram_message_id"))
+    # Se o destino mudou, a msg salva não existe no chat atual → força reenvio.
+    has_msg = bool(agg.get("telegram_message_id")) and not chat_changed
     if has_msg and not changed and not due:
         return
 
     body = _msg_disconnected(down, cfg["panel_url"])
     old_mid = agg.get("telegram_message_id")
     old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
-    if old_mid:
+    if old_mid and not chat_changed:
         await _tg_delete(cfg["token"], old_chat, int(old_mid))
     mid = await _tg_send(cfg["token"], cfg["chat_id"], body)
     await asyncio.to_thread(
