@@ -155,3 +155,39 @@ def test_guard_excludes_self_on_update():
     ident = cs._guard_duplicate(deps, "whatsapp_cloud", {"phone_number_id": "SELF1"},
                                 exclude_channel_id="p32_cloud2")
     assert ident.value == "SELF1"
+
+
+# ── Partial unique index (the DB backstop) ──────────────────────────────────
+from sqlalchemy.exc import IntegrityError
+
+
+def test_index_rejects_two_enabled_same_identity():
+    _mk("p32_ix1")
+    channel_repo.set_status("p32_ix1", account_identity="IX", account_identity_kind="phone")
+    _mk("p32_ix2")
+    with pytest.raises(IntegrityError):
+        channel_repo.set_status("p32_ix2", account_identity="IX",
+                                account_identity_kind="phone")
+
+
+def test_index_allows_archived_and_disabled():
+    _mk("p32_ix3")
+    channel_repo.set_status("p32_ix3", account_identity="IX2", account_identity_kind="phone")
+    # archived and disabled rows are outside the partial index → no violation.
+    _mk("p32_ix4")
+    channel_repo.set_status("p32_ix4", archived=1, account_identity="IX2",
+                            account_identity_kind="phone")
+    _mk("p32_ix5")
+    channel_repo.set_status("p32_ix5", enabled=0, account_identity="IX2",
+                            account_identity_kind="phone")
+    assert channel_repo.get("p32_ix4")["account_identity"] == "IX2"
+    assert channel_repo.get("p32_ix5")["account_identity"] == "IX2"
+
+
+def test_index_allows_cross_provider_same_identity():
+    _mk("p32_ix6")
+    channel_repo.set_status("p32_ix6", account_identity="IX3", account_identity_kind="phone")
+    channel_repo.create(id="p32_ix7", provider="whatsapp_cloud", display_name="x")
+    channel_repo.set_status("p32_ix7", account_identity="IX3",
+                            account_identity_kind="phone")
+    assert channel_repo.get("p32_ix7")["account_identity"] == "IX3"
