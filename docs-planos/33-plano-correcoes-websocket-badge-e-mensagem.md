@@ -173,11 +173,11 @@ WAVE 2
 **Pronto quando:** simular half-open (DevTools → throttling offline sem fechar a aba, ou suspender/retomar) → dentro de ~1 heartbeat o cliente reconecta e (via F2) recupera o thread. Conexões saudáveis não sofrem reconnect espúrio.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher — intervalo e timeout escolhidos; onde o pong é interceptado)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** (a) heartbeat no cliente em [wsBus.js](../web/static/js/services/wsBus.js); (b) `close()` best-effort no laço de prune do broadcast em [server/state.py](../server/state.py).
+- **Como foi feito / decisões:** heartbeat — `_startHeartbeat(sock)` iniciado no `sock.onopen`; `setInterval` de **25s** (`HEARTBEAT_INTERVAL_MS`); a cada tick, se `Date.now() - _lastPongAt > 40s` (`HEARTBEAT_TIMEOUT_MS`, tolera 1 pong perdido e fica acima do ping protocolar ~20s do uvicorn → sem reconnect espúrio em link saudável), `sock.close()` (dispara `onclose` → reconnect de 3s → F2). O `pong` é interceptado **dentro do `onmessage`, ANTES do fan-out** (`if (msg.event === 'pong') { _lastPongAt = Date.now(); return; }`) — o fan-out não tem subscriber pra `pong`. Interval limpo em `onclose` e em `_teardown` (`_stopHeartbeat`). Prune — no laço `for ws in dead` do `broadcast`, após `self.disconnect(ws)`, `await asyncio.wait_for(ws.close(), timeout=1.0)` em try/except. **NÃO** adicionado ao `disconnect()` compartilhado (que também roda no `WebSocketDisconnect` limpo). Backend do pong já existia ([websocket.py:59-60](../server/routes/websocket.py)) — sem mudança lá.
+- **Problemas / pendências:** nenhuma. O `setInterval` de 25s não dispara nos JS units curtos e o teardown limpa o interval (sem vazar timer).
+- **Verificação:** `node --check` + 6 units do `wsBus.test.js` verdes; `state.py` parseia e `test_tool_call_broadcast` verde. Teste manual half-open (offline toggle/suspend-resume) pendente (validação do usuário).
 
 ---
 
@@ -195,11 +195,11 @@ WAVE 2
 **Pronto quando:** mandar "ok" e depois "ok" com ~5s de intervalo (batches distintos) → **2 balões** ao vivo; enviar mídia pelo operador → **1 balão** (echo colapsa no otimista). JS unit cobre ambos.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher — confirmar que áudio "[Áudio]" do operador não duplica)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** em [useConversationWsEvents.js](../web/static/js/components/contacts/hooks/useConversationWsEvents.js), extraído um helper module-level `optimisticDupIndex(message, list)` que só casa entradas **sem `msg_id`** via `sameMessage`. Aplicado aos DOIS call sites: o dedup do thread aberto (antes `findDuplicateIndex`) e o dedup do buffer de carregamento (antes `isDuplicateMessage`). Import trocado de `{isDuplicateMessage, findDuplicateIndex}` para `{sameMessage}`.
+- **Como foi feito / decisões:** framing (a) do plano (`!m.msg_id && sameMessage`), escolhido sobre "pular dedup quando o incoming tem msg_id" porque preserva o colapso do echo do operador: o otimista EXISTENTE (sem msg_id) é a entrada casada, e o echo incoming (com msg_id) funde nele (merge de msg_id/status em seguida). Dois inbounds distintos "ok"/"ok" (cada um com seu msg_id) não casam → APPEND. O caminho de reconciliação por msg_id (linhas ~455-467) fica intacto. NÃO alterei os merges buffer-vs-servidor (selection hook + reloadOpenThread), que dedupam contra dados autoritativos do DB por conteúdo — correto lá.
+- **Problemas / pendências:** o buffer de load só contém WS messages (todas com msg_id), então o dedup do buffer vira efetivamente no-op — seguro (o merge posterior contra o servidor dedupa; não há double-delivery de mesmo msg_id no bus). Áudio/mídia do operador: o otimista tem `_localId`/sem `msg_id` → ainda colapsa.
+- **Verificação:** 116 JS units verdes + `node --check`. Unit dedicado do dedup só-otimista em F5.
 
 ---
 
