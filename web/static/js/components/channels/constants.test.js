@@ -22,6 +22,7 @@ const GOWA = {
     { key: 'allowed_jid_types', type: 'multiselect',
       options: [{ value: 'person' }, { value: 'group' }, { value: 'newsletter' }],
       default: ['person', 'group'] },
+    { key: 'disconnect_alert_enabled', type: 'bool', default: true },
   ],
   capabilities: { needs_qr: true, templates: false },
   ai_sequential_default: true, post_create: null,
@@ -106,11 +107,12 @@ test('missingCredsFor: reports required creds not present on the channel', () =>
 });
 
 // ── initialConfigValues ─────────────────────────────────────────────────────
-test('initialConfigValues: multiselect→default, generated→prefix+token, text→default', () => {
+test('initialConfigValues: multiselect→default, generated→prefix+token, bool→default, text→default', () => {
   const v = initialConfigValues(GOWA);
   assert.deepEqual(v.allowed_jid_types, ['person', 'group']);
   assert.match(v.gowa_device_id, /^gowa_/);
   assert.equal(v.gowa_device_id.length, 'gowa_'.length + 10);
+  assert.equal(v.disconnect_alert_enabled, true);            // bool default coerced
   assert.deepEqual(initialConfigValues(TELEGRAM), {}); // no config fields
   assert.deepEqual(initialConfigValues(null), {});
 });
@@ -131,6 +133,26 @@ test('buildCreatePayload: GOWA → config fields, no credentials, sequential def
   assert.equal(p.config.gowa_device_id, 'gowa_abc');
   assert.equal(p.config.ai.ai_sequential_enabled, true);    // descriptor default ON
   assert.equal(p.credentials, undefined);
+});
+
+test('bool config_field (GOWA disconnect_alert_enabled) rides through create + edit payloads', () => {
+  // create: the bool value flows via configValues, no provider-specific branch
+  const created = buildCreatePayload({
+    provider: 'gowa', displayName: 'X', ai: { ...aiBase }, descriptor: GOWA,
+    configValues: { gowa_device_id: 'gowa_x', allowed_jid_types: ['person'],
+      disconnect_alert_enabled: false },
+    credValues: {},
+  });
+  assert.equal(created.config.disconnect_alert_enabled, false);
+  // edit: configValues override the parsed existing config
+  const edited = buildEditPayload({
+    displayName: 'X', descriptor: GOWA,
+    channelConfig: { allowed_jid_types: ['person'], disconnect_alert_enabled: true },
+    ai: { ...aiBase },
+    configValues: { allowed_jid_types: ['person'], disconnect_alert_enabled: false },
+    credValues: {},
+  });
+  assert.equal(edited.config.disconnect_alert_enabled, false);
 });
 
 test('buildCreatePayload: telegram → only non-empty bot_token, sequential default OFF', () => {

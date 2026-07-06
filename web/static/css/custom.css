@@ -19,6 +19,7 @@
   --wa-secondary: 102 119 129;
   --wa-border: 233 237 239;
   --wa-inputBg: 255 255 255;
+  --wa-replyPreviewBg: 255 255 255;
   --wa-hover: 245 246 246;
   --wa-selected: 240 242 245;
   --wa-badge: 37 211 102;
@@ -40,6 +41,7 @@ html.dark {
   --wa-secondary: 142 158 168;
   --wa-border: 42 57 66;
   --wa-inputBg: 42 57 66;
+  --wa-replyPreviewBg: 31 44 51;
   --wa-hover: 42 57 66;
   --wa-selected: 42 57 66;
   --wa-badge: 37 211 102;

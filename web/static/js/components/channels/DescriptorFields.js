@@ -1,7 +1,7 @@
 // Channels — generic descriptor-driven field renderers (plano 33). The core form
 // renders ANY provider from its descriptor's `credential_fields` / `config_fields`
 // with NO provider-specific code. Field types: text, secret, token_suggest,
-// multiselect, generated. Rich providers may instead ship a `form_component`
+// multiselect, generated, bool. Rich providers may instead ship a `form_component`
 // (loaded elsewhere via import()); these renderers are the always-available
 // generic path that covers the built-in providers.
 import { h } from 'preact';
@@ -104,10 +104,23 @@ function CredentialField({ field, value, onChange, editMode, busy }) {
     </div>`;
 }
 
-// Render a single config field (text / generated / multiselect).
+// Render a single config field (text / generated / multiselect / bool).
 function ConfigField({ field, value, onChange, busy }) {
   const type = field.type || 'text';
   const set = (v) => onChange(field.key, v);
+  if (type === 'bool') {
+    return html`
+      <div>
+        <label class="flex items-start gap-2 cursor-pointer ${busy ? 'opacity-60 cursor-not-allowed' : ''}">
+          <input type="checkbox" class="mt-0.5" checked=${!!value}
+            disabled=${busy} onChange=${(e) => set(e.target.checked)} />
+          <span class="flex flex-col">
+            <span class="text-[13px] text-wa-text">${field.label || field.key}</span>
+            ${field.help ? html`<span class="text-[11px] text-wa-secondary">${field.help}</span>` : null}
+          </span>
+        </label>
+      </div>`;
+  }
   if (type === 'multiselect') {
     return html`
       <div>

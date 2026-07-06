@@ -145,6 +145,12 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # desenfreado). 0 = sem teto; env WHATSBOT_TOOL_CALL_LIMIT tem precedência.
     ConfigKey("ai_tool_call_limit_total", default=25, exposed=True, writable=True),
     ConfigKey("setup_completed", default=False, exposed=True, writable=True),
+    # ── Installation identity (seeded once on first boot; see
+    # ``_seed_installation_metadata``). Exposed in GET /api/config but NEVER
+    # writable — ``installation_id`` is a stable, immutable per-install identity.
+    ConfigKey("installation_id", exposed=True, get_default=""),
+    ConfigKey("installed_at", exposed=True, get_default=None),
+    ConfigKey("app_version", exposed=True, get_default=""),
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
     ConfigKey("account_url", default="", exposed=True),
@@ -157,6 +163,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("system_notice_conv_labels", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_status", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_ai", default=True, exposed=True, writable=True),
+    # Trilha de auditoria (plano 07) — master global. Desligado ⇒ o listener core
+    # (``server/audit_listener.py``) faz early-return e nenhum evento é gravado em
+    # ``audit_log``. Checado por evento (sem restart). Toggle na tela Auditoria,
+    # gated por ``audit.manage``.
+    ConfigKey("audit_enabled", default=True, exposed=True, writable=True),
     # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
     ConfigKey("inactivity_timeout_min", default=30),
     ConfigKey("response_delay_min", default=1.0),
@@ -244,6 +255,35 @@ class Settings:
                     current.get("openrouter_api_key") or env_key
                 )
             config_repo.set_many(missing)
+        self._seed_installation_metadata(current)
+
+    def _seed_installation_metadata(self, current: dict):
+        """Persist per-installation identity on first boot; refresh app_version.
+
+        - ``installation_id``: a UUID minted ONCE and never overwritten — a stable
+          identity for this install (support, telemetry, distinguishing instances
+          that share the same Postgres). Mirrors Chatwoot's INSTALLATION_IDENTIFIER.
+        - ``installed_at``: unix timestamp captured ONCE. For an install predating
+          this feature it records the first boot AFTER the upgrade, not the true
+          original install time.
+        - ``app_version``: the running code version, refreshed on EVERY boot so the
+          DB always reflects the deployed build.
+        """
+        import time
+        import uuid
+
+        from config.version import get_app_version
+
+        to_set = {}
+        if not current.get("installation_id"):
+            to_set["installation_id"] = str(uuid.uuid4())
+        if not current.get("installed_at"):
+            to_set["installed_at"] = time.time()
+        version = get_app_version()
+        if current.get("app_version") != version:
+            to_set["app_version"] = version
+        if to_set:
+            config_repo.set_many(to_set)
 
     @staticmethod
     def _env_override(key: str):

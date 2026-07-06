@@ -8,11 +8,12 @@
 import { h, Fragment } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { listAudit, getAuditActions, downloadAuditExport } from '../services/api.js';
+import { listAudit, getAuditActions, downloadAuditExport, getConfig, saveConfig } from '../services/api.js';
 import { SearchableSelect } from './SearchableSelect.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, int } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -149,7 +150,31 @@ function Row({ row, expanded, onToggle, linkPath }) {
   `;
 }
 
-export default function AuditLog() {
+export default function AuditLog({ currentUser } = {}) {
+  // Master global (plano 07): liga/desliga a gravação da trilha. Só quem tem
+  // `audit.manage` vê o interruptor (P48: hide, don't disable); quem só tem
+  // `audit.read` enxerga a tela em modo leitura, sem o toggle.
+  const canManage = hasPermission(currentUser, 'audit.manage');
+  const [auditEnabled, setAuditEnabled] = useState(null);   // null = ainda carregando
+  const [togglingAudit, setTogglingAudit] = useState(false);
+
+  useEffect(() => {
+    if (!canManage) return;
+    getConfig().then((res) => {
+      if (res && res.ok && res.data) setAuditEnabled(res.data.audit_enabled !== false);
+    });
+  }, [canManage]);
+
+  async function toggleAudit() {
+    if (togglingAudit || auditEnabled == null) return;
+    const next = !auditEnabled;
+    setTogglingAudit(true);
+    setAuditEnabled(next);                                   // otimista
+    const res = await saveConfig({ audit_enabled: next });
+    if (!res || !res.ok) setAuditEnabled(!next);             // rollback em falha
+    setTogglingAudit(false);
+  }
+
   // Filter inputs (draft) — applied on "Filtrar".
   const [resourceType, setResourceType] = useState('');
   const [action, setAction] = useState('');
@@ -312,9 +337,31 @@ export default function AuditLog() {
 
   return html`
     <div class="flex flex-col gap-4">
-      <p class="text-[13px] text-wa-secondary">
-        Trilha de auditoria (somente leitura). Registra ações de usuários, do sistema e da IA.
-      </p>
+      <div class="flex items-start justify-between gap-4 flex-wrap">
+        <p class="text-[13px] text-wa-secondary flex-1 min-w-[240px]">
+          Trilha de auditoria (somente leitura). Registra ações de usuários, do sistema e da IA.
+        </p>
+        ${canManage && auditEnabled != null ? html`
+          <div class="flex items-center gap-3 bg-wa-bg border border-wa-border rounded-lg px-3 py-2">
+            <div class="flex flex-col">
+              <span class="text-[13px] text-wa-text font-medium">Registrar auditoria</span>
+              <span class="text-[11px] text-wa-secondary">
+                ${auditEnabled ? 'Ativa — novos eventos são gravados.' : 'Desativada — nada novo é gravado.'}
+              </span>
+            </div>
+            <button
+              onClick=${toggleAudit}
+              disabled=${togglingAudit}
+              role="switch"
+              aria-checked=${auditEnabled}
+              title=${auditEnabled ? 'Desativar auditoria' : 'Ativar auditoria'}
+              class="w-11 h-6 rounded-full transition-colors relative shrink-0 disabled:opacity-50 ${auditEnabled ? 'bg-wa-teal' : 'bg-wa-border'}"
+            >
+              <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${auditEnabled ? 'left-[22px]' : 'left-0.5'}"></span>
+            </button>
+          </div>
+        ` : null}
+      </div>
 
       <!-- Filters -->
       <div class="bg-wa-bg border border-wa-border rounded-lg p-4">

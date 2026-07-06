@@ -89,6 +89,12 @@ class GOWAChannel(Channel):
                  "help": "Escolha quais tipos de conversa deste número viram "
                          "conversa. Os tipos desmarcados são ignorados (não "
                          "aparecem no painel)."},
+                {"key": "disconnect_alert_enabled",
+                 "label": "Avisar no Telegram se este número cair",
+                 "type": "bool", "default": True,
+                 "help": "Quando ligado, quedas de conexão deste canal entram "
+                         "no alerta agregado do Telegram. O bot/chat/fuso ficam "
+                         "na configuração do plugin GOWA."},
             ],
             "capabilities": {"needs_qr": True, "templates": False},
             "ai_sequential_default": True,
