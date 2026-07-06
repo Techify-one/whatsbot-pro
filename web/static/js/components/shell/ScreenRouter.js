@@ -25,8 +25,18 @@ import UsersManager from '../UsersManager.js';
 import AuditLog from '../AuditLog.js';
 import AgentEngine from '../ai/AgentEngine.js';
 import { PageHeader } from './GearMenu.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
+
+function PermissionDenied({ label = 'esta tela' }) {
+  return html`
+    <div class="max-w-5xl mx-auto p-4">
+      <div class="rounded-lg border border-wa-border bg-wa-bg p-4 text-[14px] text-wa-secondary">
+        Você não tem permissão para acessar ${label}.
+      </div>
+    </div>`;
+}
 
 export function ScreenRouter({
   tab, setTab, activeRouteOverride, extensionsLoaded, activePluginScreen, currentUser,
@@ -111,6 +121,9 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'contacts') {
+    if (!hasPermission(currentUser, 'conversation.read')) {
+      return html`<${PermissionDenied} label="as conversas" />`;
+    }
     return html`<${Contacts} ...${contactsProps} />`;
   }
   if (tab === 'costs') {
@@ -133,6 +146,9 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'contatos') {
+    if (!hasPermission(currentUser, 'contact.read')) {
+      return html`<${PermissionDenied} label="a tela de contatos" />`;
+    }
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
         <${ContactsListScreen} initialEntity=${entFor('contatos')} />
