@@ -31,6 +31,13 @@ test('tabFromPathPure: core paths map to their tab', () => {
   assert.equal(tabFromPathPure('/channels', [], null), 'channels');
   assert.equal(tabFromPathPure('/ai', [], null), 'ai');
 });
+test('tabFromPathPure: /protocolos e o alias /attendances → aba attendances', () => {
+  // A aba do plugin protocolos: /protocolos é o path canônico; /attendances é
+  // alias silencioso (links antigos). pathForTab('attendances') → /protocolos.
+  assert.equal(tabFromPathPure('/protocolos', [], null), 'attendances');
+  assert.equal(tabFromPathPure('/attendances', [], null), 'attendances');
+  assert.equal(pathForTab('attendances', []), '/protocolos');
+});
 test('tabFromPathPure: /conversations/<id> opens the contacts hub', () => {
   assert.equal(tabFromPathPure('/conversations/42', [], null), 'contacts');
 });
@@ -70,7 +77,7 @@ test('pathForTab: plugin tab resolves to the screen path; unknown → /', () => 
 // ── legacyRedirectTarget ─────────────────────────────────────────────────────
 test('legacyRedirectTarget: PT → EN map, null otherwise', () => {
   assert.equal(legacyRedirectTarget('/contatos'), '/contacts');
-  assert.equal(legacyRedirectTarget('/atendimentos'), '/attendances');
+  assert.equal(legacyRedirectTarget('/atendimentos'), '/protocolos');
   assert.equal(legacyRedirectTarget('/painel'), '/dashboard');
   assert.equal(legacyRedirectTarget('/auditoria'), '/audit');
   assert.equal(legacyRedirectTarget('/contacts'), null);

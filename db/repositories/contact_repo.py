@@ -129,11 +129,11 @@ def mark_as_read(contact_id: int) -> list[str]:
     return unread_repo.mark_as_read(contact_id)
 
 
-def unread_conversation_count() -> int:
+def unread_conversation_count(inbox_ids: list[int] | None = None) -> int:
     """Number of non-archived conversations that have unread messages — used for the
     browser-tab badge (e.g. "(3) WhatsBot"). Counts a conversation once regardless of
     how many messages are unread, mirroring the sidebar badge visibility."""
-    return unread_repo.unread_conversation_count()
+    return unread_repo.unread_conversation_count(inbox_ids)
 
 
 def set_mention(contact_id: int) -> None:

@@ -378,7 +378,8 @@ class AgentHandler:
                               reply_to_msg_id: str | None = None,
                               sent_by_user_id: int | None = None,
                               sent_by_name: str | None = None,
-                              channel_id: str = "default") -> dict:
+                              channel_id: str = "default",
+                              reopen: bool | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing.
 
         ``channel_id`` decides which inbox owns the conversation the message lands
@@ -391,7 +392,8 @@ class AgentHandler:
         contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, status=status, msg_id=msg_id,
                             reply_to_msg_id=reply_to_msg_id,
-                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
+                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            reopen=reopen)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def mark_message_sent(self, phone: str, content: str,

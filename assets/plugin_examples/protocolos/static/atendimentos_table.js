@@ -1,11 +1,10 @@
 // Tabela de "Atendimentos" (ciclos) do protocolo, com COLUNAS DINÂMICAS + filtro.
 //
-// Colunas em DOIS grupos, com cabeçalho de grupo p/ deixar CLARO a origem de cada coluna:
-//  - "Informações do atendimento": fixos (Início/Fim/Atendente/Observações) + rótulos do
-//    plugin (escopo atendimento, lidos de `c.fields`), NA ORDEM da config.
-//  - "Atributos personalizados": atributos do core (is_system=0, lidos de `c.attrs`).
-// Rótulos/atributos apagados NÃO aparecem: o backend só devolve em `c.fields`/`c.attrs` os
-// valores cujo rótulo/atributo ainda existe; aqui renderizamos só as defs recebidas.
+// Colunas: fixos (Início/Fim/Atendente) + rótulos do plugin (escopo atendimento, lidos de
+// `c.fields`, incluindo Observações), NA ORDEM da config. (Os atributos personalizados de
+// CONVERSA do core não fazem mais parte do plugin.)
+// Rótulos apagados NÃO aparecem: o backend só devolve em `c.fields` os valores cujo rótulo
+// ainda existe; aqui renderizamos só as defs recebidas.
 // Filtro de colunas (botão "Colunas") liga/desliga cada coluna; a escolha é persistida
 // por-dispositivo em localStorage (storageKey). Cores wa-*.
 
@@ -24,47 +23,37 @@ function fmtTs(ts) {
 function lsGet(k) { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
 
-// Grupos de colunas (origem clara). 'atendimento' = info + rótulos da atendimento; 'atributo' =
-// atributo personalizado do core. A ordem aqui é a ordem dos grupos na tabela.
+// Grupo único de colunas: info fixa + rótulos da atendimento.
 const GROUPS = [
   { id: 'atendimento', label: 'Informações do atendimento' },
-  { id: 'atributo', label: 'Atributos personalizados' },
 ];
 
 const BASE = [
   { key: '__inicio', label: 'Início', base: true, group: 'atendimento' },
   { key: '__fim', label: 'Fim', base: true, group: 'atendimento' },
   { key: '__atendente', label: 'Atendente', base: true, group: 'atendimento' },
-  { key: '__obs', label: 'Observações', base: true, group: 'atendimento' },
 ];
 
-export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs = [],
+export function AtendimentosTable({ atendimentos = [], fieldDefs = [],
                                 storageKey = 'whatsbot_proto_cols',
                                 defaultHidden = {}, showFilter = true,
                                 startField = 'started_at', endField = 'ended_at',
                                 onRowClick = null,
                                 emptyText = 'Nenhum atendimento vinculado ainda.' }) {
-  // Conjunto de colunas: fixos (group 'atendimento') + rótulos EXTRAS do plugin (group
-  // 'atendimento', lidos de c.fields) + atributos do core (group 'atributo', lidos de
-  // c.attrs). Defs fixas que cheguem em fieldDefs são ignoradas (já cobertas pela base).
+  // Conjunto de colunas: fixos (Início/Fim/Atendente) + rótulos do plugin (obs incluso,
+  // lidos de c.fields). O tipo "atendente" NÃO vira coluna aqui (a base __atendente já mostra
+  // o atendente do ciclo; o rótulo atendente é só de entrada).
   const cols = useMemo(() => {
     const out = [...BASE];
     const seen = new Set();
     for (const d of (fieldDefs || [])) {
-      if (d && d.key && !d.fixed && !seen.has(d.key)) {
+      if (d && d.key && !d.fixed && d.type !== 'atendente' && !seen.has(d.key)) {
         seen.add(d.key);
         out.push({ key: d.key, label: d.label || d.key, type: d.type, group: 'atendimento', src: 'fields' });
       }
     }
-    for (const d of (attrDefs || [])) {
-      const ck = `attr:${d && d.key}`;
-      if (d && d.key && !seen.has(ck)) {
-        seen.add(ck);
-        out.push({ key: ck, attrKey: d.key, label: d.label || d.key, type: d.type, group: 'atributo', src: 'attrs' });
-      }
-    }
     return out;
-  }, [fieldDefs, attrDefs]);
+  }, [fieldDefs]);
 
   // Visibilidade persistida (mapa colKey -> true = oculta). Default configurável.
   const [hidden, setHidden] = useState(() => lsGet(storageKey) || { ...defaultHidden });
@@ -80,28 +69,24 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
   }
 
   const visCols = cols.filter((c) => visible(c.key));
-  // Grupos visíveis (ordem fixa, só os com ≥1 coluna). Com >1 grupo, o cabeçalho ganha
-  // uma linha de grupo (Informações do atendimento | Atributos personalizados).
+  // Grupos visíveis (só os com ≥1 coluna). Com grupo único não há linha de cabeçalho de grupo.
   const visGroups = GROUPS
     .map((g) => ({ ...g, cols: visCols.filter((c) => c.group === g.id) }))
     .filter((g) => g.cols.length);
   const showGroupHeader = visGroups.length > 1;
-  // Colunas achatadas na ordem dos grupos; marca a 1ª de cada grupo (≠ 1º) p/ um separador
-  // visual (borda à esquerda) entre "atendimento" e "atributos".
-  const flatCols = visGroups.flatMap((g, gi) => g.cols.map((c, ci) => ({ ...c, _sep: gi > 0 && ci === 0 })));
+  // Colunas achatadas na ordem dos grupos (grupo único ⇒ sem separador visual).
+  const flatCols = visGroups.flatMap((g) => g.cols.map((c) => ({ ...c, _sep: false })));
 
   function cell(c, col) {
     if (col.key === '__inicio') return fmtTs(c[startField]);
     if (col.key === '__fim') return fmtTs(c[endField]);
     if (col.key === '__atendente') return c.assignee_name || '—';
-    if (col.key === '__obs') return c.obs || '—';
-    const src = col.src === 'attrs' ? (c.attrs || {}) : (c.fields || {});
-    const v = src[col.attrKey || col.key];
+    const v = (c.fields || {})[col.key];
     if (col.type === 'checkbox') return v === true ? 'Sim' : (v === false ? 'Não' : '—');
     return (v === null || v === undefined || v === '') ? '—' : String(v);
   }
 
-  const groupCls = (gid) => (gid === 'atributo' ? 'text-amber-600' : 'text-wa-teal');
+  const groupCls = () => 'text-wa-teal';
 
   return html`
     <div>
@@ -140,8 +125,8 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [], attrDefs 
             <thead>
               ${showGroupHeader ? html`
                 <tr class="text-left">
-                  ${visGroups.map((g, gi) => html`<th key=${g.id} colspan=${g.cols.length}
-                    class="py-1 pr-2 text-[10px] uppercase tracking-wide font-semibold ${gi > 0 ? 'border-l border-wa-border pl-2' : ''} ${groupCls(g.id)}">${g.label}</th>`)}
+                  ${visGroups.map((g) => html`<th key=${g.id} colspan=${g.cols.length}
+                    class="py-1 pr-2 text-[10px] uppercase tracking-wide font-semibold ${groupCls(g.id)}">${g.label}</th>`)}
                 </tr>` : null}
               <tr class="text-wa-secondary text-left">
                 ${flatCols.map((col) => html`<th key=${col.key}
