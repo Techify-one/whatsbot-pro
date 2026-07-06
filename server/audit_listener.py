@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from db import audit_actions
-from db.repositories import audit_repo
+from db.repositories import audit_repo, config_repo
 from server.audit_context import get_current_actor
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,10 @@ def audit_event_handler(ctx, payload: dict) -> None:
     try:
         spec = audit_actions.AUDITABLE_EVENTS.get(ctx.event_name)
         if not spec:
+            return
+        # Master global (plano 07): desligado ⇒ nada é gravado. Checado por evento
+        # para que o toggle na tela Auditoria valha sem restart.
+        if not config_repo.get("audit_enabled", True):
             return
         action, rtype = spec
         actor = get_current_actor()

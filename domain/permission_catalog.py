@@ -33,6 +33,7 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("template.delete",       "Apagar templates (WhatsApp Cloud)"),
     ("users.manage",          "Criar/editar/desativar usuários e grupos de permissão"),
     ("audit.read",            "Ler trilha de auditoria"),
+    ("audit.manage",          "Ativar/desativar a trilha de auditoria"),
     # Plano 24 — maximizar permissões (CRUD)
     ("contact.delete",           "Excluir contato (e todas as conversas)"),
     ("conversation.delete",      "Excluir conversa (apaga histórico)"),
