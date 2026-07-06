@@ -152,11 +152,11 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 **Pronto quando:** com uma linha `default` duplo-codificada no banco de teste, `build_for_contact` **retorna um `AgentSpec` com `model="deepseek/deepseek-v4-pro"`** (não levanta); um `logger.error` é emitido. Manualmente: com a linha suja, enviar "Oi" no Sandbox → a IA **responde** (degradada) em vez de gravar o card de erro.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `agent/agent_factory.py`: (1) helper `_emergency_spec()` monta um `AgentSpec` default a partir das constantes seed (espelha o shape `model_config` com `_agent_key`/`_hooks_config`); (2) helper `_coerce_dict()` (reusa `coerce_json` F1) troca `dict(agent.get("model_config") or {})` em `:293`/`:300` por coerção tolerante (dict pronto OU string JSON → dict, senão `{}`), + coerção de `tool_names` para lista-ou-None; (3) branch "agente ausente/desativado" e `except Exception` genérico agora `logger.error` + **retornam `_emergency_spec()`** em vez de só `raise` — `AgentResolutionError` só se nem o piso montar; (4) docstrings do módulo, da função e da exceção realinhadas ao piso. `tests/test_agent_json_hardening.py` estendido (hooks_config/routing_targets duplo + piso via agente desativado com captura de `logger.error`).
+- **Como foi feito / decisões:** `_coerce_dict` faz cópia (`dict(coerced)`) para nunca mutar o dict cacheado no `dynamic_registry`. Piso inclui `_agent_key`/`_hooks_config` porque o engine os lê (`agno_engine.py:468,527` via `.get()` — não obrigatórios, mas espelhar é mais seguro). Contrato de `AgentResolutionError` preservado: `agent_run_service` continua tratando-o como parada dura (só que a frequência cai — o piso cobre a maioria).
+- **Problemas / pendências:** Corrigido no teste: o setter do agente vinculado é `conversation_repo.set_agent` (não `set_active_agent`). Nenhuma pendência.
+- **Verificação:** `tests/test_agent_json_hardening.py` → 16 passed. Regressões verdes: `test_agent_routing` (29), `test_routing_engine`, `test_model_factory`, `test_hooks`; `pytest` de `test_spoke_router_enforcement` + `test_router_prompt_description` + `characterization/test_agent_turn_characterization` (20 passed).
 
 ---
 
