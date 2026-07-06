@@ -86,7 +86,18 @@ test('buildCreatePayload: GOWA sets jid types + device id, sequential default ON
   assert.deepEqual(p.config.allowed_jid_types, ['person', 'group']);
   assert.equal(p.config.gowa_device_id, 'gowa_abc');
   assert.equal(p.config.ai.ai_sequential_enabled, true); // GOWA default ON
+  assert.equal(p.config.disconnect_alert_enabled, true); // alert default ON
   assert.equal(p.credentials, undefined);
+});
+
+test('buildCreatePayload: GOWA disconnect alert off when unchecked; non-GOWA omits it', () => {
+  const off = buildCreatePayload({
+    provider: 'gowa', displayName: 'G', ai: { ...aiBase },
+    gowaDeviceId: 'gowa_x', jidTypes: ['person'], gowaAlertEnabled: false,
+  });
+  assert.equal(off.config.disconnect_alert_enabled, false);
+  const tg = buildCreatePayload({ provider: 'telegram', displayName: 'TG', ai: { ...aiBase }, botToken: '1:A' });
+  assert.equal(tg.config.disconnect_alert_enabled, undefined);  // non-GOWA → not set
 });
 
 test('buildCreatePayload: telegram sequential default OFF, only non-empty bot_token sent', () => {
@@ -129,6 +140,25 @@ test('buildEditPayload: preserves existing config keys, updates ai, GOWA jid typ
   assert.deepEqual(p.config.allowed_jid_types, ['person']);      // updated by jidTypes
   assert.equal(p.config.ai.group_reply_mode, 'always');
   assert.equal(p.credentials, undefined);
+});
+
+test('buildEditPayload: GOWA writes per-channel disconnect_alert_enabled', () => {
+  const on = buildEditPayload({
+    displayName: 'G', ai: { ...aiBase }, jidTypes: ['person'], isGowa: true, isCloud: false,
+    gowaAlertEnabled: true, channelConfig: '{"gowa_device_id":"dev1"}',
+  });
+  assert.equal(on.config.disconnect_alert_enabled, true);
+  assert.equal(on.config.gowa_device_id, 'dev1');            // preserved
+  const off = buildEditPayload({
+    displayName: 'G', ai: { ...aiBase }, jidTypes: ['person'], isGowa: true, isCloud: false,
+    gowaAlertEnabled: false, channelConfig: {},
+  });
+  assert.equal(off.config.disconnect_alert_enabled, false);
+  const cloud = buildEditPayload({
+    displayName: 'C', ai: { ...aiBase }, jidTypes: [], isGowa: false, isCloud: true,
+    channelConfig: {},
+  });
+  assert.equal(cloud.config.disconnect_alert_enabled, undefined);  // non-GOWA → not set
 });
 
 test('buildEditPayload: whatsapp_cloud sends only non-blank creds ("keep current")', () => {

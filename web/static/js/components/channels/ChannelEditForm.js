@@ -8,6 +8,7 @@ import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import {
   updateChannel, getChannelMembers, setChannelMembers, telegramChannelStatus,
+  getGowaAlertSettings,
 } from '../../services/api.js';
 import {
   parseChannelConfig, aiDefaultsFrom, DEFAULT_JID_TYPES, buildEditPayload,
@@ -63,6 +64,24 @@ export function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
       ? cfg.allowed_jid_types
       : DEFAULT_JID_TYPES;
   });
+  // GOWA: per-channel on/off for the disconnect alert (Telegram). Seed from the
+  // channel's own config; if it never set one (undefined), the effect below fills
+  // it from the plugin's legacy global value so existing installs stay consistent.
+  const [gowaAlertEnabled, setGowaAlertEnabled] = useState(() => {
+    const cfg = parseChannelConfig(channel.config);
+    return !!cfg.disconnect_alert_enabled;
+  });
+  useEffect(() => {
+    if (!isGowa) return;
+    const cfg = parseChannelConfig(channel.config);
+    if (cfg.disconnect_alert_enabled !== undefined) return; // channel already explicit
+    let alive = true;
+    (async () => {
+      const res = await getGowaAlertSettings();
+      if (alive && res && res.ok && res.data) setGowaAlertEnabled(!!res.data.enabled);
+    })();
+    return () => { alive = false; };
+  }, [isGowa, channel.id]);
   // whatsapp_cloud secrets: blank means "keep current"; only non-empty is sent.
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
@@ -100,6 +119,7 @@ export function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
     // settings (plano 21) and sends only the non-empty whatsapp_cloud creds.
     const payload = buildEditPayload({
       displayName, ai, jidTypes, isGowa, isCloud,
+      gowaAlertEnabled,
       channelConfig: channel.config,
       accessToken, phoneNumberId, wabaId, verifyToken,
     });
@@ -162,6 +182,18 @@ export function ChannelEditForm({ channel, onSaved, onCancel, aiDefaults }) {
                 desmarcados são ignorados (não aparecem no painel).
               </p>
               <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
+            </div>
+
+            <div class="border-t border-wa-border pt-3">
+              <label class="flex items-center gap-2 text-[14px] text-wa-text">
+                <input type="checkbox" checked=${gowaAlertEnabled} disabled=${busy}
+                  onChange=${(e) => setGowaAlertEnabled(e.target.checked)} />
+                Ativar alertas de desconexão (Telegram)
+              </label>
+              <p class="text-[12px] text-wa-secondary mt-1">
+                Avisa no Telegram quando este número cair. O bot, o chat de destino, o
+                intervalo e o fuso são configurados em Plugins → WhatsApp (GOWA) → Configurar.
+              </p>
             </div>
           ` : null}
 

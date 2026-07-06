@@ -40,6 +40,9 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
   const [gowaDeviceId, setGowaDeviceId] = useState(() => `gowa_${randomToken(10)}`);
   // Which chat types this GOWA channel surfaces (config.allowed_jid_types).
   const [jidTypes, setJidTypes] = useState(DEFAULT_JID_TYPES);
+  // GOWA: per-channel on/off for the Telegram disconnect alert. Default ON for a
+  // new channel (the bot/chat/timezone are configured in the plugin's screen).
+  const [gowaAlertEnabled, setGowaAlertEnabled] = useState(true);
   const [accessToken, setAccessToken] = useState('');
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [wabaId, setWabaId] = useState('');
@@ -79,7 +82,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
   function submit() {
     if (!canSave) return;
     const payload = buildCreatePayload({
-      provider, displayName, ai, gowaDeviceId, jidTypes,
+      provider, displayName, ai, gowaDeviceId, jidTypes, gowaAlertEnabled,
       accessToken, phoneNumberId, wabaId, verifyToken, botToken,
     });
     onCreated(payload, agentIds);
@@ -122,6 +125,17 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
               desmarcados são ignorados (não aparecem no painel).
             </p>
             <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
+          </div>
+          <div>
+            <label class="flex items-center gap-2 text-[14px] text-wa-text">
+              <input type="checkbox" checked=${gowaAlertEnabled} disabled=${busy}
+                onChange=${(e) => setGowaAlertEnabled(e.target.checked)} />
+              Ativar alertas de desconexão (Telegram)
+            </label>
+            <p class="text-[12px] text-wa-secondary mt-1">
+              Avisa no Telegram quando este número cair. O bot, o chat de destino, o
+              intervalo e o fuso são configurados em Plugins → WhatsApp (GOWA) → Configurar.
+            </p>
           </div>
         ` : null}
 
