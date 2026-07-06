@@ -134,6 +134,14 @@ class MessagingState:
         self.channel_ai_locks: dict[str, asyncio.Lock] = {}
         # True while a reply is mid-flight — webhook must NOT cancel during this phase.
         self.sending: dict[tuple, bool] = {}
+        # True while an orchestrator is MID-CYCLE — i.e. it has already POPPED its
+        # batch from pending_messages and is running the LLM/send cycle (plano 33
+        # F6). Broader than ``sending`` (which only covers the final SEND phase):
+        # a message arriving in the pop→persist window used to cancel the task and
+        # DISCARD the already-popped items (message lost). While this flag is set
+        # the webhook must NOT cancel — it leaves the new message in pending and the
+        # running orchestrator's tail spawns a follow-up cycle for it.
+        self.processing: dict[tuple, bool] = {}
         # Track recently sent replies to filter webhook echo-backs.
         # "<channel_id>:<phone>:<wire_text[:120]>" -> timestamp.
         self.recently_sent: dict[str, float] = {}
@@ -208,6 +216,10 @@ class AppState:
     @property
     def sending(self) -> dict:
         return self.messaging.sending
+
+    @property
+    def processing(self) -> dict:
+        return self.messaging.processing
 
     @property
     def recently_sent(self) -> dict:

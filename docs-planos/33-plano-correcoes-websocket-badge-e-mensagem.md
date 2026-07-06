@@ -230,11 +230,11 @@ WAVE 2
 **Pronto quando:** enviar 2 mensagens do cliente com <2s entre elas (dentro do `ai_sequential_delay`) → **nenhuma** some (ambas persistem e são respondidas), sem resposta/mensagem duplicada.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** novo dict `state.processing: dict[tuple, bool]` em [server/state.py](../server/state.py) (`MessagingState` + property shim em `AppState`, análogo a `sending`). Em [app/services/messaging_service.py](../app/services/messaging_service.py): `state.processing[key]=True` logo após o pop do batch (`_orchestrate`), limpo em `state.processing.pop(key, None)` no `finally`; e o guard do `schedule_orchestrator` estendido para `if state.sending.get(key) or state.processing.get(key): return` (não cancela).
+- **Como foi feito / decisões:** o guard cobre a janela pop→persist que a flag `sending` (só a fase de SEND) não cobria — um inbound nessa janela cancelava a task e descartava o `items` já popado (mensagem perdida do DB). Com o guard, o inbound fica em `pending_messages` e o **tail** existente (spawn de follow-up se `pending_messages.get(key)`) o processa como batch fresco. **Correção de corretude verificada:** entre o tail (spawn) e o `finally` que limpa `processing` NÃO há `await` — então o webhook (task separada, só interleava em await points) não pode inserir uma mensagem "cega" nessa janela; ela ou chegou antes (tail spawna) ou chegará depois de limpar (agenda orquestrador fresco normalmente). **NÃO** re-enfileirei `items` no `except CancelledError` (duplicaria após o persist). Clear posto ANTES do pop de `processing_tasks` no finally.
+- **Problemas / pendências:** sem teste automatizado dedicado (o race é timing-dependent; o plano não pede harness — cenário manual "2 msgs <2s"). Nenhuma regressão nos testes existentes que exercitam o orquestrador.
+- **Verificação:** `state.py`/`messaging_service.py` parseiam; 26 testes de `test_webhook_characterization` + `test_conversation_race` + `test_human_gate` (9) verdes após a mudança.
 
 ---
 
