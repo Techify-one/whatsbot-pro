@@ -24,7 +24,7 @@ let _assignableUsers = null;
 
 // Seletor de ATENDENTE nativo: os mesmos usuários de "Atribuir atendente" + "Não atribuído".
 // value = uid (número) ou vazio quando não atribuído; onChange devolve number|null.
-export function AttendantSelect({ value, onChange }) {
+export function AttendantSelect({ value, onChange, fallbackUser = null }) {
   const [users, setUsers] = useState(_assignableUsers || []);
   useEffect(() => {
     if (_assignableUsers) return undefined;
@@ -35,9 +35,14 @@ export function AttendantSelect({ value, onChange }) {
     return () => { alive = false; };
   }, []);
   const cur = value == null ? '' : String(value);
+  const hasCur = cur === '' || users.some((u) => String(u.id) === cur);
+  const extra = (!hasCur && fallbackUser && fallbackUser.id != null)
+    ? [{ id: fallbackUser.id, name: fallbackUser.name || fallbackUser.email || ('#' + fallbackUser.id), email: fallbackUser.email }]
+    : [];
   return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${cur}
     onChange=${(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
     <option value="">Não atribuído</option>
+    ${extra.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
     ${users.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
   </select>`;
 }
@@ -46,7 +51,7 @@ export function AttendantSelect({ value, onChange }) {
 export function FieldInput({ def, value, onChange }) {
   const t = def.type || 'text';
   if (t === 'atendente') {
-    return html`<${AttendantSelect} value=${value} onChange=${onChange} />`;
+    return html`<${AttendantSelect} value=${value} onChange=${onChange} fallbackUser=${def.fallbackUser} />`;
   }
   if (t === 'textarea') {
     return html`<textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] min-h-[80px]"
