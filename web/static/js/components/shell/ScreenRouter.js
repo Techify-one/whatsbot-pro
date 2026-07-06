@@ -83,7 +83,7 @@ export function ScreenRouter({
   if (tab === 'audit') {
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Auditoria" onBack=${() => setTab('contacts')} />
-        <${AuditLog} />
+        <${AuditLog} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'ai') {
@@ -100,7 +100,7 @@ export function ScreenRouter({
   }
   if (tab === 'dashboard') {
     return html`<div class="max-w-5xl mx-auto p-4">
-        <${PageHeader} title="Painel" onBack=${() => setTab('contacts')} />
+        <${PageHeader} title="Configurações Gerais" onBack=${() => setTab('contacts')} />
         <${Dashboard}
           config=${config}
           saving=${saving}

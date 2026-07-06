@@ -163,6 +163,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("system_notice_conv_labels", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_status", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_ai", default=True, exposed=True, writable=True),
+    # Trilha de auditoria (plano 07) — master global. Desligado ⇒ o listener core
+    # (``server/audit_listener.py``) faz early-return e nenhum evento é gravado em
+    # ``audit_log``. Checado por evento (sem restart). Toggle na tela Auditoria,
+    # gated por ``audit.manage``.
+    ConfigKey("audit_enabled", default=True, exposed=True, writable=True),
     # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
     ConfigKey("inactivity_timeout_min", default=30),
     ConfigKey("response_delay_min", default=1.0),
