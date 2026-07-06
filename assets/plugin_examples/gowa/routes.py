@@ -15,7 +15,8 @@ import asyncio
 
 import httpx
 from fastapi import APIRouter, Body, Request
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from db.repositories import config_repo
 
@@ -25,14 +26,11 @@ _CFG = "plugin.gowa."
 _MASK = "••••••••"
 HTTP_TIMEOUT = 20.0
 _DEFAULT_TZ = "America/Sao_Paulo"
-# Fusos do Brasil oferecidos como OVERRIDE manual na tela (nome IANA → rótulo).
-# O fuso padrão é detectado do navegador; isto é só para quem quiser fixar outro.
-_BR_TIMEZONES = {
-    "America/Sao_Paulo": "Brasília (UTC-3) — maior parte do país",
-    "America/Manaus": "Manaus (UTC-4) — AM, RR, RO, MT, MS",
-    "America/Rio_Branco": "Rio Branco (UTC-5) — Acre e oeste do AM",
-    "America/Noronha": "Fernando de Noronha (UTC-2)",
-}
+
+# Lista COMPLETA de fusos do mundo — a base IANA embutida no Python (zoneinfo),
+# a fonte autoritativa e offline (sem API externa). Cacheada por processo; o rótulo
+# traz o offset atual (UTC±HH:MM) para o usuário se localizar.
+_TZ_CACHE: list[dict] | None = None
 
 
 def _get(key: str, default=None):
@@ -50,34 +48,39 @@ def _valid_tz(name: str) -> bool:
         return False
 
 
-def _origin_from_request(request: Request) -> str:
-    """URL base que o navegador está usando para acessar o painel AGORA.
-
-    Honra os headers de proxy reverso (Coolify/Nginx) para pegar o domínio público
-    real; em acesso direto (LAN/localhost) cai no Host + scheme da requisição."""
-    proto = (request.headers.get("x-forwarded-proto")
-             or request.url.scheme or "http").split(",")[0].strip()
-    host = (request.headers.get("x-forwarded-host")
-            or request.headers.get("host")
-            or request.url.netloc or "").split(",")[0].strip()
-    return f"{proto}://{host}" if host else ""
+def _all_timezones() -> list[dict]:
+    """Todos os fusos IANA, ordenados por offset e nome: [{value, label}]."""
+    global _TZ_CACHE
+    if _TZ_CACHE is not None:
+        return _TZ_CACHE
+    now = datetime.now()
+    items: list[tuple[int, str, dict]] = []
+    for name in available_timezones():
+        try:
+            off = now.astimezone(ZoneInfo(name)).utcoffset()
+        except Exception:  # noqa: BLE001
+            continue
+        mins = int(off.total_seconds() // 60) if off else 0
+        sign = "+" if mins >= 0 else "-"
+        hh, mm = divmod(abs(mins), 60)
+        label = f"(UTC{sign}{hh:02d}:{mm:02d}) {name.replace('_', ' ')}"
+        items.append((mins, name, {"value": name, "label": label}))
+    items.sort(key=lambda t: (t[0], t[1]))
+    _TZ_CACHE = [it[2] for it in items]
+    return _TZ_CACHE
 
 
 @router.get("/alert-settings")
 async def get_alert_settings(request: Request, tz: str = ""):
-    """Configuração atual do alerta + auto-detecta URL do painel e fuso do navegador.
+    """Configuração atual do alerta + auto-detecta o fuso do navegador.
 
-    Toda vez que a tela de config carrega, capturamos (a) a URL que o navegador está
-    usando (headers) e (b) o fuso horário do navegador (query ``tz`` enviada pela
-    tela). Ambos são persistidos como valores ``_auto`` — assim o loop de alerta
-    (que roda em background, sem requisição) sempre tem a URL e o fuso corretos sem
-    o usuário precisar preencher nada. O token continua mascarado."""
-    detected_url = _origin_from_request(request)
+    A URL do painel NÃO é capturada aqui: ela é a variável global do core
+    ``public_base_url`` (capturada no 1º acesso ao painel), lida direto pelo loop de
+    alerta. O fuso do navegador (query ``tz``) é persistido para o loop usar sem o
+    usuário precisar escolher. O token continua mascarado."""
     detected_tz = tz.strip() if _valid_tz(tz.strip()) else ""
 
     def _load():
-        if detected_url:
-            config_repo.set(_CFG + "disconnect_alert_panel_url_auto", detected_url)
         if detected_tz:
             config_repo.set(_CFG + "disconnect_alert_timezone_auto", detected_tz)
         token = (_get("disconnect_alert_bot_token", "") or "").strip()
@@ -85,22 +88,19 @@ async def get_alert_settings(request: Request, tz: str = ""):
             interval = int(_get("disconnect_alert_interval_min", 15) or 15)
         except (TypeError, ValueError):
             interval = 15
-        manual = str(_get("disconnect_alert_panel_url", "") or "")
-        auto = str(_get("disconnect_alert_panel_url_auto", "") or "") or detected_url
+        base = str(config_repo.get("public_base_url", "") or "").rstrip("/")
         tz_manual = str(_get("disconnect_alert_timezone", "") or "")
         tz_auto = str(_get("disconnect_alert_timezone_auto", "") or "") or detected_tz or _DEFAULT_TZ
         return {
             "enabled": bool(_get("disconnect_alert_enabled", False)),
             "bot_token_set": bool(token),
             "chat_id": str(_get("disconnect_alert_chat_id", "") or ""),
-            "panel_url": manual,                 # override manual (opcional)
-            "panel_url_auto": auto,              # URL detectada automaticamente
-            "panel_url_effective": manual or auto,  # a que o alerta vai usar
+            "panel_url_effective": base,         # variável global do core (só leitura)
             "interval_min": interval,
             "timezone": tz_manual,               # override manual do fuso (vazio = automático)
             "timezone_auto": tz_auto,            # fuso detectado do navegador
             "timezone_effective": tz_manual or tz_auto,  # fuso que o alerta vai usar
-            "timezones": _BR_TIMEZONES,          # opções do override manual
+            "timezones": _all_timezones(),       # lista completa (IANA) para o seletor
         }
     data = await asyncio.to_thread(_load)
     return {"ok": True, "data": data}
@@ -115,8 +115,6 @@ async def put_alert_settings(payload: dict = Body(...)):
             updates[_CFG + "disconnect_alert_enabled"] = bool(payload["enabled"])
         if "chat_id" in payload:
             updates[_CFG + "disconnect_alert_chat_id"] = str(payload["chat_id"] or "").strip()
-        if "panel_url" in payload:
-            updates[_CFG + "disconnect_alert_panel_url"] = str(payload["panel_url"] or "").strip().rstrip("/")
         if "interval_min" in payload:
             try:
                 updates[_CFG + "disconnect_alert_interval_min"] = max(1, int(payload["interval_min"]))
@@ -124,9 +122,9 @@ async def put_alert_settings(payload: dict = Body(...)):
                 pass
         if "timezone" in payload:
             tz = str(payload["timezone"] or "").strip()
-            # Vazio = usar o fuso automático (detectado do navegador). Se preenchido,
-            # precisa ser um fuso IANA válido; caso contrário cai para vazio (auto).
-            updates[_CFG + "disconnect_alert_timezone"] = tz if _valid_tz(tz) else ""
+            # Fuso é sempre um valor fixo (não há mais modo automático); valor
+            # inválido/vazio cai no default Brasília.
+            updates[_CFG + "disconnect_alert_timezone"] = tz if _valid_tz(tz) else _DEFAULT_TZ
         # Token só é gravado quando vem um valor real (não vazio e não a máscara).
         token = payload.get("bot_token")
         if token is not None:
@@ -153,13 +151,22 @@ async def alert_test(payload: dict = Body(default={})):
     if not token or not chat_id:
         return {"ok": False, "error": "Informe o token do bot e o chat_id."}
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = {
+        "chat_id": chat_id,
+        "text": "✅ WhatsBot: alerta de desconexão configurado com sucesso.",
+    }
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.post(url, json={
-                "chat_id": chat_id,
-                "text": "✅ WhatsBot: alerta de desconexão configurado com sucesso.",
-            })
-        data = resp.json()
+            resp = await client.post(url, json=body)
+            data = resp.json()
+            # Grupo virou supergrupo: o chat_id mudou. Persiste o novo id e reenvia
+            # uma vez — mesma cortesia da interceptação central do loop (alerts.py).
+            new_id = data.get("parameters", {}).get("migrate_to_chat_id") if not data.get("ok") else None
+            if new_id:
+                new_id = str(new_id)
+                await asyncio.to_thread(config_repo.set, _CFG + "disconnect_alert_chat_id", new_id)
+                resp = await client.post(url, json={**body, "chat_id": new_id})
+                data = resp.json()
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Falha ao contatar o Telegram: {e}"}
     if not data.get("ok"):

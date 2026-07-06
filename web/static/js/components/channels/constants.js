@@ -125,13 +125,15 @@ export function missingCredsFor(channel, requiredCreds) {
 }
 
 // Initial config-field values for a NEW channel of `descriptor`: multiselect →
-// its `default` list; generated → `prefix` + a random token; anything else →
-// its `default` (or empty string). PURE.
+// its `default` list; generated → `prefix` + a random token; bool → its
+// `default` coerced to boolean; anything else → its `default` (or empty string).
+// PURE.
 export function initialConfigValues(descriptor) {
   const out = {};
   for (const f of (descriptor && descriptor.config_fields) || []) {
     if (f.type === 'multiselect') out[f.key] = Array.isArray(f.default) ? f.default.slice() : [];
     else if (f.type === 'generated') out[f.key] = `${f.prefix || ''}${randomToken(10)}`;
+    else if (f.type === 'bool') out[f.key] = f.default != null ? !!f.default : false;
     else out[f.key] = f.default != null ? f.default : '';
   }
   return out;

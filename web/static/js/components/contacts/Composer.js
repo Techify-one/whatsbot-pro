@@ -200,7 +200,7 @@ export function Composer({
         const accent = q ? q.senderColor : '#8696a0';
         return html`
           <div class="px-[14px] pt-[6px] bg-wa-panel shrink-0">
-            <div class="flex items-stretch rounded-[6px] overflow-hidden" style="background:#1f2c33;">
+            <div class="flex items-stretch rounded-[6px] overflow-hidden" style="background:rgb(var(--wa-replyPreviewBg));">
               <div class="w-[4px] shrink-0" style="background:${accent};"></div>
               <div class="px-[10px] py-[5px] min-w-0 flex-1">
                 <div class="text-[12.5px] font-semibold leading-[16px] truncate" style="color:${accent};">${q ? q.senderLabel : 'Mensagem'}</div>

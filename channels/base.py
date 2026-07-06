@@ -130,7 +130,8 @@ class Channel(ABC):
     # ``token_suggest`` (text + a "suggest random token" button), ``multiselect``
     # (checkbox group over ``options=[{value,label,hint?}]``, seeded from
     # ``default``), ``generated`` (auto-filled read-only string, prefixed by
-    # ``prefix``). ``post_create`` kinds: ``{"kind":"webhook_url","path":...}``
+    # ``prefix``), ``bool`` (single checkbox, seeded from ``default``).
+    # ``post_create`` kinds: ``{"kind":"webhook_url","path":...}``
     # (show a copiable inbound-webhook URL) and ``{"kind":"autoconfigure",
     # "endpoint":...}`` (POST the endpoint, show the returned webhook/long-poll
     # result). ``{channel_id}`` in a path/endpoint is substituted client-side.

@@ -91,6 +91,13 @@ export async function getRuntimeSubprocesses() {
   return request('GET', '/api/runtime/subprocesses');
 }
 
+// GOWA disconnect-alert settings (bundled plugin). Read-only here: used by the
+// channel edit form to seed the per-channel on/off toggle from the plugin's legacy
+// global `enabled` value when the channel hasn't set its own yet.
+export async function getGowaAlertSettings() {
+  return request('GET', '/api/plugins/gowa/alert-settings');
+}
+
 export async function getStatus() {
   return request('GET', '/api/status');
 }
