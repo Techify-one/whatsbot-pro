@@ -228,6 +228,13 @@ channels = Table(
     Column("connected", Integer, nullable=False, server_default="0"),
     Column("logged_in", Integer, nullable=False, server_default="0"),
     Column("own_phone", Text, nullable=True),
+    # Account-identity dedup contract (plano 32): canonical account id + its kind
+    # (namespace: phone | phone_number_id | bot_id | bot_token | ...). Populated by
+    # the provider hooks (create-time or the status sweep). The partial unique
+    # index below forbids two enabled/non-archived channels of the same provider
+    # sharing an identity.
+    Column("account_identity", Text, nullable=True),
+    Column("account_identity_kind", Text, nullable=True),
     Column("last_error", Text, nullable=True),
     # Soft-delete (plano inboxes/canais §4.3-c): "excluir" um canal o arquiva
     # (esconde da UI) em vez de apagar, preservando o histórico de conversas da
@@ -235,6 +242,17 @@ channels = Table(
     Column("archived", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    # plano 32: one account per (provider) among enabled, non-archived channels.
+    # Partial so NULL/'' identities (not-yet-logged-in, disabled, archived) never
+    # collide. Mirrors the Alembic migration 0038_channels_account_identity.
+    Index(
+        "ux_channels_account_identity", "provider", "account_identity",
+        unique=True,
+        postgresql_where=text("enabled = 1 AND archived = 0 "
+                              "AND account_identity IS NOT NULL AND account_identity <> ''"),
+        sqlite_where=text("enabled = 1 AND archived = 0 "
+                          "AND account_identity IS NOT NULL AND account_identity <> ''"),
+    ),
 )
 
 channel_credentials = Table(

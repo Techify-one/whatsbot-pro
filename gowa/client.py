@@ -234,36 +234,68 @@ class GOWAClient:
     def get_own_number(self) -> str:
         """Best-effort: the connected account's own phone number (digits only).
 
-        GOWA does not expose the logged-in number consistently, so we probe
-        both /app/status and /devices for anything resembling a JID and
-        extract its user part. Returns "" if it can't be determined.
+        **Device-scoped (plano 32 F1):** GOWA does not expose the logged-in
+        number consistently, so we probe ``/app/status`` (already scoped to this
+        client's ``X-Device-Id``) and, as a fallback, the GLOBAL ``/devices``
+        list. The ``/devices`` fallback MUST filter to *this* device — an earlier
+        version returned the first device with any JID, which on a multi-device
+        GOWA process (N channels, one process) could return the number of a
+        DIFFERENT channel (misattribution). We therefore only read the entry
+        whose registered id matches ``self.device_id``; if none does, return "".
+
+        When more than one JID is present on an entry (e.g. both an
+        ``@s.whatsapp.net`` and an ``@lid`` form), the ``@s.whatsapp.net`` form is
+        preferred — it is the stable phone-number namespace, whereas ``@lid`` is
+        an opaque linked-device id that must never be mistaken for the number.
+
+        Returns "" if it can't be determined for this device.
         """
-        def _extract(value: object) -> str:
+        def _num_from_jid(value: object) -> str:
             text = str(value or "")
             if "@" not in text:
                 return ""
             return text.split("@")[0].split(":")[0].strip()
 
+        def _best_jid(values: list) -> str:
+            """Pick the most authoritative JID, preferring @s.whatsapp.net over @lid."""
+            jids = [str(v) for v in values if v and "@" in str(v)]
+            for j in jids:
+                if j.endswith("@s.whatsapp.net"):
+                    return j
+            return jids[0] if jids else ""
+
+        def _id_candidates(d: dict) -> set:
+            """Fields on a /devices entry that could carry the *registered* device
+            id (the session string we POSTed), so we can tell our entry apart."""
+            return {str(d.get(k, "")).strip() for k in ("id", "name", "device") if d.get(k)}
+
+        # 1) /app/status is scoped to this client's X-Device-Id → always THIS device.
         try:
             status = self.get_status()
             if status and isinstance(status, dict):
                 results = status.get("results", status.get("data", status))
                 if isinstance(results, dict):
-                    for key in ("jid", "device", "phone", "id", "user"):
-                        num = _extract(results.get(key))
-                        if num:
-                            return num
+                    jid = _best_jid([results.get(k)
+                                     for k in ("jid", "device", "phone", "id", "user")])
+                    num = _num_from_jid(jid)
+                    if num:
+                        return num
         except Exception as e:
             logger.debug("get_own_number: /app/status probe failed: %s", e)
 
+        # 2) /devices is GLOBAL → only trust the entry for THIS device (never adopt
+        #    another channel's number). Skip the filter only when device_id is unset
+        #    (legacy singleton without a bound device), preserving old behaviour.
         try:
             for d in self.list_devices():
                 if not isinstance(d, dict):
                     continue
-                for key in ("device", "jid", "phone", "id"):
-                    num = _extract(d.get(key))
-                    if num:
-                        return num
+                if self.device_id and self.device_id not in _id_candidates(d):
+                    continue
+                jid = _best_jid([d.get(k) for k in ("device", "jid", "phone", "id")])
+                num = _num_from_jid(jid)
+                if num:
+                    return num
         except Exception as e:
             logger.debug("get_own_number: /devices probe failed: %s", e)
 

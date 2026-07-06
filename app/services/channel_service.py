@@ -32,11 +32,74 @@ import re
 import time
 import uuid
 
+from sqlalchemy.exc import IntegrityError
+
+from channels import dedup
 from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
                              inbox_member_repo, user_repo)
 from plugins.events import emit_with_filter
 
 logger = logging.getLogger(__name__)
+
+
+# ── Account-identity dedup enforcement (plano 32 F4) ─────────────────────────────
+
+class DuplicateChannelError(Exception):
+    """Raised by create/update when the submitted credentials resolve to an account
+    already bound to another enabled channel of the same provider. The route maps it
+    to HTTP 409 (D1: block, don't just warn)."""
+
+    def __init__(self, existing_channel_id: str):
+        self.existing_channel_id = existing_channel_id
+        super().__init__(
+            f"Esta conta já está conectada no canal {existing_channel_id}.")
+
+
+def credential_identity(deps, provider: str, creds: dict):
+    """The account identity a provider derives from credentials, or ``None``.
+
+    Generic: reads the provider CLASS's ``identity_from_credentials`` hook (a
+    classmethod) via the registry — never branches on provider name. ``None`` when
+    the provider has no create-time identity (GOWA) or the plugin isn't loaded."""
+    registry = getattr(deps, "channel_registry", None)
+    if registry is None:
+        return None
+    cls = registry.get_provider(provider)
+    if cls is None:
+        return None
+    try:
+        return cls.identity_from_credentials(dict(creds or {}))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _guard_duplicate(deps, provider: str, creds: dict, *, exclude_channel_id):
+    """Resolve the credential identity and raise if it duplicates another channel.
+
+    Returns the identity to persist (or ``None`` when the provider has none at this
+    point, e.g. GOWA — which dedups later via the sweep). Raises
+    :class:`DuplicateChannelError` on a conflict."""
+    identity = credential_identity(deps, provider, creds)
+    if identity is None:
+        return None
+    conflict = dedup.find_conflict(provider, identity,
+                                   exclude_channel_id=exclude_channel_id)
+    if conflict:
+        raise DuplicateChannelError(conflict)
+    return identity
+
+
+def _persist_identity(provider: str, channel_id: str, identity) -> None:
+    """Write the resolved identity, mapping the index backstop to a 409."""
+    if identity is None:
+        return
+    try:
+        channel_repo.set_status(channel_id, account_identity=identity.value,
+                                account_identity_kind=identity.kind)
+    except IntegrityError:
+        conflict = dedup.find_conflict(provider, identity,
+                                       exclude_channel_id=channel_id) or channel_id
+        raise DuplicateChannelError(conflict)
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ALLOWED_PROVIDERS = {"gowa", "whatsapp_cloud", "telegram", "test"}
@@ -341,7 +404,14 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     """Create a channel + credentials + its inbox, register it live, and return the
     serialized row. The route does the validation (provider allow-list, missing
     creds, id format/uniqueness) and resolves the final ``cid``/``gowa_device_id``
-    before calling here so the persistence + side-effects live in one place."""
+    before calling here so the persistence + side-effects live in one place.
+
+    Account-identity dedup (plano 32 F4): if the provider derives an identity from
+    the submitted credentials (Cloud ``phone_number_id``, Telegram ``bot_token``)
+    and it duplicates another channel, raise ``DuplicateChannelError`` (→ 409)
+    BEFORE persisting anything. GOWA has no create-time identity → dedups later via
+    the sweep."""
+    identity = _guard_duplicate(deps, provider, submitted_creds, exclude_channel_id=None)
     row = await asyncio.to_thread(
         channel_repo.create, id=cid, provider=provider,
         display_name=display_name or cid,
@@ -351,6 +421,9 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     for key, value in submitted_creds.items():
         if value:  # never store an empty/placeholder secret
             await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
+    if identity is not None:
+        await asyncio.to_thread(_persist_identity, provider, cid, identity)
+        row = await asyncio.to_thread(channel_repo.get, cid)
     # One inbox per channel (plano 11) — best-effort; resolve_inbox_id self-heals.
     try:
         await asyncio.to_thread(
@@ -371,6 +444,19 @@ async def update(deps, row: dict, body: dict) -> dict:
     the per-channel caches and emits the minimal ``channel.updated`` event (Q6).
     """
     channel_id = row["id"]
+    provider = row.get("provider")
+    # Account-identity dedup on EDIT (plano 32 F4): a credential edit could make this
+    # channel collide with another (bypass of the create-guard). Resolve the EFFECTIVE
+    # credentials (stored overlaid with the non-placeholder submitted values) and
+    # block before persisting anything. GOWA has no create-time identity → None here.
+    submitted_creds = body.get("credentials") or {}
+    if submitted_creds:
+        effective = dict(await asyncio.to_thread(
+            channel_credential_repo.get_all, channel_id))
+        for k, v in submitted_creds.items():
+            if v and not str(v).startswith("••••"):
+                effective[str(k)] = str(v)
+        _guard_duplicate(deps, provider, effective, exclude_channel_id=channel_id)
     fields = {}
     if "display_name" in body:
         fields["display_name"] = body["display_name"]
@@ -401,6 +487,13 @@ async def update(deps, row: dict, body: dict) -> dict:
     for key, value in (body.get("credentials") or {}).items():
         if value and not str(value).startswith("••••"):
             await asyncio.to_thread(channel_credential_repo.set, channel_id, str(key), str(value))
+    # Persist the (already dedup-guarded) credential identity so the row + index
+    # reflect the edit (plano 32 F4).
+    if submitted_creds:
+        identity = credential_identity(deps, provider, effective)
+        if identity is not None:
+            await asyncio.to_thread(_persist_identity, provider, channel_id, identity)
+            row = await asyncio.to_thread(channel_repo.get, channel_id)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
     return serialize(row, stored)
 

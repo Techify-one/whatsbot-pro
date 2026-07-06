@@ -79,7 +79,8 @@ async def setup(ctx) -> None:
 
     from runtime.subprocess_service import SubprocessSpec
     from runtime.supervisor import RestartPolicy
-    from server.background import status_poll_loop, qr_poll_loop, avatar_fetch_task
+    from server.background import (status_poll_loop, qr_poll_loop, avatar_fetch_task,
+                                   channel_identity_sweep_loop)
 
     gm = deps.gowa_manager
     # Build the exact argv the core used (binary path, --webhook .../gowa/default,
@@ -163,6 +164,9 @@ async def setup(ctx) -> None:
         ctx.spawn_task("qr_poll", lambda: qr_poll_loop(deps),
                        policy=RestartPolicy.PERMANENT)
         ctx.spawn_task("avatar_fetch", lambda: avatar_fetch_task(deps),
+                       policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("channel_identity_sweep",
+                       lambda: channel_identity_sweep_loop(deps),
                        policy=RestartPolicy.PERMANENT)
         from . import alerts
         ctx.spawn_task("disconnect_alert", lambda: alerts.disconnect_alert_loop(deps),
