@@ -14,11 +14,24 @@ from __future__ import annotations
 
 import logging
 
-from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
+from channels.br_phone import br_phone_variants
 from channels.events import InboundEvent
 from gowa.client import extract_msg_id
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_phone(digits: str) -> str:
+    """One deterministic canonical form for a BR number's 12↔13-digit variants.
+
+    ``br_phone_variants`` yields the same *set* of forms regardless of which one
+    we start from; picking the shortest (then lexicographically) collapses both
+    the 12- and 13-digit representations of the SAME line to one dedup key. Non-BR
+    numbers have a single variant and pass through unchanged.
+    """
+    variants = br_phone_variants(digits)
+    return min(variants, key=lambda v: (len(v), v))
 
 
 class GOWAChannel(Channel):
@@ -73,6 +86,27 @@ class GOWAChannel(Channel):
         return {"connected": connected, "logged_in": logged_in,
                 "needs_qr": not logged_in,
                 "own_phone": own_phone, "error": None}
+
+    # ── Account identity (dedup contract — plano 32 F5) ──────────────
+    def account_identity(self) -> AccountIdentity | None:
+        """This device's own WhatsApp number (canonical BR), or ``None``.
+
+        Only knowable AFTER the QR pairing, so this is the live hook (the status
+        sweep calls it). Uses the device-scoped ``get_own_number`` (plano 32 F1),
+        so it never returns another channel's number. ``kind="phone"``. ``None``
+        while not logged in / unresolved. The base ``reject_duplicate`` (logout)
+        severs a device that paired to an already-connected number.
+        """
+        if self._client is None:
+            return None
+        try:
+            raw = self._client.get_own_number() or ""
+        except Exception:  # noqa: BLE001
+            return None
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            return None
+        return AccountIdentity("phone", _canonical_phone(digits))
 
     def get_qr(self) -> bytes | None:
         """PNG bytes of this device's login QR (None if logged in / unavailable).
