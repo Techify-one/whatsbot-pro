@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { markAllUnread, markAllRead } from '../services/api.js';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -18,7 +19,11 @@ function Section({ title, id, children }) {
   `;
 }
 
-export function ConfigPanel({ config, saving, onSave, onNotify }) {
+export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
+  // Avisos de sistema, execuções salvas, retenção de auditoria e a senha do
+  // painel vivem no PUT /api/config (gated settings.manage). Sem essa permissão
+  // esses campos NÃO aparecem — só a seção "Marcar conversas" (endpoints próprios).
+  const canSettings = hasPermission(currentUser, 'settings.manage');
   // Avisos de sistema no chat (plano 12) — toggles globais por grupo de evento.
   const [systemNoticeAssignment, setSystemNoticeAssignment] = useState(true);
   const [systemNoticeTags, setSystemNoticeTags] = useState(true);
@@ -198,6 +203,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
         </div>
       <//>
 
+      ${canSettings ? html`
       <!-- Section: Avisos de sistema no chat (plano 12) -->
       <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
@@ -353,6 +359,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           ${saving ? 'Salvando...' : saveSuccess ? '\u2713 Salvo!' : 'Salvar Configurações'}
         </button>
       </div>
+      ` : null}
     </div>
   `;
 }

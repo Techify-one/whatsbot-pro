@@ -84,7 +84,7 @@ def require_permission(key: str) -> Callable[[Request], Awaitable[None]]:
 
     Usage::
 
-        @app.put("/api/...", dependencies=[Depends(require_permission("agent.manage"))])
+        @app.put("/api/...", dependencies=[Depends(require_permission("settings.manage"))])
         async def handler(...): ...
 
     Resolves ``current_user`` from the request and calls :func:`authz.acheck`

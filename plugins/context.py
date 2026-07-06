@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 # annotation on its inner dependency resolves under ``from __future__ import
 # annotations`` — otherwise FastAPI can't evaluate the forward ref and treats
 # ``request`` as a required QUERY param (HTTP 422 on every gated plugin route).
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 
 if TYPE_CHECKING:
     from agent.handler import AgentHandler
@@ -228,12 +228,18 @@ def plugin_permission(key: str):
 
     async def _dep(request: Request) -> None:
         from server.authz import acheck
+        from server.deps import PermissionDeniedError
         m = _PLUGIN_PATH_RE.match(request.url.path)
         if not m:
             return  # not a plugin-namespaced path — cannot infer id, allow.
         full_key = f"plugin.{m.group(1)}.{key}"
         if not await acheck(request, full_key):
-            raise HTTPException(status_code=403, detail="Permissão negada.")
+            # Raise the SAME exception the core routes use so the 403 body is the
+            # unified ``{"ok": false, "error": "Permissão negada."}`` envelope
+            # (rendered by ``install_exception_handlers``, registered app-wide),
+            # NOT FastAPI's ``{"detail": ...}``. This lets the frontend's
+            # ``res.ok === false`` guards fire for plugin routes too.
+            raise PermissionDeniedError()
 
     return Depends(_dep)
 

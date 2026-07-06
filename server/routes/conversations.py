@@ -193,6 +193,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         vis = visible_inbox_ids(request)
+        can_read_contact = has_permission(request, "contact.read")
 
         def _load():
             conv = conversation_repo.get_with_channel(conv_id)
@@ -202,7 +203,16 @@ def register_routes(app, deps):
             if vis is not None and conv.get("inbox_id") not in vis:
                 return None, None, [], []
             phone = conv.get("contact_phone") or ""
-            contact = contact_repo.get_full_contact(phone) if phone else None
+            if can_read_contact:
+                contact = contact_repo.get_full_contact(phone) if phone else None
+            else:
+                contact = {
+                    "id": conv.get("contact_id"),
+                    "phone": phone,
+                    "is_group": bool(conv.get("contact_is_group")),
+                    "info": {},
+                    "tags": [],
+                }
             ids: list[str] = []
             if mark_read and conv.get("unread_count", 0) > 0:
                 ids = conversation_repo.mark_conversation_read(conv_id)
@@ -231,7 +241,7 @@ def register_routes(app, deps):
             "contact": contact,
             "messages": msgs,
             "channel_id": channel_id,
-            "avatar_v": avatar_version(settings, phone),
+            "avatar_v": avatar_version(settings, phone) if can_read_contact else None,
             "templates_supported": outbound.supports(channel_id, "templates"),
             "session_open": outbound.session_open(channel_id, last_inbound_ts),
         })
@@ -663,4 +673,6 @@ def register_routes(app, deps):
             if not conv:
                 conv = await asyncio.to_thread(
                     conversation_repo.get_latest_for_contact, contact["id"])
+        if conv and _inbox_hidden(request, conv.get("inbox_id")):
+            return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})

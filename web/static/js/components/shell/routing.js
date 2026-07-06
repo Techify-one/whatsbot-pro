@@ -11,6 +11,9 @@
 export const CORE_ROUTES = {
   '/': 'contacts',
   '/contacts': 'contatos',
+  // A aba é exclusiva do plugin protocolos (override de rota). O path canônico é
+  // /protocolos; /attendances segue como ALIAS silencioso p/ links antigos.
+  '/protocolos': 'attendances',
   '/attendances': 'attendances',
   '/channels': 'channels',
   '/dashboard': 'dashboard',
@@ -28,7 +31,7 @@ export const CORE_ROUTES = {
 export const CORE_TAB_PATHS = {
   contacts: '/',
   contatos: '/contacts',
-  attendances: '/attendances',
+  attendances: '/protocolos',
   channels: '/channels',
   dashboard: '/dashboard',
   sandbox: '/sandbox',
@@ -48,7 +51,7 @@ export const CORE_TAB_PATHS = {
 // replaceState so they don't pollute history).
 const LEGACY_PATH_REDIRECTS = {
   '/contatos': '/contacts',
-  '/atendimentos': '/attendances',
+  '/atendimentos': '/protocolos',
   '/painel': '/dashboard',
   '/auditoria': '/audit',
 };
