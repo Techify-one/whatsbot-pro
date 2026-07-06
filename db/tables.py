@@ -572,8 +572,9 @@ Index("idx_tool_overrides_plugin", tool_overrides.c.plugin_id)
 # AI engine — config-in-DB + code-in-DB (prefix ``ai_``)
 # --------------------------------------------------------------------------- #
 # These tables move the agent's prompt/model/tools out of code and into the DB,
-# so behaviour can change without a deploy. All JSON-shaped values are stored as
-# JSON-encoded TEXT (portable across SQLite/Postgres), mirroring ``config``.
+# so behaviour can change without a deploy. The ``ai_agents`` JSON columns are
+# NATIVE JSONB (plano 34 F5 — the DB serializes once, killing the double-encoding
+# class at the source); other JSON-shaped values here remain JSON-encoded TEXT.
 
 ai_agents = Table(
     "ai_agents",
@@ -589,16 +590,16 @@ ai_agents = Table(
     # resolution (the inline ``prompt`` above replaced it); kept for back-compat
     # with old rows/snapshots.
     Column("prompt_key", Text, nullable=False, server_default=""),
-    # JSON object: {model, temperature, top_p, max_tokens, ...}
-    Column("model_config", Text, nullable=False, server_default="{}"),
-    # JSON array of tool names, or null/"all" meaning every registered tool.
-    Column("tool_names", Text),
+    # JSON object: {model, temperature, top_p, max_tokens, ...} — native JSONB (F5).
+    Column("model_config", _json_type(), nullable=False, server_default="{}"),
+    # JSON array of tool names, or null/"all" meaning every registered tool. JSONB (F5).
+    Column("tool_names", _json_type()),
     Column("enabled", Integer, nullable=False, server_default="1"),
     # plano 06: roteamento/handoff (consumido pelo motor de routing futuro).
     Column("description", Text, nullable=False, server_default=""),
     Column("is_router", Integer, nullable=False, server_default="0"),
-    Column("routing_targets", Text),                          # JSON array de agent_keys
-    Column("hooks_config", Text, nullable=False, server_default="{}"),  # plano 06: hooks declarativos
+    Column("routing_targets", _json_type()),                  # JSON array de agent_keys — JSONB (F5)
+    Column("hooks_config", _json_type(), nullable=False, server_default="{}"),  # hooks declarativos — JSONB (F5)
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
