@@ -22,6 +22,7 @@ import { playTransferAlert } from '../../utils/alertSound.js';
 import { getNotifPref, playNotificationSound, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
+import { Toaster } from './Toaster.js';
 import {
   pluginTabId, tabFromPath, pathForTab, redirectLegacyPath,
   contactIdFromPath, conversationIdFromPath, scrollMsgFromSearch,
@@ -434,6 +435,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
       <!-- Host for plugin-opened modals (e.g. the "popup ao resolver" flow). -->
       <${PluginModalHost} />
+
+      <!-- Host global de toasts (avisos transitórios: 403 "Permissão negada." etc.). -->
+      <${Toaster} />
 
       <!-- Root overlay extension point (P: dev tools): a plugin may register a
            persistent, non-blocking floating widget here via addSlot('app.overlay').

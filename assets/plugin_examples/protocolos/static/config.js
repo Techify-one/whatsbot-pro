@@ -9,13 +9,24 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
+import { notifyPermissionDenied } from '/static/js/services/notify.js';
 
 const html = htm.bind(h);
 
+// fetch + JSON com feedback de 403 (toast "Permissão negada."). O corpo já vem
+// unificado do back-end ({ok:false,error}), então a mensagem inline também aparece.
+async function reqJson(url, init) {
+  const r = await fetch(url, init);
+  if (r.status === 403) notifyPermissionDenied();
+  return r.json().catch(() => ({}));
+}
+
+// Tipos CRIÁVEIS pelo operador. "atendente" NÃO está aqui: virou rótulo fixo/obrigatório,
+// invisível nesta tela — aparece só em "Resolver atendimento"/"Finalizar protocolo".
 const TYPES = [
   ['text', 'Texto'], ['textarea', 'Área de texto'], ['number', 'Número'], ['date', 'Data'],
   ['select', 'Lista de seleção'], ['checkboxes', 'Caixa de seleção'],
-  ['checkbox', 'Caixa (sim/não)'], ['atendente', 'Atendente (nativo)'],
+  ['checkbox', 'Caixa (sim/não)'],
 ];
 // Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
 const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação']];
@@ -27,7 +38,7 @@ function slug(s) {
 }
 
 export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', can }) {
-  const canEdit = !can || can('config');
+  const canEdit = !can || can('edit');
   const [tab, setTab] = useState('protocolo'); // 'protocolo' | 'atendimento' | 'avaliacao'
   const [defs, setDefs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -39,9 +50,10 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const load = useCallback(async (sc) => {
     setLoading(true); setMsg('');
     try {
-      const r = await fetch(`${apiBase}/field-defs?scope=${sc}`, { headers: authHeaders() });
-      const d = await r.json();
-      setDefs((d && d.ok && d.data && d.data.defs) || []);
+      const d = await reqJson(`${apiBase}/field-defs?scope=${sc}`, { headers: authHeaders() });
+      // O rótulo fixo "atendente" não aparece na tela de Configurações (só nos formulários).
+      const all = (d && d.ok && d.data && d.data.defs) || [];
+      setDefs(all.filter((x) => x.type !== 'atendente'));
     } finally { setLoading(false); }
   }, [apiBase]);
 
@@ -51,8 +63,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' } };
   const loadProto = useCallback(async () => {
     try {
-      const r = await fetch(`${apiBase}/protocol-config`, { headers: authHeaders() });
-      const d = await r.json();
+      const d = await reqJson(`${apiBase}/protocol-config`, { headers: authHeaders() });
       setProto((d && d.ok && d.data) || PROTO_EMPTY);
     } catch (_) { setProto(PROTO_EMPTY); }
   }, [apiBase]);
@@ -73,22 +84,20 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
       key: d.key && d.key.trim() ? d.key.trim() : slug(d.label),
       options: (d.options || []).map((s) => String(s).trim()).filter(Boolean),
     }));
-    const r = await fetch(`${apiBase}/field-defs`, {
+    const d = await reqJson(`${apiBase}/field-defs`, {
       method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: tab, defs: payload }),
     });
-    const d = await r.json();
-    if (d && d.ok) { setDefs(d.data.defs); setMsg('Campos salvos.'); }
+    if (d && d.ok) { setDefs((d.data.defs || []).filter((x) => x.type !== 'atendente')); setMsg('Campos salvos.'); }
     else setMsg((d && d.error) || 'Falha ao salvar.');
   }
 
   async function saveProto() {
     setProtoMsg('');
-    const r = await fetch(`${apiBase}/protocol-config`, {
+    const d = await reqJson(`${apiBase}/protocol-config`, {
       method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(proto),
     });
-    const d = await r.json();
     if (d && d.ok) { setProto(d.data); setProtoMsg('Configuração salva.'); }
     else setProtoMsg((d && d.error) || 'Falha ao salvar.');
   }
@@ -110,13 +119,13 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     <div class="space-y-4">
       <p class="text-[13px] text-wa-secondary">
         Crie rótulos (texto, seleção, etc.); <b>todos são editáveis e removíveis</b>, inclusive
-        <b>Observações</b> (ID, Atendente, Início e Fim são preenchidos automaticamente, não são
-        rótulos). O tipo <b>Atendente (nativo)</b> liga o valor ao atendente real do atendimento
-        — equivale a atribuir/mover no Kanban por atendente (só um por aba). Os do
-        <b>Protocolo</b> e os de <b>Resolver atendimento</b> são armazenados separadamente. Um
-        campo <b>Obrigatório</b> deve estar sempre preenchido para fechar/resolver (caixas de
-        seleção são exceção). Apagar um rótulo o some do menu e do histórico — o dado fica
-        recuperável apenas pelo banco.
+        <b>Observações</b> (ID, Início e Fim são preenchidos automaticamente, não são rótulos).
+        O <b>Atendente</b> é um campo fixo e obrigatório que aparece automaticamente em
+        "Resolver atendimento" e "Finalizar protocolo" (já pré-selecionado com você) — não é
+        configurável aqui. Os do <b>Protocolo</b> e os de <b>Resolver atendimento</b> são
+        armazenados separadamente. Um campo <b>Obrigatório</b> deve estar sempre preenchido para
+        fechar/resolver (caixas de seleção são exceção). Apagar um rótulo o some do menu e do
+        histórico — o dado fica recuperável apenas pelo banco.
       </p>
       ${loading ? html`<div class="text-[13px] text-wa-secondary">Carregando…</div>` : html`
         <div class="space-y-3">
