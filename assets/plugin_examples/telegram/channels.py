@@ -75,6 +75,34 @@ class TelegramChannel(Channel):
         self.registry = registry
         self._credentials = dict(credentials or {})
 
+    # ── Provider descriptor (plano 33) ───────────────────────────────
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """Telegram is a Bot API provider: one ``bot_token`` credential, no QR, no
+        templates. After create it self-configures (webhook if a public HTTPS domain
+        exists, else long-poll) via the ``autoconfigure`` route — declared as the
+        ``post_create`` action so the core drives it without knowing "telegram"."""
+        return {
+            "provider": "telegram",
+            "label": "Telegram",
+            "color": "purple",
+            "credential_fields": [
+                {"key": "bot_token", "label": "Bot Token", "type": "secret",
+                 "required": True,
+                 "placeholder": "123456:ABC-DEF... (do @BotFather)",
+                 "help": "Crie um bot com o @BotFather (/newbot) e cole o token. "
+                         "Recebe por long-poll (sem host público) — basta criar e "
+                         "mandar mensagem ao bot."},
+            ],
+            "config_fields": [],
+            "capabilities": {"needs_qr": False, "templates": False},
+            "ai_sequential_default": False,
+            "post_create": {"kind": "autoconfigure",
+                            "endpoint": "/api/plugins/telegram/autoconfigure",
+                            "webhook_path": "/api/webhook/telegram/{channel_id}"},
+            "form_component": None,
+        }
+
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
         if self.registry is not None:

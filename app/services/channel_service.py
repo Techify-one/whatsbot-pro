@@ -274,16 +274,68 @@ async def get_serialized(deps, channel_id: str) -> dict | None:
     return serialize(row, creds)
 
 
-async def providers(deps) -> dict:
-    """Available providers (intersect registered with the allow-list) + required
-    credentials per provider (capability-driven)."""
+def provider_descriptor(deps, provider: str) -> dict:
+    """The provider's self-description (plano 33), reconciled with capabilities.
+
+    Reads the provider CLASS's ``provider_descriptor`` (a classmethod) via the
+    registry — never branches on provider name — then guarantees every credential
+    key the provider marks REQUIRED via ``ChannelCapabilities.required_credentials``
+    is present + flagged ``required`` in the returned ``credential_fields`` (so a
+    provider that only declared its required set, or nothing, still yields a usable
+    generic form). Best-effort: a broken/absent provider degrades to a minimal
+    descriptor rather than failing the endpoint."""
     registry = getattr(deps, "channel_registry", None)
-    if registry is not None:
-        names = sorted(set(registry.providers()) & ALLOWED_PROVIDERS)
-    else:
-        names = sorted(ALLOWED_PROVIDERS)
-    required = {p: required_credentials(deps, p) for p in names}
-    return {"providers": names, "required_credentials": required}
+    cls = registry.get_provider(provider) if registry is not None else None
+    desc: dict = {}
+    if cls is not None:
+        try:
+            desc = dict(cls.provider_descriptor())
+        except Exception:  # noqa: BLE001
+            desc = {}
+    if not desc:
+        desc = {"provider": provider, "label": provider, "color": "gray",
+                "credential_fields": [], "config_fields": [],
+                "capabilities": {"needs_qr": False, "templates": False},
+                "ai_sequential_default": False, "post_create": None,
+                "form_component": None}
+    desc.setdefault("provider", provider)
+    desc.setdefault("label", provider)
+    desc.setdefault("color", "gray")
+    desc.setdefault("config_fields", [])
+    desc.setdefault("capabilities", {"needs_qr": False, "templates": False})
+    desc.setdefault("ai_sequential_default", False)
+    desc.setdefault("post_create", None)
+    desc.setdefault("form_component", None)
+    fields = list(desc.get("credential_fields") or [])
+    # Reconcile: capability-required credentials must appear + be flagged required.
+    have = {f.get("key") for f in fields}
+    for key in required_credentials(deps, provider):
+        matched = next((f for f in fields if f.get("key") == key), None)
+        if matched is not None:
+            matched["required"] = True
+        else:
+            fields.append({"key": key, "label": key, "type": "secret",
+                           "required": True})
+    desc["credential_fields"] = fields
+    return desc
+
+
+async def providers(deps) -> dict:
+    """Available providers as full descriptors (plano 33) + a flat required-
+    credentials map (kept for the create-form gate + back-compat).
+
+    Offer = every provider currently REGISTERED in the live registry (its backing
+    plugin is enabled). ``ALLOWED_PROVIDERS`` is no longer the source of the offer
+    (a provider is offerable iff installed); it survives only as a legacy constant.
+    A provider that isn't installed simply doesn't appear."""
+    registry = getattr(deps, "channel_registry", None)
+    names = sorted(registry.providers()) if registry is not None else []
+    descriptors = [provider_descriptor(deps, p) for p in names]
+    required = {
+        d["provider"]: [f["key"] for f in d["credential_fields"] if f.get("required")]
+        for d in descriptors
+    }
+    return {"providers": descriptors, "required_credentials": required}
 
 
 async def status(deps, row: dict) -> dict:

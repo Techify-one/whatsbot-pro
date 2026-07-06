@@ -396,7 +396,9 @@ try:
     check("tombstone blocks the re-enable of gowa", ("gowa", True) not in _t_enable)
 
     # (2) fresh-install bootstrap (empty dir, e.g. user removed every plugin) must
-    #     SKIP gowa while still copying the other bundled examples.
+    #     SKIP gowa when tombstoned. Only gowa is auto-installed now (plano 33 D3:
+    #     telegram/whatsapp_cloud are import-only), so a tombstoned gowa leaves
+    #     nothing copied.
     copied = _loader.bootstrap_initial_plugins(tp, _src)
     check("tombstone skips gowa in initial bootstrap",
           "gowa" not in copied and not (tp / "gowa").exists())

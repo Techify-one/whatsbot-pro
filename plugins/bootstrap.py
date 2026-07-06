@@ -28,12 +28,23 @@ from plugins.manifest import load_manifest
 logger = logging.getLogger(__name__)
 
 
-def bootstrap_initial_plugins(plugins_dir: Path, source_dir: Path) -> list[str]:
-    """Copy bundled example plugins into ``plugins_dir`` on first run.
+# Which bundled example plugins a FRESH install auto-installs (plano 33 D3). Only
+# GOWA — the default WhatsApp channel — comes automatic; every other provider
+# (telegram, whatsapp_cloud) and example plugin is IMPORT-ONLY (via "Importar
+# (.zip)" on the Plugins screen). Their source stays in ``assets/plugin_examples/``
+# so the frontend descriptor renders them once imported and the importable zips
+# can be built from it — but a clean boot no longer copies them.
+BUNDLED_AUTO_INSTALL = ("gowa",)
 
-    Runs only when ``plugins_dir`` is empty (no subdirectories) so user
-    deletions stick across restarts. Subsequent updates of ``source_dir`` from
-    the core never overwrite a user's installed plugins.
+
+def bootstrap_initial_plugins(plugins_dir: Path, source_dir: Path) -> list[str]:
+    """Copy the auto-install bundled plugins into ``plugins_dir`` on first run.
+
+    Runs only when ``plugins_dir`` is empty (no subdirectories) so user deletions
+    stick across restarts. Only the plugins in :data:`BUNDLED_AUTO_INSTALL` (GOWA)
+    are copied — a fresh install is born with just the default WhatsApp channel;
+    telegram/whatsapp_cloud are imported on demand (plano 33 D3). Subsequent core
+    updates never overwrite a user's installed plugins.
     """
     plugins_dir.mkdir(parents=True, exist_ok=True)
     has_anything = any(c.is_dir() and not c.name.startswith(".") for c in plugins_dir.iterdir())
@@ -43,26 +54,26 @@ def bootstrap_initial_plugins(plugins_dir: Path, source_dir: Path) -> list[str]:
         return []
     gowa_tombstoned = _gowa_is_tombstoned()
     copied: list[str] = []
-    for child in source_dir.iterdir():
-        if not child.is_dir() or child.name.startswith("."):
+    for name in BUNDLED_AUTO_INSTALL:
+        child = source_dir / name
+        if not child.is_dir():
             continue
         # Honor a deliberate gowa uninstall even when the user emptied
         # storages/plugins by removing every plugin (which would otherwise make
         # this "fresh install" copy gowa back and re-enable it — plano 13 goal #2).
-        if child.name == "gowa" and gowa_tombstoned:
+        if name == "gowa" and gowa_tombstoned:
             logger.info("Skipping bundled gowa bootstrap: user uninstalled it (tombstone)")
             continue
-        target = plugins_dir / child.name
+        target = plugins_dir / name
         if target.exists():
             continue
         shutil.copytree(child, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        copied.append(child.name)
-        logger.info("Bootstrapped initial plugin: %s -> %s", child.name, target)
+        copied.append(name)
+        logger.info("Bootstrapped initial plugin: %s -> %s", name, target)
         # GOWA is bundled ACTIVE by default (plano 13 D-A): a fresh download has
-        # WhatsApp working immediately. Every other bundled plugin stays enabled=0
-        # (installed via the Plugins screen). discover_and_load (which runs next)
+        # WhatsApp working immediately. discover_and_load (which runs next)
         # preserves this enabled flag (upsert with enabled=None).
-        if child.name == "gowa":
+        if name == "gowa":
             _enable_bundled_gowa(target)
     return copied
 

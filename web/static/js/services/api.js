@@ -608,6 +608,13 @@ export async function getChannel(id) {
 export async function createChannel(payload) {
   return request('POST', '/api/channels', payload);
 }
+// Generic post-create action (plano 33): a provider descriptor may declare a
+// `post_create.autoconfigure` endpoint the core POSTs after creating the channel
+// (e.g. Telegram detects a public domain → webhook, else long-poll). The core
+// doesn't know the provider — it just POSTs {channel_id} to the declared endpoint.
+export async function providerPostCreateAction(endpoint, channelId) {
+  return request('POST', endpoint, { channel_id: channelId });
+}
 // Telegram plugin: ao criar uma inbox, detecta domínio público e registra o
 // webhook automaticamente (ou cai em long-poll). Retorna {mode, webhook_url, ...}.
 export async function telegramAutoconfigure(channelId) {

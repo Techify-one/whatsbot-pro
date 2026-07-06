@@ -6,13 +6,16 @@
 // credential fields. After creating a whatsapp_cloud channel the modal shows
 // the webhook URL to paste into the Meta App configuration.
 //
-// Plano 23 · D4 — decomposed: this file is now the thin container (data fetching
-// + CRUD orchestration + layout). The presentational pieces live in
+// Plano 23 · D4 — decomposed: this file is the thin container (data fetching +
+// CRUD orchestration + layout). The presentational pieces live in
 // components/channels/* (ChannelForm, ChannelEditForm, ChannelCard, QRConnect,
-// JidTypePicker, AiSettingsFields, AgentPicker, notices) and the pure helpers in
-// components/channels/constants.js. The provider list {gowa, whatsapp_cloud,
-// telegram, test} and every route call (telegramAutoconfigure/status, …) are
-// preserved exactly.
+// DescriptorFields, AiSettingsFields, AgentPicker, notices).
+//
+// Plano 33 — the core no longer knows any provider by name. The offered list, the
+// create/edit form and every post-create step (QR / webhook URL / autoconfigure)
+// are driven by the PROVIDER DESCRIPTORS fetched from GET /api/channels/providers.
+// Adding a provider = ship a plugin whose Channel subclass describes itself; this
+// screen renders it without a single `if provider === ...`.
 
 import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -29,19 +32,19 @@ import {
   channelLogout,
   setChannelMembers,
   listChannelProviders,
-  telegramAutoconfigure,
+  providerPostCreateAction,
   getConfig,
 } from '../services/api.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, bool } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
-import { PROVIDERS, aiDefaultsFrom } from './channels/constants.js';
+import { aiDefaultsFrom, providerMeta } from './channels/constants.js';
 import { ChannelForm } from './channels/ChannelForm.js';
 import { ChannelEditForm } from './channels/ChannelEditForm.js';
 import { ChannelCard } from './channels/ChannelCard.js';
 import { QRConnect } from './channels/QRConnect.js';
-import { WebhookNotice, TelegramWebhookNotice, PurgeChannelModal } from './channels/notices.js';
+import { WebhookNotice, AutoconfigureNotice, PurgeChannelModal } from './channels/notices.js';
 
 const html = htm.bind(h);
 
@@ -49,7 +52,10 @@ const html = htm.bind(h);
 // /channels/{id} (ou /channels/new). `provider` pré-seleciona o form de criação;
 // connect/webhook/telegram (mutuamente exclusivas) reabrem o modal do canal do
 // path. `archived` abre a seção de arquivados. Serialize omite defaults → URL limpa.
-const PROVIDER_KEYS = new Set(['gowa', 'whatsapp_cloud', 'telegram', 'test']);
+// Substitui {channel_id} num path/endpoint declarado pelo descriptor.
+function subPath(tmpl, channelId) {
+  return (tmpl || '').replace('{channel_id}', encodeURIComponent(channelId));
+}
 const CHANNELS_URL_SCHEMA = [
   enumStr('provider', ''),   // pré-seleção do form de criação (/channels/new)
   bool('connect'),           // reabre o QR/conexão do canal do path
@@ -92,6 +98,12 @@ export default function ChannelsManager({ initialEntity }) {
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
+  // Descriptors do que está instalado, indexados por provider (plano 33). Toda a
+  // UI (badge, form, pós-criação, ações de sessão) é dirigida por eles — sem
+  // nenhum provider hardcoded no core.
+  const descriptorsById = {};
+  for (const d of (providers || [])) descriptorsById[d.provider] = d;
+
   // Rola a viewport até o form ao abrir (criar no topo / editar abaixo da lista).
   const createFormRef = useRef(null);
   const editFormRef = useRef(null);
@@ -116,7 +128,9 @@ export default function ChannelsManager({ initialEntity }) {
       // /channels/new → form de criação (não é um canal real; trate antes do find).
       if (sel.id === 'new') {
         const q = readParams(window.location.search, CHANNELS_URL_SCHEMA);
-        if (PROVIDER_KEYS.has(q.provider)) setInitialProvider(q.provider);
+        // Qualquer provider instalado pode ser pré-selecionado; o ChannelForm
+        // ignora um valor que não exista nos descriptors.
+        if (q.provider) setInitialProvider(q.provider);
         setEditingChannel(null);
         setCreateError(''); setError('');
         setCreating(true);
@@ -126,9 +140,11 @@ export default function ChannelsManager({ initialEntity }) {
       if (!c) return;
       setEditingChannel(c);
       // Flags de modal sobre o canal do path (mutuamente exclusivas: só a 1ª vale).
+      // Dirigidas pelo descriptor do provider, não por nome (connect=QR,
+      // webhook=webhook_url, telegram=autoconfigure — nomes históricos das flags).
       const q = readParams(window.location.search, CHANNELS_URL_SCHEMA);
       if (q.connect) setConnectFor({ id: c.id, display_name: c.display_name || c.id });
-      else if (q.webhook) setWebhookFor(c.id);
+      else if (q.webhook) setWebhookFor({ id: c.id, provider: c.provider });
       else if (q.telegram) setTelegramNotice({ channel_id: c.id, deep_link: true });
     },
   });
@@ -235,25 +251,30 @@ export default function ChannelsManager({ initialEntity }) {
       // Sai de /channels/new e ancora as flags de modal pós-criação no canal novo
       // (/channels/{newId}?connect|webhook|telegram=1 via useUrlState).
       pushUrl(newId ? { id: newId } : null);
-      if (payload.provider === 'whatsapp_cloud') setWebhookFor(newId);
-      // GOWA: open the QR-connect panel immediately so the user can scan it.
-      if (payload.provider === 'gowa') {
+      // Pós-criação dirigido pelo DESCRIPTOR (plano 33), sem `if provider ===`:
+      //  • needs_qr  → abre o QR pra conectar (GOWA);
+      //  • post_create.webhook_url → mostra a URL de callback pra colar (Cloud);
+      //  • post_create.autoconfigure → POST no endpoint declarado (Telegram
+      //    detecta domínio → webhook, senão long-poll) e mostra o resultado.
+      const desc = descriptorsById[payload.provider] || {};
+      const caps = desc.capabilities || {};
+      const pc = desc.post_create || null;
+      if (caps.needs_qr) {
         setConnectFor({ id: newId, display_name: created.display_name || payload.display_name });
-      }
-      // Telegram: auto-detect a public domain and register the webhook (or fall
-      // back to long-poll), then show the resulting webhook URL so the operator
-      // can copy it / confirm — no need to open the plugin config.
-      if (payload.provider === 'telegram' && newId) {
-        const auto = await telegramAutoconfigure(newId);
+      } else if (pc && pc.kind === 'webhook_url' && newId) {
+        setWebhookFor({ id: newId, provider: payload.provider });
+      } else if (pc && pc.kind === 'autoconfigure' && newId) {
+        const auto = await providerPostCreateAction(pc.endpoint, newId);
         if (auto && auto.ok && auto.data) {
           setTelegramNotice(auto.data);
         } else {
-          // Autoconfigure failed (plugin off?): still show the webhook URL with a
-          // long-poll fallback so the inbox isn't left in limbo.
+          // Autoconfigure falhou (plugin off?): ainda mostra a URL de webhook com
+          // fallback long-poll, pra inbox não ficar no limbo.
           setTelegramNotice({
             mode: 'poll', registered: false,
-            reason: (auto && auto.error) || 'plugin Telegram indisponível',
-            webhook_url: `${window.location.origin}/api/webhook/telegram/${newId}`,
+            reason: (auto && auto.error) || 'provider indisponível',
+            webhook_url: pc.webhook_path
+              ? `${window.location.origin}${subPath(pc.webhook_path, newId)}` : '',
           });
         }
       }
@@ -370,8 +391,13 @@ export default function ChannelsManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${webhookFor ? html`<${WebhookNotice} channelId=${webhookFor} onDismiss=${() => setWebhookFor(null)} />` : null}
-      ${telegramNotice ? html`<${TelegramWebhookNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
+      ${webhookFor ? (() => {
+        const pc = (descriptorsById[webhookFor.provider] || {}).post_create || {};
+        const url = `${window.location.origin}${subPath(pc.path, webhookFor.id)}`;
+        return html`<${WebhookNotice} url=${url} title=${pc.title} help=${pc.help}
+          onDismiss=${() => setWebhookFor(null)} />`;
+      })() : null}
+      ${telegramNotice ? html`<${AutoconfigureNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
 
       ${connectFor ? html`<${QRConnect}
         channelId=${connectFor.id}
@@ -387,8 +413,7 @@ export default function ChannelsManager({ initialEntity }) {
           busy=${createBusy}
           error=${createError}
           aiDefaults=${aiDefaults}
-          availableProviders=${providers}
-          requiredCreds=${requiredCreds} />` : null}
+          providers=${providers} />` : null}
       </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
@@ -413,7 +438,8 @@ export default function ChannelsManager({ initialEntity }) {
             onLogout=${handleLogout}
             onEdit=${handleEdit}
             busyId=${busyId}
-            requiredCreds=${requiredCreds} />
+            requiredCreds=${requiredCreds}
+            descriptorsById=${descriptorsById} />
         `)}
       </div>
 
@@ -431,7 +457,7 @@ export default function ChannelsManager({ initialEntity }) {
                   <div class="min-w-0">
                     <div class="text-[14px] text-wa-text truncate">${channel.display_name || channel.id}</div>
                     <div class="text-[12px] text-wa-secondary truncate">
-                      ${(PROVIDERS[channel.provider] || {}).label || channel.provider} · arquivado
+                      ${providerMeta(channel.provider, descriptorsById).label} · arquivado
                     </div>
                   </div>
                   <button class="px-2 py-1 rounded-md text-[13px] text-wa-teal hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
@@ -447,6 +473,7 @@ export default function ChannelsManager({ initialEntity }) {
       <div ref=${editFormRef}>
         ${editingChannel ? html`<${ChannelEditForm}
           channel=${editingChannel}
+          descriptor=${descriptorsById[editingChannel.provider] || null}
           aiDefaults=${aiDefaults}
           onCancel=${() => { setEditingChannel(null); pushUrl(null); }}
           onSaved=${() => { setEditingChannel(null); pushUrl(null); load(); }} />` : null}

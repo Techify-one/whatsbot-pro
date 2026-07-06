@@ -1,53 +1,59 @@
-// Channels — ChannelForm (Plano 23 · D4), extracted verbatim from
-// ChannelsManager.js. Create-channel modal: pick a provider, a display name, the
-// provider's credential fields, the per-channel AI settings, and the inbox agents.
-// The create-payload construction is delegated to the pure `buildCreatePayload`
-// (channels/constants.js) so the provider branching is locked by node --test.
+// Channels — ChannelForm (create). Plano 33: fully DESCRIPTOR-DRIVEN. The form
+// picks a provider from the installed descriptors (GET /api/channels/providers)
+// and renders that provider's config/credential fields generically — there is NO
+// `if provider === 'gowa'/'telegram'/'whatsapp_cloud'` here. The per-channel AI
+// settings (plano 21) are core and always rendered. The payload is assembled by
+// the pure `buildCreatePayload` (channels/constants.js), locked by node --test.
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { listChannelAssignableUsers } from '../../services/api.js';
-import {
-  PROVIDERS, REQUIRED_CREDS_FALLBACK, DEFAULT_JID_TYPES,
-  aiDefaultsFrom, randomToken, buildCreatePayload,
-} from './constants.js';
-import { JidTypePicker } from './JidTypePicker.js';
+import { aiDefaultsFrom, buildCreatePayload, initialConfigValues } from './constants.js';
+import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
 import { AgentPicker } from './AgentPicker.js';
 
 const html = htm.bind(h);
 
-export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProvider, busy, error, aiDefaults, availableProviders, requiredCreds }) {
-  // Only providers whose backing plugin is enabled are offered (GOWA is core and
-  // always present). Falls back to the full catalogue while the list is still
-  // loading. The badge/label catalogue (PROVIDERS) is unfiltered — existing
-  // channels keep their badge even if their provider's plugin is later disabled.
-  const providerEntries = Object.entries(PROVIDERS).filter(
-    ([key]) => !availableProviders || availableProviders.includes(key));
+export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProvider, busy, error, aiDefaults, providers }) {
+  // Descriptors of the installed providers (null while loading). The picker and
+  // the whole form are driven by these; no local provider catalogue.
+  const descriptors = providers || [];
+  const byId = Object.fromEntries(descriptors.map((d) => [d.provider, d]));
   // Pré-seleção via deep-link (/channels/new?provider=…) tem precedência, desde
-  // que o provider exista no catálogo; senão cai no 1º disponível (ou gowa).
+  // que o provider exista nos descriptors; senão cai no 1º disponível.
   const [provider, setProvider] = useState(
-    () => (initialProvider && PROVIDERS[initialProvider] && initialProvider)
-      || (availableProviders && availableProviders[0]) || 'gowa');
-  // Reflete o provider escolhido na URL (o pai serializa ?provider=).
-  function pickProvider(p) { setProvider(p); if (onProviderChange) onProviderChange(p); }
+    () => (initialProvider && byId[initialProvider] && initialProvider)
+      || (descriptors[0] && descriptors[0].provider) || '');
+  const descriptor = byId[provider] || null;
+
   const [displayName, setDisplayName] = useState('');
-  // Per-channel AI settings (config.ai), seeded from the current global config.
   const [ai, setAi] = useState(() => aiDefaults || aiDefaultsFrom({}));
-  // Provider-specific credential/config fields.
-  // The GOWA device id is auto-generated and read-only: each channel maps to its
-  // own GOWA device (one WhatsApp number) on the shared GOWA process.
-  const [gowaDeviceId, setGowaDeviceId] = useState(() => `gowa_${randomToken(10)}`);
-  // Which chat types this GOWA channel surfaces (config.allowed_jid_types).
-  const [jidTypes, setJidTypes] = useState(DEFAULT_JID_TYPES);
-  const [accessToken, setAccessToken] = useState('');
-  const [phoneNumberId, setPhoneNumberId] = useState('');
-  const [wabaId, setWabaId] = useState('');
-  const [verifyToken, setVerifyToken] = useState('');
-  const [botToken, setBotToken] = useState('');
+  // Descriptor-driven field state, keyed by field key. Re-seeded when the
+  // provider changes (generated fields get a fresh value, multiselects their
+  // defaults). credValues start empty.
+  const [credValues, setCredValues] = useState({});
+  const [configValues, setConfigValues] = useState(() => initialConfigValues(descriptor));
   // Agents to assign to the new channel's inbox (all providers). Loaded once.
   const [users, setUsers] = useState([]);
   const [agentIds, setAgentIds] = useState([]);
+
+  // When a descriptor becomes available (or the provider changes), re-seed the
+  // provider-specific field state.
+  useEffect(() => {
+    setCredValues({});
+    setConfigValues(initialConfigValues(descriptor));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, !!descriptor]);
+
+  // Se o provider selecionado sumir dos descriptors (fetch tardio), cai no 1º.
+  useEffect(() => {
+    if (!provider && descriptors.length) pickProvider(descriptors[0].provider);
+    else if (provider && !byId[provider] && descriptors.length) pickProvider(descriptors[0].provider);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers]);
+
+  function pickProvider(p) { setProvider(p); if (onProviderChange) onProviderChange(p); }
 
   useEffect(() => {
     let alive = true;
@@ -58,31 +64,29 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
     return () => { alive = false; };
   }, []);
 
-  // Reporta o provider inicial ao pai no mount, para a URL (?provider=) refletir
-  // o que está selecionado mesmo quando aberto sem deep-link.
-  useEffect(() => { if (onProviderChange) onProviderChange(provider); }, []);
+  // Reporta o provider inicial ao pai no mount, para a URL (?provider=) refletir.
+  useEffect(() => { if (provider && onProviderChange) onProviderChange(provider); }, []);
 
-  // O ID do canal é gerado automaticamente pelo backend (o usuário só escolhe o
-  // nome de exibição). GOWA reusa o device id; demais providers, "<provider>_<hex>".
-  // Credenciais obrigatórias do provider (capability-driven; backend é a fonte da
-  // verdade, com fallback local enquanto a lista não chega) — sem elas o canal
-  // nasceria "morto" (nunca conecta). O backend também rejeita; aqui é só UX.
-  const required = (requiredCreds && requiredCreds[provider]) || REQUIRED_CREDS_FALLBACK[provider] || [];
-  const credValues = {
-    access_token: accessToken, phone_number_id: phoneNumberId,
-    waba_id: wabaId, verify_token: verifyToken, bot_token: botToken,
-  };
-  const credsOk = required.every((k) => (credValues[k] || '').trim());
-  const isRequired = (k) => required.includes(k);
-  const canSave = !busy && displayName.trim() && credsOk;
+  const setCred = (key, value) => setCredValues((prev) => ({ ...prev, [key]: value }));
+  const setConfig = (key, value) => setConfigValues((prev) => ({ ...prev, [key]: value }));
+
+  // Required credentials come from the descriptor's fields (capability-driven on
+  // the backend). Without them the channel would be born "dead" (never connects).
+  const requiredKeys = ((descriptor && descriptor.credential_fields) || [])
+    .filter((f) => f.required).map((f) => f.key);
+  const credsOk = requiredKeys.every((k) => (credValues[k] || '').toString().trim());
+  const canSave = !busy && !!descriptor && displayName.trim() && credsOk;
 
   function submit() {
     if (!canSave) return;
-    const payload = buildCreatePayload({
-      provider, displayName, ai, gowaDeviceId, jidTypes,
-      accessToken, phoneNumberId, wabaId, verifyToken, botToken,
-    });
+    const payload = buildCreatePayload({ provider, displayName, ai, descriptor, credValues, configValues });
     onCreated(payload, agentIds);
+  }
+
+  if (!descriptors.length) {
+    return html`<div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4 text-[14px] text-wa-secondary">
+      Carregando providers de canal…
+    </div>`;
   }
 
   return html`
@@ -93,8 +97,8 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
           <label class="block text-[12px] text-wa-secondary mb-1">Provider</label>
           <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
             value=${provider} onChange=${(e) => pickProvider(e.target.value)} disabled=${busy}>
-            ${providerEntries.map(([key, meta]) => html`
-              <option key=${key} value=${key}>${meta.label}</option>
+            ${descriptors.map((d) => html`
+              <option key=${d.provider} value=${d.provider}>${d.label || d.provider}</option>
             `)}
           </select>
         </div>
@@ -106,76 +110,23 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
             onInput=${(e) => setDisplayName(e.target.value)} />
         </div>
 
-        ${provider === 'gowa' ? html`
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">GOWA Device ID <span class="text-wa-secondary">(gerado automaticamente)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] opacity-60 cursor-not-allowed"
-              type="text" value=${gowaDeviceId} readonly disabled />
-            <div class="text-[12px] text-wa-secondary mt-1">
-              Identifica este número dentro do GOWA. Após criar, leia o QR Code para conectar o WhatsApp.
-            </div>
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">O que deve aparecer no painel</label>
-            <p class="text-[12px] text-wa-secondary mb-2">
-              Escolha quais tipos de conversa deste número viram conversa. Os tipos
-              desmarcados são ignorados (não aparecem no painel).
-            </p>
-            <${JidTypePicker} selected=${jidTypes} onChange=${setJidTypes} disabled=${busy} />
-          </div>
-        ` : null}
-
-        ${provider === 'whatsapp_cloud' ? html`
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Access Token${isRequired('access_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="password" placeholder="EAAB..." value=${accessToken}
-              onInput=${(e) => setAccessToken(e.target.value)} />
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Phone Number ID${isRequired('phone_number_id') ? html`<span class="text-red-500"> *</span>` : null}</label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" placeholder="ID do número (Meta)" value=${phoneNumberId}
-              onInput=${(e) => setPhoneNumberId(e.target.value)} />
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">WABA ID <span class="text-wa-secondary">(para templates)</span></label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" placeholder="WhatsApp Business Account ID" value=${wabaId}
-              onInput=${(e) => setWabaId(e.target.value)} />
-            <div class="text-[12px] text-wa-secondary mt-1">
-              Necessário para listar e criar templates (HSM). Em WhatsApp Manager → Configurações da conta. Diferente do Phone Number ID.
-            </div>
-          </div>
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Verify Token${isRequired('verify_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
-            <div class="flex gap-2">
-              <input class="wa-field flex-1 px-3 py-2 rounded-md text-[14px]"
-                type="text" placeholder="token de verificação do webhook" value=${verifyToken}
-                onInput=${(e) => setVerifyToken(e.target.value)} />
-              <button type="button"
-                class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
-                onClick=${() => setVerifyToken(randomToken())}>Sugerir</button>
-            </div>
-          </div>
-        ` : null}
-
-        ${provider === 'telegram' ? html`
-          <div>
-            <label class="block text-[12px] text-wa-secondary mb-1">Bot Token${isRequired('bot_token') ? html`<span class="text-red-500"> *</span>` : null}</label>
-            <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="password" placeholder="123456:ABC-DEF... (do @BotFather)" value=${botToken}
-              onInput=${(e) => setBotToken(e.target.value)} />
-            <div class="text-[12px] text-wa-secondary mt-1">
-              Crie um bot com o <span class="font-medium">@BotFather</span> (<code>/newbot</code>) e cole o token.
-              Recebe por long-poll (sem host público) — basta criar e mandar mensagem ao bot.
-            </div>
-          </div>
+        ${descriptor ? html`
+          <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
+            onChange=${setConfig} editMode=${false} busy=${busy} />
+          <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
+            onChange=${setCred} editMode=${false} busy=${busy} />
+          ${descriptor.form_component ? html`
+            <${FormComponentLoader} path=${descriptor.form_component}
+              descriptor=${descriptor} mode="create"
+              credValues=${credValues} setCred=${setCred}
+              configValues=${configValues} setConfig=${setConfig} busy=${busy} />
+          ` : null}
         ` : null}
 
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-          <${AiSettingsFields} value=${ai} onChange=${setAi} sequentialDefault=${provider === 'gowa'} />
+          <${AiSettingsFields} value=${ai} onChange=${setAi}
+            sequentialDefault=${!!(descriptor && descriptor.ai_sequential_default)} />
         </div>
 
         <div class="border-t border-wa-border pt-3">
