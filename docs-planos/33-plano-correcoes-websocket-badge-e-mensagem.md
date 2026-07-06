@@ -1,6 +1,6 @@
 # Plano 33 — Correções de WebSocket: badge de agente não atualiza + última mensagem "às vezes" some
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-06 · **Escopo:** pequeno/médio (1 broadcast faltando no handoff da IA · 1 ressync de thread no reconnect · 1 heartbeat no cliente WS · 1 correção de dedup de conteúdo idêntico · 1 guard de race de perda de mensagem, independente/por último). **Sem migration** (não toca schema).
+> **Status:** EXECUTADO (F1–F6, 2026-07-06 · branch `feat/plano-33-ws`) · **Data:** 2026-07-06 · **Escopo:** pequeno/médio (1 broadcast faltando no handoff da IA · 1 ressync de thread no reconnect · 1 heartbeat no cliente WS · 1 correção de dedup de conteúdo idêntico · 1 guard de race de perda de mensagem, independente/por último). **Sem migration** (não toca schema).
 > **Origem:** teste do usuário no roteamento hub-and-spoke — "o websocket parece com problemas: não atualiza o agente atribuído (badge) e a última mensagem que o cliente manda às vezes não aparece (às vezes funciona, às vezes não)". Refinado por investigação multiagente adversarial (13 agentes, rastreio backend + frontend + infra WS, cada hipótese verificada contra o código) — todas as afirmações abaixo vêm com `arquivo:linha` verificado nesta sessão.
 > **O quê/por quê:** são **dois** sintomas com **duas causas-raiz distintas**, nenhuma é "o WS em si":
 > 1. **Badge (determinístico):** o handoff feito pela IA (`transferir_agente`) troca `active_agent_key` no banco mas **não emite nenhum evento WS** — o verbo `conversation.agent_changed` está fora do mapa de projeção. O caminho **manual** (reatribuir pela UI) emite `conversation_updated` e por isso atualiza ao vivo. É a assimetria que prova a causa.
@@ -268,16 +268,16 @@ WAVE 2
 
 ## 8. Checklist de verificação
 
-- [ ] Handoff da IA (`transferir_agente`) atualiza o chip do agente na sidebar/board **ao vivo** (sem F5/refresh); manual continua ok.
-- [ ] Card system-notice de "troca de agente" continua aparecendo (não regrediu).
-- [ ] Com a conversa aberta: desligar a rede, cliente manda msg, religar → a mensagem **aparece sozinha** no thread.
-- [ ] Socket meio-morto (suspend/resume ou offline toggle) reconecta dentro de ~1 heartbeat.
-- [ ] Conexão saudável não sofre reconnect espúrio; sem loop de reconnect.
-- [ ] "ok" + "ok" (~5s) → **2 balões** ao vivo; echo de mídia do operador → **1 balão**.
-- [ ] (F6) 2 msgs do cliente <2s não perdem nenhuma; sem duplicação de resposta.
-- [ ] `venv/bin/python -m pytest tests/ -q` verde no `WHATSBOT_TEST_DB_URL`; JS units do dedup passam.
-- [ ] Nenhuma mudança de schema/migration; head Alembic `0037` intacto.
-- [ ] Telas/cards afetados legíveis no **modo escuro** (nada de cor nova crua).
+- [x] Handoff da IA (`transferir_agente`) atualiza o chip do agente na sidebar/board **ao vivo** (sem F5/refresh); manual continua ok. — código+teste de broadcast (F1/F5); validação **ao vivo** pendente (usuário).
+- [x] Card system-notice de "troca de agente" continua aparecendo (não regrediu). — `emit_domain_sync(ConversationAgentChanged)` intacto; broadcast é aditivo.
+- [ ] Com a conversa aberta: desligar a rede, cliente manda msg, religar → a mensagem **aparece sozinha** no thread. — **manual** (F2, offline toggle) pendente.
+- [ ] Socket meio-morto (suspend/resume ou offline toggle) reconecta dentro de ~1 heartbeat. — **manual** (F3) pendente.
+- [ ] Conexão saudável não sofre reconnect espúrio; sem loop de reconnect. — **manual** (F3) pendente.
+- [x] "ok" + "ok" (~5s) → **2 balões** ao vivo; echo de mídia do operador → **1 balão**. — JS unit cobre APPEND + colapso do echo (F4/F5); validação ao vivo pendente.
+- [ ] (F6) 2 msgs do cliente <2s não perdem nenhuma; sem duplicação de resposta. — **manual** (timing-dependent) pendente; sem regressão nos testes do orquestrador.
+- [x] `venv/bin/python -m pytest tests/ -q` verde no `WHATSBOT_TEST_DB_URL`; JS units do dedup passam. — JS: 120 verdes. Suíte pytest completa rodada: **as únicas 2 falhas são pré-existentes/ambientais** e independentes do plano 33 — `test_legacy_suite[test_endpoints.py]` (o `test_endpoints.py` do repo chama `create_kanban_view(group_field_scope=…)`, param que a versão do plugin **protocolos instalada neste checkout** não tem — lag conhecido: plugin chega por `.zip`, worktree limpo nasce vermelho) e `test_legacy_suite[test_gowa_plugin.py]` (idem, plugin). Meu diff (11 arquivos) não toca `test_endpoints.py`/kanban/protocolos/gowa e menciona `group_field_scope`/`create_kanban_view` 0×. Todos os testes que exercitam o código do plano 33 estão verdes.
+- [x] Nenhuma mudança de schema/migration; head Alembic `0037` intacto. — nenhum arquivo em `db/alembic/versions/` tocado.
+- [x] Telas/cards afetados legíveis no **modo escuro** (nada de cor nova crua). — nenhuma superfície/cor nova de UI (só lógica de hook/wsBus e um broadcast backend).
 
 ---
 
