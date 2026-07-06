@@ -82,6 +82,15 @@ def _write_raw(agent_key: str, column: str, raw_text: str) -> None:
     dynamic_registry.invalidate()
 
 
+def _read_raw(agent_key: str, column: str) -> str | None:
+    """Lê o texto CRU da coluna (sem passar por coerce_json)."""
+    from sqlalchemy import select
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(ai_agents.c[column]).where(ai_agents.c.agent_key == agent_key)
+        ).scalar()
+
+
 def _reset_default_clean() -> None:
     """Restaura a linha `default` para um model_config limpo."""
     agent_repo.save(
@@ -216,6 +225,54 @@ check("piso: retorna AgentSpec (não levanta)", spec is not None)
 check("piso: agent_key = default", spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)
 check("piso: usa DEFAULT_MODEL", spec is not None and spec.model == agent_factory.DEFAULT_MODEL)
 check("piso: emite logger.error", any(r.levelno == logging.ERROR for r in records))
+_reset_default_clean()
+
+# ── F3: guarda defensiva no agent_repo — caller passa STRING crua ─────────
+# Simula um caller (ex.: plugin de terceiro) que passa uma string JSON já
+# codificada em vez de dict. Antes: json.dumps(string) → dupla codificação.
+print("\nF3 — agent_repo._dump_json_field coage string crua (sem duplicar):")
+agent_repo.save("f3repo", display_name="F3", prompt="x",
+                model_config='{"model": "z/z"}',  # STRING crua (dirty caller)
+                tool_names='["save_contact_info"]', enabled=True)
+raw_mc = _read_raw("f3repo", "model_config")
+check("model_config gravado é single-encoded (começa com '{')",
+      raw_mc is not None and raw_mc.lstrip().startswith("{"))
+check("model_config relido é dict com o modelo certo",
+      agent_repo.get("f3repo").get("model_config") == {"model": "z/z"})
+raw_tn = _read_raw("f3repo", "tool_names")
+check("tool_names gravado é single-encoded (começa com '[')",
+      raw_tn is not None and raw_tn.lstrip().startswith("["))
+check("tool_names relido é lista", agent_repo.get("f3repo").get("tool_names") == ["save_contact_info"])
+agent_repo.delete("f3repo")
+
+# ── F3: helper da rota + save_agent_prompt sobre linha suja ───────────────
+# Reproduz o caminho de save_agent_prompt: grava linha default DUPLO-codificada,
+# saneia via _coerce_agent_json_fields e regrava — releitura crua tem que voltar
+# single-encoded (sem tripla codificação).
+print("\nF3 — _coerce_agent_json_fields + patch de prompt sobre linha suja:")
+from server.routes.ai_engine import _coerce_agent_json_fields  # noqa: E402
+_write_raw(agent_repo.DEFAULT_AGENT_KEY, "model_config", _double_encode({"model": "w/w"}))
+_write_raw(agent_repo.DEFAULT_AGENT_KEY, "hooks_config", _double_encode({"h": 1}))
+existing = agent_repo.get(agent_repo.DEFAULT_AGENT_KEY)
+clean = _coerce_agent_json_fields(existing)
+check("helper devolve model_config dict", clean["model_config"] == {"model": "w/w"})
+check("helper devolve hooks_config dict", clean["hooks_config"] == {"h": 1})
+agent_repo.save(
+    agent_repo.DEFAULT_AGENT_KEY, display_name=existing.get("display_name") or "",
+    prompt="Prompt novo via wizard",
+    model_config=clean["model_config"], tool_names=clean["tool_names"],
+    enabled=bool(existing.get("enabled", True)),
+    description=existing.get("description", ""),
+    is_router=bool(existing.get("is_router", False)),
+    routing_targets=clean["routing_targets"], hooks_config=clean["hooks_config"],
+)
+raw_after = _read_raw(agent_repo.DEFAULT_AGENT_KEY, "model_config")
+check("após patch: model_config single-encoded (não começa com '\"')",
+      raw_after is not None and raw_after.lstrip().startswith("{"))
+check("após patch: model_config relido volta ao objeto",
+      agent_repo.get(agent_repo.DEFAULT_AGENT_KEY).get("model_config") == {"model": "w/w"})
+check("após patch: prompt atualizado",
+      agent_repo.get(agent_repo.DEFAULT_AGENT_KEY).get("prompt") == "Prompt novo via wizard")
 _reset_default_clean()
 
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")

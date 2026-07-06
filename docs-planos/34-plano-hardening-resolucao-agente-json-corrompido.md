@@ -170,11 +170,11 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 **Pronto quando:** teste — gravar linha suja, chamar o endpoint `POST /api/ai/agents/default/prompt` com um prompt novo, reler a linha: `model_config` volta **single-encoded** (`{"model": …}`), não `"\"{...}\""`. Suíte verde.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** (a) `db/repositories/agent_repo.py`: helper `_dump_json_field(value, default)` (reusa `coerce_json`) substitui os `json.dumps` manuais em `ensure` e `save` — coage uma string crua ao objeto antes de serializar, então **nenhum caller** (inclui plugin de terceiro) gera dupla/tripla codificação; saída byte-idêntica no caminho feliz. (b) `server/routes/ai_engine.py`: helper compartilhado `_coerce_agent_json_fields(row)` (decisão P1-a) usado em `save_agent_prompt` para sanear `model_config`/`hooks_config`/`tool_names`/`routing_targets` da linha existente antes do `save()`. `tests/test_agent_json_hardening.py` estendido (guarda defensiva do repo com string crua + helper da rota + patch sobre linha suja → releitura single-encoded).
+- **Como foi feito / decisões:** `save_agent` mantém a validação de borda (rejeita input de usuário inválido com 400 — contrato correto); o helper compartilhado sana a linha do DB no `save_agent_prompt` (que NÃO pode rejeitar, senão o wizard não consegue corrigir uma linha suja). A divergência que abriu o buraco (save_agent guardava, save_agent_prompt não) some. Nota: F1 já limpava `existing` (via `agent_repo.get`→`coerce_json`), então F3 é defesa em profundidade — a guarda no `_dump_json_field` é a última linha para callers que não passam por `get`.
+- **Problemas / pendências:** `venv/bin/python tests/test_endpoints.py` falha em `create_kanban_view() got an unexpected keyword argument 'group_field_scope'` — **drift PRÉ-EXISTENTE e alheio ao Track A**: a função vive em `assets/plugin_examples/protocolos/logic.py` (plugin protocolos bundled, versão antiga vs. o `.zip` instalado que o teste espera). O crash ocorre na linha ~1583, **antes** de qualquer código deste plano (ai/agents PUT está em ~2225). **Reportar ao coordenador; não corrigir (fora do escopo).**
+- **Verificação:** `tests/test_agent_json_hardening.py` → 25 passed. Regressões verdes: `test_agent_routing` (29), `test_dynamic_registry` (6), `test_model_factory` (24), `test_hooks` (32), `test_routing_engine` (26); `pytest tests/endpoints` (34). `test_endpoints` bloqueado no drift do protocolos (acima), não pela minha mudança.
 
 ---
 

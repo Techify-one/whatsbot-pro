@@ -34,6 +34,22 @@ def _decode_json(value, fallback):
     return coerce_json(value, fallback)
 
 
+def _dump_json_field(value, default):
+    """Serialize a dict/list column to TEXT **exactly once** (plano 34 F3).
+
+    Tolerates a value that arrived already-encoded as a JSON string: ``coerce_json``
+    (N-layer) peels it back to the object before we re-serialize, so a dirty caller
+    can never produce a double/triple-encoded row. ``default`` steers the empty case
+    (``{}`` for model_config/hooks_config, ``None`` for tool_names/routing_targets →
+    SQL NULL). On the happy path (a clean dict/list) the output is byte-identical to
+    the previous ``json.dumps(value or default)``.
+    """
+    coerced = coerce_json(value, default)
+    if coerced is None:
+        return None
+    return json.dumps(coerced, ensure_ascii=False)
+
+
 def _row_to_dict(row) -> dict:
     d = dict(row)
     d["model_config"] = coerce_json(d.get("model_config"), {})
@@ -85,8 +101,8 @@ def ensure(
         "display_name": display_name,
         "prompt": prompt,
         "prompt_key": prompt_key,
-        "model_config": json.dumps(model_config or {}, ensure_ascii=False),
-        "tool_names": None if tool_names is None else json.dumps(tool_names, ensure_ascii=False),
+        "model_config": _dump_json_field(model_config, {}),
+        "tool_names": _dump_json_field(tool_names, None),
         "enabled": 1 if enabled else 0,
         "version": 1,
         "updated_at": now,
@@ -147,14 +163,13 @@ def save(
         "display_name": display_name,
         "prompt": prompt or "",
         "prompt_key": prompt_key or "",
-        "model_config": json.dumps(model_config or {}, ensure_ascii=False),
-        "tool_names": None if tool_names is None else json.dumps(tool_names, ensure_ascii=False),
+        "model_config": _dump_json_field(model_config, {}),
+        "tool_names": _dump_json_field(tool_names, None),
         "enabled": 1 if enabled else 0,
         "description": description or "",
         "is_router": 1 if is_router else 0,
-        "routing_targets": (None if routing_targets is None
-                            else json.dumps(routing_targets, ensure_ascii=False)),
-        "hooks_config": json.dumps(hooks_config or {}, ensure_ascii=False),
+        "routing_targets": _dump_json_field(routing_targets, None),
+        "hooks_config": _dump_json_field(hooks_config, {}),
         "version": version,
         "updated_at": now,
     }
