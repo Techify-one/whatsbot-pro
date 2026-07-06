@@ -98,7 +98,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect,
     pendingWsMessages,
-    isOpenRow, selectContact,
+    isOpenRow, selectContact, reloadOpenThread,
   } = selection;
 
   // ── Contact/conversation actions + identity + tags + context menu ──
@@ -209,6 +209,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     pendingWsMessages, isOpenRow, selected, contactData,
     setGlobalTags,
     pageVisibleRef,
+    reloadOpenThread,
   });
 
   // Search box: clear the phone-check error as the operator types (preserves the
