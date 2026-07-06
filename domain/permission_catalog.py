@@ -115,6 +115,7 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     # Usuários e auditoria
     "users.manage": ("core", _G_USERS),
     "audit.read": ("core", _G_USERS),
+    "audit.manage": ("core", _G_USERS),
     "usage.read": ("core", _G_USERS),
     "execution.read": ("core", _G_USERS),
     "execution.delete": ("core", _G_USERS),
