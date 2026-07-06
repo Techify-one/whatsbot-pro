@@ -349,6 +349,7 @@ async def _tick(deps) -> None:
     # Monta a lista de caixas FORA DO AR (alerta ligado + já conectou alguma vez +
     # agora não logada). Uma caixa nunca pareada nunca entra (evita alarme de warm-up).
     down: list[dict] = []
+    online_ids: set[str] = set()  # caixas MONITORADAS que estão logadas neste ciclo
     for ch in channels:
         cid = ch["id"]
         chan_cfg = ch["config"]
@@ -366,6 +367,7 @@ async def _tick(deps) -> None:
         phone = live_phone or (st.get("last_phone") or "")
 
         if logged_in:
+            online_ids.add(cid)
             if not st.get("ever_connected") or (live_phone and live_phone != st.get("last_phone")):
                 await asyncio.to_thread(_save_state, cid, ever_connected=True,
                                         last_phone=live_phone or st.get("last_phone"))
@@ -380,12 +382,18 @@ async def _tick(deps) -> None:
     signature = ",".join(sorted(c["id"] for c in down))
 
     if not down:
-        # Nada fora do ar. Se havia alerta ativo, apaga a msg de queda e avisa recuperação.
+        # Nada fora do ar (na lista monitorada). Se havia alerta ativo, apaga a msg de queda.
         old_mid = agg.get("telegram_message_id")
         if old_mid:
             old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
             await _tg_delete(cfg["token"], old_chat, int(old_mid))
-            await _tg_send(cfg["token"], cfg["chat_id"], _msg_recovered_all())
+            # A msg de "reconectado" SÓ sai se alguma caixa que estava caída realmente
+            # voltou a logar. Se o alerta esvaziou porque o monitoramento foi DESLIGADO
+            # (ou a caixa saiu da lista), nada reconectou de fato — só limpa o estado.
+            old_sig = agg.get("down_signature") or ""
+            old_down_ids = set(old_sig.split(",")) if old_sig else set()
+            if old_down_ids & online_ids:
+                await _tg_send(cfg["token"], cfg["chat_id"], _msg_recovered_all())
             await asyncio.to_thread(_save_state, AGGREGATE_KEY,
                                     telegram_message_id=None, disconnected_since=None,
                                     last_alert_ts=None, down_signature=None)
