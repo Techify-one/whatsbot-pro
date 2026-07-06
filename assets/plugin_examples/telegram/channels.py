@@ -32,7 +32,7 @@ from typing import Optional
 
 import httpx
 
-from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,37 @@ class TelegramChannel(Channel):
     @property
     def _token(self) -> str:
         return self._cred("bot_token")
+
+    # ── Account identity (dedup contract — plano 32 F5) ──────────────
+    # A Telegram bot token is ``{bot_id}:{auth_hash}``, so the numeric ``bot_id``
+    # (the bot's Telegram user id — the account) is derivable from the token
+    # WITHOUT a network call. We use ``kind="bot_id"`` for BOTH hooks so the
+    # create-time identity and the live ``getMe`` identity dedup against each other
+    # (plano 32 P1: one consistent kind). Storing the bot_id — not the secret token
+    # — also keeps the token out of the ``account_identity`` column.
+    @staticmethod
+    def _bot_id_from_token(token: str) -> str:
+        token = (token or "").strip()
+        prefix = token.split(":", 1)[0].strip() if ":" in token else ""
+        return prefix if prefix.isdigit() else ""
+
+    @classmethod
+    def identity_from_credentials(cls, creds: dict) -> Optional[AccountIdentity]:
+        """The bot account (``bot_id``), parsed from the ``bot_token`` at create time."""
+        bot_id = cls._bot_id_from_token(creds.get("bot_token") or "")
+        return AccountIdentity("bot_id", bot_id) if bot_id else None
+
+    def account_identity(self) -> Optional[AccountIdentity]:
+        """Live ``bot_id``: parsed from the token (no network), else via ``getMe``."""
+        bot_id = self._bot_id_from_token(self._token)
+        if bot_id:
+            return AccountIdentity("bot_id", bot_id)
+        res = self._request("getMe")
+        if res.get("ok"):
+            bid = str((res.get("result") or {}).get("id") or "").strip()
+            if bid:
+                return AccountIdentity("bot_id", bid)
+        return None
 
     def _base_url(self) -> str:
         return f"{api_base()}/bot{self._token}"

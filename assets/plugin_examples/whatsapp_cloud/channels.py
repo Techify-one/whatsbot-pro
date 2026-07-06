@@ -33,7 +33,7 @@ from typing import Optional
 
 import httpx
 
-from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,18 @@ class WhatsAppCloudChannel(Channel):
         # Short cache for list_templates (avoid hitting the Graph API on every
         # picker open): (fetched_at, [templates]).
         self._templates_cache: Optional[tuple] = None
+
+    # ── Account identity (dedup contract — plano 32 F5) ──────────────
+    @classmethod
+    def identity_from_credentials(cls, creds: dict) -> Optional[AccountIdentity]:
+        """The Cloud account is the ``phone_number_id`` — known at create time.
+
+        Two channels with the same ``phone_number_id`` are the same WhatsApp
+        Business number connected twice, so the core rejects the duplicate before
+        it is persisted (no network needed). ``None`` when the field is blank.
+        """
+        pid = (creds.get("phone_number_id") or "").strip()
+        return AccountIdentity("phone_number_id", pid) if pid else None
 
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
