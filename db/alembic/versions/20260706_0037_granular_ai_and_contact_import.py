@@ -25,7 +25,10 @@ import sqlalchemy as sa
 
 
 revision: str = "0037_granular_ai_perms"
-down_revision: Union[str, Sequence[str], None] = "0036_atend_open_unique"
+# Encadeado após a migration do developer 0037_drop_ai_variables_category (o merge
+# de origin/developer trouxe outra migration que também partia de 0036 → 2 heads).
+# Mantém-se o revision id para o banco vivo, que já a aplicou, não perder a âncora.
+down_revision: Union[str, Sequence[str], None] = "0037_drop_ai_variables_category"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
