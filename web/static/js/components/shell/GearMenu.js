@@ -7,7 +7,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { Slot } from '../../plugins/Slot.js';
-import { hasPermission } from '../../utils/permissions.js';
+import { hasPermission, hasAnyPermission, AI_PERMS } from '../../utils/permissions.js';
 import { CORE_TAB_PATHS, pluginTabId } from './screenRegistry.js';
 
 const html = htm.bind(h);
@@ -150,7 +150,7 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
           <${MenuItem} gated=${can('audit.read')} active=${tab === 'audit'} href=${CORE_TAB_PATHS.audit} onClick=${() => { onTabChange('audit'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>`}
           >Auditoria</${MenuItem}>
-          <${MenuItem} gated=${can('agent.manage')} active=${tab === 'ai'} href=${CORE_TAB_PATHS.ai} onClick=${() => { onTabChange('ai'); close(); }}
+          <${MenuItem} gated=${hasAnyPermission(currentUser, AI_PERMS)} active=${tab === 'ai'} href=${CORE_TAB_PATHS.ai} onClick=${() => { onTabChange('ai'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a2 2 0 0 1 2 2v1h3a2 2 0 0 1 2 2v2h1a2 2 0 0 1 0 4h-1v2a2 2 0 0 1-2 2h-3v1a2 2 0 0 1-4 0v-1H7a2 2 0 0 1-2-2v-2H4a2 2 0 0 1 0-4h1V7a2 2 0 0 1 2-2h3V4a2 2 0 0 1 2-2zm-3 7a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1zm6 0a1 1 0 0 0-1 1v4a1 1 0 0 0 2 0v-4a1 1 0 0 0-1-1z"/></svg>`}
           >Configurações de IA</${MenuItem}>
           <${MenuItem} gated=${can('plugins.manage')} active=${tab === 'plugins'} href=${CORE_TAB_PATHS.plugins} onClick=${() => { onTabChange('plugins'); close(); }}

@@ -106,8 +106,21 @@ def set_custom_permissions(user_id: int, permission_keys: list[str]) -> dict | N
     """Switch a user to custom mode and replace their explicit permission set.
 
     Clears any role assignments (custom replaces roles) and sets the flag.
+    Grants de permissões de plugins DESATIVADOS (escondidas do PermissionPicker)
+    são preservados — igual a ``rbac_repo.set_role_permissions`` — para
+    sobreviverem ao ciclo desativar→editar→reativar.
     """
+    from db.repositories import rbac_repo
+    hidden = rbac_repo.hidden_plugin_permission_keys()
     with get_engine().begin() as conn:
+        if hidden:
+            existing = {r[0] for r in conn.execute(
+                select(permissions.c.key).select_from(
+                    user_permissions.join(
+                        permissions,
+                        permissions.c.id == user_permissions.c.permission_id))
+                .where(user_permissions.c.user_id == user_id))}
+            permission_keys = list(set(permission_keys) | (existing & hidden))
         conn.execute(update(users).where(users.c.id == user_id)
                      .values(custom_permissions=1, updated_at=time.time()))
         conn.execute(sa_delete(user_roles).where(user_roles.c.user_id == user_id))

@@ -397,7 +397,7 @@ def register_routes(app, deps):
         and an invalid/unrecognized value is silently discarded. Columns that
         don't match any defined attribute are ignored (for now) — the contact is
         still saved regardless."""
-        denied = permission_denied(request, "contact.write")
+        denied = permission_denied(request, "contact.import")
         if denied:
             return denied
 

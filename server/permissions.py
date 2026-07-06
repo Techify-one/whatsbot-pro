@@ -24,8 +24,11 @@ ROLE_LABELS = {
 ROLE_DEFAULTS = {
     "gestor": {
         "conversation.read", "conversation.reply", "conversation.assign",
-        "conversation.resolve", "contact.read", "contact.write", "channel.manage",
-        "settings.manage", "plugins.manage", "billing.manage", "agent.manage",
+        "conversation.resolve", "contact.read", "contact.write", "contact.import",
+        "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
+        # IA granular (substitui o antigo agent.manage — gestor recebe as 4)
+        "agent.config.manage", "agent.prompts.manage", "agent.tools.manage",
+        "agent.variables.manage",
         "quickreply.manage", "template.create", "template.delete", "audit.read",
         # Plano 24 — gestor recebe as 9 novas (database.manage fica admin-only)
         "contact.delete", "conversation.delete", "tag.manage",
