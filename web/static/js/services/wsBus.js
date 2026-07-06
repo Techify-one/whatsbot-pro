@@ -33,6 +33,37 @@ let _reconnectTimer = null;
 let _closing = false;             // true only while we intentionally tear the socket down (last unsubscribe)
 let _connected = false;           // mirrors the socket's open state for late-subscriber onConnect
 
+// Plano 33 F3 — application-level heartbeat. A laptop sleep / NAT rebind / carrier
+// blip can leave a socket HALF-OPEN: the browser never fires `onclose`, so the
+// 3s reconnect below never runs and live events (new_message, conversation_updated)
+// are silently dropped until an F5. We ping every INTERVAL and, if no `pong` comes
+// back within TIMEOUT (tolerating one missed ping), force-close the socket — that
+// fires `onclose` → reconnect → (F2) thread resync. TIMEOUT > the server's own
+// ~20s protocol ping keeps healthy links from ever tripping a spurious reconnect.
+const HEARTBEAT_INTERVAL_MS = 25000;
+const HEARTBEAT_TIMEOUT_MS = 40000;
+let _heartbeatTimer = null;
+let _lastPongAt = 0;
+
+function _stopHeartbeat() {
+  if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+}
+
+function _startHeartbeat(sock) {
+  _stopHeartbeat();
+  _lastPongAt = Date.now();
+  _heartbeatTimer = setInterval(() => {
+    if (sock !== _ws || sock.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - _lastPongAt > HEARTBEAT_TIMEOUT_MS) {
+      // Half-open: no pong in the window → the OS never told us it died. Force the
+      // close so onclose (which is otherwise never called) drives the reconnect.
+      try { sock.close(); } catch (e) {}
+      return;
+    }
+    try { sock.send(JSON.stringify({ action: 'ping' })); } catch (e) {}
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
 function _wsUrl() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const token = localStorage.getItem('whatsbot_token') || '';
@@ -54,6 +85,7 @@ function _connect() {
   sock.onopen = () => {
     if (sock !== _ws) return;   // superseded before it ever opened — ignore.
     _connected = true;
+    _startHeartbeat(sock);      // plano 33 F3 — detect half-open sockets
     for (const h of [..._subscribers]) {
       if (h.onConnect) { try { h.onConnect(); } catch (e) { console.error('WS onConnect error:', e); } }
     }
@@ -68,6 +100,9 @@ function _connect() {
       console.error('WS parse error:', e);
       return;
     }
+    // Plano 33 F3: a `pong` is the heartbeat ack — consume it here (refresh the
+    // liveness clock) and do NOT fan it out (no subscriber handles it anyway).
+    if (msg.event === 'pong') { _lastPongAt = Date.now(); return; }
     // Fan the event out to every subscriber that registered a handler for it.
     for (const h of [..._subscribers]) {
       const handler = h[msg.event];
@@ -83,6 +118,7 @@ function _connect() {
     // reconnect — exactly like the baseline's per-instance `closed` guard.
     if (sock._intentional || sock !== _ws) return;
     _connected = false;
+    _stopHeartbeat();           // plano 33 F3 — no pinging a closed socket
     for (const h of [..._subscribers]) {
       if (h.onDisconnect) { try { h.onDisconnect(); } catch (e) { console.error('WS onDisconnect error:', e); } }
     }
@@ -98,6 +134,7 @@ function _connect() {
 
 function _teardown() {
   _closing = true;
+  _stopHeartbeat();             // plano 33 F3
   if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   if (_ws) { _ws._intentional = true; try { _ws.close(); } catch (e) {} }
   _ws = null;

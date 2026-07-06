@@ -19,7 +19,7 @@
 // with the selection hook's detail loader so reads gate on the same visibility.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
-import { isDuplicateMessage, findDuplicateIndex } from '../../../services/messages.js';
+import { optimisticDupIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
@@ -52,6 +52,8 @@ export function useConversationWsEvents(opts) {
     setGlobalTags,
     // container-shared ref (page visibility gates read + unread bumps)
     pageVisibleRef,
+    // selection: background re-fetch of the OPEN thread (plano 33 F2)
+    reloadOpenThread,
   } = opts;
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
@@ -63,6 +65,8 @@ export function useConversationWsEvents(opts) {
   const convListRefetchTimer = useRef(null);   // debounce for membership-change refetch
   const listRefetchTimer = useRef(null);       // debounce/coalesce for new-conversation refetch
   const wsConnectedOnceRef = useRef(false);    // skip the first WS connect (initial fetch covers it)
+  const reloadOpenThreadRef = useRef(null);    // plano 33 F2 — freshest thread reloader for the []-dep onWsConnect
+  reloadOpenThreadRef.current = reloadOpenThread;
 
   // Coalesce every "a conversation not in the list just changed" trigger
   // (new_message for an unknown row, conversation_created, WS reconnect) into ONE
@@ -80,9 +84,15 @@ export function useConversationWsEvents(opts) {
   // lost (the bus has no replay), so on RE-connect refetch the list to catch any
   // conversation that changed while we were offline. Skip the first connect — the
   // initial fetch already covers it.
+  //
+  // Plano 33 F2 (LINCHPIN): the list refetch above ONLY heals the sidebar. The
+  // open THREAD also lost any `new_message` that arrived during the gap (the
+  // append is live-only, no replay), so it stayed stale until re-selection/F5.
+  // Reload the open thread too — best-effort, background, dedup-idempotent.
   const onWsConnect = useCallback(() => {
     if (!wsConnectedOnceRef.current) { wsConnectedOnceRef.current = true; return; }
     scheduleListRefetch();
+    if (reloadOpenThreadRef.current) reloadOpenThreadRef.current();
   }, [scheduleListRefetch]);
 
   // Track page visibility — mark selected contact as read when tab becomes visible
@@ -433,7 +443,7 @@ export function useConversationWsEvents(opts) {
         if (!prev) {
           // Detail still loading — buffer under the open thread's phone key
           const buf = pendingWsMessages.current[phone] || [];
-          if (!isDuplicateMessage(message, buf)) {
+          if (optimisticDupIndex(message, buf) === -1) {
             pendingWsMessages.current[phone] = [...buf, message];
           }
           return prev;
@@ -455,8 +465,9 @@ export function useConversationWsEvents(opts) {
             return { ...prev, messages: updated };
           }
         }
-        // Deduplicate by ts + role, or by content + role (within 30s window)
-        const dupIdx = prev.messages ? findDuplicateIndex(message, prev.messages) : -1;
+        // Collapse only an OPTIMISTIC bubble (no msg_id) into its server echo —
+        // NOT two distinct inbound rows of identical content (plano 33 F4).
+        const dupIdx = optimisticDupIndex(message, prev.messages);
         if (dupIdx !== -1) {
           // Merge ids/status from server into existing (optimistic) message
           if (message.msg_id || message.status || message._id) {
