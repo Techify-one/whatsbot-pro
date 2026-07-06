@@ -1158,8 +1158,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 28 permissions", _perm_count == 28)
-check("RBAC seed -> role_permissions populated (gestor 24 + atendente 5)", _rp_count == 29)
+check("RBAC seed -> 32 permissions", _perm_count == 32)
+check("RBAC seed -> role_permissions populated (gestor 28 + atendente 5)", _rp_count == 33)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1198,7 +1198,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 28 permissions", len([p for p in _perms if p != "*"]) == 28)
+check("admin me -> all 32 permissions", len([p for p in _perms if p != "*"]) == 32)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -1216,7 +1216,7 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 24 perms, no '*'", "*" not in _gperms and len(_gperms) == 24)
+check("gestor resolver -> 28 perms, no '*'", "*" not in _gperms and len(_gperms) == 28)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1225,8 +1225,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 28 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 28)
+check("GET /api/roles -> 3 roles + 32 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 32)
 
 r = client.get("/api/users")
 check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
@@ -1357,7 +1357,18 @@ check("POST /api/custom-attributes (no custom_attribute.manage) -> 403", r.statu
 r = client.get("/api/admin/database", headers=_chdr)
 check("GET /api/admin/database (no database.manage) -> 403", r.status_code == 403)
 r = client.get("/api/ai/agents", headers=_chdr)
-check("GET /api/ai/agents (no agent.manage) -> 403", r.status_code == 403)
+check("GET /api/ai/agents (no agent.config.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/variables", headers=_chdr)
+check("GET /api/ai/variables (no agent.variables.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/tools", headers=_chdr)
+check("GET /api/ai/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/default/prompt", json={"prompt": "x"}, headers=_chdr)
+check("PUT /api/ai/agents/default/prompt (no agent.prompts.manage) -> 403", r.status_code == 403)
+r = client.get("/api/tools", headers=_chdr)
+check("GET /api/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.post("/api/contacts/import",
+                files={"file": ("c.csv", "phone\n5511999\n", "text/csv")}, headers=_chdr)
+check("POST /api/contacts/import (no contact.import) -> 403", r.status_code == 403)
 
 # ── Switching modes + last-admin guard ────────────────────────────
 r = client.put(f"/api/users/{_cu_id}", json={
@@ -1381,9 +1392,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 24)
-check("GET /api/roles -> admin shows all 28",
-      len(_by_key["admin"]["permission_keys"]) == 28)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 28)
+check("GET /api/roles -> admin shows all 32",
+      len(_by_key["admin"]["permission_keys"]) == 32)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1437,7 +1448,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 24 perms", len(_rrepo.get_role_permissions("gestor")) == 24)
+check("gestor restored to 28 perms", len(_rrepo.get_role_permissions("gestor")) == 28)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio
@@ -1462,6 +1473,10 @@ check("manifest rbac -> invalid/dup keys dropped",
 check("manifest rbac absent -> {}", _parse_rbac(None, "x") == {})
 
 # 2) Repo: upsert plugin perms → catalog merge + keys + delete cascade.
+# O plugin precisa existir ATIVO para suas permissões aparecerem no catálogo
+# (list_catalog esconde permissões de plugins desativados/ausentes).
+from db.repositories import plugin_repo as _prepo
+_prepo.upsert("lembretes", "1.0.0", enabled=True)
 _rrepo.upsert_plugin_permission("plugin.lembretes.view", "Ver lembretes",
                                 "lembretes", "Lembretes")
 _rrepo.upsert_plugin_permission("plugin.lembretes.delete", "Excluir lembretes",
@@ -1475,6 +1490,21 @@ check("list_catalog -> core + plugin rows", _cat_view is not None
       and _cat_view["plugin_id"] == "lembretes" and _cat_view["group_label"] == "Lembretes")
 check("list_catalog -> core perms have plugin_id None",
       any(c["key"] == "conversation.read" and c["plugin_id"] is None for c in _catalog))
+# Agrupamento core/plugin (metadado de exibição): tier + group em cada item.
+_cat_by_key = {c["key"]: c for c in _catalog}
+check("list_catalog -> core perm tier=core + group",
+      _cat_by_key["conversation.read"]["tier"] == "core"
+      and _cat_by_key["conversation.read"]["group"] == "Atendimentos e conversas")
+check("list_catalog -> AI perms under 'IA e agente'",
+      _cat_by_key["agent.config.manage"]["group"] == "IA e agente"
+      and _cat_by_key["agent.prompts.manage"]["tier"] == "core")
+check("list_catalog -> templates shown under Plugins tier",
+      _cat_by_key["template.create"]["tier"] == "plugin"
+      and _cat_by_key["template.create"]["group"] == "Templates (WhatsApp Cloud)")
+check("list_catalog -> plugin perm carries tier=plugin",
+      _cat_view["tier"] == "plugin" and _cat_view["group"] == "Lembretes")
+check("list_catalog -> agent.manage removido do catálogo",
+      "agent.manage" not in _cat_by_key)
 
 # 3) /api/roles exposes plugin perms with metadata.
 _roles_payload = client.get("/api/roles").json()["data"]
@@ -1492,6 +1522,38 @@ _lr_keys = r.json()["data"]["role"]["permission_keys"]
 check("create role -> valid plugin perm kept, bogus dropped",
       _lr_keys == ["plugin.lembretes.view"])
 client.delete(f"/api/roles/{_lr_id}")
+
+# 4b) Desativar o plugin ESCONDE suas permissões do picker mas PRESERVA os grants
+# (sobrevive ao ciclo desativar→editar→reativar). Ver rbac_repo.list_catalog +
+# set_role_permissions (hidden_plugin_permission_keys).
+r = client.post("/api/roles", json={"key": "lembrete_ops", "name": "Lembrete Ops",
+    "permission_keys": ["plugin.lembretes.view", "conversation.read"]})
+_lo_id = r.json()["data"]["role"]["id"]
+_prepo.set_enabled("lembretes", False)
+_cat_off = {c["key"] for c in _rrepo.list_catalog()}
+check("plugin desativado -> permissões somem do catálogo",
+      "plugin.lembretes.view" not in _cat_off and "plugin.lembretes.delete" not in _cat_off)
+check("plugin desativado -> chave ainda válida (grants persistem)",
+      "plugin.lembretes.view" in _rrepo.plugin_permission_keys())
+# Editar o cargo com o plugin OFF (picker manda só o que vê) NÃO apaga o grant escondido.
+r = client.put(f"/api/roles/{_lo_id}", json={"permission_keys": ["conversation.read"]})
+check("editar cargo com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+# Idem para usuário custom: editar sem ver o plugin preserva o grant escondido.
+_puo = _urepo.create(email="lembreteops@test.com", name="LO",
+                     password_hash=_hpa("supersecret"),
+                     permission_keys=["plugin.lembretes.view"], custom=True)
+_urepo.set_custom_permissions(_puo["id"], ["conversation.read"])
+check("editar usuário custom com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.user_permissions(_puo["id"]))
+client.delete(f"/api/users/{_puo['id']}")
+# Reativar traz a permissão de volta ao catálogo, com o grant intacto.
+_prepo.set_enabled("lembretes", True)
+_cat_on = {c["key"] for c in _rrepo.list_catalog()}
+check("reativar plugin -> permissão volta ao catálogo", "plugin.lembretes.view" in _cat_on)
+check("reativar plugin -> grant continua no cargo",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+client.delete(f"/api/roles/{_lo_id}")
 
 # 5) plugin_permission() dependency: infers id from path; default-allow legacy.
 _pu = _urepo.create(email="pluginuser@test.com", name="PU",

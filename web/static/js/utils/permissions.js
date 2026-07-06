@@ -19,3 +19,12 @@ export function hasPermission(user, key) {
 export function hasAnyPermission(user, keys) {
   return (keys || []).some(k => hasPermission(user, k));
 }
+
+// Chaves de permissão da área de IA — substituíram o genérico agent.manage.
+// Ver domain/permission_catalog.py e a migração 0037_granular_ai_perms.
+export const AI_PERMS = [
+  'agent.config.manage',
+  'agent.prompts.manage',
+  'agent.tools.manage',
+  'agent.variables.manage',
+];

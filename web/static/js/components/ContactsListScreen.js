@@ -22,6 +22,7 @@ import {
 } from '../services/api.js';
 import { matchesAdvFilters } from '../services/conversationRows.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -221,7 +222,8 @@ const CONTACTS_URL_SCHEMA = [
 ];
 
 // ── Tela principal ───────────────────────────────────────────────────────
-export default function ContactsListScreen({ initialEntity = null }) {
+export default function ContactsListScreen({ initialEntity = null, currentUser = null }) {
+  const canImport = hasPermission(currentUser, 'contact.import');
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -474,21 +476,23 @@ export default function ContactsListScreen({ initialEntity = null }) {
     <div>
       <!-- Importar / Exportar -->
       <div class="flex items-center justify-end gap-2 mb-3 flex-wrap">
-        <input
-          ref=${fileInputRef}
-          type="file"
-          accept=".csv,text/csv"
-          class="hidden"
-          onChange=${handleImportFile}
-        />
-        <button
-          onClick=${() => { setImportError(null); setShowImport(true); }}
-          disabled=${importing}
-          class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13v6H5v-6H3v6c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z" transform="rotate(180 12 12)"/></svg>
-          ${importing ? 'Importando...' : 'Importar contatos'}
-        </button>
+        ${canImport ? html`
+          <input
+            ref=${fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            class="hidden"
+            onChange=${handleImportFile}
+          />
+          <button
+            onClick=${() => { setImportError(null); setShowImport(true); }}
+            disabled=${importing}
+            class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13v6H5v-6H3v6c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z" transform="rotate(180 12 12)"/></svg>
+            ${importing ? 'Importando...' : 'Importar contatos'}
+          </button>
+        ` : null}
         <button
           onClick=${handleExport}
           class="flex items-center gap-2 text-[14px] font-medium px-4 py-[8px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors"
@@ -674,7 +678,7 @@ export default function ContactsListScreen({ initialEntity = null }) {
         />
       ` : null}
 
-      ${showImport ? html`
+      ${showImport && canImport ? html`
         <div
           class="fixed inset-0 z-[120] bg-black/50 flex items-center justify-center p-4"
           onClick=${() => { if (!importing) setShowImport(false); }}

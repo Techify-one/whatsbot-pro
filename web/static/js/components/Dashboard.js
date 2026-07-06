@@ -4,7 +4,7 @@ import { ConfigPanel } from './ConfigPanel.js';
 
 const html = htm.bind(h);
 
-export function Dashboard({ config, saving, onSave, onNotify, onReopenSetup }) {
+export function Dashboard({ config, saving, onSave, onNotify, onReopenSetup, currentUser }) {
   return html`
     <div class="flex flex-col gap-4">
       <${ConfigPanel}
@@ -12,6 +12,7 @@ export function Dashboard({ config, saving, onSave, onNotify, onReopenSetup }) {
         saving=${saving}
         onSave=${onSave}
         onNotify=${onNotify}
+        currentUser=${currentUser}
       />
 
       ${onReopenSetup ? html`

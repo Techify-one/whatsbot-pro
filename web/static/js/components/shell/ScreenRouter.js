@@ -89,7 +89,7 @@ export function ScreenRouter({
   if (tab === 'ai') {
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Configurações de IA" onBack=${() => setTab('contacts')} />
-        <${AgentEngine} initialEntity=${entFor('ai')} />
+        <${AgentEngine} initialEntity=${entFor('ai')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'plugins') {
@@ -107,6 +107,7 @@ export function ScreenRouter({
           onSave=${handleSave}
           onNotify=${handleNotify}
           onReopenSetup=${openWizard}
+          currentUser=${currentUser}
         />
       </div>`;
   }
@@ -135,7 +136,7 @@ export function ScreenRouter({
   if (tab === 'contatos') {
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
-        <${ContactsListScreen} initialEntity=${entFor('contatos')} />
+        <${ContactsListScreen} initialEntity=${entFor('contatos')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'attendances') {
