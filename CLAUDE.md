@@ -256,7 +256,7 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 |--------|----------|-----------|
 | GET | `/` | Serve o frontend (web/index.html) |
 | GET | `/wizard` | Serve o frontend forçando o wizard de 1ª execução (onboarding) |
-| GET | `/api/config` | Retorna config (API key mascarada) + `account_url` |
+| GET | `/api/config` | Retorna config (API key mascarada) + `account_url` + `public_base_url`. **Efeito colateral**: captura e persiste `public_base_url` (config key global — a URL que o operador usa pra acessar o painel, honrando headers de proxy reverso) no 1º acesso, com self-heal se o salvo era localhost. Variável reutilizável por qualquer feature (ex.: o alerta de desconexão do plugin gowa monta o link de reconexão a partir dela) |
 | PUT | `/api/config` | Salva config + atualiza AgentHandler |
 | POST | `/api/config/test-key` | Testa API key no proxy Techify (compatível OpenRouter); auto-salva se válida |
 | POST | `/api/config/request-apikey` | Provisiona uma chave via Techify (manda msg ao número de provisionamento; usado pelo wizard) |

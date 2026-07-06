@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -30,6 +31,36 @@ def get_models_cache() -> dict[str, Any]:
     return _models_cache
 
 
+# ── Public base URL capture ───────────────────────────────────
+# The URL the operator uses to reach the panel is captured on the first panel
+# load and stored as the core config ``public_base_url`` — a global variable
+# reusable by any feature (e.g. the GOWA disconnect alert builds its reconnect
+# link from it). Honors reverse-proxy headers so a Coolify deploy records the
+# real public domain.
+
+_LOCAL_URL_RE = re.compile(r"//(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])", re.I)
+
+
+def _request_origin(request: Request) -> str:
+    proto = (request.headers.get("x-forwarded-proto")
+             or request.url.scheme or "http").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host")
+            or request.headers.get("host")
+            or request.url.netloc or "").split(",")[0].strip()
+    return f"{proto}://{host}" if host else ""
+
+
+def _capture_public_base_url(settings, request: Request) -> None:
+    """Persist ``public_base_url`` on first use; self-heal a saved localhost URL
+    once a real domain shows up (so a dev localhost visit never clobbers it)."""
+    origin = _request_origin(request)
+    if not origin:
+        return
+    saved = (settings.get("public_base_url", "") or "").strip()
+    if not saved or (_LOCAL_URL_RE.search(saved) and not _LOCAL_URL_RE.search(origin)):
+        settings["public_base_url"] = origin.rstrip("/")
+
+
 def register_routes(app, deps):
     settings = deps.settings
     agent_handler = deps.agent_handler
@@ -37,7 +68,9 @@ def register_routes(app, deps):
     state = deps.state
 
     @app.get("/api/config")
-    async def get_config():
+    async def get_config(request: Request):
+        # Capture the panel's public base URL on first use (global var for reuse).
+        _capture_public_base_url(settings, request)
         # R17: the exposed keys + their GET fallbacks come from the single config-key
         # metadata table (config.settings.CONFIG_KEYS). The two special keys —
         # ``openrouter_api_key`` (masked) and ``has_password`` (derived) — stay inline.
@@ -45,6 +78,7 @@ def register_routes(app, deps):
         for ck in exposed_config_keys():
             out[ck.key] = settings.get(ck.key, ck.effective_get_default)
         out["has_password"] = bool(settings.get("web_password_hash", ""))
+        out["public_base_url"] = settings.get("public_base_url", "")
         return _ok(out)
 
     @app.put("/api/config")

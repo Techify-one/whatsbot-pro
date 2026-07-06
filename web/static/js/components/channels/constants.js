@@ -156,6 +156,9 @@ export function buildCreatePayload(f) {
   if (provider === 'gowa') {
     config.allowed_jid_types = f.jidTypes;
     if ((f.gowaDeviceId || '').trim()) config.gowa_device_id = f.gowaDeviceId.trim();
+    // Per-channel on/off for the Telegram disconnect alert (bot/chat/timezone stay
+    // global in the plugin). Default ON when the field is omitted.
+    config.disconnect_alert_enabled = f.gowaAlertEnabled ?? true;
   } else if (provider === 'whatsapp_cloud') {
     const credentials = {};
     if ((f.accessToken || '').trim()) credentials.access_token = f.accessToken.trim();
@@ -181,7 +184,12 @@ export function buildEditPayload(f) {
   const payload = { display_name: (f.displayName || '').trim() };
   const cfg = parseChannelConfig(f.channelConfig);
   const newConfig = { ...cfg, ai: f.ai };
-  if (f.isGowa) newConfig.allowed_jid_types = f.jidTypes;
+  if (f.isGowa) {
+    newConfig.allowed_jid_types = f.jidTypes;
+    // Per-channel on/off for the GOWA disconnect alert (Telegram). The bot/chat/
+    // interval/timezone stay global in the plugin's config screen.
+    newConfig.disconnect_alert_enabled = !!f.gowaAlertEnabled;
+  }
   payload.config = newConfig;
   if (f.isCloud) {
     const credentials = {};

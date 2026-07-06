@@ -5,22 +5,35 @@ O alerta vai direto à Bot API do Telegram (``api.telegram.org``) usando um toke
 bot e um chat_id configurados NA tela deste plugin (``routes.py`` + ``gowa.js``),
 independentes de qualquer canal.
 
-Comportamento (decisões do usuário):
-- Avisa quando o número CAI (transição conectado→desconectado). Só na queda: a
-  recuperação não gera mensagem nova (apenas edita a mensagem existente, silencioso).
-- Enquanto continuar fora do ar, RE-AVISA a cada 15 min (configurável) EDITANDO a
-  MESMA mensagem no Telegram (``editMessageText``) — "substitui a notificação" em
-  vez de mandar uma nova a cada ciclo, evitando flood.
-- A mensagem inclui o nome da caixa de entrada (canal GOWA) e a URL direta para
-  reconectar (base configurada + a tela do QR ``/gowa/config``).
+Comportamento (decisões do usuário) — alerta AGREGADO por status de conexão:
+- Verificação GLOBAL a cada ciclo. Entre TODAS as caixas GOWA com o alerta ligado,
+  as que estão FORA DO AR (device não logado) são listadas numa ÚNICA mensagem no
+  Telegram — um bloco (caixa + número) por caixa caída. Cai uma a mais → a mensagem
+  ganha outro bloco. Uma volta → o bloco some.
+- A mensagem é RE-ENVIADA (apaga a anterior via ``deleteMessage`` + manda nova via
+  ``sendMessage``, voltando ao FIM do chat) quando (a) é a 1ª queda, (b) o CONJUNTO
+  de caixas caídas muda, ou (c) passou o intervalo configurado (minutos, global).
+- Quando TODAS voltam, a msg de queda é apagada e sai um "reconectado(s)".
+- O número exibido é o do device do canal (``own_phone``); quando desconectado, o
+  último número conhecido salvo (``last_phone``).
+- Status por canal vem da instância viva do provider (``channel_registry.get(id).status()``),
+  que consulta o ``/app/status`` do device — cada caixa GOWA é um device no MESMO
+  subprocesso, então NÃO se usa mais o ``state.connected`` global.
 
-O estado (message_id, desde quando caiu, último aviso, se já esteve conectado) fica
-na tabela ``plugin_gowa_disconnect_alerts`` para sobreviver a restart do processo.
+O LIGA/DESLIGA do alerta é POR CANAL: fica em ``channels.config.disconnect_alert_enabled``,
+editável na edição da caixa GOWA (tela Canais). O token/chat_id/intervalo/fuso seguem
+globais na tela do plugin. Instalações antigas que ligavam pelo flag global do plugin
+são migradas one-time para o config do canal no 1º ciclo.
+
+Estado em ``plugin_gowa_disconnect_alerts``: uma linha por canal guarda ever_connected
++ last_phone; a linha reservada ``__all__`` guarda a mensagem agregada (message_id,
+chat_id, último aviso, assinatura do conjunto caído) — tudo sobrevive a restart.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -59,17 +72,14 @@ def _cfg(key: str, default=None):
 
 
 def _resolve_panel_url() -> str:
-    """URL base do painel para o link de reconexão, sem o usuário precisar preencher.
+    """URL base do painel para o link de reconexão.
 
-    Ordem: override manual (se preenchido) → URL auto-detectada do navegador (salva
-    pela rota /alert-settings ao abrir a tela de config) → env pública → localhost.
+    Usa a variável GLOBAL do core ``public_base_url`` (capturada no 1º acesso ao
+    painel — server/routes/config.py). Fallbacks: env pública → localhost:web_port.
     """
-    manual = (_cfg("disconnect_alert_panel_url", "") or "").strip().rstrip("/")
-    if manual:
-        return manual
-    auto = (_cfg("disconnect_alert_panel_url_auto", "") or "").strip().rstrip("/")
-    if auto:
-        return auto
+    base = (config_repo.get("public_base_url", "") or "").strip().rstrip("/")
+    if base:
+        return base
     env = (os.environ.get("WHATSBOT_PUBLIC_URL")
            or os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if env:
@@ -93,21 +103,78 @@ def _alert_config() -> dict:
     }
 
 
-def _primary_gowa_channel() -> tuple[str, str] | None:
-    """(channel_id, display_name) do canal GOWA principal — ``default`` de preferência.
+def _parse_config(raw) -> dict:
+    """Config do canal (coluna ``channels.config``) como dict — aceita str JSON ou dict."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
 
-    A conexão GOWA é única (um subprocesso/um número), então basta o canal principal
-    para dar nome à caixa de entrada na mensagem. Retorna ``None`` se não houver canal.
+
+def _all_gowa_channels() -> list[dict]:
+    """Todos os canais GOWA ativos: [{id, name, config, row_logged_in, row_own_phone}].
+
+    Com múltiplas caixas GOWA (N devices no MESMO subprocesso), o alerta é agregado:
+    varre TODOS os canais e, entre os com alerta ligado, lista os que estão fora do ar
+    numa única mensagem. O ``config`` traz o liga/desliga por canal.
     """
     try:
         rows = channel_repo.list_all()
     except Exception:  # noqa: BLE001
-        return None
-    gowa = [r for r in rows if r.get("provider") == "gowa" and r.get("enabled", 1)]
-    if not gowa:
-        return None
-    chan = next((r for r in gowa if r.get("id") == "default"), gowa[0])
-    return chan["id"], (chan.get("display_name") or chan["id"])
+        return []
+    out: list[dict] = []
+    for r in rows:
+        if r.get("provider") != "gowa" or not r.get("enabled", 1):
+            continue
+        out.append({
+            "id": r["id"],
+            "name": r.get("display_name") or r["id"],
+            "config": _parse_config(r.get("config")),
+            "row_logged_in": bool(r.get("logged_in")),
+            "row_own_phone": r.get("own_phone") or "",
+        })
+    return out
+
+
+AGGREGATE_KEY = "__all__"  # channel_id reservado da linha de estado da MSG agregada
+
+
+def _channel_live_status(deps, channel_id: str, fallback_logged_in: bool,
+                         fallback_phone: str) -> tuple[bool, str]:
+    """(logged_in, own_phone) do device do canal, via instância viva no registry.
+
+    Cada canal GOWA tem seu ``GOWAClient`` device-bound; ``status()`` consulta o
+    ``/app/status`` daquele device. Sem instância viva (canal recém-criado antes do
+    restart), cai no status persistido na linha do canal.
+    """
+    registry = getattr(deps, "channel_registry", None)
+    inst = registry.get(channel_id) if registry is not None else None
+    if inst is None or not hasattr(inst, "status"):
+        return fallback_logged_in, fallback_phone
+    try:
+        st = inst.status() or {}
+        return bool(st.get("logged_in")), (st.get("own_phone") or "")
+    except Exception:  # noqa: BLE001 — status best-effort; usa o fallback da linha
+        return fallback_logged_in, fallback_phone
+
+
+def _migrate_enable_to_channel(channel_id: str, current_cfg: dict, value: bool) -> None:
+    """Grava ``disconnect_alert_enabled`` no config do canal, preservando as demais chaves.
+
+    Migração one-time: instalações que ligavam o alerta pelo flag GLOBAL do plugin
+    herdam esse valor no config do canal (o liga/desliga passou a ser por canal).
+    """
+    cfg = dict(current_cfg or {})
+    cfg["disconnect_alert_enabled"] = bool(value)
+    try:
+        channel_repo.update(channel_id, config=json.dumps(cfg))
+    except Exception:  # noqa: BLE001 — migração best-effort; fallback ao global cobre o ciclo
+        pass
 
 
 # ── Estado persistido (tabela plugin_gowa_disconnect_alerts) ─────────────────
@@ -116,7 +183,7 @@ def _load_state(channel_id: str) -> dict:
     with make_plugin_db() as conn:
         row = conn.execute(
             text("SELECT ever_connected, disconnected_since, last_alert_ts, "
-                 "telegram_chat_id, telegram_message_id, last_phone "
+                 "telegram_chat_id, telegram_message_id, last_phone, down_signature "
                  "FROM plugin_gowa_disconnect_alerts WHERE channel_id = :cid"),
             {"cid": channel_id},
         ).mappings().first()
@@ -126,7 +193,7 @@ def _load_state(channel_id: str) -> dict:
 def _save_state(channel_id: str, **fields) -> None:
     """UPSERT parcial: cria a linha se não existir, senão atualiza os campos dados."""
     cols = ["ever_connected", "disconnected_since", "last_alert_ts",
-            "telegram_chat_id", "telegram_message_id", "last_phone"]
+            "telegram_chat_id", "telegram_message_id", "last_phone", "down_signature"]
     values = {c: fields.get(c) for c in cols if c in fields}
     if not values:
         return
@@ -187,21 +254,19 @@ async def _tg_edit(token: str, chat_id: str, message_id: int, text_html: str) ->
     return False
 
 
+async def _tg_delete(token: str, chat_id: str, message_id: int) -> bool:
+    data = await _tg_call(token, "deleteMessage", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+    })
+    if data.get("ok"):
+        return True
+    # Mensagem já apagada / velha demais / inexistente — não é erro fatal para o
+    # fluxo: seguimos e enviamos a nova mesmo assim.
+    return False
+
+
 # ── Formatação das mensagens ─────────────────────────────────────────────────
-
-def _fmt_duration(seconds: float) -> str:
-    seconds = int(max(0, seconds))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}min"
-    hours, minutes = divmod(minutes, 60)
-    if hours < 24:
-        return f"{hours}h {minutes:02d}min"
-    days, hours = divmod(hours, 24)
-    return f"{days}d {hours}h"
-
 
 def _reconnect_url(panel_url: str) -> str:
     base = panel_url or "http://localhost:8080"
@@ -240,32 +305,29 @@ def _now_str() -> str:
     return datetime.now(_tz()).strftime("%H:%M de %d/%m/%Y")
 
 
-def _msg_down_first(name: str, phone: str, panel_url: str) -> str:
+def _msg_disconnected(down: list[dict], panel_url: str) -> str:
+    """Mensagem AGREGADA: um bloco (caixa + número) por canal fora do ar.
+
+    ``down`` = [{name, phone}, ...] das caixas GOWA desconectadas (alerta ligado).
+    O singular/plural do título é resolvido pela quantidade.
+    """
+    plural = "s" if len(down) > 1 else ""
+    blocks = "\n\n".join(
+        f"Caixa de entrada: <b>{ch['name']}</b>\n"
+        f"Número: {ch.get('phone') or '—'}"
+        for ch in down
+    )
     return (
-        "🔴 <b>WhatsApp desconectado</b>\n\n"
-        f"Caixa de entrada: <b>{name}</b>\n"
-        f"Número: {phone or '—'}\n"
-        f"Caiu às {_now_str()}\n\n"
+        f"🔴 <b>WhatsApp desconectado{plural}</b>\n\n"
+        f"{blocks}\n\n"
         f'🔗 <a href="{_reconnect_url(panel_url)}">Reconectar agora</a>'
     )
 
 
-def _msg_down_repeat(name: str, phone: str, panel_url: str, down_for: float) -> str:
+def _msg_recovered_all() -> str:
     return (
-        "🔴 <b>WhatsApp ainda desconectado</b>\n\n"
-        f"Caixa de entrada: <b>{name}</b>\n"
-        f"Número: {phone or '—'}\n"
-        f"Fora do ar há {_fmt_duration(down_for)}\n"
-        f"Última verificação: {_now_str()}\n\n"
-        f'🔗 <a href="{_reconnect_url(panel_url)}">Reconectar agora</a>'
-    )
-
-
-def _msg_recovered(name: str, down_for: float) -> str:
-    return (
-        "✅ <b>WhatsApp reconectado</b>\n\n"
-        f"Caixa de entrada: <b>{name}</b>\n"
-        f"Ficou fora do ar por {_fmt_duration(down_for)}.\n"
+        "✅ <b>WhatsApp reconectado(s)</b>\n\n"
+        "Todas as caixas monitoradas voltaram a ficar online.\n"
         f"Reconectado às {_now_str()}."
     )
 
@@ -274,74 +336,84 @@ def _msg_recovered(name: str, down_for: float) -> str:
 
 async def _tick(deps) -> None:
     cfg = await asyncio.to_thread(_alert_config)
-    if not cfg["enabled"] or not cfg["token"] or not cfg["chat_id"]:
-        return  # alertas desligados / não configurados
+    if not cfg["token"] or not cfg["chat_id"]:
+        return  # bot/destino não configurados (tela Plugins → WhatsApp (GOWA))
 
-    channel = await asyncio.to_thread(_primary_gowa_channel)
-    if not channel:
+    channels = await asyncio.to_thread(_all_gowa_channels)
+    if not channels:
         return
-    channel_id, display_name = channel
-
-    connected = bool(getattr(deps.state, "connected", False))
-    live_phone = getattr(deps.state, "bot_phone", "") or ""
-    st = await asyncio.to_thread(_load_state, channel_id)
     now = time.time()
 
-    # Número a exibir: o ao vivo (quando conectado) ou o último conhecido salvo — o
-    # state.bot_phone é esvaziado enquanto o número fica fora do ar, então sem isto a
-    # mensagem de repetição sairia com "Número: —".
-    phone = live_phone or (st.get("last_phone") or "")
+    # Passo 1 — por canal: resolve o liga/desliga (por canal, com migração do flag
+    # global legado), lê o status AO VIVO do device e persiste ever_connected/last_phone.
+    # Monta a lista de caixas FORA DO AR (alerta ligado + já conectou alguma vez +
+    # agora não logada). Uma caixa nunca pareada nunca entra (evita alarme de warm-up).
+    down: list[dict] = []
+    for ch in channels:
+        cid = ch["id"]
+        chan_cfg = ch["config"]
+        ch_enabled = chan_cfg.get("disconnect_alert_enabled")
+        if ch_enabled is None:
+            ch_enabled = cfg["enabled"]
+            if cfg["enabled"]:
+                await asyncio.to_thread(_migrate_enable_to_channel, cid, chan_cfg, True)
+        if not ch_enabled:
+            continue
 
-    if connected:
-        # Marca que já esteve conectado e persiste o número atual como "último conhecido".
-        if not st.get("ever_connected") or (live_phone and live_phone != st.get("last_phone")):
-            await asyncio.to_thread(_save_state, channel_id, ever_connected=True,
-                                    last_phone=live_phone or st.get("last_phone"))
-        # Se estava caído, edita a mensagem existente p/ "reconectado" (silencioso) e limpa.
-        if st.get("disconnected_since"):
-            down_for = now - float(st["disconnected_since"])
-            mid = st.get("telegram_message_id")
-            if mid:
-                await _tg_edit(cfg["token"], st.get("telegram_chat_id") or cfg["chat_id"],
-                               int(mid), _msg_recovered(display_name, down_for))
-            await asyncio.to_thread(
-                _save_state, channel_id,
-                disconnected_since=None, telegram_message_id=None, last_alert_ts=None)
+        st = await asyncio.to_thread(_load_state, cid)
+        logged_in, live_phone = await asyncio.to_thread(
+            _channel_live_status, deps, cid, ch["row_logged_in"], ch["row_own_phone"])
+        phone = live_phone or (st.get("last_phone") or "")
+
+        if logged_in:
+            if not st.get("ever_connected") or (live_phone and live_phone != st.get("last_phone")):
+                await asyncio.to_thread(_save_state, cid, ever_connected=True,
+                                        last_phone=live_phone or st.get("last_phone"))
+            continue
+
+        if not st.get("ever_connected"):
+            continue  # nunca pareado / warm-up de boot — não alarma
+        down.append({"id": cid, "name": ch["name"], "phone": phone})
+
+    # Passo 2 — mensagem AGREGADA (uma só, estado na linha reservada __all__).
+    agg = await asyncio.to_thread(_load_state, AGGREGATE_KEY)
+    signature = ",".join(sorted(c["id"] for c in down))
+
+    if not down:
+        # Nada fora do ar. Se havia alerta ativo, apaga a msg de queda e avisa recuperação.
+        old_mid = agg.get("telegram_message_id")
+        if old_mid:
+            old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
+            await _tg_delete(cfg["token"], old_chat, int(old_mid))
+            await _tg_send(cfg["token"], cfg["chat_id"], _msg_recovered_all())
+            await asyncio.to_thread(_save_state, AGGREGATE_KEY,
+                                    telegram_message_id=None, disconnected_since=None,
+                                    last_alert_ts=None, down_signature=None)
         return
 
-    # --- desconectado ---
-    if not st.get("ever_connected"):
-        return  # nunca esteve conectado (nunca pareado / boot) — não alarma
-
-    if not st.get("disconnected_since"):
-        # 1ª detecção da queda → envia a primeira mensagem e guarda o message_id.
-        mid = await _tg_send(cfg["token"], cfg["chat_id"],
-                             _msg_down_first(display_name, phone, cfg["panel_url"]))
-        await asyncio.to_thread(
-            _save_state, channel_id,
-            disconnected_since=now, last_alert_ts=now,
-            telegram_chat_id=cfg["chat_id"],
-            telegram_message_id=mid,
-            last_phone=phone or st.get("last_phone"))
-        logger.info("gowa alert: canal '%s' desconectado — alerta enviado (msg_id=%s)",
-                    channel_id, mid)
+    # Há caixas fora do ar. Reenvia quando: (a) 1ª queda, (b) o CONJUNTO de caixas
+    # caídas mudou, ou (c) passou o intervalo configurado — sempre APAGANDO a anterior
+    # e mandando uma nova (a notificação volta ao fim do chat, nunca fica soterrada).
+    last = float(agg.get("last_alert_ts") or 0)
+    changed = (agg.get("down_signature") or "") != signature
+    due = (now - last) >= cfg["interval_min"] * 60
+    has_msg = bool(agg.get("telegram_message_id"))
+    if has_msg and not changed and not due:
         return
 
-    # Já estava caído: RE-avisa a cada interval_min editando a MESMA mensagem.
-    last = float(st.get("last_alert_ts") or 0)
-    if now - last < cfg["interval_min"] * 60:
-        return
-    down_for = now - float(st["disconnected_since"])
-    body = _msg_down_repeat(display_name, phone, cfg["panel_url"], down_for)
-    mid = st.get("telegram_message_id")
-    chat = st.get("telegram_chat_id") or cfg["chat_id"]
-    edited = await _tg_edit(cfg["token"], chat, int(mid), body) if mid else False
-    if not edited:
-        # Mensagem sumiu / muito antiga p/ editar → manda uma nova e re-ancora o id.
-        mid = await _tg_send(cfg["token"], cfg["chat_id"], body)
-        await asyncio.to_thread(_save_state, channel_id,
-                                telegram_chat_id=cfg["chat_id"], telegram_message_id=mid)
-    await asyncio.to_thread(_save_state, channel_id, last_alert_ts=now)
+    body = _msg_disconnected(down, cfg["panel_url"])
+    old_mid = agg.get("telegram_message_id")
+    old_chat = agg.get("telegram_chat_id") or cfg["chat_id"]
+    if old_mid:
+        await _tg_delete(cfg["token"], old_chat, int(old_mid))
+    mid = await _tg_send(cfg["token"], cfg["chat_id"], body)
+    await asyncio.to_thread(
+        _save_state, AGGREGATE_KEY,
+        disconnected_since=(agg.get("disconnected_since") or now),
+        last_alert_ts=now, telegram_chat_id=cfg["chat_id"],
+        telegram_message_id=mid, down_signature=signature)
+    logger.info("gowa alert: %d caixa(s) fora do ar — alerta agregado (msg_id=%s, sig=%s)",
+                len(down), mid, signature)
 
 
 async def disconnect_alert_loop(deps) -> None:
