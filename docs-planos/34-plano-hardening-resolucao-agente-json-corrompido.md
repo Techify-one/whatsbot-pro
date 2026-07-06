@@ -211,11 +211,11 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 **Pronto quando:** `alembic upgrade head` + `downgrade` round-trip num banco de teste; `pg_typeof(model_config)=jsonb`; suíte inteira verde; um `save`/`get` round-trip devolve dict idêntico; impossível gravar string crua (o SQLAlchemy serializa o dict).
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-06 · branch `feat/plano-34-f5`)
+- **O que foi feito:** As 4 colunas JSON de `ai_agents` (`model_config`, `tool_names`, `routing_targets`, `hooks_config`) viraram **JSONB nativo** (`_json_type()` em [db/tables.py](../db/tables.py) — `JSON().with_variant(JSONB())`). Migration **0039** (`20260706_0039_ai_agents_jsonb.py`) faz `ALTER COLUMN … TYPE jsonb` com `USING` robusto + downgrade reversível. O `agent_repo` parou de `json.dumps` à mão: `_dump_json_field` virou `_native_json_field` (só `coerce_json` → devolve **dict/list nativo**; o SQLAlchemy serializa 1×). Leitura mantém `coerce_json` como no-op defensivo. Novo `tests/test_ai_agents_jsonb.py` (26 checks); `tests/test_agent_json_hardening.py` teve as 3 assertivas de formato bruto atualizadas de "TEXT single-encoded" para "objeto/array JSONB nativo".
+- **Como foi feito / decisões:** (1) `USING` **robusto** (não só `::jsonb` direto): `NULL`/vazio → `'{}'::jsonb` (cols NOT NULL) ou `NULL` (nullable); valor eventualmente **duplo-codificado** → desembrulha 1 camada via `#>> '{}'` antes do cast; caso normal → `::jsonb`. Testado com dados sujos reais (downgrade→0038, semeia TEXT limpo/vazio/NULL/duplo, upgrade→0039). (2) Postgres-only: a conversão só roda no dialeto `postgresql` (guard), no-op em sqlite. (3) `tool_names` incluído (grep confirmou que nunca guarda o sentinel raw `"all"` — sempre array/NULL). (4) `ai_agents_history.snapshot` fica **TEXT** (blob versionado, fora de escopo — D4); com `values` agora nativo, `json.dumps(values)` do snapshot passa a embutir objetos aninhados (mais limpo) e o rollback de snapshots **antigos** (string) segue funcionando via `coerce_json`. (5) Dedup do `save` inalterado (já compara objetos nativos). **Track B fez só F5** (não F6): F6 tocaria `channels.config`/repos de canal, território da lane de canais (plano 33) rodando em paralelo — evitado de propósito.
+- **Problemas / pendências:** Uma assertiva do `test_agent_json_hardening.py` (Track A, já mergeado) quebrou porque inspecionava a **representação TEXT crua** da coluna (`raw.lstrip().startswith("{")`) — inválido sob JSONB (a leitura devolve dict). Atualizada para `isinstance(dict/list)` preservando a intenção (nenhuma dupla-codificação persiste); a resiliência (build_for_contact degrada/recupera) permaneceu idêntica e verde. Nenhuma outra regressão.
+- **Verificação:** Banco de teste dedicado `whatsbot_test_34f5` (UTF8/template0). `tests/test_ai_agents_jsonb.py` → 26 passed (pg_typeof=jsonb, jsonb_typeof=object/array, round-trip nativo, string crua normalizada, USING robusto com dados sujos, up/down round-trip). **Sem drift:** `tests/test_schema_drift.py` + `tests/test_alembic_hygiene.py` verdes (metadata JSONB ≡ DB jsonb; 0039 sem prefixo duplicado). Regressões verdes: `test_agent_json_hardening` (25), `test_agent_json_hardening_e2e`, `test_coerce_json` (14), `test_agent_routing` (29), `test_model_factory` (24), `test_dynamic_registry` (6), `test_hooks` (32), `test_routing_engine` (26), `test_postgres_roundtrip`, `test_router_prompt_description`, `test_routing_motivo`, `test_spoke_router_enforcement`, `test_builtin_tool_delete`, `test_improve_conversation_scope`, `tests/endpoints`, e caracterização `agent_turn`/`execution`.
 
 ---
 
@@ -257,7 +257,7 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 
 - **P1** — Extrair um helper compartilhado de coerção/validação de campos JSON do agente para `save_agent` **e** `save_agent_prompt` (F3), ou duplicar a guarda? · ✅ **DECIDIDO (2026-07-06):** extrair `_coerce_agent_json_fields` — as duas rotas divergirem foi justamente o que abriu o buraco. (a) helper compartilhado **[recomendado]**; (b) duplicar. Recomendação: (a).
 - **P2** — `coerce_json` que sobra `str` deve retornar `default` **sempre** ou preservar a string em call sites que a esperem? · ✅ **DECIDIDO (2026-07-06):** retornar `default` + `warning`; nenhum consumidor atual espera string final (confirmar no grep de F1). Reabrir só se o grep achar exceção.
-- **P3** — Track B (F5/F6) entra **neste** ciclo ou vira plano separado? · ⏸️ **ADIADO:** decidir após Track A mergeado e verde em produção. Track A resolve o apagão sozinho (D2); F5 é melhoria estrutural sem urgência. Recomendação: mergear A, observar, então avaliar F5.
+- **P3** — Track B (F5/F6) entra **neste** ciclo ou vira plano separado? · ✅ **DECIDIDO (2026-07-06):** **F5 executado** (branch `feat/plano-34-f5`) depois que o plano 32 (lane de canais) mergeou e liberou `db/tables.py`/Alembic. **F6 NÃO** — tocaria `channels.config`/repos de canal, território da lane de canais (plano 33) rodando em paralelo; fica adiável/opcional (D4). Track A já resolvia o apagão sozinho; F5 fechou a *classe* do bug na origem (colunas `ai_agents` viram JSONB nativo).
 - **P4** — Vale um endpoint/admin "detectar linhas JSON duplo-codificadas" (diagnóstico read-only) para varredura periódica? · ⏸️ **ADIADO:** fora do escopo; o repro read-only do QA (§2.5) já serve para checagem manual. Reavaliar se a corrupção reaparecer.
 
 ---
@@ -271,7 +271,7 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 - [x] Manual (Sandbox) coberto por **e2e automatizado**: `test_agent_json_hardening_e2e.py` dirige um turno real com a linha suja → **IA responde** (degradada), sem card `role='error'`.
 - [x] `save_agent_prompt` sobre linha suja → releitura volta **single-encoded** (sem tripla codificação) — guarda em `agent_repo._dump_json_field` + helper de rota (F3).
 - [x] Caminho feliz intacto: linha limpa resolve modelo/prompt corretos; `test_model_factory.py` / `test_agent_routing.py` verdes sem edição.
-- [ ] (F5, se executada) migration `upgrade`/`downgrade` round-trip; `pg_typeof=jsonb`; … → **Track B, NÃO executado nesta lane** (colide com a lane de canais em `db/tables.py`/Alembic).
+- [x] **(F5, executada — branch `feat/plano-34-f5`)** migration 0039 `upgrade`/`downgrade` round-trip verde; `pg_typeof=jsonb` nas 4 colunas; `USING` robusto testado com dados sujos; `test_ai_agents_jsonb.py` (26) + `test_schema_drift`/`test_alembic_hygiene` verdes. **F6 NÃO** (adiável — território da lane de canais).
 - [x] Sem segredo em URL/log; `channel_credentials.value` e `*_history.snapshot` **não** migrados (Track B fora de escopo aqui).
 - [x] Um refactor por commit; cada fase com seu bloco "Status de execução" preenchido.
 
