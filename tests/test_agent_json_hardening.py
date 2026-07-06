@@ -18,6 +18,10 @@ Histórico de fases:
   estourar. Este arquivo passou a asseverar o comportamento pós-conserto.
 - **F2** cobre o piso de emergência + ``hooks_config``/``routing_targets``.
 - **F4** cobre o caminho end-to-end e o caminho feliz.
+- **F5** (Track B) migrou as 4 colunas JSON de ``ai_agents`` para **JSONB nativo**,
+  então as checagens de formato bruto abaixo asseveram objeto/array nativo (não mais
+  string single-encoded em TEXT). A resiliência (build_for_contact degrada/recupera)
+  segue idêntica — o ``coerce_json`` de leitura continua desembrulhando legado.
 
     venv/bin/python tests/test_agent_json_hardening.py
 """
@@ -230,18 +234,18 @@ _reset_default_clean()
 # ── F3: guarda defensiva no agent_repo — caller passa STRING crua ─────────
 # Simula um caller (ex.: plugin de terceiro) que passa uma string JSON já
 # codificada em vez de dict. Antes: json.dumps(string) → dupla codificação.
-print("\nF3 — agent_repo._dump_json_field coage string crua (sem duplicar):")
+print("\nF3 — agent_repo._native_json_field coage string crua (objeto JSONB, sem duplicar):")
 agent_repo.save("f3repo", display_name="F3", prompt="x",
                 model_config='{"model": "z/z"}',  # STRING crua (dirty caller)
                 tool_names='["save_contact_info"]', enabled=True)
 raw_mc = _read_raw("f3repo", "model_config")
-check("model_config gravado é single-encoded (começa com '{')",
-      raw_mc is not None and raw_mc.lstrip().startswith("{"))
+check("model_config gravado é objeto JSONB nativo (F5, não string dupla)",
+      isinstance(raw_mc, dict) and raw_mc == {"model": "z/z"})
 check("model_config relido é dict com o modelo certo",
       agent_repo.get("f3repo").get("model_config") == {"model": "z/z"})
 raw_tn = _read_raw("f3repo", "tool_names")
-check("tool_names gravado é single-encoded (começa com '[')",
-      raw_tn is not None and raw_tn.lstrip().startswith("["))
+check("tool_names gravado é array JSONB nativo (F5)",
+      isinstance(raw_tn, list) and raw_tn == ["save_contact_info"])
 check("tool_names relido é lista", agent_repo.get("f3repo").get("tool_names") == ["save_contact_info"])
 agent_repo.delete("f3repo")
 
@@ -267,8 +271,8 @@ agent_repo.save(
     routing_targets=clean["routing_targets"], hooks_config=clean["hooks_config"],
 )
 raw_after = _read_raw(agent_repo.DEFAULT_AGENT_KEY, "model_config")
-check("após patch: model_config single-encoded (não começa com '\"')",
-      raw_after is not None and raw_after.lstrip().startswith("{"))
+check("após patch: model_config é objeto JSONB nativo (F5, sem tripla codificação)",
+      isinstance(raw_after, dict) and raw_after == {"model": "w/w"})
 check("após patch: model_config relido volta ao objeto",
       agent_repo.get(agent_repo.DEFAULT_AGENT_KEY).get("model_config") == {"model": "w/w"})
 check("após patch: prompt atualizado",
