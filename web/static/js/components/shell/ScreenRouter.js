@@ -25,11 +25,21 @@ import UsersManager from '../UsersManager.js';
 import AuditLog from '../AuditLog.js';
 import AgentEngine from '../ai/AgentEngine.js';
 import { PageHeader } from './GearMenu.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
+function PermissionDenied({ label = 'esta tela' }) {
+  return html`
+    <div class="max-w-5xl mx-auto p-4">
+      <div class="rounded-lg border border-wa-border bg-wa-bg p-4 text-[14px] text-wa-secondary">
+        Você não tem permissão para acessar ${label}.
+      </div>
+    </div>`;
+}
+
 export function ScreenRouter({
-  tab, setTab, activeRouteOverride, activePluginScreen, currentUser,
+  tab, setTab, activeRouteOverride, extensionsLoaded, activePluginScreen, currentUser,
   // Dashboard / config
   config, saving, handleSave, handleNotify, openWizard,
   // entity deep-link resolver: entFor(tab) → entity|null
@@ -89,7 +99,7 @@ export function ScreenRouter({
   if (tab === 'ai') {
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Configurações de IA" onBack=${() => setTab('contacts')} />
-        <${AgentEngine} initialEntity=${entFor('ai')} />
+        <${AgentEngine} initialEntity=${entFor('ai')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'plugins') {
@@ -107,10 +117,14 @@ export function ScreenRouter({
           onSave=${handleSave}
           onNotify=${handleNotify}
           onReopenSetup=${openWizard}
+          currentUser=${currentUser}
         />
       </div>`;
   }
   if (tab === 'contacts') {
+    if (!hasPermission(currentUser, 'conversation.read')) {
+      return html`<${PermissionDenied} label="as conversas" />`;
+    }
     return html`<${Contacts} ...${contactsProps} />`;
   }
   if (tab === 'costs') {
@@ -133,16 +147,24 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'contatos') {
+    if (!hasPermission(currentUser, 'contact.read')) {
+      return html`<${PermissionDenied} label="a tela de contatos" />`;
+    }
     return html`<div class="max-w-5xl mx-auto p-4">
         <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
-        <${ContactsListScreen} initialEntity=${entFor('contatos')} />
+        <${ContactsListScreen} initialEntity=${entFor('contatos')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'attendances') {
     // A aba "Atendimentos" (kanban/lista) é EXCLUSIVA do plugin protocolos, que a
     // provê via overrideRoute('attendances') — tratado no topo (activeRouteOverride).
-    // Se chegamos aqui, o plugin está desligado: não há tela nativa. Volta ao hub de
-    // conversas (Contatos) em vez de cair no fallback Sandbox.
+    // Enquanto as extensões de plugin ainda estão carregando (janela assíncrona do
+    // boot: fetch do manifest + import() do extends.js), NÃO redirecione: o override
+    // pode estar prestes a registrar. Sem esse gate, um F5 em /protocolos cairia no
+    // hub de Contatos antes do plugin subir (e perderia o ?detail).
+    if (!extensionsLoaded) return null;
+    // Extensões já carregadas e ainda sem override → o plugin está de fato desligado:
+    // não há tela nativa. Volta ao hub de conversas (Contatos) em vez do fallback Sandbox.
     queueMicrotask(() => setTab('contacts'));
     return null;
   }

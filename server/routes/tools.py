@@ -21,7 +21,7 @@ def register_routes(app, deps):
     @app.get("/api/tools")
     async def list_tools(request: Request):
         """Return every registered tool with override state merged."""
-        denied = permission_denied(request, "agent.manage")
+        denied = permission_denied(request, "agent.tools.manage")
         if denied:
             return denied
         items = await asyncio.to_thread(agent_handler.list_tools)
@@ -30,7 +30,7 @@ def register_routes(app, deps):
     @app.put("/api/tools/{name}")
     async def update_tool(name: str, request: Request):
         """Apply a partial override. ``description=null`` clears the override."""
-        denied = permission_denied(request, "agent.manage")
+        denied = permission_denied(request, "agent.tools.manage")
         if denied:
             return denied
         if name not in agent_handler.known_tool_names():

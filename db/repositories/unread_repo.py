@@ -28,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from db.engine import get_engine
-from db.tables import contacts, unread_msg_ids
+from db.tables import contacts, conversations, unread_msg_ids
 
 
 def increment_unread(contact_id: int, msg_id: str | None = None) -> None:
@@ -70,7 +70,7 @@ def mark_as_read(contact_id: int) -> list[str]:
     return msg_ids
 
 
-def unread_conversation_count() -> int:
+def unread_conversation_count(inbox_ids: list[int] | None = None) -> int:
     """Number of non-archived conversations that have unread messages — used for the
     browser-tab badge (e.g. "(3) WhatsBot"). Counts a conversation once regardless of
     how many messages are unread, mirroring the sidebar badge visibility.
@@ -78,13 +78,18 @@ def unread_conversation_count() -> int:
     Contact-centric (denormalized counters) — the single source of truth. The
     conversation-centric join variant was removed (dead, and incompatible with the
     phantom-msg_id increment in the legacy suite)."""
+    if inbox_ids == []:
+        return 0
+    stmt = select(func.count(func.distinct(contacts.c.id))).select_from(contacts)
+    if inbox_ids is not None:
+        stmt = stmt.join(conversations, conversations.c.contact_id == contacts.c.id)
+        stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids))
+    stmt = stmt.where(
+        (contacts.c.is_archived == 0)
+        & ((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0))
+    )
     with get_engine().connect() as conn:
-        return conn.execute(
-            select(func.count()).select_from(contacts).where(
-                (contacts.c.is_archived == 0)
-                & ((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0))
-            )
-        ).scalar() or 0
+        return conn.execute(stmt).scalar() or 0
 
 
 def set_mention(contact_id: int) -> None:

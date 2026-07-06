@@ -326,10 +326,11 @@ def register_routes(app, deps):
 
         Declared before /api/contacts/{phone} so the static path wins over the
         path parameter."""
-        denied = permission_denied(request, "contact.read")
+        denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
-        count = await asyncio.to_thread(contact_repo.unread_conversation_count)
+        count = await asyncio.to_thread(
+            contact_repo.unread_conversation_count, visible_inbox_ids(request))
         return _ok({"count": count})
 
     @app.get("/api/contacts/export")
@@ -397,7 +398,7 @@ def register_routes(app, deps):
         and an invalid/unrecognized value is silently discarded. Columns that
         don't match any defined attribute are ignored (for now) — the contact is
         still saved regardless."""
-        denied = permission_denied(request, "contact.write")
+        denied = permission_denied(request, "contact.import")
         if denied:
             return denied
 

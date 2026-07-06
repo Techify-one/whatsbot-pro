@@ -100,10 +100,10 @@ def _assert_denied_envelope(resp) -> None:
 # FIRST action in the body is the permission check (verified by recon), so the
 # 403 happens before any observable work — safe to also enforce via a dependency.
 _CASES = [
-    # ai_engine.py — key "agent.manage"
-    ("ai_engine", "agent.manage", "put",  "/api/ai/agents/some_agent",
+    # ai_engine.py — chaves granulares de IA (substituíram o antigo agent.config.manage)
+    ("ai_engine", "agent.config.manage", "put",  "/api/ai/agents/some_agent",
      {"display_name": "x", "prompt_key": "p"}),
-    ("ai_engine", "agent.manage", "post", "/api/ai/restart", {}),
+    ("ai_engine", "agent.tools.manage", "post", "/api/ai/restart", {}),
     # admin.py — key "database.manage" (moved from settings.manage in plano 24)
     ("admin", "database.manage", "get",  "/api/admin/database", None),
     ("admin", "database.manage", "post", "/api/admin/repair-sequences", {}),
@@ -193,7 +193,7 @@ def test_authz_seam_can_downgrade_allow_to_deny():
     from plugins import events as bus
     from server import authz
 
-    uid = _make_custom_user("rbac_seam@test.com", ["agent.manage"])
+    uid = _make_custom_user("rbac_seam@test.com", ["agent.config.manage"])
 
     # A fake Request whose state.user is our granted user (acheck reads
     # request.state.user via current_user()).
@@ -207,7 +207,7 @@ def test_authz_seam_can_downgrade_allow_to_deny():
     bus.set_runtime(loop, prev_handler)
     try:
         # (1) baseline: granted + no seam filter ⇒ allowed.
-        baseline = loop.run_until_complete(authz.acheck(req, "agent.manage"))
+        baseline = loop.run_until_complete(authz.acheck(req, "agent.config.manage"))
         assert baseline is True, "granted permission must be allowed with no seam filter"
 
         # (2) register a downgrade filter and re-check ⇒ denied.
@@ -216,7 +216,7 @@ def test_authz_seam_can_downgrade_allow_to_deny():
             return value
 
         bus.register_filter("_charz_authz_seam", "filter.authz.decision", _deny, priority=1)
-        downgraded = loop.run_until_complete(authz.acheck(req, "agent.manage"))
+        downgraded = loop.run_until_complete(authz.acheck(req, "agent.config.manage"))
         assert downgraded is False, "filter.authz.decision must be able to downgrade allow→deny"
     finally:
         # Remove ONLY our seam filter, restore the prior runtime, tear the loop down.

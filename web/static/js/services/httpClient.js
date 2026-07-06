@@ -11,6 +11,8 @@
 // `api.js` keeps every public function but now delegates here, so existing
 // `import { sendImage } from '.../api.js'` etc. keep resolving unchanged.
 
+import { notifyPermissionDenied } from './notify.js';
+
 const BASE = '';
 
 /**
@@ -46,6 +48,28 @@ export function handleUnauthorized() {
 const UNAUTHORIZED_RESULT = { ok: false, error: 'Não autenticado.' };
 
 /**
+ * Read a non-2xx response and normalise it to a single `{ ok:false, error, status }`
+ * shape, regardless of the two 403 body shapes the backend produces (core `_err`
+ * → `{ok:false,error}` vs plugin `HTTPException` → `{detail}`). On HTTP 403 it also
+ * fires the global "permission denied" toast. This is the single place that turns a
+ * silent 403 (which `res.json()` used to return verbatim, tricking `res.ok===false`
+ * guards into a false success) into a visible, consistently-shaped error.
+ *
+ * Exported so the plugin transport (`api.http` in plugins/api.js) reuses the exact
+ * same normalisation + 403-toast behaviour as the core path.
+ *
+ * @param {Response} res - a fetch Response whose `res.ok` is false and status !== 401.
+ * @returns {Promise<{ok:false, error:string, status:number}>}
+ */
+export async function handleErrorResponse(res) {
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* corpo vazio / não-JSON */ }
+  const error = (body && (body.error || body.detail)) || `Erro ${res.status}`;
+  if (res.status === 403) notifyPermissionDenied(error);
+  return { ok: false, error, status: res.status };
+}
+
+/**
  * JSON request. Serialises `body` as JSON, attaches auth, and on HTTP 401
  * clears the session and resolves to `{ ok: false, error }` (single retry-free
  * 401 path — callers don't see a thrown error for auth loss).
@@ -67,6 +91,7 @@ export async function request(method, path, body) {
     handleUnauthorized();
     return { ...UNAUTHORIZED_RESULT };
   }
+  if (!res.ok) return handleErrorResponse(res);
   return res.json();
 }
 
@@ -100,5 +125,6 @@ export async function uploadRequest(path, fields) {
     handleUnauthorized();
     return { ...UNAUTHORIZED_RESULT };
   }
+  if (!res.ok) return handleErrorResponse(res);
   return res.json();
 }
