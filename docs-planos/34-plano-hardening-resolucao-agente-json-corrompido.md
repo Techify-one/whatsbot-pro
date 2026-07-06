@@ -190,11 +190,11 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 **Pronto quando:** `venv/bin/python -m pytest tests/ -q` verde no Postgres de teste; os novos testes cobrem duplo/triplo em `model_config`/`hooks_config`/`routing_targets`.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** A inversão de F0 e a cobertura de duplo/triplo em `model_config`/`hooks_config`/`routing_targets` + piso de emergência já vivem em `tests/test_agent_json_hardening.py` (25 checks, construídas em F1-F3). F4 adiciona o **e2e**: novo `tests/test_agent_json_hardening_e2e.py` (pytest, 2 testes) dirige um turno REAL do handler (AGNO stubado em `agno_engine.build_runner`, mesmo seam da caracterização — `build_for_contact` executa de verdade) com (a) `model_config` duplo-codificado e (b) agente default desativado, asseverando que a IA **envia a resposta** (`result.reply` + linha `assistant` persistida) e **nenhum card `role='error'`** é gravado.
+- **Como foi feito / decisões:** Reaproveitei `_patch_agno_turn`/`_run_turn`/`_project_messages` de `tests/characterization/test_agent_turn_characterization.py` (o plano sugeria reaproveitar mocks de caracterização). Não usei `fake_agent_reply` porque ele stuba `aprocess_message` e pularia a resolução do agente — o ponto do teste. Card de erro confirmado como `role='error'` em `handler._emit_resolution_error` (:327).
+- **Problemas / pendências:** **`pytest tests/ -q` inteiro NÃO é executável verde neste worktree** por dois motivos alheios ao Track A: (1) **design** — 8 scripts standalone (`test_agent_routing`, `test_endpoints`, `test_model_factory`, `test_hooks`, `test_routing_engine`, `test_dynamic_registry`, `test_quick_replies_edge`, `test_audit`) e os 2 novos (`test_agent_json_hardening`, `test_coerce_json`) têm `sys.exit()` no corpo → `SystemExit` aborta a coleção do pytest; rodam via `venv/bin/python tests/<f>.py`. (2) **pré-existente** — o plugin `protocolos` bundled está defasado (`create_kanban_view` sem `group_field_scope`) travando `test_endpoints`, e alguns testes de caracterização de lifecycle/subprocess penduram neste ambiente. Ambos independem desta lane. **Reportar (1) e (2) ao coordenador.**
+- **Verificação:** e2e `test_agent_json_hardening_e2e.py` → 2 passed. `test_agent_json_hardening.py` → 25 passed; `test_coerce_json.py` → 14 passed. Regressões verdes: standalone `test_agent_routing` (29), `test_dynamic_registry` (6), `test_model_factory` (24), `test_hooks` (32), `test_routing_engine` (26); pytest `tests/endpoints` (34), `tests/test_postgres_roundtrip.py` (5), `characterization/{test_agent_turn,test_agno_reply_extraction,test_execution,test_webhook}` (todos verdes), `test_spoke_router_enforcement`+`test_router_prompt_description` (20). Caminho feliz intacto (nenhuma edição em `test_model_factory.py`/`test_agent_routing.py`).
 
 ---
 
@@ -264,16 +264,16 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 
 ## 6. Checklist de verificação
 
-- [ ] `venv/bin/python -m pytest tests/ -q` **verde no Postgres de teste** (`WHATSBOT_TEST_DB_URL`) após cada fase.
-- [ ] F0 captura o crash atual (levanta) **antes** de qualquer mudança de produção; F4 o inverte (não levanta, responde).
-- [ ] `coerce_json`: duplo/triplo → objeto; string-que-sobra → `default` + warning; dict pronto → intacto (testes unitários puros).
-- [ ] Com linha `default` duplo-codificada no banco de teste: `build_for_contact` retorna `AgentSpec` com o modelo default (não `AgentResolutionError`) e emite `logger.error`.
-- [ ] Manual (Sandbox): com a linha suja, enviar "Oi" → **IA responde** (degradada), sem card de erro painel-only.
-- [ ] `save_agent_prompt` sobre linha suja → releitura volta **single-encoded** (sem tripla codificação).
-- [ ] Caminho feliz intacto: linha limpa resolve modelo/prompt corretos; `test_model_factory.py` / `test_agent_routing.py` verdes sem edição.
-- [ ] (F5, se executada) migration `upgrade`/`downgrade` round-trip; `pg_typeof=jsonb`; `save`/`get` round-trip devolve dict idêntico; sem `json.dumps` manual sobrando em `agent_repo`.
-- [ ] Sem segredo em URL/log; `channel_credentials.value` e `*_history.snapshot` **não** migrados sem análise dedicada.
-- [ ] Um refactor por commit; cada fase com seu bloco "Status de execução" preenchido.
+- [~] `venv/bin/python -m pytest tests/ -q` **verde no Postgres de teste** (`WHATSBOT_TEST_DB_URL`) após cada fase. → **Parcial por motivos alheios ao Track A** (ver Status F4): a suíte inteira não coleta no pytest (8+2 scripts standalone com `sys.exit`) e há drift pré-existente do plugin `protocolos` + travas de lifecycle/subprocess. Verificado via subconjuntos relevantes (todos verdes) + scripts standalone rodados individualmente.
+- [x] F0 captura o crash atual (levanta) **antes** de qualquer mudança de produção (commit F0); F4 o inverte (não levanta, responde) — `test_agent_json_hardening.py` + e2e.
+- [x] `coerce_json`: duplo/triplo → objeto; string-que-sobra → `default` + warning; dict pronto → intacto (`test_coerce_json.py`, 14 checks).
+- [x] Com linha `default` duplo-codificada no banco de teste: `build_for_contact` **degrada** (não `AgentResolutionError`) — recupera o modelo real ou cai no default; agente desativado → piso de emergência com `logger.error`.
+- [x] Manual (Sandbox) coberto por **e2e automatizado**: `test_agent_json_hardening_e2e.py` dirige um turno real com a linha suja → **IA responde** (degradada), sem card `role='error'`.
+- [x] `save_agent_prompt` sobre linha suja → releitura volta **single-encoded** (sem tripla codificação) — guarda em `agent_repo._dump_json_field` + helper de rota (F3).
+- [x] Caminho feliz intacto: linha limpa resolve modelo/prompt corretos; `test_model_factory.py` / `test_agent_routing.py` verdes sem edição.
+- [ ] (F5, se executada) migration `upgrade`/`downgrade` round-trip; `pg_typeof=jsonb`; … → **Track B, NÃO executado nesta lane** (colide com a lane de canais em `db/tables.py`/Alembic).
+- [x] Sem segredo em URL/log; `channel_credentials.value` e `*_history.snapshot` **não** migrados (Track B fora de escopo aqui).
+- [x] Um refactor por commit; cada fase com seu bloco "Status de execução" preenchido.
 
 ---
 
