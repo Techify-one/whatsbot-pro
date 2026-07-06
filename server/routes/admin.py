@@ -22,9 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 def register_routes(app, deps):
+    settings = deps.settings
     # B1: render require_permission's PermissionDeniedError to the legacy
     # _err(403) envelope (idempotent across route modules).
     install_exception_handlers(app)
+
+    @app.get("/api/admin/installation",
+             dependencies=[Depends(require_permission("database.manage"))])
+    async def installation_info():
+        """Per-installation identity (seeded on first boot; see
+        ``config.settings._seed_installation_metadata``)."""
+        return _ok({
+            "installation_id": settings.get("installation_id", ""),
+            "installed_at": settings.get("installed_at", None),
+            "app_version": settings.get("app_version", ""),
+        })
 
     @app.get("/api/admin/database",
              dependencies=[Depends(require_permission("database.manage"))])
