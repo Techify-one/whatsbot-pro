@@ -224,6 +224,46 @@ export function useConversationSelection({
     });
   }, [selected, selectedConvId]);
 
+  // Plano 33 F2 — re-fetch the OPEN thread after a WS RECONNECT. The bus has no
+  // replay, so a `new_message` that arrived during a connection gap (sleep / NAT
+  // blip / half-open socket) is lost from the open thread — only the sidebar is
+  // separately refetched. This ref-based, BACKGROUND reload recovers it. Reuses
+  // the SAME per-conversation/per-contact loader and the R12 dedup, so it is
+  // idempotent with the optimistic append (nothing is duplicated) and a failed
+  // fetch leaves the current thread intact. Unlike the selection-time effect it
+  // deliberately does NOT flip the loading spinner, reset the open panel, or clear
+  // unread badges — a reconnect must not flash or reshuffle the open thread. Reads
+  // refs (not deps) so it is stable across renders and safe in a WS closure.
+  const reloadOpenThread = useCallback(() => {
+    const sel = selectedRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!sel && convId == null) return;
+    const bufKey = sel || (convId != null ? `conv:${convId}` : '');
+    const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
+    pendingWsMessages.current[bufKey] = [];
+    const isPageVisible = pageVisibleRef.current;
+    const loader = convId != null
+      ? getConversationMessages(convId, isPageVisible).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(sel, isPageVisible, null);
+    loader.then(res => {
+      if (!res.ok) return;
+      const data = res.data;
+      if (data.channel_id) setSelectedChannelId(data.channel_id);
+      const duringFetch = pendingWsMessages.current[bufKey] || [];
+      const pending = [...preFetchBuffer, ...duringFetch];
+      if (pending.length > 0) {
+        const existing = data.messages || [];
+        const newMsgs = pending.filter(m => !isDuplicateMessage(m, existing));
+        if (newMsgs.length > 0) data.messages = [...(data.messages || []), ...newMsgs];
+      }
+      data.messages = (data.messages || []).map(m =>
+        m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
+      pendingWsMessages.current[bufKey] = [];
+      setContactData(data);
+    });
+  }, []);
+
   return {
     selected, setSelected,
     selectedConvId, setSelectedConvId,
@@ -234,6 +274,6 @@ export function useConversationSelection({
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect, pendingWsMessages,
-    isOpenRow, selectContact,
+    isOpenRow, selectContact, reloadOpenThread,
   };
 }

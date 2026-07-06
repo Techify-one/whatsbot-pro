@@ -736,9 +736,12 @@ class MessagingService:
         key = (channel_id, phone)
         existing = state.processing_tasks.get(key)
         if existing and not existing.done():
-            if state.sending.get(key):
-                # Mid-send — don't cancel. The current orchestrator will spawn the next
-                # cycle automatically when it finishes sending (sees pending_messages).
+            if state.sending.get(key) or state.processing.get(key):
+                # Mid-send (state.sending) OR mid-cycle (state.processing — the batch
+                # was already popped, plano 33 F6). Don't cancel: cancelling here
+                # discards the popped items → the customer's message is lost from the
+                # DB too. The new message stays in pending_messages and the running
+                # orchestrator's tail re-checks pending and spawns a follow-up cycle.
                 return
             existing.cancel()
         state.processing_tasks[key] = asyncio.create_task(self._orchestrate(channel_id, phone))
@@ -1087,6 +1090,10 @@ class MessagingService:
                 return
             # Consume now: a NEW message arriving during _run_one_cycle goes into a fresh batch
             state.pending_messages.pop(key, None)
+            # Plano 33 F6: from THIS point the batch is popped but not yet persisted.
+            # Mark the cycle as processing so schedule_orchestrator won't cancel us in
+            # the pop→persist window (which would drop `items`). Cleared in `finally`.
+            state.processing[key] = True
 
             # Modo sequencial (plano 21): quando LIGADO no canal, só UM contato
             # roda o ciclo da IA por vez nesse canal. Um asyncio.Lock por canal
@@ -1119,6 +1126,11 @@ class MessagingService:
         except asyncio.CancelledError:
             return
         finally:
+            # Plano 33 F6: clear the mid-cycle guard. The tail spawn (1117) and this
+            # clear run with NO await between them, so a webhook message cannot slip
+            # in unseen: it either arrived earlier (tail spawns a follow-up) or will
+            # arrive after this clears (a fresh orchestrator is scheduled normally).
+            state.processing.pop(key, None)
             cur = asyncio.current_task()
             if state.processing_tasks.get(key) is cur:
                 state.processing_tasks.pop(key, None)

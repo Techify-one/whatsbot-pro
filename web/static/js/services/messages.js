@@ -72,6 +72,25 @@ export function findDuplicateIndex(message, list) {
 }
 
 /**
+ * Index of an OPTIMISTIC bubble in `list` that `message` collapses into, or -1
+ * (plano 33 F4). Like {@link findDuplicateIndex} but only matches entries WITHOUT
+ * a stable `msg_id` — i.e. an optimistic copy (the operator's own send, whose
+ * bubble has no msg_id until its echo carries one). Two DISTINCT inbound messages
+ * of identical content in separate batches (e.g. "ok"/"ok") each already carry
+ * their OWN msg_id, so the `!m.msg_id` guard stops the second from being swallowed
+ * into the first — they are two real rows and must render as two bubbles. The
+ * content-only {@link findDuplicateIndex} wrongly merged them.
+ *
+ * @param {ChatMessage} message
+ * @param {ChatMessage[]} list
+ * @returns {number}
+ */
+export function optimisticDupIndex(message, list) {
+  if (!Array.isArray(list)) return -1;
+  return list.findIndex(m => !m.msg_id && sameMessage(m, message));
+}
+
+/**
  * Default sidebar preview labels per media type (Portuguese, with emoji).
  * @type {Record<string, string>}
  */
