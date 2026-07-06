@@ -15,7 +15,7 @@
 // `setShowArchived` and reloads on the change without reaching into other hooks.
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import { getContacts, listConversations } from '../../../services/api.js';
-import { buildRows, sortContacts } from '../../../services/conversationRows.js';
+import { buildRows, convRowToSidebarRow, sortContacts } from '../../../services/conversationRows.js';
 
 /**
  * @param {Object} opts
@@ -73,11 +73,16 @@ export function useConversationList({ onUnreadChange }) {
       getContacts(q, showArchivedRef.current),
       listConversations({ archived: showArchivedRef.current, limit: 200 }),
     ]).then(([cRes, vRes]) => {
-      if (cRes.ok) {
-        const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
-        const rows = sortContacts(buildRows(cRes.data, convs));
+      if (vRes && vRes.ok) {
+        const convs = (vRes.data && vRes.data.conversations) || [];
+        const rows = sortContacts(cRes && cRes.ok
+          ? buildRows(cRes.data || [], convs)
+          : convs.map(convRowToSidebarRow));
         setContacts(rows);
         contactsRef.current = rows;
+      } else {
+        setContacts([]);
+        contactsRef.current = [];
       }
       setLoading(false);
     });
