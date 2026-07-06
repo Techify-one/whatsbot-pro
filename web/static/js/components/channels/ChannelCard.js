@@ -11,17 +11,20 @@ import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 
 const html = htm.bind(h);
 
-export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onReconnect, onLogout, onEdit, busyId, requiredCreds }) {
-  const meta = providerMeta(channel.provider);
+export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onReconnect, onLogout, onEdit, busyId, requiredCreds, descriptorsById }) {
+  const descriptor = descriptorsById && descriptorsById[channel.provider];
+  const meta = providerMeta(channel.provider, descriptorsById);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
   const busy = busyId === channel.id;
-  const isGowa = channel.provider === 'gowa';
-  const canConnect = isGowa && !channel.logged_in;
-  // Session actions (plano 27 D5), GOWA-only: "Reconectar" when paired but the
-  // socket is down; "Desconectar" whenever there's a session to drop.
-  const canReconnect = isGowa && channel.logged_in && !channel.connected;
-  const canLogout = isGowa && channel.logged_in;
+  // Session actions (QR/linked-device providers, capability-driven — plano 33):
+  // "Conectar" (read QR) when not logged in, "Reconectar" when paired but the
+  // socket is down, "Desconectar" whenever there's a session to drop. Gated by
+  // the descriptor's ``needs_qr`` capability, never by provider name.
+  const needsQr = !!(descriptor && descriptor.capabilities && descriptor.capabilities.needs_qr);
+  const canConnect = needsQr && !channel.logged_in;
+  const canReconnect = needsQr && channel.logged_in && !channel.connected;
+  const canLogout = needsQr && channel.logged_in;
   // Zombie-channel detection: required credentials this channel is missing
   // (capability-driven via the providers fetch, local fallback otherwise). A
   // credential-only provider missing these can never connect — flag it with a
@@ -67,7 +70,7 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
 
         ${missingCreds.length ? html`
           <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mt-2 break-words">
-            ⚠️ Credenciais faltando: ${missingCreds.map(credLabel).join(', ')}.
+            ⚠️ Credenciais faltando: ${missingCreds.map((k) => credLabel(k, descriptor)).join(', ')}.
             Este canal não vai conectar até serem preenchidas —
             <button class="underline hover:no-underline font-medium"
               onClick=${() => onEdit(channel)}>editar agora</button>.

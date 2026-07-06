@@ -72,6 +72,46 @@ class WhatsAppCloudChannel(Channel):
         # picker open): (fetched_at, [templates]).
         self._templates_cache: Optional[tuple] = None
 
+    # ── Provider descriptor (plano 33) ───────────────────────────────
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """WhatsApp Cloud API (Meta Graph): credential-only (no QR), supports
+        templates (HSM). After create the core shows the inbound webhook callback
+        URL to paste into the Meta app config (``post_create`` = ``webhook_url``).
+        ``verify_token`` offers a "suggest random token" button."""
+        return {
+            "provider": "whatsapp_cloud",
+            "label": "WhatsApp Cloud",
+            "color": "blue",
+            "credential_fields": [
+                {"key": "access_token", "label": "Access Token", "type": "secret",
+                 "required": True, "placeholder": "EAAB..."},
+                {"key": "phone_number_id", "label": "Phone Number ID",
+                 "type": "text", "required": True,
+                 "placeholder": "ID do número (Meta)"},
+                {"key": "waba_id", "label": "WABA ID", "type": "text",
+                 "required": False,
+                 "placeholder": "WhatsApp Business Account ID",
+                 "help": "Necessário para listar e criar templates (HSM). Em "
+                         "WhatsApp Manager → Configurações da conta. Diferente do "
+                         "Phone Number ID."},
+                {"key": "verify_token", "label": "Verify Token",
+                 "type": "token_suggest", "required": True,
+                 "placeholder": "token de verificação do webhook"},
+            ],
+            "config_fields": [],
+            "capabilities": {"needs_qr": False, "templates": True},
+            "ai_sequential_default": False,
+            "post_create": {
+                "kind": "webhook_url",
+                "path": "/api/webhook/whatsapp_cloud/{channel_id}",
+                "title": "Canal criado",
+                "help": "Cole esta URL como Callback URL na configuração de "
+                        "webhook do seu app na Meta:",
+            },
+            "form_component": None,
+        }
+
     # ── Account identity (dedup contract — plano 32 F5) ──────────────
     @classmethod
     def identity_from_credentials(cls, creds: dict) -> Optional[AccountIdentity]:

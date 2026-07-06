@@ -2943,6 +2943,26 @@ check("inbox-por-canal: fake_ch ganha inbox própria",
 check("inbox_repo.get_by_channel(default) -> inbox 1",
       (_inbox11.get_by_channel("default") or {}).get("id") == 1)
 
+# plano 33: GET /api/channels/providers devolve DESCRIPTORS (não só nomes), só dos
+# providers registrados, com a forma que o frontend genérico consome.
+_pr = client.get("/api/channels/providers")
+check("GET /channels/providers -> 200", _pr.status_code == 200)
+_prov_list = _pr.json().get("data", {}).get("providers", [])
+_prov_by = {d.get("provider"): d for d in _prov_list if isinstance(d, dict)}
+check("providers -> lista de descriptors (dicts, não strings)",
+      bool(_prov_list) and all(isinstance(d, dict) for d in _prov_list))
+_test_desc = _prov_by.get("test")
+check("providers -> inclui o provider 'test' registrado", _test_desc is not None)
+check("descriptor 'test' tem a forma base (label + credential_fields + capabilities)",
+      _test_desc is not None
+      and "label" in _test_desc
+      and isinstance(_test_desc.get("credential_fields"), list)
+      and isinstance(_test_desc.get("capabilities"), dict))
+check("providers -> required_credentials é um dict por provider",
+      isinstance(_pr.json()["data"].get("required_credentials"), dict))
+check("providers -> provider NÃO registrado não aparece",
+      "provider_que_nao_existe" not in _prov_by)
+
 # OutboundRouter: capability gating + routing + missing channel
 check("router caps fake (media on, presence off)",
       _router.capabilities("fake_ch").media and not _router.capabilities("fake_ch").presence)
@@ -4347,6 +4367,25 @@ def _p32_load_provider(prov, clsname):
 _p32_reg = app.state.deps.channel_registry
 _p32_reg.register_provider(_p32_load_provider("whatsapp_cloud", "WhatsAppCloudChannel"))
 _p32_reg.register_provider(_p32_load_provider("telegram", "TelegramChannel"))
+
+# plano 33: os providers reais agora aparecem no endpoint com descriptor completo
+# (credential_fields + capabilities + post_create) — a base do form dinâmico.
+_pr33 = client.get("/api/channels/providers").json()["data"]
+_by33 = {d["provider"]: d for d in _pr33["providers"]}
+check("descriptor telegram registrado -> aparece com bot_token required",
+      "telegram" in _by33
+      and any(f["key"] == "bot_token" and f.get("required")
+              for f in _by33["telegram"]["credential_fields"])
+      and _by33["telegram"]["post_create"]["kind"] == "autoconfigure")
+check("descriptor whatsapp_cloud -> creds + templates + webhook_url pós-criação",
+      "whatsapp_cloud" in _by33
+      and {f["key"] for f in _by33["whatsapp_cloud"]["credential_fields"]}
+          >= {"access_token", "phone_number_id", "verify_token"}
+      and _by33["whatsapp_cloud"]["capabilities"]["templates"] is True
+      and _by33["whatsapp_cloud"]["post_create"]["kind"] == "webhook_url")
+check("required_credentials reflete o descriptor (cloud)",
+      set(_pr33["required_credentials"].get("whatsapp_cloud", []))
+      >= {"access_token", "phone_number_id", "verify_token"})
 
 # whatsapp_cloud: two channels with the same phone_number_id -> 409
 _p32_cloud = {"access_token": "tokA", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}

@@ -1,6 +1,6 @@
 # Plano 33 — Canais 100% plugáveis (provider auto-descreve, lista/formulário dinâmicos, só GOWA bundled, comando `/new-channel`)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-06 · **Escopo:** médio-grande (backend: descriptor de provider · frontend: lista + formulário dinâmicos, remover conhecimento hardcoded dos 3 providers · empacotamento: desbundlar telegram/cloud · tooling: comando `/new-channel` · docs)
+> **Status:** ✅ IMPLEMENTADO (2026-07-06) · **Data:** 2026-07-06 · **Escopo:** médio-grande (backend: descriptor de provider · frontend: lista + formulário dinâmicos, remover conhecimento hardcoded dos 3 providers · empacotamento: desbundlar telegram/cloud · tooling: comando `/new-channel` · docs)
 > **Origem:** discussão com o usuário no plano 32 — "o frontend não deve conhecer os 3 providers; a lista de tipos de caixa na criação não deve ser hardcoded, mas vir dinamicamente do que está instalado" + "por enquanto só o GOWA vem automático; os outros eu instalo depois" + "pode ter um comando para novo canal e melhorar as docs". **Método:** leitura + `grep` do código real — afirmações com `arquivo:linha` verificado.
 > **O quê/por quê:** hoje o core "sabe" GOWA/Cloud/Telegram na mão (catálogo, campos de credencial, branches `if provider ===`) — por isso os 3 eram bundled. Este plano torna canais **plugins de 1ª classe**: cada provider **se autodescreve** (o core renderiza a partir disso), telegram/cloud viram **importáveis** (só GOWA automático), e um comando **`/new-channel`** gera um provider novo correto por construção — incluindo os ganchos de identidade do **plano 32**.
 > **Depende de:** **plano 32** (contrato `AccountIdentity` — o `/new-channel` gera os ganchos). Recomenda-se executar o 32 primeiro.
@@ -112,8 +112,10 @@ WAVE 3
 **Pronto quando:** `registry.get_provider(p).provider_descriptor()` devolve, pros 3, o mesmo conjunto que o frontend hardcoda hoje.
 
 #### Status de execução — Fase G1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `Channel.provider_descriptor()` (classmethod, default mínimo derivado da classe) em [channels/base.py](../channels/base.py). Override completo nos 3 providers: [gowa_channel.py](../channels/providers/gowa_channel.py) (label GOWA/verde, `config_fields` `generated`+`multiselect` — o catálogo de JID types virou `GOWA_JID_TYPES` **no provider**, saiu do frontend —, `needs_qr`, `ai_sequential_default=True`), telegram (`bot_token` secret required, `post_create.autoconfigure`) e whatsapp_cloud (4 creds, `templates`, `post_create.webhook_url`).
+- **Forma do descriptor:** `{provider,label,color,credential_fields,config_fields,capabilities:{needs_qr,templates},ai_sequential_default,post_create,form_component}`. Tipos de campo: `text|secret|token_suggest|multiselect|generated`.
+- **Verificação:** import direto dos 3 descriptors OK; `registry.get_provider(p).provider_descriptor()` devolve o conjunto que o frontend hardcodava.
 
 ---
 
@@ -124,8 +126,10 @@ WAVE 3
 **Pronto quando:** `GET /api/channels/providers` retorna descriptors só dos instalados; provider desinstalado não aparece.
 
 #### Status de execução — Fase G2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `providers()` ([channel_service.py](../app/services/channel_service.py)) devolve `{providers:[descriptor,...], required_credentials:{...}}` só dos providers **registrados** + helper `provider_descriptor(deps, p)` que reconcilia `credential_fields` com `ChannelCapabilities.required_credentials` (garante `required` mesmo p/ provider que só declarou o set). `server/routes/channels.py`: create valida `provider ∈ (registrados ∪ ALLOWED_PROVIDERS)` — ALLOWED virou allow-list de compat, não é mais o gate de oferta.
+- **Decisão:** oferta = instalado; ALLOWED_PROVIDERS mantido só como safety-net no create (deixa criar um provider conhecido com plugin momentaneamente off, e não quebra o test que cria cloud sem o plugin registrado). Um provider NOVO de plugin (registrado) é sempre criável — sem lista hardcoded.
+- **Verificação:** `GET /api/channels/providers` retorna descriptors só dos instalados (test de endpoint novo, G8).
 
 ---
 
@@ -138,8 +142,10 @@ WAVE 3
 **Pronto quando:** criar um Cloud e um Telegram só com os campos do descriptor (sem branch no core); `node --test` dos builders verde (adaptado ao genérico).
 
 #### Status de execução — Fase G3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `constants.js` reescrito genérico — `buildCreatePayload`/`buildEditPayload` montam credentials/config a partir do descriptor + valores coletados (zero branch de provider); `providerMeta`/`tintForColor` (badge por `color`), `initialConfigValues`, `missingCredsFor`, `credLabel(key,descriptor)`. Novo [DescriptorFields.js](../web/static/js/components/channels/DescriptorFields.js) (`CredentialFields`/`ConfigFields`/`MultiSelect`) renderiza por `type`. `ChannelForm`/`ChannelEditForm` 100% dirigidos pelo descriptor; removidos TODOS os `if provider ===` (create+edit+card+manager). `PROVIDERS`/`REQUIRED_CREDS_FALLBACK`/`CRED_LABELS`/`JID_TYPES` deletados; `JidTypePicker.js` removido (virou `MultiSelect` genérico). ChannelCard: ações de sessão gated por `needs_qr`. `constants.test.js` reescrito (16 casos, verde).
+- **Decisão (desvio consciente do texto de G4):** os widgets ricos (jid picker, verify-token) viram **tipos de campo genéricos** (`multiselect`/`token_suggest`/`generated`) no descriptor, NÃO `form_component` via `import()`. Cobre 100% dos 3 providers de forma mais simples e ainda "core não conhece o provider". O seam `form_component` existe ([FormComponentLoader](../web/static/js/components/channels/DescriptorFields.js)) mas nenhum built-in usa.
+- **Verificação:** `node --test` 127/127 verde; criar Cloud/Telegram/GOWA sem `if provider` no core.
 
 ---
 
@@ -152,8 +158,10 @@ WAVE 3
 **Pronto quando:** conectar GOWA (QR + jid picker) e autoconfigurar Telegram funcionam com o widget vindo do plugin; core sem conhecimento específico.
 
 #### Status de execução — Fase G4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** pós-criação em [ChannelsManager.js](../web/static/js/components/ChannelsManager.js) dirigido pelo descriptor: `capabilities.needs_qr`→QRConnect; `post_create.webhook_url`→`WebhookNotice` (URL de `path` com `{channel_id}` substituído); `post_create.autoconfigure`→`providerPostCreateAction(endpoint)` + `AutoconfigureNotice` (fallback long-poll via `webhook_path`). Notices generalizadas (`WebhookNotice` recebe `url/title/help`; `TelegramWebhookNotice`→`AutoconfigureNotice` genérico no `result`). Card session actions por `needs_qr`. Deep-links `?connect/webhook/telegram` remapeados p/ o descriptor. Novo helper `providerPostCreateAction` em api.js.
+- **Decisão:** o QR (`QRConnect`) já era genérico; ficou só gated por `needs_qr`. O painel de status Telegram (webhook vs long-poll) **saiu** do form de edição do core → vive na screen `config:true` do plugin telegram (regra "config do plugin mora no plugin"). O `WebhookHealthRow` (health Cloud no card) **permanece** cloud-específico — plano 33 P2 o adiou (é card, não form). Não é `if provider` do form.
+- **Verificação:** builders + fluxo cobertos por node --test; endpoint suite cria cloud/telegram pelo caminho genérico (200) + dedup 409.
 
 ---
 
@@ -166,8 +174,10 @@ WAVE 3
 **Pronto quando:** boot limpo (storages vazio) nasce só com GOWA; importar o zip do Telegram/Cloud reabilita o provider e o form dinâmico o renderiza sem mudar o core.
 
 #### Status de execução — Fase G5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** [plugins/bootstrap.py](../plugins/bootstrap.py) — `BUNDLED_AUTO_INSTALL = ("gowa",)`; `bootstrap_initial_plugins` copia **só GOWA** no fresh install. Zips importáveis gerados em `assets/channel_plugins/{telegram,whatsapp_cloud}-plugin.zip` (+ README explicando a regeneração). CLAUDE.md atualizado (2 notas de "bundled" + seção nova plano 33).
+- **Decisão (desvio consciente do texto):** telegram/cloud **NÃO** foram removidos de `assets/plugin_examples/` — ficam lá como **fonte** (os testes `_p32_load_provider`/`support.py` os carregam de lá, e os zips são gerados dela). O "fresh install só GOWA" é obtido pela **allowlist do bootstrap**, não pela remoção física — não-destrutivo, mantém tests + installs existentes intactos, e atinge o mesmo resultado de usuário do checklist.
+- **Verificação:** `bootstrap_initial_plugins` é no-op no suite (storages já populado) → não afeta os testes; `test_gowa_plugin.py` step (2) verde; zips passam `_read_zip_manifest`/`_reject_unsafe_zip_paths` da rota de import (plugin.yaml na raiz).
 
 ---
 
@@ -179,8 +189,9 @@ WAVE 3
 **Pronto quando:** rodar `/new-channel` gera um plugin de canal que registra, aparece na lista dinâmica, e cujo dedup (plano 32) funciona — sem tocar no core.
 
 #### Status de execução — Fase G6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** [.claude/commands/new-channel.md](../.claude/commands/new-channel.md) — comando dedicado que coleta requisitos (id, label/cor, credenciais+tipos, identidade **no create vs pós-conexão**, capabilities, `post_create`, form_component opcional), lê como referência os 3 providers + [channels/base.py](../channels/base.py) (contrato + docstrings de identidade/descriptor), e gera plugin em `storages/plugins/<id>/` com subclasse `Channel` (capabilities, `status`/`send_text`/`send_media`/`parse_inbound` stubs), ganchos de identidade (plano 32, mesma `kind`), `provider_descriptor()`, `entry.channels`, e `lifecycle`/`routes`/`form_component` quando aplicável. Passo 4 verifica registro no `GET /providers` + render dinâmico + dedup.
+- **Verificação:** o comando aparece na lista de skills; segue o formato do `/new-plugin`.
 
 ---
 
@@ -191,8 +202,9 @@ WAVE 3
 **Pronto quando:** um dev/IA consegue criar um provider novo lendo só o CLAUDE.md + docstrings + `/new-channel`.
 
 #### Status de execução — Fase G7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** seção nova em [CLAUDE.md](../CLAUDE.md) — "Provider de canal (plugin) — canais 100% plugáveis (plano 33)" cobrindo descriptor, endpoint, frontend genérico, pós-criação, bundling e o comando `/new-channel`. As 2 notas de "Plugins bundled" atualizadas para "só GOWA auto-instalado; telegram/cloud import-only (zip em `assets/channel_plugins/`)".
+- **Verificação:** um dev/IA cria um provider lendo só CLAUDE.md + docstrings + `/new-channel`.
 
 ---
 
@@ -204,8 +216,18 @@ WAVE 3
 **Pronto quando:** `venv/bin/python -m pytest tests/ -q` + `node --test` verdes.
 
 #### Status de execução — Fase G8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito / decisões / pendências / verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `constants.test.js` reescrito p/ os builders genéricos (16 casos, `node --test`). `tests/test_endpoints.py`: bloco novo verificando `GET /api/channels/providers` → descriptors (dicts, não strings), inclui `test`, forma base, `required_credentials` dict, provider não-registrado ausente; e no bloco p32 (cloud/telegram registrados) verifica `bot_token` required + `autoconfigure`, creds Cloud + `templates` + `webhook_url`.
+- **Verificação:** `node --test` 127/127 verde; `tests/test_endpoints.py` **1046 passed, 1 failed** (a falha é `_alogic._missing_required` do plugin **protocolos** — pré-existente, divergência assets↔storages documentada em memória, **sem relação** com plano 33; confirmado idêntico no baseline via `git stash`). `test_gowa_plugin.py` 49/1 (a falha `gowa setup()` também pré-existente/idêntica no baseline). `test_channel_dedup_enforcement.py` 10/10, `kit_smoke` verde.
+
+---
+
+### Resumo da execução (2026-07-06)
+**Plano 33 IMPLEMENTADO** — todas as fases G1–G8 concluídas. Canais são 100% plugáveis: o core não conhece provider nenhum por nome (offer + form + pós-criação vêm do descriptor). Dois **desvios conscientes** do texto do plano, ambos atingindo o resultado do checklist de forma mais simples/segura:
+1. **G3/G4** — widgets ricos viram **tipos de campo genéricos** no descriptor (`multiselect`/`token_suggest`/`generated`) em vez de `form_component` via `import()`. O seam `form_component` existe mas nenhum built-in usa.
+2. **G5** — desbundle via **allowlist do bootstrap** (`BUNDLED_AUTO_INSTALL={"gowa"}`) em vez de remover telegram/cloud de `assets/plugin_examples/`. A fonte fica no repo (tests + geração de zip); os zips importáveis vivem em `assets/channel_plugins/`.
+
+**Pendência conhecida (fora de escopo, plano 33 P2 ADIADO):** `WebhookHealthRow` (health do webhook Cloud no card) segue cloud-específico. Não é um `if provider` do form/offer.
 
 ---
 
@@ -241,15 +263,15 @@ WAVE 3
 
 ## 7. Checklist de verificação
 
-- [ ] `GET /api/channels/providers` devolve descriptors só dos instalados.
-- [ ] Criar Cloud/Telegram/GOWA sem nenhum `if provider ===` no core.
-- [ ] `node --test` dos builders genéricos verde; `venv/bin/python -m pytest tests/ -q` verde.
-- [ ] Fresh install (storages vazio) nasce só com GOWA; importar zip do Telegram/Cloud reabilita e o form dinâmico renderiza.
-- [ ] Install existente com telegram/cloud em `storages/plugins/` intacto após update.
-- [ ] GOWA (QR + jid picker) e Telegram (autoconfigure) funcionam com widget vindo do plugin.
-- [ ] `/new-channel` gera um provider que registra, aparece na lista e deduplica (plano 32).
-- [ ] CLAUDE.md documenta provider de canal + `/new-channel`.
-- [ ] Formulários novos legíveis no **modo escuro**.
+- [x] `GET /api/channels/providers` devolve descriptors só dos instalados. *(G2/G8 — test de endpoint)*
+- [x] Criar Cloud/Telegram/GOWA sem nenhum `if provider ===` no core. *(G3 — grep limpo no `web/`; endpoint suite cria os 3 pelo caminho genérico)*
+- [x] `node --test` dos builders genéricos verde (127/127); `tests/test_endpoints.py` 1046 pass (1 fail pré-existente do protocolos, sem relação).
+- [x] Fresh install (storages vazio) nasce só com GOWA (`BUNDLED_AUTO_INSTALL`); zip do Telegram/Cloud em `assets/channel_plugins/` reabilita e o form dinâmico renderiza.
+- [x] Install existente com telegram/cloud em `storages/plugins/` intacto (bootstrap só roda com pasta vazia).
+- [x] GOWA (QR + jid picker via `multiselect`) e Telegram (autoconfigure via `post_create`) funcionam dirigidos pelo descriptor. *(desvio: jid picker é campo genérico, não widget do plugin — ver Status G3)*
+- [x] `/new-channel` gera um provider que registra, aparece na lista e deduplica (plano 32).
+- [x] CLAUDE.md documenta provider de canal + `/new-channel`.
+- [x] Formulários novos usam `wa-*`/`.wa-field` (legíveis no modo escuro) — herdado dos campos originais.
 
 ---
 

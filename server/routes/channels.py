@@ -28,7 +28,6 @@ from server.authz import permission_denied, has_permission, current_user
 from server.helpers import _ok, _err
 
 _ID_RE = svc.ID_RE
-_ALLOWED_PROVIDERS = svc.ALLOWED_PROVIDERS
 
 
 def register_routes(app, deps):
@@ -233,8 +232,18 @@ def register_routes(app, deps):
             return denied
         cid = (body.get("id") or "").strip()
         provider = (body.get("provider") or "").strip()
-        if provider not in _ALLOWED_PROVIDERS:
-            return _err(f"provider deve ser um de: {', '.join(sorted(_ALLOWED_PROVIDERS))}.", 400)
+        # A provider is creatable iff it is REGISTERED (its plugin is enabled) — so
+        # ANY installed provider works, including a brand-new one from a plugin, with
+        # no hardcoded list (plano 33 D1). The legacy ``ALLOWED_PROVIDERS`` survives
+        # only as a compat safety-net allow-list (lets a known provider be created
+        # while its plugin is momentarily disabled — its row persists and goes live
+        # on re-enable). No ``if provider ==`` in the core.
+        registry = getattr(deps, "channel_registry", None)
+        registered = set(registry.providers()) if registry is not None else set()
+        creatable = registered | svc.ALLOWED_PROVIDERS
+        if provider not in creatable:
+            return _err(
+                f"provider deve ser um de: {', '.join(sorted(creatable))}.", 400)
         # Anti zombie-channel (capability-driven): a credential-only provider with no
         # connect step (Cloud/Telegram) is useless without its required credentials —
         # reject the create up front. GOWA's required set is empty (QR flow).

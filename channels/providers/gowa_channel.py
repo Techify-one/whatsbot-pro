@@ -34,6 +34,27 @@ def _canonical_phone(digits: str) -> str:
     return min(variants, key=lambda v: (len(v), v))
 
 
+# Which WhatsApp chat types (by JID suffix) a GOWA channel surfaces as
+# conversations. The provider OWNS this catalogue (plano 33): the core form only
+# renders it as a generic multiselect from the descriptor — it never knows what a
+# "JID type" is. Keys mirror ``channels/jid.py``; the user only sees the label.
+GOWA_JID_TYPES = [
+    {"value": "person", "label": "Pessoa (contato)",
+     "hint": "Conversas individuais com contatos."},
+    {"value": "person_lid", "label": "Pessoa (modo privacidade)",
+     "hint": "Contatos que ocultam o número (modo privacidade)."},
+    {"value": "group", "label": "Grupo / Comunidade",
+     "hint": "Mensagens de grupos e comunidades."},
+    {"value": "newsletter", "label": "Canal",
+     "hint": "Publicações de Canais do WhatsApp."},
+    {"value": "broadcast", "label": "Status / Transmissão",
+     "hint": "Status e listas de transmissão."},
+    {"value": "bot", "label": "Bot (Meta AI etc.)",
+     "hint": "Conversas com bots como o Meta AI."},
+]
+GOWA_DEFAULT_JID_TYPES = ["person", "person_lid", "group"]
+
+
 class GOWAChannel(Channel):
     provider = "gowa"
 
@@ -44,6 +65,36 @@ class GOWAChannel(Channel):
         ))
         self._client = gowa_client
         self._manager = gowa_manager
+
+    # ── Provider descriptor (plano 33) ───────────────────────────────
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """GOWA is QR/linked-device: no credentials, a generated device id, and a
+        JID-type multiselect deciding which chat types surface as conversations.
+        ``needs_qr`` drives the post-create QR panel (no ``post_create`` block)."""
+        return {
+            "provider": "gowa",
+            "label": "GOWA",
+            "color": "green",
+            "credential_fields": [],
+            "config_fields": [
+                {"key": "gowa_device_id", "label": "GOWA Device ID",
+                 "type": "generated", "prefix": "gowa_",
+                 "help": "Identifica este número dentro do GOWA. Após criar, "
+                         "leia o QR Code para conectar o WhatsApp."},
+                {"key": "allowed_jid_types",
+                 "label": "O que deve aparecer no painel",
+                 "type": "multiselect", "options": GOWA_JID_TYPES,
+                 "default": list(GOWA_DEFAULT_JID_TYPES),
+                 "help": "Escolha quais tipos de conversa deste número viram "
+                         "conversa. Os tipos desmarcados são ignorados (não "
+                         "aparecem no painel)."},
+            ],
+            "capabilities": {"needs_qr": True, "templates": False},
+            "ai_sequential_default": True,
+            "post_create": None,
+            "form_component": None,
+        }
 
     # ── Lifecycle ────────────────────────────────────────────────────
     def start(self) -> None:

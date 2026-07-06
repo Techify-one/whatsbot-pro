@@ -100,6 +100,66 @@ class Channel(ABC):
     def get_qr(self) -> Optional[bytes]:
         return None
 
+    # ── Provider self-description (descriptor — plano 33) ─────────────
+    # A provider declares EVERYTHING the core needs to OFFER and RENDER it, so the
+    # core never knows the provider by name (no ``if provider ==`` in the offer
+    # list, the create/edit form, or the post-create UX). ``GET /api/channels/
+    # providers`` returns one descriptor per REGISTERED provider; the frontend
+    # builds the whole channel form from it. Adding a provider = ship a plugin
+    # whose ``Channel`` subclass overrides this — the core is untouched.
+    #
+    # Shape (all keys optional except ``provider``; the service fills sensible
+    # defaults + reconciles ``required`` against ``ChannelCapabilities``):
+    #   {
+    #     "provider": "telegram",            # == cls.provider
+    #     "label": "Telegram",               # human name for the picker/badge
+    #     "color": "purple",                 # semantic tint token (frontend maps it)
+    #     "credential_fields": [             # secrets/ids stored in channel_credentials
+    #        {"key","label","type","placeholder"?,"required"?,"help"?}
+    #     ],
+    #     "config_fields": [                 # non-secret settings stored in config
+    #        {"key","label","type","options"?,"default"?,"placeholder"?,"help"?}
+    #     ],
+    #     "capabilities": {"needs_qr": bool, "templates": bool},
+    #     "ai_sequential_default": bool,     # default for config.ai.ai_sequential_enabled
+    #     "post_create": None | {...},       # declarative post-create UX (see below)
+    #     "form_component": None | "/plugins/<id>/static/<x>.js",  # optional rich form
+    #   }
+    #
+    # Field ``type`` values the generic form understands: ``text``, ``secret``,
+    # ``token_suggest`` (text + a "suggest random token" button), ``multiselect``
+    # (checkbox group over ``options=[{value,label,hint?}]``, seeded from
+    # ``default``), ``generated`` (auto-filled read-only string, prefixed by
+    # ``prefix``). ``post_create`` kinds: ``{"kind":"webhook_url","path":...}``
+    # (show a copiable inbound-webhook URL) and ``{"kind":"autoconfigure",
+    # "endpoint":...}`` (POST the endpoint, show the returned webhook/long-poll
+    # result). ``{channel_id}`` in a path/endpoint is substituted client-side.
+
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """Self-description used by the core to offer + render this provider.
+
+        Default: a minimal, credential-less descriptor derived from the class. The
+        service layer (:func:`app.services.channel_service.providers`) reconciles
+        ``required`` credential fields against ``ChannelCapabilities.required_
+        credentials`` afterwards, so a provider that only declares its required
+        credentials (or nothing) still gets a usable generic form. Real providers
+        override this to add labels, a colour, field placeholders and any rich
+        post-create UX. Must be pure (no network/DB) — the core calls it in the
+        request path.
+        """
+        return {
+            "provider": cls.provider,
+            "label": cls.provider,
+            "color": "gray",
+            "credential_fields": [],
+            "config_fields": [],
+            "capabilities": {"needs_qr": False, "templates": False},
+            "ai_sequential_default": False,
+            "post_create": None,
+            "form_component": None,
+        }
+
     # ── Account identity contract (dedup — plano 32) ─────────────────
     # A provider declares HOW to identify the account a channel is bound to; the
     # core does the rest generically (compare, store, unique index, 409 on create,

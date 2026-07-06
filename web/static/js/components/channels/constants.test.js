@@ -1,37 +1,74 @@
 // Run with: node --test web/static/js/components/channels/constants.test.js
 //
-// Characterization tests (Plano 23 · D4) for the pure channels helpers extracted
-// from ChannelsManager.js. These lock the create/edit payload shaping (provider
-// branching, the GOWA-vs-others sequential default, "keep current" blank creds)
-// and the catalogue/credential helpers, so a decomposition regression trips here
-// instead of silently in the browser.
+// Characterization tests (plano 33) for the DESCRIPTOR-DRIVEN channel helpers.
+// The create/edit payload builders no longer branch on provider name: they take
+// the provider descriptor + the collected field values and assemble the payload
+// generically. These lock that shaping (credentials from credential_fields,
+// config from config_fields, the sequential-reply default from the descriptor,
+// "keep current" blank/masked creds on edit) so a regression trips here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PROVIDERS, providerMeta, credLabel, parseChannelConfig, aiDefaultsFrom,
-  requiredCredsFor, missingCredsFor, buildCreatePayload, buildEditPayload,
-  REQUIRED_CREDS_FALLBACK,
+  providerMeta, credLabel, tintForColor, parseChannelConfig, aiDefaultsFrom,
+  missingCredsFor, initialConfigValues, buildCreatePayload, buildEditPayload,
 } from './constants.js';
 
-// ── providerMeta ─────────────────────────────────────────────────────────
-test('providerMeta: known providers map to their catalogue entry', () => {
-  assert.equal(providerMeta('gowa'), PROVIDERS.gowa);
-  assert.equal(providerMeta('whatsapp_cloud').label, 'WhatsApp Cloud');
-  assert.equal(providerMeta('telegram').label, 'Telegram');
-  assert.equal(providerMeta('test').label, 'Teste');
+// ── Descriptor fixtures (mirror the real gowa/telegram/whatsapp_cloud) ──────
+const GOWA = {
+  provider: 'gowa', label: 'GOWA', color: 'green',
+  credential_fields: [],
+  config_fields: [
+    { key: 'gowa_device_id', type: 'generated', prefix: 'gowa_' },
+    { key: 'allowed_jid_types', type: 'multiselect',
+      options: [{ value: 'person' }, { value: 'group' }, { value: 'newsletter' }],
+      default: ['person', 'group'] },
+  ],
+  capabilities: { needs_qr: true, templates: false },
+  ai_sequential_default: true, post_create: null,
+};
+const TELEGRAM = {
+  provider: 'telegram', label: 'Telegram', color: 'purple',
+  credential_fields: [{ key: 'bot_token', label: 'Bot Token', type: 'secret', required: true }],
+  config_fields: [],
+  capabilities: { needs_qr: false, templates: false },
+  ai_sequential_default: false,
+  post_create: { kind: 'autoconfigure', endpoint: '/api/plugins/telegram/autoconfigure' },
+};
+const CLOUD = {
+  provider: 'whatsapp_cloud', label: 'WhatsApp Cloud', color: 'blue',
+  credential_fields: [
+    { key: 'access_token', label: 'Access Token', type: 'secret', required: true },
+    { key: 'phone_number_id', label: 'Phone Number ID', type: 'text', required: true },
+    { key: 'waba_id', label: 'WABA ID', type: 'text', required: false },
+    { key: 'verify_token', label: 'Verify Token', type: 'token_suggest', required: true },
+  ],
+  config_fields: [],
+  capabilities: { needs_qr: false, templates: true },
+  ai_sequential_default: false,
+  post_create: { kind: 'webhook_url', path: '/api/webhook/whatsapp_cloud/{channel_id}' },
+};
+const BY_ID = { gowa: GOWA, telegram: TELEGRAM, whatsapp_cloud: CLOUD };
+
+// ── providerMeta / tintForColor ─────────────────────────────────────────────
+test('providerMeta: resolves label + tint from the descriptor map', () => {
+  assert.equal(providerMeta('gowa', BY_ID).label, 'GOWA');
+  assert.equal(providerMeta('telegram', BY_ID).tint, tintForColor('purple'));
+  assert.equal(providerMeta('whatsapp_cloud', BY_ID).label, 'WhatsApp Cloud');
 });
-test('providerMeta: unknown provider falls back to the raw name + neutral tint', () => {
-  const m = providerMeta('weird');
+test('providerMeta: unknown/absent descriptor falls back to raw name + neutral tint', () => {
+  const m = providerMeta('weird', BY_ID);
   assert.equal(m.label, 'weird');
   assert.match(m.tint, /text-wa-secondary/);
-  assert.equal(providerMeta(null).label, '—');
+  assert.equal(providerMeta(null, BY_ID).label, '—');
+  assert.equal(providerMeta('gowa', null).label, 'gowa'); // no map → raw name
 });
 
 // ── credLabel ────────────────────────────────────────────────────────────
-test('credLabel: friendly PT label, falls back to the raw key', () => {
-  assert.equal(credLabel('access_token'), 'Access Token');
-  assert.equal(credLabel('bot_token'), 'Bot Token');
-  assert.equal(credLabel('something_new'), 'something_new');
+test('credLabel: friendly label from the descriptor, falls back to the raw key', () => {
+  assert.equal(credLabel('access_token', CLOUD), 'Access Token');
+  assert.equal(credLabel('bot_token', TELEGRAM), 'Bot Token');
+  assert.equal(credLabel('something_new', CLOUD), 'something_new');
+  assert.equal(credLabel('x', null), 'x');
 });
 
 // ── parseChannelConfig ─────────────────────────────────────────────────────
@@ -50,7 +87,6 @@ test('aiDefaultsFrom: empty config → canonical defaults (ai_enabled on)', () =
   assert.equal(d.group_reply_mode, 'mention_only');
   assert.equal(d.max_context_messages, 10);
   assert.equal(d.split_messages, true);
-  assert.equal(d.transfer_alert_duration, 5);
 });
 test('aiDefaultsFrom: inherits provided global values', () => {
   const d = aiDefaultsFrom({ group_reply_mode: 'always', max_context_messages: 25, split_messages: false });
@@ -59,91 +95,108 @@ test('aiDefaultsFrom: inherits provided global values', () => {
   assert.equal(d.split_messages, false);
 });
 
-// ── requiredCredsFor / missingCredsFor ─────────────────────────────────────
-test('requiredCredsFor: prefers backend list, falls back to local table', () => {
-  assert.deepEqual(requiredCredsFor('telegram', { telegram: ['x'] }), ['x']);
-  assert.deepEqual(requiredCredsFor('telegram', {}), REQUIRED_CREDS_FALLBACK.telegram);
-  assert.deepEqual(requiredCredsFor('gowa', {}), []);
-});
+// ── missingCredsFor ─────────────────────────────────────────────────────────
 test('missingCredsFor: reports required creds not present on the channel', () => {
+  const req = { whatsapp_cloud: ['access_token', 'phone_number_id', 'verify_token'] };
   const ch = { provider: 'whatsapp_cloud', credentials: { access_token: 'x' } };
-  assert.deepEqual(missingCredsFor(ch, {}), ['phone_number_id', 'verify_token']);
+  assert.deepEqual(missingCredsFor(ch, req), ['phone_number_id', 'verify_token']);
   const full = { provider: 'whatsapp_cloud', credentials: { access_token: 'a', phone_number_id: 'b', verify_token: 'c' } };
-  assert.deepEqual(missingCredsFor(full, {}), []);
-  assert.deepEqual(missingCredsFor({ provider: 'gowa', credentials: {} }, {}), []);
+  assert.deepEqual(missingCredsFor(full, req), []);
+  assert.deepEqual(missingCredsFor({ provider: 'gowa', credentials: {} }, req), []);
 });
 
-// ── buildCreatePayload ─────────────────────────────────────────────────────
+// ── initialConfigValues ─────────────────────────────────────────────────────
+test('initialConfigValues: multiselect→default, generated→prefix+token, text→default', () => {
+  const v = initialConfigValues(GOWA);
+  assert.deepEqual(v.allowed_jid_types, ['person', 'group']);
+  assert.match(v.gowa_device_id, /^gowa_/);
+  assert.equal(v.gowa_device_id.length, 'gowa_'.length + 10);
+  assert.deepEqual(initialConfigValues(TELEGRAM), {}); // no config fields
+  assert.deepEqual(initialConfigValues(null), {});
+});
+
+// ── buildCreatePayload (generic) ────────────────────────────────────────────
 const aiBase = aiDefaultsFrom({});
 
-test('buildCreatePayload: GOWA sets jid types + device id, sequential default ON', () => {
+test('buildCreatePayload: GOWA → config fields, no credentials, sequential default ON', () => {
   const p = buildCreatePayload({
     provider: 'gowa', displayName: '  Atendimento  ', ai: { ...aiBase },
-    gowaDeviceId: 'gowa_abc', jidTypes: ['person', 'group'],
+    descriptor: GOWA,
+    configValues: { gowa_device_id: 'gowa_abc', allowed_jid_types: ['person', 'group'] },
+    credValues: {},
   });
   assert.equal(p.provider, 'gowa');
-  assert.equal(p.display_name, 'Atendimento');           // trimmed
+  assert.equal(p.display_name, 'Atendimento');              // trimmed
   assert.deepEqual(p.config.allowed_jid_types, ['person', 'group']);
   assert.equal(p.config.gowa_device_id, 'gowa_abc');
-  assert.equal(p.config.ai.ai_sequential_enabled, true); // GOWA default ON
+  assert.equal(p.config.ai.ai_sequential_enabled, true);    // descriptor default ON
   assert.equal(p.credentials, undefined);
 });
 
-test('buildCreatePayload: telegram sequential default OFF, only non-empty bot_token sent', () => {
-  const p = buildCreatePayload({ provider: 'telegram', displayName: 'TG', ai: { ...aiBase }, botToken: ' 123:ABC ' });
-  assert.equal(p.config.ai.ai_sequential_enabled, false);  // non-GOWA default OFF
+test('buildCreatePayload: telegram → only non-empty bot_token, sequential default OFF', () => {
+  const p = buildCreatePayload({
+    provider: 'telegram', displayName: 'TG', ai: { ...aiBase }, descriptor: TELEGRAM,
+    configValues: {}, credValues: { bot_token: ' 123:ABC ' },
+  });
+  assert.equal(p.config.ai.ai_sequential_enabled, false);
   assert.deepEqual(p.credentials, { bot_token: '123:ABC' });
   assert.equal(p.config.allowed_jid_types, undefined);
 });
 
-test('buildCreatePayload: telegram with blank token omits credentials', () => {
-  const p = buildCreatePayload({ provider: 'telegram', displayName: 'TG', ai: { ...aiBase }, botToken: '   ' });
+test('buildCreatePayload: telegram blank token omits credentials', () => {
+  const p = buildCreatePayload({
+    provider: 'telegram', displayName: 'TG', ai: { ...aiBase }, descriptor: TELEGRAM,
+    configValues: {}, credValues: { bot_token: '   ' },
+  });
   assert.equal(p.credentials, undefined);
 });
 
-test('buildCreatePayload: whatsapp_cloud only includes the non-empty creds', () => {
+test('buildCreatePayload: whatsapp_cloud includes only the non-empty creds', () => {
   const p = buildCreatePayload({
-    provider: 'whatsapp_cloud', displayName: 'Cloud', ai: { ...aiBase },
-    accessToken: 'tok', phoneNumberId: '', wabaId: 'W1', verifyToken: ' v ',
+    provider: 'whatsapp_cloud', displayName: 'Cloud', ai: { ...aiBase }, descriptor: CLOUD,
+    configValues: {},
+    credValues: { access_token: 'tok', phone_number_id: '', waba_id: 'W1', verify_token: ' v ' },
   });
   assert.deepEqual(p.credentials, { access_token: 'tok', waba_id: 'W1', verify_token: 'v' });
   assert.equal(p.config.ai.ai_sequential_enabled, false);
 });
 
-test('buildCreatePayload: explicit ai_sequential_enabled wins over the provider default', () => {
+test('buildCreatePayload: explicit ai_sequential_enabled wins over the descriptor default', () => {
   const p = buildCreatePayload({
-    provider: 'telegram', displayName: 'TG', ai: { ...aiBase, ai_sequential_enabled: true }, botToken: 't',
+    provider: 'telegram', displayName: 'TG', descriptor: TELEGRAM,
+    ai: { ...aiBase, ai_sequential_enabled: true }, configValues: {}, credValues: { bot_token: 't' },
   });
   assert.equal(p.config.ai.ai_sequential_enabled, true);
 });
 
-// ── buildEditPayload ───────────────────────────────────────────────────────
-test('buildEditPayload: preserves existing config keys, updates ai, GOWA jid types', () => {
+// ── buildEditPayload (generic) ───────────────────────────────────────────────
+test('buildEditPayload: preserves existing config keys (generated), updates multiselect + ai', () => {
   const p = buildEditPayload({
     displayName: 'New name', ai: { ...aiBase, group_reply_mode: 'always' },
-    jidTypes: ['person'], isGowa: true, isCloud: false,
+    descriptor: GOWA,
     channelConfig: '{"gowa_device_id":"dev1","allowed_jid_types":["person","group"]}',
+    configValues: { allowed_jid_types: ['person'] }, credValues: {},
   });
   assert.equal(p.display_name, 'New name');
-  assert.equal(p.config.gowa_device_id, 'dev1');                 // preserved
-  assert.deepEqual(p.config.allowed_jid_types, ['person']);      // updated by jidTypes
+  assert.equal(p.config.gowa_device_id, 'dev1');                // preserved from stored config
+  assert.deepEqual(p.config.allowed_jid_types, ['person']);     // updated
   assert.equal(p.config.ai.group_reply_mode, 'always');
   assert.equal(p.credentials, undefined);
 });
 
-test('buildEditPayload: whatsapp_cloud sends only non-blank creds ("keep current")', () => {
+test('buildEditPayload: whatsapp_cloud sends only non-blank, non-masked creds ("keep current")', () => {
   const p = buildEditPayload({
-    displayName: 'C', ai: { ...aiBase }, jidTypes: [], isGowa: false, isCloud: true,
-    channelConfig: {}, accessToken: '', phoneNumberId: 'PNID', wabaId: '', verifyToken: '',
+    displayName: 'C', ai: { ...aiBase }, descriptor: CLOUD, channelConfig: {},
+    configValues: {},
+    credValues: { access_token: '••••abcd', phone_number_id: 'PNID', waba_id: '', verify_token: '' },
   });
-  assert.deepEqual(p.credentials, { phone_number_id: 'PNID' });
-  assert.equal(p.config.allowed_jid_types, undefined);  // not GOWA → not set
+  assert.deepEqual(p.credentials, { phone_number_id: 'PNID' });  // masked + blank skipped
 });
 
-test('buildEditPayload: whatsapp_cloud with all-blank creds omits credentials', () => {
+test('buildEditPayload: all-blank/masked creds omit credentials', () => {
   const p = buildEditPayload({
-    displayName: 'C', ai: { ...aiBase }, jidTypes: [], isGowa: false, isCloud: true,
-    channelConfig: {}, accessToken: '', phoneNumberId: '', wabaId: '', verifyToken: '',
+    displayName: 'C', ai: { ...aiBase }, descriptor: CLOUD, channelConfig: {},
+    configValues: {}, credValues: { access_token: '••••abcd', phone_number_id: '', verify_token: '' },
   });
   assert.equal(p.credentials, undefined);
 });

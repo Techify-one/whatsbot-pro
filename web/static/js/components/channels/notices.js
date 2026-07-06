@@ -25,9 +25,11 @@ export function fallbackCopyText(text, onOk) {
   } catch (e) { /* clipboard truly unavailable */ }
 }
 
-// ── Webhook-URL notice (shown after creating a whatsapp_cloud channel) ──
-export function WebhookNotice({ channelId, onDismiss }) {
-  const url = `${window.location.origin}/api/webhook/whatsapp_cloud/${channelId}`;
+// ── Webhook-URL notice (post-create `webhook_url`, plano 33) ──
+// Generic: the URL + title + help come from the provider descriptor's
+// `post_create` block (resolved by ChannelsManager), so the core doesn't know
+// which provider needs a callback URL — it just renders what it's handed.
+export function WebhookNotice({ url, title, help, onDismiss }) {
   const [copied, setCopied] = useState(false);
   function flagCopied() {
     setCopied(true);
@@ -59,9 +61,9 @@ export function WebhookNotice({ channelId, onDismiss }) {
   }
   return html`
     <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-      <div class="text-[14px] font-medium text-blue-700 mb-1">Canal criado</div>
+      <div class="text-[14px] font-medium text-blue-700 mb-1">${title || 'Canal criado'}</div>
       <p class="text-[13px] text-wa-text mb-2">
-        Cole esta URL como <span class="font-medium">Callback URL</span> na configuração de webhook do seu app na Meta:
+        ${help || 'Cole esta URL como Callback URL na configuração de webhook do provider:'}
       </p>
       <div class="flex gap-2 items-center flex-wrap">
         <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url}</code>
@@ -76,12 +78,13 @@ export function WebhookNotice({ channelId, onDismiss }) {
   `;
 }
 
-// ── Telegram post-create notice ─────────────────────────────────────
-// Shown right after creating a Telegram inbox. The backend (autoconfigure)
-// already detected the domain and either registered the webhook or fell back to
-// long-poll; here we surface the webhook URL (copiable) + the resulting mode so
-// the user can confirm. ``result`` = {mode, webhook_url, registered, reason}.
-export function TelegramWebhookNotice({ result, onDismiss }) {
+// ── Autoconfigure post-create notice (post-create `autoconfigure`, plano 33) ──
+// Shown after creating a channel whose provider self-configures its inbound
+// delivery (e.g. Telegram: webhook if a public HTTPS domain exists, else
+// long-poll). Generic on the autoconfigure RESULT the provider route returned:
+// ``result`` = {mode, webhook_url, registered, reason}. The core doesn't know the
+// provider — it renders whatever the route reported.
+export function AutoconfigureNotice({ result, onDismiss }) {
   const url = (result && result.webhook_url) || '';
   const isWebhook = result && result.mode === 'webhook';
   const [copied, setCopied] = useState(false);
