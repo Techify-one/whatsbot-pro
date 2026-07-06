@@ -163,6 +163,16 @@ function optionFields(defs, scope, singleOnly) {
     .map((d) => ({ scope, key: d.key, label: d.label || d.key, type: d.type,
                    options: d.options, multiple: !!d.multiple }));
 }
+// Campos de um escopo como FILTROS — QUALQUER tipo (não só opção). Opção → dropdown (options);
+// os demais (texto/número/data/…) → campo de digitação (busca parcial). A restrição a tipo de
+// opção fica SÓ no AGRUPAMENTO (optionFields), não nos filtros.
+function filterableFields(defs, scope) {
+  return (defs || [])
+    .filter((d) => d && d.key)
+    .map((d) => ({ scope, key: d.key, label: d.label || d.key, type: d.type,
+                   options: (OPTION_TYPES.has(d.type) && Array.isArray(d.options)) ? d.options : [],
+                   multiple: !!d.multiple }));
+}
 
 function buildGrouping(view, { users, groupFields, rows, apiPost }) {
   const gb = (view && view.group_by) || 'status';
@@ -350,8 +360,8 @@ function ProtocolosList({ api, mode }) {
   const [cols, setCols] = useState([]);          // TODAS as defs do protocolo (OBS fixo + extras, com `required`)
   const [atendDefs, setAtendDefs] = useState([]);  // defs de "Resolver atendimento" (sub-tabela do detalhe)
   const [atendResolveDefs, setAtendResolveDefs] = useState([]); // atendimento: obs+extras editáveis (popup)
-  const [coreAttrDefs, setCoreAttrDefs] = useState([]);   // atributo de CONVERSA do core (só p/ o detalhe)
-  const [contactAttrDefs, setContactAttrDefs] = useState([]);  // atributo de CONTATO do core (filtros, tipo list, não-sistema)
+  const [contactAttrDefs, setContactAttrDefs] = useState([]);  // atributo de CONTATO do core (filtros; list=dropdown, resto=texto; não-sistema)
+  const [channels, setChannels] = useState([]);  // canais disponíveis p/ o dropdown do filtro "Canal" ([{value,label}])
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
@@ -396,28 +406,36 @@ function ProtocolosList({ api, mode }) {
   const activeView = useMemo(
     () => tabs.find((t) => String(t.id) === String(activeViewId)) || tabs[0] || FALLBACK_VIEW,
     [tabs, activeViewId]);
+  // Permissões do plugin (P48 "esconder, não desabilitar"; default-allow p/ legado/
+  // sem RBAC). `view` gate a tela inteira (conteúdo + os GETs); `edit` gate as AÇÕES
+  // (finalizar, salvar campos, arrastar no Kanban → fechar/reabrir/atribuir).
+  const can = (k) => (api.services.hasPermission
+    ? api.services.hasPermission(currentUser, `plugin.protocolos.${k}`) : true);
+  const canView = can('view');
+  const canEdit = can('edit');
   const canTeam = api.services.hasPermission
     ? api.services.hasPermission(currentUser, 'plugin.protocolos.manage_team_views') : true;
   const canEditView = (v) => canTeam
     || (v.scope === 'personal' && (!currentUser || v.owner_user_id === currentUser.id));
 
   // Campos de "Configurações — Protocolos" (escopos protocolo + atendimento) que alimentam o
-  // Kanban: `groupFields` = opção de valor único (agrupar/arrastar); `filterFields` = todos os
-  // de opção (filtrar, inclusive multi). `cols` = defs do protocolo; `atendDefs` = de atendimento.
+  // Kanban: `groupFields` = opção de valor único (agrupar/arrastar) — SÓ tipo opção; `filterFields`
+  // = QUALQUER tipo de campo (filtrar: opção→dropdown, texto/número/data→busca parcial).
+  // `cols` = defs do protocolo; `atendDefs` = de atendimento.
   const groupFields = useMemo(() => [
     ...optionFields(cols, 'protocolo', true),
     ...optionFields(atendDefs, 'atendimento', true),
   ], [cols, atendDefs]);
   const filterFields = useMemo(() => [
-    ...optionFields(cols, 'protocolo', false),
-    ...optionFields(atendDefs, 'atendimento', false),
+    ...filterableFields(cols, 'protocolo'),
+    ...filterableFields(atendDefs, 'atendimento'),
   ], [cols, atendDefs]);
   // Pode CRIAR novas visualizações (agrupamentos)? Gate do "+ Nova". create_views OU
   // manage_team_views (quem gerencia views de equipe também cria). Default-allow sem RBAC.
   const canCreateViews = (api.services.hasPermission
     ? api.services.hasPermission(currentUser, 'plugin.protocolos.create_views') : true) || canTeam;
   // Filtros disponíveis na aba ativa (available_filters da view; null/undefined = todos).
-  // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|attr:<key>.
+  // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|canal|pf:<scope>:<key>|cattr:<key>.
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
   const availFilter = (key) => !availArr || availArr.includes(key);
 
@@ -430,18 +448,12 @@ function ProtocolosList({ api, mode }) {
   const [colOrderDraft, setColOrderDraft] = useState(null);  // null = usar a ordem salva
   const [colDropTarget, setColDropTarget] = useState(null);  // realce da coluna alvo
 
-  const getJson = useCallback(async (url, opts) => {
-    const r = await fetch(url, { headers: authHeaders(), ...(opts || {}) });
-    return r.json();
-  }, [authHeaders]);
-
-  const apiPost = useCallback(async (path, body) => {
-    const r = await fetch(`${apiBase}${path}`, {
-      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    return r.json();
-  }, [apiBase, authHeaders]);
+  // Transporte via api.http do core: checa status HTTP, unifica o corpo de erro
+  // ({error}/{detail}) e dispara o toast "Permissão negada." em 403 — some o falso
+  // "sucesso" quando o back-end nega. getJson recebe URLs já absolutas (/api/...);
+  // apiPost recebe paths relativos ao apiBase (/protocolos/…).
+  const getJson = useCallback((url) => api.http.get(url), [api]);
+  const apiPost = useCallback((path, body) => api.http.post(path, body), [api]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -455,11 +467,11 @@ function ProtocolosList({ api, mode }) {
       if (ot != null) params.set('opened_to', String(ot));
       if (assigneeFilter != null) params.set('assignee_user_id', String(assigneeFilter));
       if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
-      const [dd, cd, ca, co, ll] = await Promise.all([
+      const [dd, cd, co, ch, ll] = await Promise.all([
         getJson(`${apiBase}/field-defs?scope=protocolo`),
         getJson(`${apiBase}/field-defs?scope=atendimento`),
-        getJson('/api/custom-attributes?applies_to=conversation'),  // atributos de CONVERSA (só p/ o detalhe)
         getJson('/api/custom-attributes?applies_to=contact'),       // atributos de CONTATO (filtros)
+        getJson(`${apiBase}/canais`),                               // canais disponíveis (filtro Canal)
         getJson(`${apiBase}/protocolos?${params.toString()}`),
       ]);
       // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
@@ -468,34 +480,34 @@ function ProtocolosList({ api, mode }) {
       const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
       setAtendDefs(atendAll.filter((d) => !d.fixed));
       setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
-      // Atributo de CONVERSA (is_system=0) — mantido SÓ p/ exibição no detalhe (não filtra/agrupa).
-      setCoreAttrDefs(((ca && ca.ok && ca.data) || [])
+      // Atributo de CONTATO (is_system=0) — alimenta os FILTROS do Kanban. Tipo list vira
+      // dropdown (opções); os demais (texto/número/data) viram campo de digitação (busca parcial).
+      setContactAttrDefs(((co && co.ok && co.data) || [])
         .filter((d) => !d.is_system)
         .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
                        options: Array.isArray(d.options) ? d.options : [] })));
-      // Atributo de CONTATO tipo list (is_system=0) — alimenta os FILTROS do Kanban.
-      setContactAttrDefs(((co && co.ok && co.data) || [])
-        .filter((d) => !d.is_system && d.type === 'list')
-        .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
-                       options: Array.isArray(d.options) ? d.options : [] })));
+      // Canais disponíveis (não-arquivados) → opções do dropdown do filtro "Canal".
+      setChannels(((ch && ch.ok && ch.data) || []).map((c) => ({ value: c.id, label: c.name || c.id })));
       setRows((ll && ll.ok && ll.data) || []);
     } finally { setLoading(false); }
   }, [apiBase, status, q, dateFrom, dateTo, assigneeFilter, attrFilters, getJson]);
 
-  useEffect(() => { load(); }, [load]);
+  // Sem permissão de VER → não dispara os GETs (evita uma rajada de 403 no load).
+  useEffect(() => { if (canView) load(); }, [load, canView]);
 
   // Visualizações (abas) + usuário atual (p/ permissão de equipe).
   const loadViews = useCallback(async () => {
     try { const r = await getJson(`${apiBase}/kanban-views`); if (r && r.ok) setViews(r.data || []); }
     catch (e) { /* ignore */ }
   }, [apiBase, getJson]);
-  useEffect(() => { loadViews(); }, [loadViews]);
+  useEffect(() => { if (canView) loadViews(); }, [loadViews, canView]);
   // Grupos de permissão (roles) p/ o seletor "Quem pode ver" do editor.
   useEffect(() => {
+    if (!canView) return;
     let alive = true;
     getJson(`${apiBase}/roles`).then((r) => { if (alive && r && r.ok && r.data) setRoles(r.data.roles || []); }).catch(() => {});
     return () => { alive = false; };
-  }, [apiBase, getJson]);
+  }, [apiBase, getJson, canView]);
   useEffect(() => {
     if (!api.services.getMe) return;
     api.services.getMe().then((r) => { if (r && r.ok && r.data && r.data.user) setCurrentUser(r.data.user); }).catch(() => {});
@@ -686,7 +698,7 @@ function ProtocolosList({ api, mode }) {
     writeUrlParam('detail', '');
   }, []);
 
-  // Deep-link do protocolo aberto (Plano 24): /attendances?detail=<id> abre e MANTÉM o
+  // Deep-link do protocolo aberto (Plano 24): /protocolos?detail=<id> abre e MANTÉM o
   // param na URL (compartilhável — antes era one-shot). Lido no mount E em popstate (é
   // assim que o "Resolver e ir ao protocolo" chega, via pushState no extends.js). Sync
   // bidirecional: param novo → abre; param ausente com detalhe aberto (voltar) → fecha.
@@ -779,6 +791,7 @@ function ProtocolosList({ api, mode }) {
     if (atendResolveDefs.length) {
       const picked = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
+          defaultAssignee=${currentUser && currentUser.id}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return false; // cancelou → não finaliza
       fields = picked.fields || {}; // onOk devolve { fields, custom_attributes, goTo }
@@ -834,6 +847,7 @@ function ProtocolosList({ api, mode }) {
   }
 
   async function applyDrop(row, colId) {
+    if (!canEdit) return;                            // sem permissão de editar → não muta
     if (!row || !grouping.onDrop) return;            // modo só-leitura (data) não muta
     if (grouping.columnIdOf(row) === colId) return;  // já está na coluna
     setActionMsg(null);
@@ -939,7 +953,7 @@ function ProtocolosList({ api, mode }) {
         ${canCreateViews ? html`<button title="Novo agrupamento" onClick=${() => openViewEditor(null)}
           class="px-2.5 py-1 text-[12px] rounded-lg border border-dashed border-wa-border text-wa-text hover:bg-wa-hover">+ Nova</button>` : null}
       </div>
-      ${mode === 'kanban' && grouping.onDrop ? html`<span class="text-[11px] text-wa-secondary">Arraste um card para outra coluna (pede confirmação).</span>` : null}
+      ${mode === 'kanban' && grouping.onDrop && canEdit ? html`<span class="text-[11px] text-wa-secondary">Arraste um card para outra coluna (pede confirmação).</span>` : null}
       ${mode === 'kanban' ? html`<span class="text-[11px] text-wa-secondary">Arraste o título de uma coluna para reordenar (salve para manter).</span>` : null}
       ${mode === 'kanban' && grouping.unavailable ? html`<span class="text-[11px] text-amber-600">Atributo da visualização indisponível (foi removido).</span>` : null}
     </div>`;
@@ -972,13 +986,22 @@ function ProtocolosList({ api, mode }) {
                 class="flex-1 min-h-[120px] rounded-lg p-2 flex flex-col gap-2 border border-dashed transition-colors ${isTarget ? 'ring-2 ring-wa-teal bg-wa-hover border-wa-teal' : 'bg-wa-bg border-wa-border'}">
                 ${cards.length === 0 ? html`<div class="text-[12px] text-wa-secondary text-center py-4">Vazio</div>`
                   : cards.map((r) => html`<${KanbanCard} key=${r.id} row=${r}
-                      draggedRef=${draggedRef} dragRef=${dragRef} canDrag=${!!grouping.onDrop}
+                      draggedRef=${draggedRef} dragRef=${dragRef} canDrag=${!!grouping.onDrop && canEdit}
                       onClearDrop=${() => setDropCol(null)} onOpen=${() => openDetail(r.id)} />`)}
               </div>
             </div>`;
         })}
       </div>
     </div>`;
+
+  // Sem permissão de VER → tela vazia com aviso (nenhum dado é carregado; ver os
+  // useEffect gated por canView acima). P48: esconder o conteúdo, não desabilitar.
+  if (!canView) {
+    return html`
+      <div class="p-6 text-[13px] text-wa-secondary">
+        Você não tem permissão para ver os protocolos.
+      </div>`;
+  }
 
   return html`
     <div>
@@ -1024,14 +1047,26 @@ function ProtocolosList({ api, mode }) {
             value=${assigneeFilter == null ? '' : String(assigneeFilter)}
             onChange=${(v) => setAssigneeFilter(v === '' ? null : +v)} placeholder="Todos" float=${true} />
         </div>` : null}
+        ${availFilter('canal') ? html`
+        <div class="w-[180px]">
+          <label class="block text-[12px] text-wa-secondary mb-1">Canal</label>
+          <${OptionListSelect} options=${channels}
+            value=${attrFilters['canal'] || ''}
+            onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n['canal'] = v; else delete n['canal']; return n; })}
+            placeholder="Todos" float=${true} />
+        </div>` : null}
         ${[...filterFields.map((d) => ({ fk: `pf:${d.scope}:${d.key}`, label: d.label, options: d.options })),
            ...contactAttrDefs.map((d) => ({ fk: `cattr:${d.key}`, label: d.label, options: d.options }))]
           .filter((d) => availFilter(d.fk)).map((d) => html`
           <div key=${d.fk} class="w-[180px]">
             <label class="block text-[12px] text-wa-secondary mb-1 truncate" title=${d.label}>${d.label}</label>
-            <${OptionListSelect} options=${d.options || []} value=${attrFilters[d.fk] || ''}
-              onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })}
-              placeholder="Todos" float=${true} />
+            ${(d.options && d.options.length)
+              ? html`<${OptionListSelect} options=${d.options} value=${attrFilters[d.fk] || ''}
+                  onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })}
+                  placeholder="Todos" float=${true} />`
+              : html`<input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text"
+                  value=${attrFilters[d.fk] || ''} placeholder="Filtrar…"
+                  onInput=${(e) => setAttrFilters((s) => { const n = { ...s }; const v = e.target.value; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })} />`}
           </div>`)}
         ${availFilter('q') ? html`
         <div class="flex-1 min-w-[180px]">
@@ -1067,8 +1102,9 @@ function ProtocolosList({ api, mode }) {
         : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
         : mode === 'kanban' ? kanbanView : listaView}
 
-      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs} attrDefs=${coreAttrDefs}
-        protoDefs=${cols} warning=${detailWarning} api=${api}
+      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs}
+        protoDefs=${cols} warning=${detailWarning} api=${api} canEdit=${canEdit}
+        defaultAssignee=${currentUser && currentUser.id}
         onClose=${closeDetail}
         onChanged=${load} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
@@ -1076,8 +1112,7 @@ function ProtocolosList({ api, mode }) {
 
 // Card do kanban: draggable (altera estado ao soltar) + clique abre o detalhe. A CAPA
 // mostra só os dados próprios do protocolo (cliente, datas, atendente, status) — os
-// rótulos do plugin e os atributos personalizados ficam no DETALHE (modal), junto da
-// atendimento a que pertencem.
+// rótulos do plugin ficam no DETALHE (modal), junto da atendimento a que pertencem.
 function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = true }) {
   return html`
     <div draggable=${canDrag}
@@ -1106,11 +1141,13 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
 // depois) e "Finalizar protocolo" só habilita com os obrigatórios preenchidos. Se o
 // protocolo já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
 // atendimentos (histórico, read-only) fica abaixo.
-function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warning = '',
-                      api, onClose, onChanged, onFinalize }) {
+function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
+                      defaultAssignee = null, api, canEdit = true, onClose, onChanged, onFinalize }) {
   const at = data.protocolo || {};
   const atendimentos = data.atendimentos || [];
-  const fechado = at.status === 'fechado';
+  const fechado = at.status === 'fechado';                  // status REAL (rótulo do topo)
+  // Form read-only quando fechado OU sem permissão de editar → sem Salvar/Finalizar.
+  const readOnly = fechado || !canEdit;
 
   // Estado local dos campos do protocolo, pré-preenchido (extras — obs incluso — em
   // at.fields; o rótulo Atendente vem do assignee nativo). Editável enquanto aberto; serve
@@ -1118,7 +1155,13 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of protoDefs) {
-      const cur = d.type === 'atendente' ? at.assignee_user_id : (at.fields || {})[d.key];
+      // Atendente: no protocolo ABERTO (editável) o padrão é SEMPRE o usuário conectado (quem
+      // finaliza), igual ao "Resolver atendimento" — o assignee salvo do protocolo pode estar
+      // defasado e não deve pré-selecionar outra pessoa. Em protocolo já fechado (só leitura) o
+      // valor real é mostrado via at.assignee_name, então aí usamos o assignee salvo.
+      let cur = d.type === 'atendente'
+        ? (readOnly ? at.assignee_user_id : defaultAssignee)
+        : (at.fields || {})[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
       else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
         ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
@@ -1131,18 +1174,15 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
   const [msg, setMsg] = useState(null);          // {text, error}
   const [linkCopied, setLinkCopied] = useState(false);
 
-  // Copia o link compartilhável deste protocolo (/attendances?detail=<id>) — plano 24.
-  const copyLink = () => copyText(`${location.origin}/attendances?detail=${at.id}`,
+  // Copia o link compartilhável deste protocolo (/protocolos?detail=<id>) — plano 24.
+  const copyLink = () => copyText(`${location.origin}/protocolos?detail=${at.id}`,
     () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); });
 
   const missing = protoDefs.filter((d) => d.required && !isFilledProto(d, vals[d.key]));
 
   // PUT parcial dos campos do protocolo (obrigatório só é exigido ao FECHAR).
-  const putFields = () => fetch(`${api.apiBase}/protocolos/${at.id}/fields`, {
-    method: 'PUT',
-    headers: { ...api.services.authHeaders(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields: vals }),
-  }).then((r) => r.json());
+  // Via api.http: status-aware + toast de 403 (some o falso "sucesso").
+  const putFields = () => api.http.put(`/protocolos/${at.id}/fields`, { fields: vals });
 
   const save = async () => {
     setSaving(true); setMsg(null);
@@ -1209,7 +1249,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
             ${warning}
           </div>` : null}
 
-        ${fechado ? html`
+        ${readOnly ? html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do protocolo</div>
             ${readOnlyInfo.length ? html`
@@ -1228,7 +1268,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
                 onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
             </div>
             ${missing.length ? html`
-              <div class="mt-3 text-[12px] text-wa-secondary">
+              <div class="mt-4 px-3 py-2.5 rounded-md bg-red-500/15 border border-red-500 text-red-500 text-[14px] font-semibold">
                 Preencha os campos obrigatórios para finalizar: ${missing.map((d) => d.label || d.key).join(', ')}.
               </div>` : null}
             ${msg ? html`
@@ -1245,7 +1285,7 @@ function DetailModal({ data, fieldDefs = [], attrDefs = [], protoDefs = [], warn
 
         <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
         <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat.</div>
-        <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs} attrDefs=${attrDefs}
+        <${AtendimentosTable} atendimentos=${atendimentos} fieldDefs=${fieldDefs}
           storageKey="whatsbot_proto_atend_cols_modal" onRowClick=${openAtend} />
       </div>
     </div>`;
@@ -1275,19 +1315,33 @@ function ConfirmDialog({ message, onOk, onCancel, okLabel = 'Confirmar', danger 
 // mais aqui — são salvos a partir dos filtros ATUAIS da barra pelos botões "Salvar filtros
 // pessoal/equipe" acima da barra. Montar com key=${view.id} reinicializa o estado por aba.
 function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, authHeaders, onSaved }) {
-  // Filtros por CAMPO DE PROTOCOLO (pf:<scope>:<key>) + ATRIBUTO DE CONTATO (cattr:<key>).
-  const attrFilterKeys = [
-    ...(filterFields || []).map((d) => [`pf:${d.scope}:${d.key}`, d.label]),
-    ...(contactAttrDefs || []).map((d) => [`cattr:${d.key}`, d.label]),
-  ];
-  // Tipos de filtro que podem existir na aba. null na view = TODOS (à prova de futuro).
-  const ALL_FILTER_KEYS = ['status', 'atendente', 'q', 'periodo', ...attrFilterKeys.map(([k]) => k)];
+  // Categorias do checklist (SÓ apresentação — available_filters continua array plano de chaves):
+  // Nativas + campos de PROTOCOLO (pf:protocolo:) + de ATENDIMENTO (pf:atendimento:) + de CONTATO
+  // (cattr:). "Outros" (defensivo) captura escopos de campo desconhecidos p/ nada sumir do checklist.
+  const CATEGORIES = [
+    { key: 'nativas', label: 'Nativas', items: [
+      ['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
+      ['canal', 'Canal'],
+    ] },
+    { key: 'protocolos', label: 'Protocolos', items:
+      (filterFields || []).filter((d) => d.scope === 'protocolo').map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
+    { key: 'atendimentos', label: 'Atendimentos', items:
+      (filterFields || []).filter((d) => d.scope === 'atendimento').map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
+    { key: 'contato', label: 'Contato', items:
+      (contactAttrDefs || []).map((d) => [`cattr:${d.key}`, d.label]) },
+    { key: 'outros', label: 'Outros', items:
+      (filterFields || []).filter((d) => d.scope !== 'protocolo' && d.scope !== 'atendimento')
+        .map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
+  ].filter((c) => c.items.length);
+  // Tipos de filtro que podem existir na aba (flatten das categorias). null na view = TODOS.
+  const ALL_FILTER_KEYS = CATEGORIES.flatMap((c) => c.items.map(([k]) => k));
   const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
   const [open, setOpen] = useState(false);
   const [availSet, setAvailSet] = useState(() => new Set(initAvail == null ? ALL_FILTER_KEYS : initAvail));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [okMsg, setOkMsg] = useState('');
+  const [catView, setCatView] = useState('todas');  // categoria ativa do checklist ('todas' = agrupado com cabeçalhos)
   const isAvail = (key) => availSet.has(key);
   const toggleAvail = (key) => { setOkMsg(''); setAvailSet((s) => {
     const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n;
@@ -1312,6 +1366,12 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
     } catch (_) { setErr('Falha ao salvar.'); setSaving(false); }
   };
 
+  // Renderiza os checkboxes de uma lista [[key,label],...] (reusado nas duas vistas do checklist).
+  const cbox = (items) => items.map(([key, lbl]) => html`
+    <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
+      <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
+    </label>`);
+
   return html`
     <div class="mb-3 rounded-lg bg-wa-panel border border-wa-border">
       <button type="button" onClick=${() => setOpen((o) => !o)}
@@ -1323,13 +1383,21 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
       <div class="px-3 pb-3 pt-3 border-t border-wa-border">
         <span class="block text-[12px] text-wa-secondary font-medium mb-1">Filtros disponíveis nesta aba</span>
         <div class="text-[11px] text-wa-secondary mb-2">Só os tipos de filtro marcados aparecem na barra de filtros deste agrupamento.</div>
-        <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
-          ${[['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
-             ...attrFilterKeys].map(([key, lbl]) => html`
-            <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
-            </label>`)}
+        <!-- Seletor de categoria: "Todas" mostra os grupos com cabeçalho; cada aba isola uma categoria. -->
+        <div class="flex flex-wrap items-center gap-1.5 mb-3">
+          ${[['todas', 'Todas'], ...CATEGORIES.map((c) => [c.key, c.label])].map(([k, lbl]) => html`
+            <button key=${k} type="button" onClick=${() => setCatView(k)}
+              class="px-2.5 py-1 rounded-md text-[12px] border ${catView === k ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
         </div>
+        ${catView === 'todas'
+          ? CATEGORIES.map((c, i) => html`
+            <div key=${c.key} class="${i > 0 ? 'mt-3 pt-3 border-t border-wa-border' : ''}">
+              <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1.5">${c.label}</div>
+              <div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">${cbox(c.items)}</div>
+            </div>`)
+          : html`<div class="flex flex-wrap gap-x-4 gap-y-1.5 text-[13px] text-wa-text">
+              ${cbox((CATEGORIES.find((c) => c.key === catView) || { items: [] }).items)}
+            </div>`}
         ${err ? html`<div class="mt-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}
         <div class="flex flex-wrap items-center gap-2 mt-3">
           <button type="button" onClick=${() => { setOkMsg(''); setAvailSet(new Set(ALL_FILTER_KEYS)); }}

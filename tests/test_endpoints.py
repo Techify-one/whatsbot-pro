@@ -1446,6 +1446,7 @@ from plugins.manifest import _parse_rbac as _parse_rbac
 from plugins.context import plugin_permission as _plugin_permission
 from plugins import events as _events
 from server import authz as _authz
+from server.deps import PermissionDeniedError as _PermissionDeniedError
 from fastapi import HTTPException as _HTTPException
 
 # 1) Manifest: parse + validate the rbac: block (invalid keys dropped).
@@ -1504,12 +1505,13 @@ def _freq(user=None, path="/api/plugins/lembretes/items/1"):
 # legacy/open (no user) -> allowed (no raise)
 _asyncio.run(_dep(_freq(user=None)))
 check("plugin_permission -> legacy/open allowed", True)
-# logged-in user WITHOUT the perm -> 403
+# logged-in user WITHOUT the perm -> raises PermissionDeniedError (rendered as the
+# unified {"ok": false, "error": "Permissão negada."} 403 envelope by the app handler).
 _denied = False
 try:
     _asyncio.run(_dep(_freq(user={"id": _pu_id})))
-except _HTTPException as e:
-    _denied = e.status_code == 403
+except _PermissionDeniedError:
+    _denied = True
 check("plugin_permission -> user without perm -> 403", _denied)
 # grant the perm to that user (custom) -> allowed
 _urepo.set_custom_permissions(_pu_id, ["plugin.lembretes.delete"])
@@ -1894,9 +1896,38 @@ check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.g
 _, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
 check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
 check("_missing_required revalida tipo+required no fechamento",
-      _alogic._missing_required("protocolo", {"cursos": [], "obs": ""}) is not None)
+      _alogic._missing_required("protocolo", {"cursos": [], "obs": "", "atendente": 1}) is not None)
 check("_missing_required ok quando preenchido",
-      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": ""}) is None)
+      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": "", "atendente": 1}) is None)
+
+# 9a-bis) Atendente é rótulo FIXO + OBRIGATÓRIO nos 2 escopos, não-criável/removível como extra.
+for _sc in ("protocolo", "atendimento"):
+    _ats = [d for d in _alogic.get_field_defs(_sc) if d.get("type") == "atendente"]
+    check(f"atendente fixo -> existe exatamente 1 em '{_sc}'", len(_ats) == 1)
+    check(f"atendente fixo -> fixed+obrigatório em '{_sc}'",
+          _ats and _ats[0].get("fixed") is True and _ats[0].get("required") is True
+          and _ats[0].get("key") == "atendente")
+# Tentar CRIAR um campo atendente extra é ignorado (não vira extra; segue só o fixo).
+_atend_defs_before = _alogic.get_extra_defs("atendimento")  # p/ restaurar ao fim
+_alogic.set_field_defs("atendimento", [
+    {"key": "resp", "label": "Responsável", "type": "atendente"},
+    {"key": "obs", "label": "Observações", "type": "textarea"},
+])
+_at_after = [d for d in _alogic.get_field_defs("atendimento") if d.get("type") == "atendente"]
+check("criar atendente extra -> ignorado (segue 1 só, fixo)",
+      len(_at_after) == 1 and _at_after[0].get("fixed") is True)
+check("criar atendente extra -> não persistiu como extra",
+      all(d.get("type") != "atendente" for d in _alogic.get_extra_defs("atendimento")))
+# normalize_values NÃO exige atendente (coerção ok sem ele); o required é gate de fechamento.
+_cae, _eae = _alogic.normalize_values("atendimento", {"obs": "x"})
+check("normalize_values -> não bloqueia por atendente ausente", _eae is None)
+# _missing_required exige atendente (sem assignee -> erro; com -> ok).
+check("_missing_required atendimento -> sem atendente bloqueia",
+      _alogic._missing_required("atendimento", {"obs": "x"}) is not None)
+check("_missing_required atendimento -> com atendente ok",
+      _alogic._missing_required("atendimento", {"obs": "x", "atendente": 1}) is None)
+# Restaura os defs de atendimento como estavam antes deste bloco.
+_alogic.set_field_defs("atendimento", _atend_defs_before)
 
 # 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
 # (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).

@@ -101,17 +101,23 @@ def now() -> float:
 
 
 # ── Rótulos FIXOS ────────────────────────────────────────────────────────────
-# Não há mais rótulos FIXOS: Observações virou um rótulo EXTRA comum (editável/removível),
-# semeado por DEFAULT_EXTRA_DEFS com id estável "fixed_obs". ID, Atendente, Início e Fim NÃO
-# são rótulos — vêm automáticos nas colunas (PK/FK, opened_at/started_at, closed_at/ended_at,
-# assignee_name) e seguem no cabeçalho/tabela. FIXED_FIELD_DEFS fica vazio (mantido só p/ compat
-# de get_fixed_defs/FIXED_KEYS).
+# O ÚNICO rótulo FIXO é "atendente" (nos DOIS escopos): não é criável/editável/removível
+# e NÃO aparece na tela de Configurações — só nos formulários de "Resolver atendimento" e
+# "Finalizar protocolo", onde é SEMPRE obrigatório (deve-se escolher um atendente) e já vem
+# pré-selecionado com o usuário conectado. Seu valor liga ao atendente NATIVO (assignee) do
+# protocolo/conversa — não é armazenado como extra. ID, Início e Fim NÃO são rótulos (vêm
+# automáticos nas colunas); Observações é um EXTRA default (editável/removível).
+def _atendente_fixed_def() -> dict:
+    return {"id": "fixed_atendente", "key": "atendente", "label": "Atendente",
+            "type": "atendente", "options": [], "required": True,
+            "regex_pattern": "", "regex_cue": "", "multiple": False, "fixed": True}
+
 FIXED_FIELD_DEFS: dict[str, list[dict]] = {
-    "protocolo": [],
-    "atendimento": [],
+    "protocolo": [_atendente_fixed_def()],
+    "atendimento": [_atendente_fixed_def()],
 }
 
-# Keys reservadas pelos fixos por escopo (vazio agora — nenhuma key é reservada).
+# Keys reservadas pelos fixos por escopo ({"atendente"} nos dois).
 FIXED_KEYS = {scope: {d["key"] for d in defs} for scope, defs in FIXED_FIELD_DEFS.items()}
 
 # Extras default por escopo. Valem até o operador editar na tela de config.
@@ -154,14 +160,15 @@ def _new_def_id() -> str:
 
 
 def get_fixed_defs(scope: str) -> list[dict]:
-    """Rótulos fixos do escopo. O ÚNICO atributo editável é `required` (persistido em
-    config) — label/tipo/opções são imutáveis. Required = "deve estar sempre preenchido"
-    (checkbox é exceção); para os fixos readonly é checado contra a coluna no fechamento."""
+    """Rótulos fixos do escopo. "atendente" é o único fixo hoje: label/tipo imutáveis e
+    SEMPRE obrigatório (não editável na UI). Se um dia houver outro fixo, seu `required`
+    viria do config (`_fixed_required_key`)."""
     req = set(config_repo.get(_fixed_required_key(scope), []) or [])
     out = []
     for d in FIXED_FIELD_DEFS.get(scope, []):
         nd = dict(d)
-        nd["required"] = nd["key"] in req
+        # Atendente é sempre obrigatório; demais fixos (nenhum hoje) leriam do config.
+        nd["required"] = True if nd.get("type") == "atendente" else (nd["key"] in req)
         out.append(nd)
     return out
 
@@ -176,6 +183,8 @@ def get_extra_defs(scope: str) -> list[dict]:
         raw = [dict(d) for d in DEFAULT_EXTRA_DEFS.get(scope, [])]
     out: list[dict] = []
     for d in raw:
+        if (d or {}).get("type") == "atendente":
+            continue  # "atendente" agora é rótulo FIXO — ignora extras legados
         nd = dict(d)
         nd.setdefault("id", "def_" + str(nd.get("key") or ""))
         nd.setdefault("type", "text")
@@ -246,17 +255,13 @@ def set_field_defs(scope: str, defs: list) -> list[dict]:
     out: list[dict] = []
     seen_keys: set[str] = set()
     seen_ids: set[str] = set()
-    seen_atendente = False
     for d in defs:
         key = str((d or {}).get("key") or "").strip()
         if key in fixed_keys or (d or {}).get("fixed"):
             continue  # rótulo fixo não é gerenciado aqui (só o `required` acima)
+        if (d or {}).get("type") == "atendente":
+            continue  # "atendente" é rótulo FIXO — nunca é criado/persistido como extra
         nd = _normalize_extra_def(d)
-        if nd["type"] == "atendente":
-            # Só UM rótulo Atendente por escopo (há um só atendente nativo).
-            if seen_atendente:
-                raise ValueError("Só é permitido um campo do tipo Atendente por escopo.")
-            seen_atendente = True
         if nd["key"] in seen_keys:
             raise ValueError(f"Campo duplicado: '{nd['key']}'")
         if nd["id"] in seen_ids:
@@ -353,10 +358,10 @@ def _coerce_extra(d: dict, value) -> tuple:
 
 def normalize_values(scope: str, values: dict) -> tuple[dict, str | None]:
     """Mantém só chaves editáveis (não-readonly), coage/valida cada valor por tipo
-    (ver ``_coerce_extra``) e exige os obrigatórios EDITÁVEIS (obs + extras). Os fixos
-    readonly (atendente/início/…) são checados contra a coluna no fechamento (ver
-    ``_missing_required``), pois não vêm no formulário. checkbox conta sempre como
-    preenchido; checkboxes exige ao menos uma opção."""
+    (ver ``_coerce_extra``) e exige os obrigatórios EDITÁVEIS (obs + extras). O rótulo
+    fixo "atendente" é COAGIDO (p/ rotear o assignee) mas seu `required` NÃO é checado
+    aqui — é gate de FECHAMENTO/RESOLVER (``_missing_required`` / ``_check_before_status``)
+    e do frontend. checkbox conta sempre como preenchido; checkboxes exige ≥1 opção."""
     defs = {d["key"]: d for d in get_field_defs(scope) if not d.get("readonly")}
     values = values or {}
     clean: dict = {}
@@ -366,6 +371,8 @@ def normalize_values(scope: str, values: dict) -> tuple[dict, str | None]:
             return clean, err
         clean[key] = cv
     for key, d in defs.items():
+        if d.get("type") == "atendente":
+            continue  # required do atendente é gate de fechamento + frontend, não do save
         if d.get("required") and not _is_filled_extra(d, clean.get(key)):
             return clean, f"Campo obrigatório não preenchido: {d.get('label', key)}"
     return clean, None
