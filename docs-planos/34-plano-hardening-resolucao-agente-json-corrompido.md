@@ -132,11 +132,11 @@ WAVE 4   F6(demais colunas TEXT→JSONB)      🟢 opcional, adiável
 **Pronto quando:** os testes do helper passam; `venv/bin/python -m pytest tests/ -q` (Postgres) segue verde; nenhum call site existente regride (os que hoje recebem dict/list continuam idênticos).
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-06)
+- **O que foi feito:** `db/repositories/_mapping.py` — `coerce_json` trocou o `json.loads` único por um laço limitado (`_MAX_JSON_UNWRAP=5`) que desembrulha enquanto o resultado for `str` reparseável; se ao fim ainda for `str`, `logger.warning` (com trecho ≤80 chars) + retorna `default`. Assinatura preservada. Novo `tests/test_coerce_json.py` (14 checks, puro).
+- **Como foi feito / decisões:** Refatorado o corpo para `if not isinstance(str): return value` cedo (passthrough de dict/list/número/bool intacto), depois o laço. Decisão P2 aplicada: nenhum call site espera string final (grep confirmou — `tool_repo` `[]`, `plugin_repo` `[]`, `contact_query` `{}`, `message_repo.reactions` `{}`/`None`, `agent_repo` `{}`/`None`); `ai_variables.value` (polimórfica) **não** usa `coerce_json` hoje, então número/bool via `'42'`/`'true'` seguem decodificando corretamente. Warning novo só dispara em dado genuinamente corrompido — o que é desejável (torna a sujeira visível).
+- **Problemas / pendências:** Nenhum. Comportamento mudado para `'"hi"'`/`'texto'`: antes `coerce_json` devolvia a `str`; agora devolve `default`+warning — sem consumidor afetado (P2). **Interação importante descoberta:** como `agent_repo._row_to_dict` já aplica `coerce_json` a `model_config`, **F1 sozinho conserta o crash de `model_config`** — o duplo-encoding recuperável volta ao objeto real (modelo real restaurado, melhor que o default) e o irrecuperável cai em `{}`→`DEFAULT_MODEL`. Por isso a caracterização F0 (que assertava "levanta") deixou de valer após F1: o `tests/test_agent_json_hardening.py` foi atualizado **neste mesmo commit** para asseverar o comportamento pós-conserto (degrada, não levanta). O commit F0 segue como snapshot verde do crash no código antigo. F2 cobre os caminhos de raise que sobram (agente ausente/desativado + `except` genérico) e `hooks_config`/`routing_targets`.
+- **Verificação:** `tests/test_coerce_json.py` → 14 passed. Regressões verdes: `test_agent_routing` (29), `test_dynamic_registry`, `test_hooks`, `test_routing_engine`, `test_model_factory`, `test_quick_replies_edge`, `test_audit`, e `pytest tests/endpoints` (34 passed — consumidores message/contact/tool/plugin de `coerce_json`).
 
 ---
 

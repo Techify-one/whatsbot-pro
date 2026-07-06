@@ -1,12 +1,23 @@
 """Hardening da resolução de agentes contra JSON corrompido/duplo-codificado.
 
-Plano 34 (Track A). Caracteriza — e depois trava — o comportamento quando uma
-linha de ``ai_agents`` guarda um campo JSON **duplo-codificado** (uma string JSON
-dentro de outra), a corrupção que derrubava 100% das conversas de IA.
+Plano 34 (Track A). Uma linha de ``ai_agents`` com um campo JSON **duplo-codificado**
+(uma string JSON dentro de outra) derrubava 100% das conversas de IA:
+``build_for_contact`` fazia ``dict(agent["model_config"])`` sobre a *string* interna
+e estourava, reclassificado como ``AgentResolutionError`` ("banco quebrado") → nada
+era enviado ao cliente.
 
 Repro read-only do QA (§2.5 do plano): ``SELECT model_config FROM ai_agents
 WHERE agent_key='default'`` cujo ``repr`` começa com ``"`` = a coluna TEXT guarda
 uma string JSON (dupla-codificação), não o objeto.
+
+Histórico de fases:
+- **F0** caracterizou o crash ANTES do conserto: com ``coerce_json`` de 1 camada,
+  ``build_for_contact`` **levantava** ``AgentResolutionError`` (ver commit F0).
+- **F1** (``coerce_json`` N-camadas) faz o campo duplo desembrulhar já no repo, então
+  ``model_config`` recuperável volta ao objeto real e o turno degrada em vez de
+  estourar. Este arquivo passou a asseverar o comportamento pós-conserto.
+- **F2** cobre o piso de emergência + ``hooks_config``/``routing_targets``.
+- **F4** cobre o caminho end-to-end e o caminho feliz.
 
     venv/bin/python tests/test_agent_json_hardening.py
 """
@@ -54,18 +65,31 @@ class FakeContact:
         self.is_group = False
 
 
-def _corrupt_field(agent_key: str, column, python_value) -> str:
-    """Grava um valor DUPLO-codificado na coluna TEXT (uma string JSON dentro de
-    outra) e devolve o texto cru gravado, simulando a corrupção original."""
-    double = json.dumps(json.dumps(python_value, ensure_ascii=False),
-                        ensure_ascii=False)
+def _double_encode(python_value) -> str:
+    """Texto DUPLO-codificado (uma string JSON dentro de outra)."""
+    return json.dumps(json.dumps(python_value, ensure_ascii=False),
+                      ensure_ascii=False)
+
+
+def _write_raw(agent_key: str, column: str, raw_text: str) -> None:
+    """Grava um texto cru na coluna TEXT e invalida o cache do registry."""
     with get_engine().begin() as conn:
         conn.execute(
             update(ai_agents).where(ai_agents.c.agent_key == agent_key)
-            .values({column: double})
+            .values({column: raw_text})
         )
     dynamic_registry.invalidate()
-    return double
+
+
+def _reset_default_clean() -> None:
+    """Restaura a linha `default` para um model_config limpo."""
+    agent_repo.save(
+        agent_repo.DEFAULT_AGENT_KEY, display_name="Agente padrão",
+        prompt=agent_factory.DEFAULT_SYSTEM_PROMPT,
+        model_config={"model": agent_factory.DEFAULT_MODEL},
+        tool_names=None, enabled=True,
+    )
+    dynamic_registry.invalidate()
 
 
 # ── Setup: agente default limpo + contato ────────────────────────────────
@@ -80,25 +104,44 @@ print("baseline (linha limpa):")
 spec = agent_factory.build_for_contact(handler, contact)
 check("linha limpa resolve o default",
       spec is not None and spec.agent_key == agent_repo.DEFAULT_AGENT_KEY)
+check("linha limpa usa o modelo default",
+      spec.model == agent_factory.DEFAULT_MODEL)
 
-# ── F0: caracteriza o crash atual em model_config duplo-codificado ────────
-# F0: caracteriza o bug; F4 inverte para NÃO levantar (IA responde no default).
-print("\nF0 — model_config duplo-codificado (crash atual):")
-raw = _corrupt_field(agent_repo.DEFAULT_AGENT_KEY, "model_config", {"model": "x/y"})
-# Repro read-only do QA: o texto gravado começa com aspas => dupla-codificação.
-check("model_config gravado começa com '\"' (duplo)", raw.startswith('"'))
+# ── F1: model_config duplo-codificado RECUPERÁVEL → desembrulha no repo ────
+# F0 caracterizou o crash pré-conserto (ver commit F0). Com o unwrap N-camadas,
+# o objeto real é recuperado e build_for_contact NÃO levanta.
+print("\nF1 — model_config duplo-codificado recuperável:")
+raw = _double_encode({"model": "x/y"})
+check("texto gravado começa com '\"' (duplo)", raw.startswith('"'))
+_write_raw(agent_repo.DEFAULT_AGENT_KEY, "model_config", raw)
 
-# O consumidor lê a linha e vê uma STRING onde esperava dict.
 _row = agent_repo.get(agent_repo.DEFAULT_AGENT_KEY)
-check("agent_repo devolve model_config como str (decode de 1 camada)",
-      isinstance(_row.get("model_config"), str))
+check("agent_repo desembrulha model_config para dict (N-camadas)",
+      isinstance(_row.get("model_config"), dict))
 
 raised = False
 try:
-    agent_factory.build_for_contact(handler, contact)
+    spec = agent_factory.build_for_contact(handler, contact)
 except agent_factory.AgentResolutionError:
     raised = True
-check("build_for_contact LEVANTA AgentResolutionError (crash de hoje)", raised)
+    spec = None
+check("build_for_contact NÃO levanta (degrada)", not raised)
+check("model real recuperado do duplo-encoding", spec is not None and spec.model == "x/y")
+
+# ── F1: model_config IRRECUPERÁVEL → cai no default, ainda sem raise ───────
+print("\nF1 — model_config irrecuperável (string pura duplo-codificada):")
+_write_raw(agent_repo.DEFAULT_AGENT_KEY, "model_config", _double_encode("lixo solto"))
+raised = False
+try:
+    spec = agent_factory.build_for_contact(handler, contact)
+except agent_factory.AgentResolutionError:
+    raised = True
+    spec = None
+check("build_for_contact NÃO levanta (degrada p/ default)", not raised)
+check("cai no DEFAULT_MODEL quando não recupera",
+      spec is not None and spec.model == agent_factory.DEFAULT_MODEL)
+
+_reset_default_clean()
 
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
