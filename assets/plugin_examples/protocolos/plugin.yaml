@@ -27,7 +27,7 @@ migrations: migrations
 frontend_extends: /plugins/protocolos/static/extends.js
 frontend_api_version: "1.0"
 screens:
-  # Tela de CONFIGURAÇÃO (config:true): field-builder dos rótulos + Avaliação no modal
+  # Tela de CONFIGURAÇÃO (config:true): field-builder dos rótulos + Avaliação + Geral no modal
   # "Configurar" do card. Filtrada fora do GearMenu; a lista de protocolos vive no
   # override da aba Protocolos.
   - id: protocolos-config
@@ -47,6 +47,6 @@ rbac:
     - { key: create_views, label: "Criar novas visualizações (agrupamentos) no Kanban" }
     - { key: resolve, label: "Fechar/reabrir protocolo e resolver atendimento" }
     - { key: assign, label: "Atribuir/reatribuir protocolos" }
-    - { key: config, label: "Configurar campos e avaliação do plugin" }
+    - { key: config, label: "Configurar campos, avaliação e opções gerais do plugin" }
     - { key: delete, label: "Excluir protocolos" }
 dependencies: []

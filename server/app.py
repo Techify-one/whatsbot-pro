@@ -456,7 +456,7 @@ def create_app(
         # English canonical routes + legacy PT aliases (kept so a hard reload on an
         # old bookmark still serves index.html; the frontend rewrites them to the
         # English path via redirectLegacyPath).
-        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
+        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/protocolos", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
         | {"/contatos", "/painel", "/atendimentos", "/auditoria"}
         | _PLUGIN_SPA_PATHS
     )
@@ -584,6 +584,8 @@ def create_app(
     @app.get("/runtime")
     @app.get("/users")
     @app.get("/conversations")
+    # /protocolos = path canônico da aba do plugin protocolos; /attendances é alias.
+    @app.get("/protocolos")
     @app.get("/attendances")
     @app.get("/audit")
     @app.get("/ai")
