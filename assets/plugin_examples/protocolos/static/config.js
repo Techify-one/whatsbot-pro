@@ -1,7 +1,8 @@
-// Tela de configuração (screen config:true) do plugin Protocolos. Três abas:
+// Tela de configuração (screen config:true) do plugin Protocolos. Quatro abas:
 //  - "Protocolo" e "Resolver atendimento": field-builder dos rótulos (fixos + extras).
 //  - "Avaliação": os 2 links (título+link) enviados ao FINALIZAR o protocolo
 //    (1 normal → WhatsApp, 1 privado → painel), com assignee_id + id_protocol na URL.
+//  - "Configurações gerais": toggles de comportamento do plugin.
 // Field-builder salva via PUT /field-defs; a aba Avaliação via PUT /protocol-config.
 // Remover e Salvar pedem confirmação. Renderizada dentro do modal "Configurar".
 
@@ -28,8 +29,8 @@ const TYPES = [
   ['select', 'Lista de seleção'], ['checkboxes', 'Caixa de seleção'],
   ['checkbox', 'Caixa (sim/não)'],
 ];
-// Abas: as 2 primeiras são escopos de rótulos; a 3ª é a config de avaliação.
-const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação']];
+// Abas: as 2 primeiras são escopos de rótulos; as demais são configs do plugin.
+const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação'], ['geral', 'Configurações gerais']];
 const FIELD_TABS = ['protocolo', 'atendimento'];
 
 function slug(s) {
@@ -46,6 +47,8 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const [confirmBox, setConfirmBox] = useState(null); // { message, onYes }
   const [proto, setProto] = useState(null);           // config de avaliação ao finalizar
   const [protoMsg, setProtoMsg] = useState('');
+  const [general, setGeneral] = useState(null);       // configurações gerais do plugin
+  const [generalMsg, setGeneralMsg] = useState('');
 
   const load = useCallback(async (sc) => {
     setLoading(true); setMsg('');
@@ -61,6 +64,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   useEffect(() => { if (FIELD_TABS.includes(tab)) load(tab); }, [tab, load]);
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' } };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true };
   const loadProto = useCallback(async () => {
     try {
       const d = await reqJson(`${apiBase}/protocol-config`, { headers: authHeaders() });
@@ -68,6 +72,14 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     } catch (_) { setProto(PROTO_EMPTY); }
   }, [apiBase]);
   useEffect(() => { loadProto(); }, [loadProto]);
+
+  const loadGeneral = useCallback(async () => {
+    try {
+      const d = await reqJson(`${apiBase}/general-config`, { headers: authHeaders() });
+      setGeneral((d && d.ok && d.data) || GENERAL_EMPTY);
+    } catch (_) { setGeneral(GENERAL_EMPTY); }
+  }, [apiBase]);
+  useEffect(() => { loadGeneral(); }, [loadGeneral]);
 
   function update(i, patch) {
     setDefs((list) => list.map((d, j) => (j === i ? { ...d, ...patch } : d)));
@@ -102,6 +114,16 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     else setProtoMsg((d && d.error) || 'Falha ao salvar.');
   }
 
+  async function saveGeneral() {
+    setGeneralMsg('');
+    const d = await reqJson(`${apiBase}/general-config`, {
+      method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(general || GENERAL_EMPTY),
+    });
+    if (d && d.ok) { setGeneral(d.data); setGeneralMsg('Configuração salva.'); }
+    else setGeneralMsg((d && d.error) || 'Falha ao salvar.');
+  }
+
   function askRemove(i, d) {
     setConfirmBox({
       message: `Remover o rótulo "${d.label || d.key || 'sem nome'}"? Ele some do menu de `
@@ -121,7 +143,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
         Crie rótulos (texto, seleção, etc.); <b>todos são editáveis e removíveis</b>, inclusive
         <b>Observações</b> (ID, Início e Fim são preenchidos automaticamente, não são rótulos).
         O <b>Atendente</b> é um campo fixo e obrigatório que aparece automaticamente em
-        "Resolver atendimento" e "Finalizar protocolo" (já pré-selecionado com você) — não é
+        "Resolver atendimento" e "Finalizar protocolo" — não é
         configurável aqui. Os do <b>Protocolo</b> e os de <b>Resolver atendimento</b> são
         armazenados separadamente. Um campo <b>Obrigatório</b> deve estar sempre preenchido para
         fechar/resolver (caixas de seleção são exceção). Apagar um rótulo o some do menu e do
@@ -241,6 +263,33 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
       `}
     </div>`;
 
+  // ── Aba de configurações gerais do plugin ──────────────────────────────────
+  const geral = html`
+    <div class="space-y-3">
+      ${general === null ? html`<div class="text-[12px] text-wa-secondary">Carregando…</div>` : html`
+        <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
+          <label class="flex items-start gap-2 text-[13px] text-wa-text">
+            <input class="mt-0.5" type="checkbox"
+              checked=${general.auto_assign_conversation_on_close !== false}
+              disabled=${!canEdit}
+              onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), auto_assign_conversation_on_close: e.target.checked }))} />
+            <span>
+              <span class="font-medium">Atribuir atendente à conversa ao finalizar protocolo</span>
+              <span class="block text-[12px] text-wa-secondary mt-0.5">
+                Quando ativo, o atendente salvo no protocolo também aparece como atendente da conversa.
+              </span>
+            </span>
+          </label>
+        </div>
+        ${canEdit ? html`
+          <div class="flex items-center gap-3">
+            <button onClick=${() => setConfirmBox({ message: 'Salvar as configurações gerais do plugin?', onYes: saveGeneral })}
+              class="px-4 py-1.5 rounded-md text-[13px] bg-wa-teal text-white">Salvar configurações</button>
+            ${generalMsg ? html`<span class="text-[12px] text-wa-secondary">${generalMsg}</span>` : null}
+          </div>` : null}
+      `}
+    </div>`;
+
   return html`
     <div class="space-y-4">
       <div class="inline-flex rounded-lg border border-wa-border overflow-hidden">
@@ -249,7 +298,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
             class="px-3 py-1.5 text-[13px] ${tab === k ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
       </div>
 
-      ${tab === 'avaliacao' ? avaliacao : fieldBuilder}
+      ${tab === 'avaliacao' ? avaliacao : (tab === 'geral' ? geral : fieldBuilder)}
 
       ${confirmBox ? html`
         <div class="fixed inset-0 bg-black/50 z-[90] flex items-center justify-center p-4"

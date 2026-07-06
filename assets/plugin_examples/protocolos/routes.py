@@ -120,8 +120,13 @@ async def ensure_contact_protocolo(contact_id: int):
 @router.put("/protocolos/{atid}/fields", dependencies=[plugin_permission("edit")])
 async def update_fields(atid: int, body: dict, request: Request):
     uid, name = _atendente(request)
+    body = body or {}
+    propagate = body.get("propagate_assignee_to_conversations")
+    if propagate is None:
+        propagate = body.get("propagate_assignee", True)
     at, err = logic.update_protocolo_fields(
-        atid, (body or {}).get("fields") or {}, assignee_user_id=uid, assignee_name=name)
+        atid, body.get("fields") or {}, assignee_user_id=uid, assignee_name=name,
+        propagate_assignee=bool(propagate))
     if err:
         return _err(err, status=400 if at is None else 400)
     return {"ok": True, "data": at}
@@ -351,3 +356,13 @@ async def get_protocol_config():
 @router.put("/protocol-config", dependencies=[plugin_permission("config")])
 async def set_protocol_config(body: dict):
     return {"ok": True, "data": logic.set_protocol_config(body or {})}
+
+
+@router.get("/general-config", dependencies=[plugin_permission("view")])
+async def get_general_config():
+    return {"ok": True, "data": logic.get_general_config()}
+
+
+@router.put("/general-config", dependencies=[plugin_permission("config")])
+async def set_general_config(body: dict):
+    return {"ok": True, "data": logic.set_general_config(body or {})}

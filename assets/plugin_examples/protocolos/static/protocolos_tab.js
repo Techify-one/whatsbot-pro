@@ -1152,15 +1152,16 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   // Estado local dos campos do protocolo, pré-preenchido (extras — obs incluso — em
   // at.fields; o rótulo Atendente vem do assignee nativo). Editável enquanto aberto; serve
   // de fonte também p/ a visão read-only.
+  const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
+  const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
+  const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of protoDefs) {
-      // Atendente: no protocolo ABERTO (editável) o padrão é SEMPRE o usuário conectado (quem
-      // finaliza), igual ao "Resolver atendimento" — o assignee salvo do protocolo pode estar
-      // defasado e não deve pré-selecionar outra pessoa. Em protocolo já fechado (só leitura) o
-      // valor real é mostrado via at.assignee_name, então aí usamos o assignee salvo.
+      // Atendente: mantém o assignee salvo quando existir. Só usa o usuário conectado
+      // como sugestão inicial quando o protocolo ainda não tem atendente gravado.
       let cur = d.type === 'atendente'
-        ? (readOnly ? at.assignee_user_id : defaultAssignee)
+        ? (hasSavedAssignee ? at.assignee_user_id : (!readOnly ? defaultAssignee : at.assignee_user_id))
         : (at.fields || {})[d.key];
       if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
       else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
@@ -1173,6 +1174,15 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
   const [linkCopied, setLinkCopied] = useState(false);
+  const [generalConfig, setGeneralConfig] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    api.http.get('/general-config').then((d) => {
+      if (alive && d && d.ok) setGeneralConfig(d.data || {});
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [api]);
 
   // Copia o link compartilhável deste protocolo (/protocolos?detail=<id>) — plano 24.
   const copyLink = () => copyText(`${location.origin}/protocolos?detail=${at.id}`,
@@ -1182,7 +1192,7 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
 
   // PUT parcial dos campos do protocolo (obrigatório só é exigido ao FECHAR).
   // Via api.http: status-aware + toast de 403 (some o falso "sucesso").
-  const putFields = () => api.http.put(`/protocolos/${at.id}/fields`, { fields: vals });
+  const putFields = (opts = {}) => api.http.put(`/protocolos/${at.id}/fields`, { fields: vals, ...opts });
 
   const save = async () => {
     setSaving(true); setMsg(null);
@@ -1196,7 +1206,8 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
 
   const finalize = async () => {
     setFinalizing(true); setMsg(null);
-    try { await putFields(); }                   // persiste os campos antes de fechar
+    const autoAssign = !generalConfig || generalConfig.auto_assign_conversation_on_close !== false;
+    try { await putFields({ propagate_assignee_to_conversations: autoAssign }); } // persiste antes de fechar
     catch (_) { /* o close revalida os obrigatórios e devolve erro se faltar */ }
     let res;
     try { res = await onFinalize(at.id); }
@@ -1262,10 +1273,19 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
+            ${showAssigneeSeedNotice ? html`
+              <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
+                Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?
+              </div>` : null}
             <div class="space-y-3">
-              ${protoDefs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
-                value=${vals[d.key]}
-                onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
+              ${protoDefs.map((d) => {
+                const def = (d.type === 'atendente' && hasSavedAssignee)
+                  ? { ...d, fallbackUser: { id: at.assignee_user_id, name: at.assignee_name } }
+                  : d;
+                return html`<${LabeledField} key=${d.key} def=${def}
+                  value=${vals[d.key]}
+                  onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`;
+              })}
             </div>
             ${missing.length ? html`
               <div class="mt-4 px-3 py-2.5 rounded-md bg-red-500/15 border border-red-500 text-red-500 text-[14px] font-semibold">

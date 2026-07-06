@@ -103,10 +103,11 @@ def now() -> float:
 # ── Rótulos FIXOS ────────────────────────────────────────────────────────────
 # O ÚNICO rótulo FIXO é "atendente" (nos DOIS escopos): não é criável/editável/removível
 # e NÃO aparece na tela de Configurações — só nos formulários de "Resolver atendimento" e
-# "Finalizar protocolo", onde é SEMPRE obrigatório (deve-se escolher um atendente) e já vem
-# pré-selecionado com o usuário conectado. Seu valor liga ao atendente NATIVO (assignee) do
-# protocolo/conversa — não é armazenado como extra. ID, Início e Fim NÃO são rótulos (vêm
-# automáticos nas colunas); Observações é um EXTRA default (editável/removível).
+# "Finalizar protocolo", onde é SEMPRE obrigatório (deve-se escolher um atendente). Quando
+# já existe atendente salvo, ele é preservado; quando não existe, a UI sugere o usuário
+# conectado. Seu valor liga ao atendente NATIVO (assignee) do protocolo/conversa — não é
+# armazenado como extra. ID, Início e Fim NÃO são rótulos (vêm automáticos nas colunas);
+# Observações é um EXTRA default (editável/removível).
 def _atendente_fixed_def() -> dict:
     return {"id": "fixed_atendente", "key": "atendente", "label": "Atendente",
             "type": "atendente", "options": [], "required": True,
@@ -733,7 +734,8 @@ def _emit_proto_notice(event_type: str, *, conversation_id: int | None = None,
 
 
 def update_protocolo_fields(atid: int, values: dict, assignee_user_id: int | None = None,
-                              assignee_name: str = "") -> tuple[dict | None, str | None]:
+                              assignee_name: str = "",
+                              propagate_assignee: bool = True) -> tuple[dict | None, str | None]:
     at = get_protocolo(atid)
     if not at:
         return None, "Protocolo não encontrado."
@@ -766,7 +768,8 @@ def update_protocolo_fields(atid: int, values: dict, assignee_user_id: int | Non
             if uid is not None:
                 u = user_repo.get(int(uid)) or {}
                 uname = str(u.get("name") or u.get("email") or "")
-            assign_protocolo(atid, uid, assignee_name=uname)
+            assign_protocolo(atid, uid, assignee_name=uname,
+                             propagate_to_conversations=propagate_assignee)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -891,7 +894,8 @@ def _propagate_assignee_to_conversations(atend_ids: list[int],
 
 
 def assign_protocolo(atid: int, assignee_user_id: int | None,
-                       assignee_name: str = "") -> tuple[dict | None, str | None]:
+                       assignee_name: str = "",
+                       propagate_to_conversations: bool = True) -> tuple[dict | None, str | None]:
     """Define o atendente do protocolo (sobrescreve; ``None`` = remove atribuição) E
     PROPAGA para as atendimentos do core (assignee_user_id) — senão a mudança não aparece
     na lista/painel de atendimentos. Usado pelo drag-and-drop do kanban "por atendente".
@@ -908,8 +912,10 @@ def assign_protocolo(atid: int, assignee_user_id: int | None,
                  "assignee_name = :aname, updated_at = :ts WHERE id = :id"),
             {"auid": assignee_user_id, "aname": name, "ts": ts, "id": atid},
         )
-    # Espelha nas atendimentos do core (fora da conn do plugin).
-    _propagate_assignee_to_conversations(_conversation_ids_of_protocolo(atid), assignee_user_id)
+    # Espelha nas atendimentos do core (fora da conn do plugin), exceto quando o fluxo
+    # de finalização pediu para salvar só o atendente do protocolo.
+    if propagate_to_conversations:
+        _propagate_assignee_to_conversations(_conversation_ids_of_protocolo(atid), assignee_user_id)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -1860,6 +1866,27 @@ def _maybe_backfill_custom_attrs() -> None:
 
 def _proto_key(name: str) -> str:
     return f"plugin.{PLUGIN_ID}.protocol_{name}"
+
+
+def _general_key(name: str) -> str:
+    return f"plugin.{PLUGIN_ID}.general_{name}"
+
+
+def auto_assign_conversation_on_close_enabled() -> bool:
+    return bool(config_repo.get(_general_key("auto_assign_conversation_on_close"), True))
+
+
+def get_general_config() -> dict:
+    return {
+        "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
+    }
+
+
+def set_general_config(cfg: dict) -> dict:
+    cfg = cfg or {}
+    config_repo.set(_general_key("auto_assign_conversation_on_close"),
+                    bool(cfg.get("auto_assign_conversation_on_close")))
+    return get_general_config()
 
 
 def get_protocol_config() -> dict:
