@@ -28,6 +28,9 @@ export default function GeneralSettings() {
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
   // Modelo da análise de melhoria ('' = usar o mesmo do chat).
   const [improvementModel, setImprovementModel] = useState('');
+  // Prompt da análise de melhoria (editável). Vazio → usa o padrão do sistema.
+  const [improvementPrompt, setImprovementPrompt] = useState('');
+  const [improvementPromptDefault, setImprovementPromptDefault] = useState('');
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -40,6 +43,11 @@ export default function GeneralSettings() {
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
     setImprovementModel(cfg.improvement_model ?? '');
+    const dflt = cfg.improvement_prompt_default ?? '';
+    setImprovementPromptDefault(dflt);
+    // Prefill with the custom prompt if set, otherwise the code default so the
+    // operator sees/edits the real text in use.
+    setImprovementPrompt((cfg.improvement_prompt || dflt));
   }
 
   async function load() {
@@ -88,6 +96,12 @@ export default function GeneralSettings() {
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
       improvement_model: improvementModel || '',
+      // Store '' when unchanged from the default, so the live code default keeps
+      // flowing; persist the edited text otherwise.
+      improvement_prompt:
+        improvementPrompt.trim() === improvementPromptDefault.trim()
+          ? ''
+          : improvementPrompt,
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -228,6 +242,32 @@ export default function GeneralSettings() {
           emptyLabel="— Usar o mesmo do chat —"
           placeholder="Usar o mesmo do chat"
         />
+      </div>
+
+      <!-- Prompt da sugestão de melhoria -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="flex items-center justify-between gap-2">
+          <label class="text-[14px] font-semibold text-wa-text">Prompt da sugestão de melhoria</label>
+          <button
+            type="button"
+            onClick=${() => setImprovementPrompt(improvementPromptDefault)}
+            disabled=${improvementPrompt.trim() === improvementPromptDefault.trim()}
+            class="text-[12px] px-2 py-1 rounded-md border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-40 disabled:cursor-default transition-colors"
+          >
+            Restaurar padrão
+          </button>
+        </div>
+        <span class="text-[12px] text-wa-secondary">
+          Instruções enviadas ao modelo ao gerar a análise de uma resposta marcada como
+          incorreta (botão direito numa resposta da IA → "Gerar melhoria"). Deixe igual
+          ao padrão para acompanhar melhorias futuras do sistema.
+        </span>
+        <textarea
+          value=${improvementPrompt}
+          onInput=${(e) => setImprovementPrompt(e.target.value)}
+          rows="8"
+          class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono leading-relaxed resize-y"
+        ></textarea>
       </div>
 
       <!-- Save -->
