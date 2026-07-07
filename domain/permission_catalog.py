@@ -31,7 +31,13 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     # IA / agente — permissões granulares (substituem o antigo agent.manage,
     # que dava tudo). Ver ``migração *_granular_ai_and_contact_import``.
     ("agent.config.manage",    "IA: configuração do agente (modelo, tools, roteamento)"),
-    ("agent.prompts.manage",   "IA: editar prompts do agente"),
+    ("agent.create",           "IA: criar novos agentes"),
+    ("agent.duplicate",        "IA: duplicar agentes"),
+    # Prompt do agente — permissões granulares (substituem o antigo
+    # agent.prompts.manage, que cobria tudo). Ver ``migração *_granular_prompt``.
+    ("agent.prompts.edit",     "IA: editar o prompt do agente"),
+    ("agent.prompts.version",  "IA: versionar o prompt (histórico, comparar, restaurar)"),
+    ("agent.prompts.delete",   "IA: apagar versões do histórico do prompt"),
     ("agent.tools.manage",     "IA: gerenciar tools (código e overrides)"),
     ("agent.variables.manage", "IA: gerenciar variáveis"),
     ("quickreply.manage",     "Respostas rápidas"),
@@ -103,7 +109,11 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "channel.manage": ("core", _G_CHANNEL),
     # IA e agente
     "agent.config.manage": ("core", _G_AI),
-    "agent.prompts.manage": ("core", _G_AI),
+    "agent.create": ("core", _G_AI),
+    "agent.duplicate": ("core", _G_AI),
+    "agent.prompts.edit": ("core", _G_AI),
+    "agent.prompts.version": ("core", _G_AI),
+    "agent.prompts.delete": ("core", _G_AI),
     "agent.tools.manage": ("core", _G_AI),
     "agent.variables.manage": ("core", _G_AI),
     "sandbox.use": ("core", _G_AI),

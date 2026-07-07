@@ -1363,7 +1363,20 @@ check("GET /api/ai/variables (no agent.variables.manage) -> 403", r.status_code 
 r = client.get("/api/ai/tools", headers=_chdr)
 check("GET /api/ai/tools (no agent.tools.manage) -> 403", r.status_code == 403)
 r = client.put("/api/ai/agents/default/prompt", json={"prompt": "x"}, headers=_chdr)
-check("PUT /api/ai/agents/default/prompt (no agent.prompts.manage) -> 403", r.status_code == 403)
+check("PUT /api/ai/agents/default/prompt (no agent.prompts.edit) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents/default/prompt/history", headers=_chdr)
+check("GET /api/ai/agents/{k}/prompt/history (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents/default/history", headers=_chdr)
+check("GET /api/ai/agents/{k}/history (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.post("/api/ai/agents/default/rollback/1", headers=_chdr)
+check("POST /api/ai/agents/{k}/rollback (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.delete("/api/ai/agents/default/prompt/history/1", headers=_chdr)
+check("DELETE /api/ai/agents/{k}/prompt/history/{v} (no agent.prompts.delete) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/rbac_new_agent", json={"display_name": "X"}, headers=_chdr)
+check("PUT /api/ai/agents/{new} create (no agent.create) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/rbac_dup_agent",
+               json={"display_name": "X", "duplicate": True}, headers=_chdr)
+check("PUT /api/ai/agents/{new} duplicate (no agent.duplicate) -> 403", r.status_code == 403)
 r = client.get("/api/tools", headers=_chdr)
 check("GET /api/tools (no agent.tools.manage) -> 403", r.status_code == 403)
 r = client.post("/api/contacts/import",
@@ -1498,7 +1511,15 @@ check("list_catalog -> core perm tier=core + group",
       and _cat_by_key["conversation.read"]["group"] == "Atendimentos e conversas")
 check("list_catalog -> AI perms under 'IA e agente'",
       _cat_by_key["agent.config.manage"]["group"] == "IA e agente"
-      and _cat_by_key["agent.prompts.manage"]["tier"] == "core")
+      and _cat_by_key["agent.prompts.edit"]["tier"] == "core")
+check("list_catalog -> granular prompt perms present under 'IA e agente'",
+      all(k in _cat_by_key and _cat_by_key[k]["group"] == "IA e agente"
+          for k in ("agent.prompts.edit", "agent.prompts.version", "agent.prompts.delete")))
+check("list_catalog -> agent.create/duplicate present under 'IA e agente'",
+      all(k in _cat_by_key and _cat_by_key[k]["group"] == "IA e agente"
+          for k in ("agent.create", "agent.duplicate")))
+check("list_catalog -> agent.prompts.manage removido do catálogo",
+      "agent.prompts.manage" not in _cat_by_key)
 check("list_catalog -> templates shown under Plugins tier",
       _cat_by_key["template.create"]["tier"] == "plugin"
       and _cat_by_key["template.create"]["group"] == "Templates (WhatsApp Cloud)")

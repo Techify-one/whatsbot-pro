@@ -323,15 +323,49 @@ def get_snapshot(agent_key: str, version: int) -> dict | None:
     return _decode_json(snap, None)
 
 
-def rollback(agent_key: str, version: int) -> dict | None:
-    """Re-apply a past snapshot as a NEW version (preserva o trail)."""
+def rollback(agent_key: str, version: int, preserve_prompt: bool = False,
+             preserve_config: bool = False) -> dict | None:
+    """Re-apply a past snapshot as a NEW version (preserva o trail).
+
+    O snapshot do agente empacota **prompt + config** juntos, então reverter o
+    agente inteiro toca os dois. As flags RBAC deixam o rollback restaurar só o que
+    o chamador tem permissão de mudar, mantendo o valor ATUAL do resto:
+
+    - ``preserve_prompt`` (sem ``agent.prompts.version``): mantém o prompt atual e
+      reverte apenas os campos de config.
+    - ``preserve_config`` (sem ``agent.config.manage``): mantém a config atual
+      (modelo/tools/roteamento/nome/etc) e reverte apenas o prompt.
+
+    Sem flags, restaura o snapshot inteiro (comportamento original).
+    """
     snap = get_snapshot(agent_key, version)
     if not snap:
         return None
+    current = get(agent_key) if (preserve_prompt or preserve_config) else None
+
+    prompt = snap.get("prompt", "")
+    if preserve_prompt:
+        prompt = (current or {}).get("prompt", "") or ""
+
+    if preserve_config and current:
+        # Campos de config vêm do agente ATUAL (get() já devolve JSON decodificado).
+        return save(
+            agent_key,
+            display_name=current.get("display_name", "") or "",
+            prompt=prompt,
+            prompt_key=current.get("prompt_key", "") or "",
+            model_config=current.get("model_config") or {},
+            tool_names=current.get("tool_names"),
+            enabled=bool(current.get("enabled", True)),
+            description=current.get("description", "") or "",
+            is_router=bool(current.get("is_router", False)),
+            routing_targets=current.get("routing_targets"),
+            hooks_config=current.get("hooks_config") or {},
+        )
     return save(
         agent_key,
         display_name=snap.get("display_name", ""),
-        prompt=snap.get("prompt", ""),
+        prompt=prompt,
         prompt_key=snap.get("prompt_key", ""),
         model_config=_decode_json(snap.get("model_config"), {}),
         tool_names=_decode_json(snap.get("tool_names"), None),
