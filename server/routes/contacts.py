@@ -1641,6 +1641,15 @@ def register_routes(app, deps):
         enabled = body.get("enabled")
         if enabled is None:
             return _err("Campo 'enabled' é obrigatório.")
+        # plano 37 (B3/P2): quando o painel diz QUAL conversa/canal está togglando,
+        # resolve o inbox pra ancorar card + mirror ai_active NAQUELE canal (num
+        # contato multicanal, não reflete no outro). Sem os campos → legado.
+        toggle_conv_id = body.get("conversation_id")
+        toggle_chan_id = body.get("channel_id")
+        toggle_inbox_id = None
+        if toggle_conv_id or toggle_chan_id:
+            toggle_inbox_id = await asyncio.to_thread(
+                _resolve_inbox_id, toggle_conv_id, toggle_chan_id)
         def _toggle():
             contact = agent_handler._get_contact(phone)
             contact.set_ai_enabled(bool(enabled))
@@ -1653,7 +1662,7 @@ def register_routes(app, deps):
         actor = (current_user(request) or {}).get("name") or None
         await conv_svc.toggle_contact_ai(
             deps, phone=phone, enabled=bool(result), contact_id=contact_id,
-            actor_name=actor)
+            actor_name=actor, inbox_id=toggle_inbox_id)
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")
