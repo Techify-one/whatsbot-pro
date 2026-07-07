@@ -15,7 +15,10 @@ from fastapi import Depends, File, Form, UploadFile
 
 from db.repositories import config_repo
 from server.deps import require_permission, install_exception_handlers
-from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
+from server.execution import (
+    astart_execution, aend_execution, atrack_step, prune_executions,
+    astamp_execution_channel,
+)
 from server.helpers import _ok, _err, parse_split_reply
 
 # Config-key prefix flagging a contact as a sandbox/test number. Operator sends
@@ -142,6 +145,7 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "message_preview": message[:200]})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(contact, "default", channel_label="Sandbox")
             contact.add_message("user", message)
             await _broadcast_user_message(phone, message)
 
@@ -186,6 +190,7 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "image"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(contact, "default", channel_label="Sandbox")
             contact.add_message("user", caption, media_type="image", media_path=rel_path)
             await _broadcast_user_message(phone, caption, media_type="image", media_path=rel_path)
 
@@ -246,6 +251,7 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "audio"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(contact, "default", channel_label="Sandbox")
             contact.add_message("user", "[Áudio recebido]", media_type="audio", media_path=rel_path)
             await _broadcast_user_message(phone, "[Áudio recebido]",
                                           media_type="audio", media_path=rel_path)
@@ -307,6 +313,7 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "document"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(contact, "default", channel_label="Sandbox")
             contact.add_message("user", content, media_type="document", media_path=rel_path)
             await _broadcast_user_message(phone, content,
                                           media_type="document", media_path=rel_path)

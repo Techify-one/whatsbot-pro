@@ -39,7 +39,10 @@ from channels import ai_settings
 from db.repositories import contact_repo, conversation_repo, tag_repo
 from agent import group_mentions
 from server import system_notices
-from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
+from server.execution import (
+    astart_execution, aend_execution, atrack_step, prune_executions,
+    astamp_execution_channel,
+)
 from server.helpers import parse_split_reply
 from server.transcription import maybe_transcribe, format_media_content
 from plugins.events import apply_filter, emit_with_filter
@@ -768,6 +771,10 @@ class MessagingService:
             })
 
             contact = agent_handler._get_contact(phone, channel_id=channel_id)
+
+            # plano 36: stamp conversation_id + channel onto the execution (best-effort)
+            # now that the contact/inbox is materialised. Cheap read; failure → NULL.
+            await astamp_execution_channel(contact, channel_id)
 
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
