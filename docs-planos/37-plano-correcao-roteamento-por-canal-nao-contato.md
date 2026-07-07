@@ -375,11 +375,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** manual — abrir conversa nova de um canal não-default (sem thread prévia), enviar nota privada com "IA lê" → nota e resposta ficam **naquele canal**. `node --test` dos módulos puros de frontend (se houver) verde.
 
 #### Status de execução — Fase FC1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [api.js](../web/static/js/services/api.js) `sendPrivateMessage` encaminha `opts.channelId → body.channel_id` (espelha `sendPrivateAudio`). [useComposer.js:177](../web/static/js/components/contacts/hooks/useComposer.js#L177) passa `channelId` (o hook já o recebe como prop). Backend `/private-message` já resolve `_channel_for(phone, conv_id, channel_id)` (FB1).
+- **Como foi feito / decisões:** Aditivo. Fecha o lado frontend do bug: ao iniciar conversa nova em canal não-default (`conversation_id=null`), o `channelId` agora chega ao backend e a nota + rodada de IA ficam no canal certo.
+- **Problemas / pendências:** Nenhuma. Verificação manual (UI) recomendada; sem test puro dedicado (não há harness pra useComposer isolado).
+- **Verificação:** `node --check` em api.js e useComposer.js OK.
 
 ---
 

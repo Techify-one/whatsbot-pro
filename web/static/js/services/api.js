@@ -266,6 +266,10 @@ export async function sendPrivateMessage(phone, text, opts = {}) {
   if (opts.aiRead !== undefined) body.ai_read = !!opts.aiRead;
   if (opts.aiReply !== undefined) body.ai_reply = !!opts.aiReply;
   if (opts.conversationId != null) body.conversation_id = opts.conversationId;
+  // plano 37 (C1): ao INICIAR uma conversa nova num canal não-default (sem
+  // conversation_id ainda), o channelId é a única pista do canal — sem ele a nota
+  // e a rodada de IA misfilam pro WhatsApp 'default'. Espelha sendPrivateAudio.
+  if (opts.channelId != null) body.channel_id = opts.channelId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/private-message`, body);
 }
 

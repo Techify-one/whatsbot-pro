@@ -178,6 +178,7 @@ export function useComposer({
           aiRead: aiReadPrivate,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
           conversationId,
+          channelId,  // plano 37 (C1): conversa nova em canal não-default não misfila
         });
         updateMsgByLocalId(localId, () => ({
           _status: res.ok ? null : 'failed',
