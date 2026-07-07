@@ -63,7 +63,7 @@ def execute(ctx, args: dict) -> str | None:
         # clear both the human assignee and the bound AI agent, and pause the
         # conversation-level AI gate (a human takes over from here).
         try:
-            conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+            conv = conversation_repo.get_open_for_contact_scoped(ctx.contact)
             if conv:
                 # plano 23 Fase B5 (§4.2): the round-robin DESTINATION of a
                 # human handoff is a plugin seam. Default = unassigned

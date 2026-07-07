@@ -202,11 +202,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** teste A1/A2 de F0 invertido — com `ctx.contact` do Telegram, a mutação recai na conversa **do Telegram**; suíte de tools/routing verde (`test_agent_routing`, `test_routing_engine`, `test_spoke_router_enforcement`).
 
 #### Status de execução — Fase FA1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** As 3 tools ([transfer_to_human.py:66](../agent/tools/transfer_to_human.py#L66), [transferir_agente.py:80](../agent/tools/transferir_agente.py#L80), [set_custom_attribute.py:92](../agent/tools/set_custom_attribute.py#L92)) trocaram `get_open_for_contact(ctx.contact.id)` por `get_open_for_contact_scoped(ctx.contact)`. Asserções A1/A2 do F0 invertidas para o canal correto.
+- **Como foi feito / decisões:** Adicionei um helper central `conversation_repo.get_open_for_contact_scoped(contact)` em vez do idioma literal do plano (`get_open_for_contact_inbox(id, inbox_id)`). Motivo: os test doubles existentes (`test_spoke_router_enforcement`, `test_transfer_broadcast`, `test_router_prompt_description`, `test_agent_routing`, `test_human_gate`) montam `ctx.contact`/`contact` como `SimpleNamespace`/`FakeContact` **sem** `inbox_id` — passar `ctx.contact.inbox_id` direto levantaria `AttributeError` e quebraria a suíte inteira. O helper usa `getattr(contact,"inbox_id",None)`: com inbox_id (todo `ContactMemory` real tem — [memory.py:97](../agent/memory.py#L97)) resolve por-inbox; sem ele cai no resolver channel-blind (D2 fail-open, byte-idêntico ao legado). É o **único ponto sancionado** a chamar `get_open_for_contact` como fallback (o guardrail P4 allow-lista só ele). Vou reusar esse helper em FA2/FA3.
+- **Problemas / pendências:** Nenhuma. O mesmo helper cobre gate/factory/memory nas próximas fases.
+- **Verificação:** `pytest tests/test_multichannel_routing.py tests/test_spoke_router_enforcement.py tests/test_transfer_broadcast.py tests/test_router_prompt_description.py tests/test_routing_motivo.py -q` → 25 passed; `python tests/test_agent_routing.py` → 29 passed.
 
 ---
 

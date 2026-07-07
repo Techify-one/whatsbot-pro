@@ -93,9 +93,9 @@ def test_f0_gate_ai_reads_wrong_channel(build_app):
 # ── A1 — transfer_to_human muta a conversa do canal errado ──────────────────
 
 def test_f0_transfer_to_human_mutates_wrong_channel(build_app):
-    """A1: ``transfer_to_human`` com ``ctx.contact`` do Telegram despausa/desatribui
-    a conversa do **default** (a mais recente), deixando o Telegram intacto. F-REG
-    inverte: a conversa do Telegram é que deve ser mutada."""
+    """A1 (FA1 corrigido): ``transfer_to_human`` com ``ctx.contact`` do Telegram
+    despausa/desatribui a conversa **do Telegram** (o canal do turno), deixando a
+    do default intacta — mesmo com o default mais recente."""
     from agent.tools import transfer_to_human as t2h
 
     built = build_app(["gowa"])
@@ -109,16 +109,16 @@ def test_f0_transfer_to_human_mutates_wrong_channel(build_app):
 
     default_after = conversation_repo.get(s.default_conv)
     tg_after = conversation_repo.get(s.tg_conv)
-    # BUG (F0): a conversa default foi a mutada (ai_active zerado); o Telegram não.
-    assert default_after["ai_active"] == 0
-    assert tg_after["ai_active"] == 1
+    # CORRETO (FA1): a conversa do Telegram foi mutada; o default ficou intacto.
+    assert tg_after["ai_active"] == 0
+    assert default_after["ai_active"] == 1
 
 
 # ── A2 — transferir_agente carimba a conversa do canal errado ───────────────
 
 def test_f0_transferir_agente_stamps_wrong_channel(build_app):
-    """A2: ``transferir_agente`` com ``ctx.contact`` do Telegram grava o
-    ``active_agent_key`` na conversa do **default**. F-REG inverte para o Telegram."""
+    """A2 (FA1 corrigido): ``transferir_agente`` com ``ctx.contact`` do Telegram
+    grava o ``active_agent_key`` na conversa **do Telegram**, não no default."""
     from agent.tools import transferir_agente as ta
     from db.repositories import agent_repo
 
@@ -135,10 +135,10 @@ def test_f0_transferir_agente_stamps_wrong_channel(build_app):
 
         default_after = conversation_repo.get(s.default_conv)
         tg_after = conversation_repo.get(s.tg_conv)
-        # BUG (F0): o handoff carimbou a conversa default (canal errado); o
-        # Telegram (canal do turno) NÃO recebeu o alvo.
-        assert default_after["active_agent_key"] == "mc_f0_target"
-        assert tg_after["active_agent_key"] != "mc_f0_target"
+        # CORRETO (FA1): o handoff carimbou a conversa do Telegram (canal do turno);
+        # o default NÃO recebeu o alvo.
+        assert tg_after["active_agent_key"] == "mc_f0_target"
+        assert default_after["active_agent_key"] != "mc_f0_target"
     finally:
         agent_repo.delete("mc_f0_target")
 
