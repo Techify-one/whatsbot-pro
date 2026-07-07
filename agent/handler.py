@@ -358,7 +358,8 @@ class AgentHandler:
         try:
             from db.repositories import conversation_repo, agent_repo
             agent_key = agent_spec.agent_key if agent_spec else agent_repo.DEFAULT_AGENT_KEY
-            conv = conversation_repo.ensure_ai_agent(contact.id, agent_key)
+            conv = conversation_repo.ensure_ai_agent(
+                contact.id, agent_key, getattr(contact, "inbox_id", None))
             if not conv:
                 return
             try:
