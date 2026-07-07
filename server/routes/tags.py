@@ -148,13 +148,26 @@ def register_routes(app, deps):
         # Chat notice (plano 12, grupo `tags`): one card per added/removed tag,
         # attached to the contact's active conversation thread. Tags são por
         # contato (plano 01), então resolvemos a conversa aberta (fallback: a mais
-        # recente) só para ancorar o aviso no fio.
+        # recente) só para ancorar o aviso no fio. Plano 37 (A11/P3): quando o painel
+        # já sabe a conversa (multicanal), ele manda ``conversation_id`` no body —
+        # ancoramos NELA (validando posse) em vez da mais recente de qualquer canal.
         added = set(result) - set(previous)
         removed_tags = set(previous) - set(result)
         if added or removed_tags:
             actor = (current_user(request) or {}).get("name") or None
-            conv = await asyncio.to_thread(
-                conversation_repo.get_open_for_contact, existing_contact["id"])
+            conv = None
+            body_conv_id = body.get("conversation_id")
+            if body_conv_id:
+                try:
+                    candidate = await asyncio.to_thread(
+                        conversation_repo.get, int(body_conv_id))
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate and candidate.get("contact_id") == existing_contact["id"]:
+                    conv = candidate
+            if conv is None:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_open_for_contact, existing_contact["id"])
             if conv is None:
                 conv = await asyncio.to_thread(
                     conversation_repo.get_latest_for_contact, existing_contact["id"])

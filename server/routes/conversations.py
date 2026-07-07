@@ -648,13 +648,20 @@ def register_routes(app, deps):
 
     @app.get("/api/contacts/{phone}/atendimento")
     async def contact_conversation(phone: str, request: Request,
-                                   include_closed: bool = False):
+                                   include_closed: bool = False,
+                                   channel_id: str | None = None,
+                                   conversation_id: int | None = None):
         """Resolve the conversation for a contact by phone — feeds the chat header
         (display_id, status, assignee, ai_active, custom_attributes).
 
         By default returns the active (open) thread. With ``include_closed`` it
         returns the latest conversation regardless of status, so the sidebar
         right-click menu can still show assignee/reopen on a resolved thread.
+
+        Plano 37 (A12/P3): o mesmo número existe em vários canais. Quando o painel
+        já sabe qual fio quer, manda ``conversation_id`` (direto) ou ``channel_id``
+        (escopa a resolução ao inbox do canal, via as variantes ``*_inbox``). Sem
+        nenhum dos dois, mantém o legado por-phone (a conversa de qualquer canal).
         """
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -662,7 +669,31 @@ def register_routes(app, deps):
         contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if not contact:
             return _err("Contato não encontrado.", status=404)
-        if include_closed:
+        # Painel já sabe o fio: resolve direto (validando posse do contato).
+        if conversation_id:
+            conv = await asyncio.to_thread(conversation_repo.get, int(conversation_id))
+            if not conv or conv.get("contact_id") != contact["id"]:
+                conv = None
+            if conv and _inbox_hidden(request, conv.get("inbox_id")):
+                return _err("Conversa não encontrada.", status=404)
+            return _ok({"conversation": conv})
+        # Escopa por canal quando informado (multicanal); senão, legado por-phone.
+        inbox_id = None
+        if channel_id:
+            from db.repositories import inbox_repo
+            inbox = await asyncio.to_thread(inbox_repo.get_by_channel, channel_id)
+            inbox_id = inbox["id"] if inbox else None
+        if inbox_id is not None:
+            if include_closed:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_latest_for_contact_inbox, contact["id"], inbox_id)
+            else:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_open_for_contact_inbox, contact["id"], inbox_id)
+                if not conv:
+                    conv = await asyncio.to_thread(
+                        conversation_repo.get_latest_for_contact_inbox, contact["id"], inbox_id)
+        elif include_closed:
             conv = await asyncio.to_thread(
                 conversation_repo.get_latest_for_contact, contact["id"])
         else:
