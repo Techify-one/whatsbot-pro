@@ -2406,6 +2406,24 @@ check("P22 PUT /agents/default/prompt preserva o modelo",
       dict(_after.get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
 check("P22 config NÃO ganha chave 'system_prompt'",
       "system_prompt" not in client.get("/api/config").json()["data"])
+# Plano 36: is_default (padrão de novas conversas) trafega pelo endpoint (save/get) e
+# é radio — marcar um novo rebaixa o anterior. O patch só-prompt preserva a flag.
+client.put("/api/ai/agents/p36e_a", json={
+    "display_name": "P36 A", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": True})
+_p36 = {a["agent_key"]: a for a in client.get("/api/ai/agents").json()["data"]}
+check("P36 GET expõe is_default=True no agente marcado", _p36.get("p36e_a", {}).get("is_default") is True)
+client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": True})
+_p36 = {a["agent_key"]: a for a in client.get("/api/ai/agents").json()["data"]}
+check("P36 marcar B como padrão rebaixa A (radio)", _p36.get("p36e_a", {}).get("is_default") is False)
+check("P36 B é o novo padrão", _p36.get("p36e_b", {}).get("is_default") is True)
+client.put("/api/ai/agents/p36e_b/prompt", json={"prompt": "novo prompt"})
+check("P36 patch só-prompt preserva is_default",
+      (_agent_repo.get("p36e_b") or {}).get("is_default") is True)
+client.delete("/api/ai/agents/p36e_a")
+client.delete("/api/ai/agents/p36e_b")
 # Invariante do agente default (Fase 5): não pode ser desativado nem excluído.
 r = client.put("/api/ai/agents/default", json={
     "display_name": "Agente padrão", "prompt_key": "default",
