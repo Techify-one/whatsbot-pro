@@ -143,6 +143,31 @@ def test_f0_transferir_agente_stamps_wrong_channel(build_app):
         agent_repo.delete("mc_f0_target")
 
 
+# ── A4 — resolve_active_agent_key vem do canal do turno (FA2) ───────────────
+
+def test_a4_resolve_agent_from_turn_channel(build_app):
+    """FA2: com agentes distintos vinculados às duas conversas,
+    ``resolve_active_agent_key`` para o ContactMemory do Telegram devolve o agente
+    DA conversa do Telegram, não o do default (mais recente)."""
+    from agent import agent_factory
+    from db.repositories import agent_repo
+
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    s = _seed_two_inboxes(handler, "5511970000014", "mc_tg_a4")
+    for key in ("mc_a4_default", "mc_a4_tg"):
+        agent_repo.save(key, display_name=key, prompt="p",
+                        model_config={"model": "openai/gpt-4o-mini"},
+                        tool_names=None, enabled=True)
+    try:
+        conversation_repo.set_agent(s.default_conv, "mc_a4_default")
+        conversation_repo.set_agent(s.tg_conv, "mc_a4_tg")
+        assert agent_factory.resolve_active_agent_key(s.tg_mem) == "mc_a4_tg"
+    finally:
+        agent_repo.delete("mc_a4_default")
+        agent_repo.delete("mc_a4_tg")
+
+
 # ── B1 — private-AI arquiva a resposta no canal errado (a conversa #41) ──────
 
 def _poll(pred, timeout: float = 4.0, step: float = 0.02):
