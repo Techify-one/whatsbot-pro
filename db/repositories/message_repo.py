@@ -172,12 +172,21 @@ def last_inbound_ts(*, conversation_id: int | None = None,
     return float(ts) if ts is not None else None
 
 
-def get_last_user_message(contact_id: int) -> dict | None:
-    """Return the most recent user message (for updating with transcription etc)."""
+def get_last_user_message(contact_id: int,
+                          conversation_id: int | None = None) -> dict | None:
+    """Return the most recent user message (for updating with transcription etc).
+
+    Plano 37 (B5): ``conversation_id`` escopa a busca àquela conversa/canal — num
+    contato com áudio no Telegram e texto no GOWA na mesma janela, a transcrição
+    deve atualizar a msg do canal certo, não a globalmente mais recente. Ausente →
+    contact-global (comportamento legado)."""
+    cond = (messages.c.contact_id == contact_id) & (messages.c.role == "user")
+    if conversation_id is not None:
+        cond = cond & (messages.c.conversation_id == conversation_id)
     with get_engine().connect() as conn:
         row = conn.execute(
             select(messages)
-            .where((messages.c.contact_id == contact_id) & (messages.c.role == "user"))
+            .where(cond)
             .order_by(messages.c.ts.desc())
             .limit(1)
         ).mappings().first()

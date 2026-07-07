@@ -961,7 +961,8 @@ class MessagingService:
                         new_content = None
                     if new_content:
                         await asyncio.to_thread(
-                            agent_handler.update_last_user_message_content, phone, new_content
+                            agent_handler.update_last_user_message_content, phone,
+                            new_content, channel_id
                         )
                     if audio_path:
                         await self.deliver_audio_transcription(phone, contact, transcription,

@@ -418,10 +418,19 @@ class AgentHandler:
         message_repo.update_status(contact.id, content, "sent", msg_id=msg_id)
         return {"content": content}
 
-    def update_last_user_message_content(self, phone: str, new_content: str) -> None:
-        """Update the content of the last user message (e.g., with transcription)."""
-        contact = self._get_contact(phone)
-        msg = message_repo.get_last_user_message(contact.id)
+    def update_last_user_message_content(self, phone: str, new_content: str,
+                                         channel_id: str = "default") -> None:
+        """Update the content of the last user message (e.g., with transcription).
+
+        Plano 37 (B5): escopa à conversa do CANAL do turno (o ``ContactMemory`` é
+        construído com ``channel_id`` → carrega ``inbox_id``), evitando a corrida
+        cross-canal em que a transcrição sobrescreveria a última msg de outro canal.
+        Fail-open: sem conversa aberta naquele inbox, cai no contact-global."""
+        contact = self._get_contact(phone, channel_id=channel_id)
+        from db.repositories import conversation_repo
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
+        msg = message_repo.get_last_user_message(
+            contact.id, conv["id"] if conv else None)
         if msg and msg.get("_id"):
             message_repo.update_content(msg["_id"], new_content)
 
