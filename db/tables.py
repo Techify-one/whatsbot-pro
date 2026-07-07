@@ -512,8 +512,16 @@ executions = Table(
     Column("total_tokens", Integer, nullable=False, server_default="0"),
     Column("total_cost_usd", Float, nullable=False, server_default="0.0"),
     Column("routing_steps", Text),                             # plano 06: JSON dos saltos de handoff
+    # plano 36: conversa + canal da execução. conversation_id é coluna SOLTA (sem FK)
+    # — execução é log histórico, não deve travar/cascatear ao apagar a conversa;
+    # o telefone colide entre canais, então o filtro principal é por conversa.
+    # channel_id/channel_label desnormalizados evitam join na listagem.
+    Column("conversation_id", Integer),
+    Column("channel_id", Text),
+    Column("channel_label", Text),
 )
 Index("idx_exec_started", executions.c.started_at)
+Index("idx_exec_conversation", executions.c.conversation_id)
 
 
 execution_steps = Table(

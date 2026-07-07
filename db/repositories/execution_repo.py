@@ -11,13 +11,48 @@ from db.engine import get_engine
 from db.tables import execution_steps, executions
 
 
-def create(phone: str, trigger_type: str = "webhook") -> int:
-    """Create a new execution and return its ID."""
+def create(phone: str, trigger_type: str = "webhook", *,
+           conversation_id: int | None = None,
+           channel_id: str | None = None,
+           channel_label: str | None = None) -> int:
+    """Create a new execution and return its ID.
+
+    ``conversation_id``/``channel_id``/``channel_label`` (plano 36) identificam a
+    conversa+canal do turno; costumam ser resolvidos só depois de materializar o
+    contato, então normalmente entram via ``set_channel`` — os kwargs aqui existem
+    para call sites que já os conhecem (e para testes). Todos opcionais/retrocompat.
+    """
+    values = dict(phone=phone, trigger_type=trigger_type, started_at=time.time())
+    if conversation_id is not None:
+        values["conversation_id"] = conversation_id
+    if channel_id is not None:
+        values["channel_id"] = channel_id
+    if channel_label is not None:
+        values["channel_label"] = channel_label
     with get_engine().begin() as conn:
-        result = conn.execute(sa_insert(executions).values(
-            phone=phone, trigger_type=trigger_type, started_at=time.time(),
-        ))
+        result = conn.execute(sa_insert(executions).values(**values))
         return result.inserted_primary_key[0]
+
+
+def set_channel(execution_id: int, conversation_id: int | None = None,
+                channel_id: str | None = None,
+                channel_label: str | None = None) -> None:
+    """Stamp the conversation + channel onto an already-created execution (plano 36).
+
+    Best-effort: only the non-None fields are written, so a failed conversation
+    lookup still lets the channel through (and vice-versa).
+    """
+    values = {}
+    if conversation_id is not None:
+        values["conversation_id"] = conversation_id
+    if channel_id is not None:
+        values["channel_id"] = channel_id
+    if channel_label is not None:
+        values["channel_label"] = channel_label
+    if not values:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(executions).where(executions.c.id == execution_id).values(**values))
 
 
 def add_step(execution_id: int, step_type: str,

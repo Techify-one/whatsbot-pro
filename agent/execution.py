@@ -37,13 +37,37 @@ def set_current_step_agent(agent_key: str | None) -> None:
     _current_step_agent.set(agent_key)
 
 
-def create_execution(phone: str, trigger_type: str = "webhook") -> int:
+def create_execution(phone: str, trigger_type: str = "webhook", *,
+                     conversation_id: int | None = None,
+                     channel_id: str | None = None,
+                     channel_label: str | None = None) -> int:
     """Create an execution row in the DB. Returns execution_id.
 
     This is a sync DB call — use via asyncio.to_thread() from async code.
     Does NOT set the contextvar (that must be done in the async context).
+    ``conversation_id``/``channel_id``/``channel_label`` (plano 36) são opcionais.
     """
-    return execution_repo.create(phone, trigger_type)
+    return execution_repo.create(
+        phone, trigger_type, conversation_id=conversation_id,
+        channel_id=channel_id, channel_label=channel_label,
+    )
+
+
+def set_execution_channel(conversation_id: int | None = None,
+                          channel_id: str | None = None,
+                          channel_label: str | None = None) -> None:
+    """Stamp conversation + channel onto the current execution (plano 36).
+
+    Reads execution_id from the contextvar (inherited inside asyncio.to_thread).
+    Best-effort: never raises into the turn.
+    """
+    exec_id = _current_execution.get()
+    if exec_id is None:
+        return
+    try:
+        execution_repo.set_channel(exec_id, conversation_id, channel_id, channel_label)
+    except Exception as e:
+        logger.warning("Failed to set execution channel: %s", e)
 
 
 def complete_execution(execution_id: int, status: str = "completed",
