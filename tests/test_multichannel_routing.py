@@ -14,10 +14,11 @@ de **Telegram** teve a resposta da IA arquivada numa conversa NOVA de **WhatsApp
 foi pro WhatsApp — porque ``_run_private_ai`` chama ``aprocess_message`` /
 ``save_assistant_message`` SEM ``channel_id``.
 
-Estes testes documentam o comportamento ATUAL (o misfiling). Cada fase de correção
-(FA1/FA3/FB1/…) INVERTE a asserção correspondente para o canal correto; a fase
-F-REG trava o conjunto. Onde uma asserção já reflete o comportamento correto, ela
-está marcada como tal.
+Estado (pós-execução do plano 37): as asserções destes testes já refletem o
+comportamento CORRETO (o misfiling foi consertado). Cobrem os 4 clusters — gate
+(A10), tools (A1/A2), motor (A4), ensure_ai_agent (A6), private-AI (B1),
+toggle-ai (B3), transcrição (B5) e a trava de transferência (D1) — mais a
+regressão single-channel e o guardrail anti-regressão (P4).
 
     venv/bin/python -m pytest tests/test_multichannel_routing.py -q
 """
@@ -331,3 +332,108 @@ def test_f0_private_ai_saves_reply_to_wrong_channel(build_app):
                 _m.c.conversation_id == s.default_conv,
                 _m.c.role == "assistant")).scalar()
     assert default_assistants == 0
+
+
+# ── A5 — atributos de conversa no prompt vêm do canal do turno (FA2) ────────
+
+def test_a5_prompt_conversation_attrs_from_turn_channel(build_app):
+    """FA2/A5: ``ContactMemory._custom_attr_lines('conversation')`` lê a conversa
+    do inbox DAQUELE ContactMemory (self.inbox_id), não a mais recente."""
+    from db.repositories import custom_attribute_repo as ca_repo
+    from db.tables import conversations as conv_tbl
+
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    s = _seed_two_inboxes(handler, "5511970000019", "mc_tg_a5")
+
+    # Define um atributo de conversa e grava valores DISTINTOS em cada conversa.
+    if not ca_repo.definition_exists("mc_a5_attr", "conversation"):
+        ca_repo.create_definition(attribute_key="mc_a5_attr", display_name="A5",
+                                  applies_to="conversation", type="text")
+    ca_repo.set_values(conv_tbl, s.default_conv, {"mc_a5_attr": "VALOR-DEFAULT"})
+    ca_repo.set_values(conv_tbl, s.tg_conv, {"mc_a5_attr": "VALOR-TELEGRAM"})
+
+    lines = "\n".join(s.tg_mem._custom_attr_lines("conversation"))
+    assert "VALOR-TELEGRAM" in lines
+    assert "VALOR-DEFAULT" not in lines
+
+
+# ── Regressão single-channel: comportamento idêntico ao legado ──────────────
+
+def test_regression_single_channel_gate_and_tools(build_app):
+    """O caminho comum (single-channel): resolver por-inbox coincide com o legado.
+    Uma só conversa (default); gate e transfer agem NELA, exatamente como antes."""
+    from app.services.messaging_service import _conversation_ai_active
+    from agent.tools import transfer_to_human as t2h
+
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    phone = "5511970000020"
+    mem = handler._get_contact(phone, channel_id="default")
+    conv_id = mem.add_message("user", "oi")["conversation_id"]
+
+    conversation_repo.set_ai_active(conv_id, 1)
+    assert _conversation_ai_active(mem) is True
+
+    ctx = SimpleNamespace(contact=mem, tag_registry=handler.tag_registry)
+    t2h.execute(ctx, {"reason": "humano"})
+    assert conversation_repo.get(conv_id)["ai_active"] == 0
+    assert _conversation_ai_active(mem) is False
+
+
+# ── Guardrail anti-regressão (P4): sem resolvers channel-blind novos ────────
+
+def test_guardrail_no_new_channel_blind_resolvers():
+    """P4: proíbe NOVOS ``get_open_for_contact(``/``get_latest_for_contact(`` (sem
+    ``_inbox``/``_scoped``) em caminhos sensíveis a canal. Os fallbacks legados
+    intencionais (D2 fail-open / P3 por-phone) estão na allow-list por contagem —
+    adicionar um resolver channel-blind novo num arquivo sensível quebra o teste."""
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    # Arquivos/dirs sensíveis (onde channel-blind = bug). conversation_repo.py é o
+    # site de DEFINIÇÃO dos resolvers + do fallback sancionado → fora do scan.
+    roots = [
+        repo / "agent",
+        repo / "app" / "services",
+        repo / "server" / "routes",
+        repo / "server" / "system_notices.py",
+    ]
+    # Fallbacks legados INTENCIONAIS (contagem exata de linhas de CHAMADA por arquivo):
+    #  - system_notices.py: ramo legado de resolve_conversation_for_contact (inbox_id None)
+    #  - conversations.py:  fallback por-phone do GET /atendimento (P3)
+    #  - tags.py:           âncora contact-global do card de tag (P3)
+    allow = {
+        "server/system_notices.py": 2,
+        "server/routes/conversations.py": 3,
+        "server/routes/tags.py": 2,
+    }
+    pat = re.compile(r"get_(?:open|latest)_for_contact\b(?!_inbox|_scoped)")
+
+    files: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            files.append(root)
+        else:
+            files.extend(root.rglob("*.py"))
+
+    offenders: dict[str, int] = {}
+    for f in files:
+        rel = str(f.relative_to(repo))
+        count = 0
+        for raw in f.read_text(encoding="utf-8").splitlines():
+            code = raw.split("#", 1)[0]          # tira comentário inline
+            if "``" in code:                      # refs em docstring (`` `nome` ``)
+                continue
+            if pat.search(code):
+                count += 1
+        if count:
+            offenders[rel] = count
+
+    # Todo arquivo com chamada channel-blind precisa bater EXATAMENTE a allow-list.
+    unexpected = {k: v for k, v in offenders.items()
+                  if k not in allow or allow[k] != v}
+    assert not unexpected, (
+        "Resolver channel-blind novo/alterado em caminho sensível (plano 37 P4). "
+        f"Use *_inbox/*_scoped ou atualize a allow-list conscientemente: {unexpected}")

@@ -434,11 +434,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** `venv/bin/python -m pytest tests/endpoints -q` + os scripts standalone relevantes verdes no Postgres de teste; novos testes multicanal cobrem os 4 clusters.
 
 #### Status de execução — Fase F-REG
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Os testes de F0 foram invertidos incrementalmente em cada fase (já asseguram o canal correto). `tests/test_multichannel_routing.py` agora cobre os 4 clusters (gate A10, tools A1/A2, motor A4/A5, ensure_ai_agent A6, private-AI B1, toggle-ai B3, transcrição B5, trava D1) + **regressão single-channel** (`test_regression_single_channel_gate_and_tools` — resolver por-inbox coincide com o legado) + **guardrail anti-regressão P4** (`test_guardrail_no_new_channel_blind_resolvers`).
+- **Como foi feito / decisões:** O guardrail escaneia os dirs sensíveis (`agent/`, `app/services/`, `server/routes/`, `server/system_notices.py`), ignora `conversation_repo.py` (site de definição + fallback sancionado), tira comentários inline e refs em `` `` ``-docstring, e exige que os `get_(open|latest)_for_contact` sem `_inbox`/`_scoped` batam EXATAMENTE a allow-list de fallbacks legados intencionais (`system_notices`=2, `conversations`=3, `tags`=2 — todos D2 fail-open / P3 por-phone). Um resolver channel-blind novo em arquivo sensível quebra o teste.
+- **Problemas / pendências:** Nenhuma. FC1/FC2 (frontend) validam a UI manualmente; sem harness puro pra useComposer.
+- **Verificação:** `pytest tests/endpoints` → 47 passed; `pytest tests/test_multichannel_routing.py tests/test_human_gate.py tests/test_transfer_broadcast.py tests/test_spoke_router_enforcement.py tests/test_router_prompt_description.py tests/test_routing_motivo.py tests/test_tool_call_broadcast.py` → 42 passed; `python tests/test_agent_routing.py` → 29 passed; `python tests/test_endpoints.py` → 1086 passed.
 
 ---
 
@@ -470,18 +470,18 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 
 ## 8. Checklist de verificação
 
-- [ ] `venv/bin/python -m pytest tests/endpoints -q` **verde no Postgres de teste** (`WHATSBOT_TEST_DB_URL`) após cada fase; scripts standalone de agente/routing rodados individualmente (ver memória "pytest tests/ não roda inteiro").
-- [ ] F0 captura o misfiling (private-AI, gate, tools) **antes** de qualquer mudança; F-REG inverte todos.
-- [ ] **Reprodução do bug relatado**: nota privada / "IA lê" numa conversa Telegram → resposta fica **na conversa Telegram**, sem criar conversa WhatsApp fantasma (#41).
-- [ ] Cluster A: todos os `get_open_for_contact`/`get_latest_for_contact` em caminho sensível usam a variante `*_inbox` com o `inbox_id` do `ContactMemory`/`ctx.contact`; gate mantém **fail-open**.
-- [ ] Cluster B: `_run_private_ai`, `send_private_audio`, toggle-ai, webhook group e transcrição threadam `channel_id`; broadcasts `new_message` carregam `channel_id`.
-- [ ] Cluster C: `sendPrivateMessage`/`sendPresence` encaminham `channelId`; conversa nova em canal não-default não misfila.
-- [ ] Cluster D: `transfer_to_human` num canal não silencia/reativa a IA no outro (conforme P1); single-channel inalterado.
-- [ ] `ensure_ai_agent` só carimba a conversa do inbox do turno; nunca uma conversa fechada de outro canal.
-- [ ] Caminho **single-channel** (comum) inalterado — comportamento idêntico ao de hoje.
-- [ ] Migration (se P1-coluna) `upgrade`/`downgrade` round-trip verde; **sem** segredo em URL/log.
-- [ ] Guardrail anti-regressão (P4) verde, se adotado.
-- [ ] Um refactor por commit; cada fase com seu bloco "Status de execução" preenchido.
+- [x] `venv/bin/python -m pytest tests/endpoints -q` **verde no Postgres de teste** (`WHATSBOT_TEST_DB_URL`) após cada fase; scripts standalone de agente/routing rodados individualmente (ver memória "pytest tests/ não roda inteiro").
+- [x] F0 captura o misfiling (private-AI, gate, tools) **antes** de qualquer mudança; F-REG inverte todos.
+- [x] **Reprodução do bug relatado**: nota privada / "IA lê" numa conversa Telegram → resposta fica **na conversa Telegram**, sem criar conversa WhatsApp fantasma (#41). (`test_f0_private_ai_saves_reply_to_wrong_channel` — 0 assistants no inbox default.)
+- [x] Cluster A: todos os `get_open_for_contact`/`get_latest_for_contact` em caminho sensível usam `*_inbox`/`get_open_for_contact_scoped` com o `inbox_id` do `ContactMemory`/`ctx.contact`; gate mantém **fail-open**.
+- [x] Cluster B: `_run_private_ai`, `send_private_audio`, toggle-ai, webhook group e transcrição threadam `channel_id`; broadcasts `new_message` carregam `channel_id`.
+- [x] Cluster C: `sendPrivateMessage`/`sendPresence` encaminham `channelId`; conversa nova em canal não-default não misfila.
+- [x] Cluster D: `transfer_to_human` num canal não silencia/reativa a IA no outro (P1-a — estado por-conversa); single-channel inalterado.
+- [x] `ensure_ai_agent` só carimba a conversa do inbox do turno; nunca uma conversa fechada de outro canal.
+- [x] Caminho **single-channel** (comum) inalterado — comportamento idêntico ao de hoje.
+- [x] Migration (se P1-coluna) — **N/A**: P1-a não usa coluna/migration.
+- [x] Guardrail anti-regressão (P4) verde (`test_guardrail_no_new_channel_blind_resolvers`).
+- [x] Um refactor por commit; cada fase com seu bloco "Status de execução" preenchido.
 
 ---
 
