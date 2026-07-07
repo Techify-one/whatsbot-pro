@@ -198,11 +198,14 @@ WAVE 3   F6(testes de integração + pruning + filtros)   [depende de: F1..F5]  
 **Pronto quando:** `GET /api/executions?conversation_id=123` retorna só as execuções daquela conversa; `?date_from=2026-07-01&date_to=2026-07-07` filtra o intervalo; `total` reflete o filtro.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-07)
+- **O que foi feito:**
+  - `db/repositories/execution_repo.py` — helper `_exec_filters(...)` compartilhado; `list_executions` e `count` ganharam `conversation_id`, `date_from`, `date_to` (epoch) mantendo `phone`/`status`.
+  - `server/routes/executions.py` — query params `conversation_id`/`date_from`/`date_to` + `_parse_date()` (aceita `YYYY-MM-DD` **ou** epoch; `date_to` = fim do dia inclusivo via `<` estrito no repo; entrada inválida vira None e dropa o filtro em vez de 500). Formato de resposta `{ok, data:{items, total}}` inalterado.
+  - `web/static/js/services/api.js` — `getExecutions` agora dropa params vazios/null (blank filter não vira `""`=422 no endpoint tipado).
+- **Como foi feito / decisões:** where-builder único evita drift entre list e count. `date_from >=` / `date_to <` (semi-aberto com fim-de-dia inclusivo). Datas em UTC (consistente com `started_at` = `time.time()`).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** repo — filtro por `conversation_id`, janela de data (dia inclusivo) e combinação conv+data conferidos contra o Postgres de teste; `_parse_date` (yyyy-mm-dd/empty/invalid/end_of_day) OK; `node --check api.js` OK; `python tests/test_endpoints.py` → **1086 passed, 0 failed** (retrocompat da assinatura).
 
 ---
 
