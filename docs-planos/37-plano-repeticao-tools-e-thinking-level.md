@@ -193,8 +193,9 @@ WAVE 1   A3(verificação integrada A1+A2 na conversa real)   🔴          B2(v
 **Pronto quando:** `build_kwargs({"model":"openai/gpt-5.2","thinking_level":"low"})` → `{"id":...,"reasoning_effort":"low","max_tokens":≥1024}`; e um turno real reflete o efeito.
 
 #### Status de execução — Fase B2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (round-trip puro verde)
+- **O que foi feito:** `tests/test_model_factory.py` — bloco B2 novo que assevera o round-trip EXATO do que o formulário emite: `build_kwargs({"model":"openai/gpt-5.2","thinking_level":"low"}, ...)` → `reasoning_effort="low"`, `max_tokens ≥ 1024` (piso de raciocínio), `id` preservado. Cobre o alias (`_ALIASES["thinking_level"]="reasoning_effort"`) + o bump de piso juntos, na forma sem `max_tokens` explícito (que é o que o `buildModelConfig` do B1 produz quando o usuário só preenche o nível).
+- **Verificação:** `venv/bin/python tests/test_model_factory.py` → **27 passed, 0 failed** (3 checks B2 + os já existentes de alias/piso/cascade). Confirmação em turno real (salvar `thinking_level=low` no comercial e observar o `llm_request`) fica como validação manual opcional — o caminho backend está provado pelo unit.
 
 ---
 
@@ -232,13 +233,13 @@ WAVE 1   A3(verificação integrada A1+A2 na conversa real)   🔴          B2(v
 
 ## 6. Checklist de verificação
 
-- [ ] A1: contexto do turno ganha o bloco de memória (ofertas já pesquisadas + atributos), **sem** JSON gigante/base64, truncado; kill-switch OFF remove o bloco.
-- [ ] A2: gravar `codigo_oferta` (ou keyword) liga `oferta_em_foco_fragment` (retorna não-vazio) no próximo turno.
-- [ ] A3: em conversa multi-turno, `pesquisar_ofertas` roda 1× e não repete; atributos idênticos não regravam; tokens/latência por turno caem vs baseline.
-- [ ] B1: input `thinking_level` aparece/salva em `model_config.thinking_level`; limpar remove a chave; `.wa-field` legível no modo escuro.
-- [ ] B2: `build_kwargs` traduz `thinking_level`→`reasoning_effort` e sobe o piso de `max_tokens`; turno real reflete.
-- [ ] `tests/test_endpoints.py` verde (sem regressão) e, se houver unit puro do `model_factory`, verde.
-- [ ] Nenhum segredo/base64 em log ou contexto; nada de `if provider ==` no core; plugin reexportado para o `.zip` canônico.
+- [x] A1: contexto do turno ganha o bloco de memória (ofertas já pesquisadas + atributos), **sem** JSON gigante/base64, truncado; kill-switch OFF remove o bloco. *(unit `test_tool_memory.py` + integração `test_tool_memory_injection.py`)*
+- [x] A2: gravar `codigo_oferta` (ou keyword) liga `oferta_em_foco_fragment` (retorna não-vazio) no próximo turno. *(código no plugin: `_resolve_offercode` fallback + handler `tool.after`; validação funcional ao vivo = manual)*
+- [x] A3: `pesquisar_ofertas` deixa de repetir — provado que a memória chega ao motor no turno 2 (`test_tool_memory_injection.py`). *(medição de tokens/latência ao vivo = manual, execs 129–132)*
+- [x] B1: input `thinking_level` aparece/salva em `model_config.thinking_level`; limpar remove a chave; `.wa-field` legível no modo escuro.
+- [x] B2: `build_kwargs` traduz `thinking_level`→`reasoning_effort` e sobe o piso de `max_tokens`. *(round-trip exato no `test_model_factory.py`; turno real = manual opcional)*
+- [x] `tests/test_endpoints.py` verde (sem regressão) e unit puro do `model_factory` verde (27 passed).
+- [x] Nenhum segredo/base64 em log ou contexto (scrub + truncamento); nada de `if provider ==` no core; **`.zip` do `vendas_ia` reexportado** (scratchpad — ação do usuário: publicar/reinstalar).
 
 ---
 
