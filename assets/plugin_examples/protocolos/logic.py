@@ -1654,6 +1654,8 @@ def on_inbound(ctx, payload: dict) -> None:
     """``message.saved`` (cliente engajou) → garante protocolo aberto + ciclo
     ABERTO. Se o último ciclo foi resolvido, abre um NOVO (cliente voltou)."""
     try:
+        if _skip_open_matches((payload or {}).get("text") or "", "received"):
+            return  # regra "ignorar abertura": recebida que casa não abre protocolo
         contact, atend = _resolve_target(payload)
         if not atend:
             return
@@ -1669,6 +1671,8 @@ def on_outbound(ctx, payload: dict) -> None:
     """``message.sent`` (operador/IA) → garante protocolo + ciclo de bootstrap,
     mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma)."""
     try:
+        if _skip_open_matches((payload or {}).get("text") or "", "sent"):
+            return  # regra "ignorar abertura": mensagem enviada casou a regex
         contact, atend = _resolve_target(payload)
         if not atend:
             return
@@ -1889,6 +1893,73 @@ def set_general_config(cfg: dict) -> dict:
     return get_general_config()
 
 
+# ── Ignorar abertura por regex (direção configurável) ────────────────────────
+# Quando o texto de uma mensagem casa com a regex, o protocolo NÃO é aberto e a
+# conversa/atendimento é mantida FECHADA (não reabre). A direção define qual lado
+# é analisado: 'sent' (enviada pelo whatsbot: operador/IA), 'received' (recebida
+# do contato) ou 'both'. A supressão do reopen é feita pelo core via o filtro
+# ``filter.conversation.before_reopen`` (ver ``before_reopen`` abaixo); a supressão
+# da abertura do protocolo é feita nos handlers ``on_inbound``/``on_outbound``.
+
+def _skip_key(name: str) -> str:
+    return f"plugin.{PLUGIN_ID}.skip_open_{name}"
+
+
+def get_skip_open_config() -> dict:
+    d = str(config_repo.get(_skip_key("direction"), "sent") or "sent")
+    return {
+        "enabled": bool(config_repo.get(_skip_key("enabled"), False)),
+        "regex": str(config_repo.get(_skip_key("regex"), "") or ""),
+        "direction": d if d in ("sent", "received", "both") else "sent",
+    }
+
+
+def set_skip_open_config(cfg: dict) -> dict:
+    cfg = cfg or {}
+    config_repo.set(_skip_key("enabled"), bool(cfg.get("enabled")))
+    config_repo.set(_skip_key("regex"), str(cfg.get("regex") or ""))
+    d = cfg.get("direction")
+    config_repo.set(_skip_key("direction"),
+                    d if d in ("sent", "received", "both") else "sent")
+    return get_skip_open_config()
+
+
+def _skip_open_matches(text_value: str, msg_direction: str) -> bool:
+    """True se a mensagem deve ser IGNORADA (não abrir protocolo / não reabrir).
+
+    ``msg_direction`` ∈ {'sent','received'} — o lado de quem enviou a mensagem.
+    Respeita o toggle, a direção configurada e trata regex inválida como no-match.
+    """
+    cfg = get_skip_open_config()
+    if not cfg["enabled"] or not cfg["regex"]:
+        return False
+    want = cfg["direction"]
+    if want != "both" and want != msg_direction:
+        return False
+    try:
+        return re.search(cfg["regex"], text_value or "") is not None
+    except re.error:
+        return False
+
+
+def _sanitize_skip_attrs(raw) -> list:
+    """Normaliza a lista de regras {key, scope, value} da aba Avaliação.
+
+    Descarta itens inválidos (key vazia, escopo fora de contact/conversation).
+    O valor é coagido para string (comparação feita em ``_attr_value_matches``).
+    """
+    out = []
+    for r in (raw or []):
+        if not isinstance(r, dict):
+            continue
+        key = str(r.get("key") or "").strip()
+        scope = r.get("scope")
+        if not key or scope not in ("contact", "conversation"):
+            continue
+        out.append({"key": key, "scope": scope, "value": str(r.get("value") or "")})
+    return out
+
+
 def get_protocol_config() -> dict:
     return {
         "enabled": bool(config_repo.get(_proto_key("enabled"), False)),
@@ -1900,6 +1971,7 @@ def get_protocol_config() -> dict:
             "title": str(config_repo.get(_proto_key("private_title"), "") or ""),
             "link": str(config_repo.get(_proto_key("private_link"), "") or ""),
         },
+        "skip_attrs": _sanitize_skip_attrs(config_repo.get(_proto_key("skip_attrs"), [])),
     }
 
 
@@ -1912,6 +1984,7 @@ def set_protocol_config(cfg: dict) -> dict:
     config_repo.set(_proto_key("normal_link"), str(normal.get("link") or ""))
     config_repo.set(_proto_key("private_title"), str(priv.get("title") or ""))
     config_repo.set(_proto_key("private_link"), str(priv.get("link") or ""))
+    config_repo.set(_proto_key("skip_attrs"), _sanitize_skip_attrs(cfg.get("skip_attrs")))
     return get_protocol_config()
 
 
@@ -1978,6 +2051,51 @@ def _latest_conversation_of_protocolo(atid: int) -> int | None:
         return None
 
 
+def _attr_value_matches(stored, wanted) -> bool:
+    """True se o valor ARMAZENADO do atributo bate com o valor DESEJADO da regra.
+
+    Case-insensitive/trim. Trata: string simples, lista nativa (checkboxes/list) e
+    string multi espelhada (", ".join do mirror de campos do plugin)."""
+    w = str(wanted or "").strip().lower()
+    if not w:
+        return False
+    if isinstance(stored, list):
+        return any(str(x).strip().lower() == w for x in stored)
+    s = str(stored if stored is not None else "").strip().lower()
+    if s == w:
+        return True
+    if "," in s:
+        return any(part.strip() == w for part in s.split(","))
+    return False
+
+
+def _should_skip_evaluation(at: dict, conv_id) -> bool:
+    """Decide se as mensagens da aba Avaliação devem ser PULADAS para este contato.
+
+    Lê as regras {key, scope, value} da config e compara com os custom_attributes
+    do contato e/ou da conversa. Qualquer regra que casar → pula (retorna True).
+    Best-effort: qualquer erro de leitura NÃO bloqueia o envio (retorna False)."""
+    try:
+        rules = get_protocol_config().get("skip_attrs") or []
+        if not rules:
+            return False
+        contact_vals, conv_vals = {}, {}
+        cid = (at or {}).get("contact_id")
+        if cid and any(r.get("scope") == "contact" for r in rules):
+            from db.tables import contacts as _contacts_tbl
+            contact_vals = custom_attribute_repo.get_values(_contacts_tbl, cid) or {}
+        if conv_id and any(r.get("scope") == "conversation" for r in rules):
+            conv_vals = custom_attribute_repo.get_values(_conversations_tbl, conv_id) or {}
+        for r in rules:
+            vals = contact_vals if r.get("scope") == "contact" else conv_vals
+            if _attr_value_matches(vals.get(r.get("key")), r.get("value")):
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — nunca travar o envio por erro de leitura
+        logger.debug("protocolos: _should_skip_evaluation falhou: %s", e)
+        return False
+
+
 def _compose_message(title: str, link: str, params: dict) -> str:
     body = _append_query(link, params)
     return f"{title}\n{body}" if title else body
@@ -2013,6 +2131,13 @@ def send_protocol_on_close(at: dict) -> None:
         conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
         channel_id = (_channel_for_conversation(conv_id)
                       or _channel_for_contact((at or {}).get("contact_id")))
+
+        # Regra "pular avaliação": se o contato/conversa tiver um atributo personalizado
+        # com um dos valores configurados, NÃO envia nem a mensagem normal nem a privada.
+        if _should_skip_evaluation(at, conv_id):
+            logger.info("protocolos: avaliação pulada (atributo personalizado) — protocolo %s",
+                        (at or {}).get("id"))
+            return
 
         # 1) Link normal → WhatsApp (envia pelo canal + salva como mensagem do operador).
         if normal.get("link") and outbound:
@@ -2085,6 +2210,57 @@ async def before_status(ctx, payload):
     if (payload or {}).get("new_status") != "closed":
         return payload
     return await asyncio.to_thread(_check_before_status, payload)
+
+
+# ── Regra "ignorar abertura" — não acionar IA/protocolo por regex ─────────────
+# A MENSAGEM sempre é salva/visível no painel, e a conversa é MANTIDA FECHADA nos dois
+# casos — só as AUTOMAÇÕES (protocolo, IA) é que são suprimidas:
+#  • ENVIADA (operador): o core aplica ``filter.conversation.before_reopen`` no envio
+#    do operador → ``before_reopen`` devolve False p/ NÃO reabrir (a msg vai ao WhatsApp,
+#    só não ressuscita o atendimento). ``on_outbound`` pula o protocolo.
+#  • RECEBIDA (contato): o core aplica o MESMO ``before_reopen`` no save inbound (t=0 e
+#    batch) → a conversa continua fechada, mas a mensagem aparece (é salva/broadcastada).
+#    ``on_inbound`` pula o protocolo e ``suppress_ai_on_ignored`` (``filter.llm.messages``
+#    → None) impede a resposta da IA — senão a resposta (que não casa a regex) reabriria
+#    a conversa e abriria protocolo por conta própria.
+
+def before_reopen(ctx, value):
+    """``filter.conversation.before_reopen`` — o core aplica nos SAVES (envio do operador
+    e recebimento do contato) com ``value=True`` (reabre). Devolve ``False`` p/ IMPEDIR a
+    reabertura quando a regra "ignorar abertura" casar na direção do lado (``role``='user'
+    → recebida, senão enviada). ``ctx.extras`` traz ``role`` e ``text``. Sync (config+regex)."""
+    ex = getattr(ctx, "extras", None) or {}
+    direction = "received" if ex.get("role") == "user" else "sent"
+    if _skip_open_matches(ex.get("text") or "", direction):
+        return False  # não reabrir
+    return value
+
+
+def suppress_ai_on_ignored(ctx, value):
+    """``filter.llm.messages`` — ABORTA a resposta da IA (retorna None) quando a última
+    mensagem do contato (RECEBIDA) casa a regra "ignorar abertura" (direção received/both).
+    A mensagem já foi salva/exibida no painel; só a resposta AUTOMÁTICA da IA é impedida
+    (senão a resposta reabriria a conversa e abriria protocolo). Não casa → IA normal."""
+    if not isinstance(value, list):
+        return value
+    last_user = next((m for m in reversed(value)
+                      if isinstance(m, dict) and m.get("role") == "user"), None)
+    if last_user is not None:
+        content = last_user.get("content")
+        if _skip_open_matches(content if isinstance(content, str) else "", "received"):
+            return None  # não chamar a IA para esta mensagem
+    return value
+
+
+def notify_on_ignored(ctx, value):
+    """``filter.message.notify`` — devolve ``False`` (sem badge de não-lida / som / alerta)
+    quando a mensagem RECEBIDA do contato casa a regra "ignorar abertura" (received/both).
+    A mensagem continua salva e visível no painel; só o AVISO de nova mensagem é suprimido.
+    Não casa → devolve o valor (True) e notifica normalmente. ``ctx.extras`` traz ``text``."""
+    ex = getattr(ctx, "extras", None) or {}
+    if _skip_open_matches(ex.get("text") or "", "received"):
+        return False  # mensagem silenciosa (sem notificação)
+    return value
 
 
 # ── Util ──────────────────────────────────────────────────────────────────────

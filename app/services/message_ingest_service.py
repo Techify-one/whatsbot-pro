@@ -417,7 +417,14 @@ class MessageIngestService:
                 "phone": phone, "archived": bool(event.is_archived),
                 "ts": time.time(),
             })
-        await asyncio.to_thread(contact.increment_unread, msg_id)
+        # Regra "ignorar abertura" (plugin): um filtro pode marcar a mensagem como
+        # SILENCIOSA (sem badge de não-lida / som / alerta) — a msg ainda é salva e
+        # exibida. Sem plugin registrado → True → notifica normalmente.
+        _notify = await apply_filter(
+            "filter.message.notify", True,
+            {"phone": phone, "role": "user", "text": display_text})
+        if _notify:
+            await asyncio.to_thread(contact.increment_unread, msg_id)
         if event.is_group and event.mentioned:
             await asyncio.to_thread(contact.mark_mention)
 
@@ -455,16 +462,27 @@ class MessageIngestService:
         media_path = _filtered.media_path
         media_extras = _filtered.media_extras
 
+        # Regra "ignorar abertura" (plugin): um filtro pode impedir que esta mensagem
+        # recebida REABRA uma conversa fechada — a mensagem ainda aparece (broadcast +
+        # save abaixo), só a conversa continua resolvida. Sem plugin → True → reopen=None.
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "user", "text": display_text})
+        _reopen = False if not _allow_reopen else None
+
         # plano 25 Fase 2 (bug #2): materialize the atendimento thread NOW (t=0), so a
         # brand-new conversation's sidebar row appears together with the tab badge —
         # not only when the batch saves the combined message (t≈message_batch_delay).
         # Idempotent: the batch's add_message re-resolves the SAME thread → no
         # re-announce. Runs AFTER echo suppression (:400) and filter.message.before_save
         # (:447) so a dropped/echo message never creates a conversation.
-        conversation_id = await asyncio.to_thread(contact.ensure_conversation_live)
+        conversation_id = await asyncio.to_thread(
+            contact.ensure_conversation_live, "user", _reopen)
 
         broadcast_msg: dict = {"role": "user", "content": display_text,
                                "ts": time.time(), "msg_id": msg_id}
+        if not _notify:
+            broadcast_msg["silent"] = True  # frontend pula som/alerta de nova mensagem
         # The frontend matches the sidebar row by conversation_id first (precedence
         # over phone/channel), so a NEW conversation's row updates in place at t=0.
         if conversation_id is not None:
@@ -487,7 +505,7 @@ class MessageIngestService:
             await asyncio.to_thread(
                 contact.add_message, "user", display_text,
                 media_type=media_type, media_path=media_path,
-                msg_id=msg_id, reply_to_msg_id=reply_to)
+                msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen)
             await emit_with_filter("message.saved", {
                 "phone": phone, "channel_id": channel_id, "text": display_text,
                 "msg_id": msg_id, "media_type": media_type, "media_path": media_path,

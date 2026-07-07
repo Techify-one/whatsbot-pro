@@ -305,6 +305,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
     if (!newMessage) return;
     const m = newMessage.message;
     if (!m || m.role !== 'user') return;
+    // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
+    // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
+    if (m.silent) return;
     if (getNotifPref('sound')) playNotificationSound();
     const away = document.hidden || !document.hasFocus();
     if (getNotifPref('browser') && away) {
