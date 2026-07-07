@@ -483,7 +483,8 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
 
 
 async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
-                            actor_name: str | None = None) -> None:
+                            actor_name: str | None = None,
+                            inbox_id: int | None = None) -> None:
     """Per-CONTACT AI gate toggle (POST /api/contacts/{phone}/toggle-ai).
 
     The route already flipped the contact-level ``ai_enabled`` (via the
@@ -495,6 +496,10 @@ async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
         (un)assign) + WS ``conversation_ai_toggled`` so the sidebar badge flips —
         this mirror is a WS broadcast ONLY (NOT a bus emit), preserving the
         characterized behavior that the bus sees only ``contact.ai_toggled`` here.
+
+    Plano 37 (B3/P2): ``inbox_id`` (o canal onde o operador agiu) ancora o card + o
+    mirror ``ai_active`` NAQUELA conversa — num contato com conversas em vários
+    canais, desligar a IA numa NÃO reflete na outra. Ausente → legado channel-blind.
     """
     await deps.ws_manager.broadcast("contact_ai_toggled", {
         "phone": phone, "ai_enabled": enabled})
@@ -506,7 +511,7 @@ async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
     conv = await asyncio.to_thread(
         system_notices.emit_for_contact,
         event_type="ai_on" if enabled else "ai_off",
-        contact_id=contact_id, phone=phone, actor=actor_name)
+        contact_id=contact_id, phone=phone, actor=actor_name, inbox_id=inbox_id)
     if conv is not None:
         await asyncio.to_thread(
             conversation_repo.set_ai_active, conv["id"], 1 if enabled else 0)

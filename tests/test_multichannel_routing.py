@@ -171,6 +171,26 @@ def test_a4_resolve_agent_from_turn_channel(build_app):
         agent_repo.delete("mc_a4_tg")
 
 
+# ── B3 — toggle-ai do contato ancora no canal do painel (FB3/P2) ────────────
+
+def test_b3_toggle_ai_scoped_to_panel_channel(build_app):
+    """FB3/P2: desligar a IA informando a conversa do Telegram zera o ``ai_active``
+    SÓ do Telegram; a conversa default segue com a IA ligada (não reflete)."""
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    phone = "5511970000016"
+    s = _seed_two_inboxes(handler, phone, "mc_tg_b3")
+    conversation_repo.set_ai_active(s.default_conv, 1)
+    conversation_repo.set_ai_active(s.tg_conv, 1)
+
+    r = built.client.post(f"/api/contacts/{phone}/toggle-ai", json={
+        "enabled": False, "conversation_id": s.tg_conv})
+    assert r.status_code == 200, r.text
+
+    assert conversation_repo.get(s.tg_conv)["ai_active"] == 0        # togglada
+    assert conversation_repo.get(s.default_conv)["ai_active"] == 1   # intacta
+
+
 # ── A6 — ensure_ai_agent carimba só a conversa do inbox do turno (FA6) ──────
 
 def test_a6_ensure_ai_agent_scoped_to_inbox(build_app):

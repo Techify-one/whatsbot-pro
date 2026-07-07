@@ -319,11 +319,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** operador no fio do Telegram desliga a IA → card + `ai_active` no Telegram (ou em todos, por P2), **não** num canal arbitrário; `characterization` de toggle-ai verde.
 
 #### Status de execução — Fase FB3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (P2 = por-conversa, decisão do usuário)
+- **O que foi feito:** [contacts.py](../server/routes/contacts.py) `toggle_contact_ai` resolve `toggle_inbox_id` de `body.conversation_id`/`channel_id` (via `_resolve_inbox_id`, só quando informado) e passa a `conv_svc.toggle_contact_ai(inbox_id=)`; [conversation_service.py:485](../app/services/conversation_service.py#L485) encaminha `inbox_id` a `emit_for_contact(inbox_id=)` (o card `ai_on/ai_off` + o mirror `set_ai_active` recaem na conversa do inbox). [api.js](../web/static/js/services/api.js) `toggleContactAI(phone, enabled, {conversationId, channelId})` (aditivo). Teste forward `test_b3_toggle_ai_scoped_to_panel_channel`.
+- **Como foi feito / decisões:** **Descoberta-chave:** `contact.ai_enabled` (o flag contact-global que o toggle vira) **NÃO** entra no gate — `_conversation_ai_active` lê só `conv.ai_active` (por-conversa) e conversas novas herdam do config global (`_default_ai_enabled`), não do contato. Logo, o cenário do usuário (2 canais GOWA, mesmo número, desligar numa não afeta a outra) já é garantido pelo `ai_active` por-conversa; o defeito B3 era só o **card + mirror** caírem num canal arbitrário. Além disso, o painel conversa-cêntrico já usa `POST /atendimentos/{id}/ai` (keyed por conv_id, inerentemente por-conversa) — o `/contacts/{phone}/toggle-ai` é o caminho contact-level legado, agora ancorado. Mantive o flip de `contact.ai_enabled` (inofensivo ao gate, preserva o WS `contact_ai_toggled`).
+- **Problemas / pendências:** O `toggleContactAI` do frontend não tem caller ativo hoje (o painel toggla por-conversa via `/atendimentos/{id}/ai`); a fiação `opts` fica pronta se algum caller contact-level voltar.
+- **Verificação:** `pytest tests/test_multichannel_routing.py tests/test_human_gate.py` → 14 passed; `node --test constants.test.js` ok; `python tests/test_endpoints.py` → 1086 passed.
 
 ---
 
