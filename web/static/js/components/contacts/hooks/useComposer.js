@@ -97,7 +97,7 @@ export function useComposer({
       if (presenceTimerRef.current) {
         clearTimeout(presenceTimerRef.current);
         presenceTimerRef.current = null;
-        if (phone) sendPresence(phone, 'stop', conversationId).catch(() => {});
+        if (phone) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
       }
     };
   }, [phone]);
@@ -129,17 +129,17 @@ export function useComposer({
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
       if (!presenceTimerRef.current) {
-        sendPresence(phone, 'start', conversationId).catch(() => {});
+        sendPresence(phone, 'start', conversationId, channelId).catch(() => {});
       }
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = setTimeout(() => {
-        sendPresence(phone, 'stop', conversationId).catch(() => {});
+        sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
         presenceTimerRef.current = null;
       }, 3000);
     } else {
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = null;
-      sendPresence(phone, 'stop', conversationId).catch(() => {});
+      sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
     }
   }
 
@@ -159,7 +159,7 @@ export function useComposer({
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
-    if (!sandbox) sendPresence(phone, 'stop', conversationId).catch(() => {});
+    if (!sandbox) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
 
     setInput('');
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

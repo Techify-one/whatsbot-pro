@@ -1553,7 +1553,9 @@ def register_routes(app, deps):
         if denied:
             return denied
         action = body.get("action", "start")
-        channel_id = _channel_for(phone, body.get("conversation_id"))
+        # plano 37 (C2): honra channel_id quando o painel inicia conversa nova sem
+        # conversation_id ainda — senão o presence cairia no 'default'.
+        channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
         await asyncio.to_thread(outbound.send_presence, channel_id, phone, action)
         return _ok({"status": "ok"})
 

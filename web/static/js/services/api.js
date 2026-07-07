@@ -348,9 +348,13 @@ export async function sendDocument(phone, file, caption = '', conversationId = n
     { document: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
-export async function sendPresence(phone, action = 'start', conversationId = null) {
+export async function sendPresence(phone, action = 'start', conversationId = null,
+                                   channelId = null) {
   const body = { action };
   if (conversationId != null) body.conversation_id = conversationId;
+  // plano 37 (C2): "digitando…" no canal que o operador compõe — sem channelId a
+  // conversa nova de canal não-default emitiria presence no WhatsApp 'default'.
+  if (channelId != null) body.channel_id = channelId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/presence`, body);
 }
 
