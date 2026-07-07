@@ -1,7 +1,6 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { markAllUnread, markAllRead } from '../services/api.js';
 import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
@@ -32,10 +31,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [systemNoticeAi, setSystemNoticeAi] = useState(true);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
-  const [confirmUnreadAll, setConfirmUnreadAll] = useState(false);
-  const [markingAllUnread, setMarkingAllUnread] = useState(false);
-  const [confirmReadAll, setConfirmReadAll] = useState(false);
-  const [markingAllRead, setMarkingAllRead] = useState(false);
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
   const [removePassword, setRemovePassword] = useState(false);
@@ -43,7 +38,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
-  // (marcar-atendimentos | avisos | avancado). Roda uma vez, quando o
+  // (avisos | avancado). Roda uma vez, quando o
   // conteúdo já montou (config carregada).
   const sectionScrolledRef = useRef(false);
   useEffect(() => {
@@ -70,40 +65,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       setAuditRetentionDays(config.audit_retention_days ?? 365);
     }
   }, [config]);
-
-  async function handleMarkAllUnread() {
-    setMarkingAllUnread(true);
-    try {
-      const res = await markAllUnread();
-      if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como não lida(s).`);
-      } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
-      }
-    } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
-    } finally {
-      setMarkingAllUnread(false);
-      setConfirmUnreadAll(false);
-    }
-  }
-
-  async function handleMarkAllRead() {
-    setMarkingAllRead(true);
-    try {
-      const res = await markAllRead();
-      if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como lida(s).`);
-      } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
-      }
-    } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
-    } finally {
-      setMarkingAllRead(false);
-      setConfirmReadAll(false);
-    }
-  }
 
   async function handleSave() {
     const data = {
@@ -142,66 +103,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
 
   return html`
     <div class="flex flex-col gap-4 flex-1">
-
-      <!-- Section: Marcar atendimentos -->
-      <${Section} id="marcar-atendimentos" title="Marcar conversas">
-        <!-- Mark all read / unread -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para uma conversa específica, use o botão direito sobre o contato na lista.</span>
-          ${confirmUnreadAll ? html`
-            <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como não lidas?</span>
-              <span class="text-xs text-amber-700">Reacende o indicador verde em todos os contatos do painel. Não afeta o WhatsApp do celular.</span>
-              <div class="flex gap-2 mt-1">
-                <button
-                  type="button"
-                  disabled=${markingAllUnread}
-                  onClick=${handleMarkAllUnread}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-amber-600 text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >${markingAllUnread ? 'Marcando...' : 'Confirmar'}</button>
-                <button
-                  type="button"
-                  disabled=${markingAllUnread}
-                  onClick=${() => setConfirmUnreadAll(false)}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover disabled:opacity-50 transition-colors"
-                >Cancelar</button>
-              </div>
-            </div>
-          ` : confirmReadAll ? html`
-            <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como lidas?</span>
-              <span class="text-xs text-amber-700">Remove o indicador verde de não lido de todos os contatos do painel.</span>
-              <div class="flex gap-2 mt-1">
-                <button
-                  type="button"
-                  disabled=${markingAllRead}
-                  onClick=${handleMarkAllRead}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-amber-600 text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >${markingAllRead ? 'Marcando...' : 'Confirmar'}</button>
-                <button
-                  type="button"
-                  disabled=${markingAllRead}
-                  onClick=${() => setConfirmReadAll(false)}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover disabled:opacity-50 transition-colors"
-                >Cancelar</button>
-              </div>
-            </div>
-          ` : html`
-            <div class="flex flex-wrap gap-2 mt-1">
-              <button
-                type="button"
-                onClick=${() => { setConfirmReadAll(false); setConfirmUnreadAll(true); }}
-                class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-teal text-white hover:opacity-90 transition-opacity"
-              >Marcar todas como não lidas</button>
-              <button
-                type="button"
-                onClick=${() => { setConfirmUnreadAll(false); setConfirmReadAll(true); }}
-                class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover transition-colors"
-              >Marcar todas como lidas</button>
-            </div>
-          `}
-        </div>
-      <//>
 
       ${canSettings ? html`
       <!-- Section: Avisos de sistema no chat (plano 12) -->
