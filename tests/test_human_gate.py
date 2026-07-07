@@ -73,23 +73,30 @@ def test_agente_ia_vinculado_nao_e_bloqueado_pelo_assignee(gate_contact):
     assert _conversation_ai_active(contact) is True
 
 
-def test_tag_transferido_atendente_bloqueia(gate_contact):
+def test_tag_transferido_atendente_nao_bloqueia_sozinha(gate_contact):
+    """Plano 37 (Cluster D / P1-a): a tag ``transferido_atendente`` deixou de ser
+    lida como trava (era contact-global → silenciava o outro canal do mesmo
+    número). Com a conversa ATIVA (ai_active=1, sem humano), a tag sozinha NÃO
+    silencia mais — a trava real é o ``ai_active=0`` por-conversa."""
     contact, _conv = gate_contact
     tag_repo.create(TRANSFER_TAG, "#ef4444")
     tag_repo.add_contact_tag(contact.id, TRANSFER_TAG)
-    assert _conversation_ai_active(contact) is False
-    tag_repo.remove_contact_tag(contact.id, TRANSFER_TAG)
     assert _conversation_ai_active(contact) is True
+    tag_repo.remove_contact_tag(contact.id, TRANSFER_TAG)
 
 
 def test_reativar_ia_limpa_a_tag(gate_contact):
-    """``_transfer`` com ai_active=1 (set_ai ON / atribuir à IA) remove a trava."""
+    """``_transfer`` com ai_active=1 religa a IA (ai_active) E limpa a tag visual.
+    Plano 37: agora quem bloqueia é o ``ai_active=0`` por-conversa (a transferência
+    o grava); a tag é só rótulo, mas a reativação continua a removendo."""
     from app.services import conversation_service as conv_svc
 
     contact, conv = gate_contact
+    # Estado real pós-transferência: conversa pausada (ai_active=0) + tag visual.
+    conversation_repo.set_ai_active(conv["id"], 0)
     tag_repo.create(TRANSFER_TAG, "#ef4444")
     tag_repo.add_contact_tag(contact.id, TRANSFER_TAG)
-    assert _conversation_ai_active(contact) is False
+    assert _conversation_ai_active(contact) is False  # bloqueia via ai_active
 
     deps = SimpleNamespace(agent_handler=None)
     asyncio.run(conv_svc._transfer(

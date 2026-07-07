@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 
 from channels import ai_settings
-from db.repositories import contact_repo, conversation_repo, tag_repo
+from db.repositories import contact_repo, conversation_repo
 from agent import group_mentions
 from server import system_notices
 from server.execution import (
@@ -1153,17 +1153,17 @@ def _conversation_ai_active(contact) -> bool:
     bot. Permite pausar a IA numa conversa específica sem mexer no contato.
 
     Plano 29 A5 — gate de humano desacoplado do flag: mesmo com ``ai_active``
-    dessincronizado em 1, a IA NÃO responde quando (a) a conversa aberta tem um
-    humano atribuído (``assignee_user_id``) sem agente de IA vinculado, ou
-    (b) o contato carrega a tag de transferência (:data:`TRANSFER_TAG`,
-    criada por ``transfer_to_human`` e limpa quando a IA reassume).
+    dessincronizado em 1, a IA NÃO responde quando a conversa aberta tem um humano
+    atribuído (``assignee_user_id``) sem agente de IA vinculado.
+
+    Plano 37 (Cluster D / P1-a): a trava de transferência é 100% POR-CONVERSA. A
+    ``transfer_to_human`` já grava ``ai_active=0`` (+ assignee) na conversa do canal;
+    o gate por-conversa acima cobre o bloqueio. A tag ``transferido_atendente`` deixa
+    de ser lida aqui (era contact-global → transferir num canal silenciava o outro
+    do mesmo número); ela permanece só como RÓTULO visual. Fail-open (D2): sem
+    conversa naquele inbox, ``conv=None`` → ``return True``; erro → ``return True``.
     """
-    from agent.tools.transfer_to_human import TRANSFER_TAG
     try:
-        # plano 37 A10: lê a conversa DO CANAL do turno (inbox do ContactMemory),
-        # não a mais recente de qualquer canal. Fail-open preservado (D2): conv=None
-        # cai na checagem de tag e retorna True no except — nunca silencia por
-        # resolução.
         conv = conversation_repo.get_open_for_contact_scoped(contact)
         if conv:
             if not conv["ai_active"]:
@@ -1171,8 +1171,6 @@ def _conversation_ai_active(contact) -> bool:
             if conv.get("assignee_user_id") is not None \
                     and not conv.get("active_agent_key"):
                 return False  # humano no comando — flag dessincronizado não fala mais alto
-        if TRANSFER_TAG in (tag_repo.get_contact_tags(contact.id) or []):
-            return False  # belt-and-suspenders: transferido pra atendente
         return True
     except Exception:
         logger.exception("Falha no gate ai_active para %s", getattr(contact, "phone", "?"))
