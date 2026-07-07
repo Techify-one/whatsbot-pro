@@ -47,6 +47,15 @@ k = mf.build_kwargs({"model": "m", "max_output_tokens": 1777, "thinking_level": 
 check("alias max_output_tokens→max_tokens", k["max_tokens"] == 1777)
 check("alias thinking_level→reasoning_effort", k.get("reasoning_effort") == "high")
 
+# Plano 37 B2 (barreira): round-trip EXATO do que o formulário de agente emite —
+# model_config = {"model": ..., "thinking_level": "low"} (sem max_tokens explícito).
+# thinking_level→reasoning_effort E o piso de max_tokens sobe pra ≥1024.
+k = mf.build_kwargs({"model": "openai/gpt-5.2", "thinking_level": "low"},
+                    fallback_model="x", default_max_tokens=D)
+check("B2: thinking_level=low → reasoning_effort=low", k.get("reasoning_effort") == "low")
+check("B2: thinking_level → piso max_tokens ≥ 1024", k["max_tokens"] >= 1024)
+check("B2: id do model_config preservado", k["id"] == "openai/gpt-5.2")
+
 # A5 (plano 31 F4): piso de max_tokens — valor baixo demais não emudece o bot
 k = mf.build_kwargs({"model": "m", "max_tokens": 10}, fallback_model="x", default_max_tokens=D)
 check("piso: max_tokens=10 sobe pro piso (sem reasoning)",
