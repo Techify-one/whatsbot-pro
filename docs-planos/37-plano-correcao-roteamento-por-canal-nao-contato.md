@@ -259,11 +259,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** conforme P3. Se P3 = manter legado, esta fase é só documentação (marcar como intencional). Suíte de tags/conversations verde.
 
 #### Status de execução — Fase FA5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (P3 = channel-aware quando o painel tem `conversation_id`/`channel_id`, fallback legado)
+- **O que foi feito:** [tags.py](../server/routes/tags.py) `set_contact_tags`: a âncora do card `tag_added/removed` prefere `body["conversation_id"]` (validando posse do contato) antes do legado `get_open/get_latest_for_contact`. [conversations.py](../server/routes/conversations.py) `GET /contacts/{phone}/atendimento`: novos query params opcionais `conversation_id` (resolve direto, com posse + `_inbox_hidden`) e `channel_id` (escopa via `inbox_repo.get_by_channel` → `get_open/latest_for_contact_inbox`); sem nenhum, mantém o legado por-phone.
+- **Como foi feito / decisões:** Tags são contact-global por design (plano 01) — só a **âncora** do aviso ficou channel-aware. Mudanças 100% aditivas (params opcionais/None), o front atual que não manda os campos cai no legado byte-a-byte.
+- **Problemas / pendências:** O frontend ainda não passa esses campos (é o gancho pra quando o painel multicanal quiser precisão do card/header — fora do escopo desta fase, sem impacto de alto valor per P3/D4). Nenhuma pendência bloqueante.
+- **Verificação:** `python tests/test_endpoints.py` → 1086 passed; `pytest tests/endpoints/test_conversation_events_c0.py` → 10 passed.
 
 ---
 
