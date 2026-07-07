@@ -131,6 +131,14 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # server.background.audit_purge_loop). NÃO seedado; GET cai em 365. Antes
     # faltava aqui, então o campo do ConfigPanel nunca persistia (era inerte).
     ConfigKey("audit_retention_days", exposed=True, get_default=365, writable=True),
+    # plano 36 F3 — KILL-SWITCH da captura do contexto enviado à IA (system prompt
+    # + histórico) no step ``llm_context``. Default OFF (conservador: o banco não
+    # cresce até o operador ligar para depurar). Toggle na tela de Execuções.
+    ConfigKey("execution_capture_context", default=False, exposed=True, writable=True),
+    # plano 36 F3 — retenção de execuções por dias (poda no mesmo loop do
+    # ``max_executions``, via ``delete_older_than``). 0 = desligado (só a poda por
+    # quantidade). Complementa a captura de contexto (que infla cada execução).
+    ConfigKey("execution_retention_days", default=0, exposed=True, writable=True),
     ConfigKey("default_ai_enabled", default=True, exposed=True, writable=True),
     # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
     # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —

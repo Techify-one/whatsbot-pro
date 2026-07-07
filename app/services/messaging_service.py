@@ -515,7 +515,7 @@ class MessagingService:
                 await ws_manager.broadcast("contact_info_updated", {
                     "phone": phone, "info": full.get("info")})
         if "conversation" in attr_scopes:
-            conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact.id)
+            conv = await asyncio.to_thread(conversation_repo.get_open_for_contact_scoped, contact)
             if conv:
                 await ws_manager.broadcast("conversation_updated", {
                     "conversation_id": conv["id"], "contact_id": contact.id,
@@ -555,7 +555,7 @@ class MessagingService:
             # The conversation was unassigned by the tool — push the change so the
             # row moves to the "Não atribuídas" inbox live (plano 10).
             conv = await asyncio.to_thread(
-                conversation_repo.get_open_for_contact, contact.id)
+                conversation_repo.get_open_for_contact_scoped, contact)
             if conv:
                 await ws_manager.broadcast("conversation_assigned", {
                     "conversation_id": conv["id"],
@@ -714,7 +714,7 @@ class MessagingService:
             contact = agent_handler._get_contact(phone, channel_id=channel_id)
             if contact is None:
                 return None
-            conv = conversation_repo.get_open_for_contact(contact.id)
+            conv = conversation_repo.get_open_for_contact_scoped(contact)
             if conv is None or system_notices.has_event(conv["id"], "ai_takeover"):
                 return None
             system_notices.emit_conversation_notice(
@@ -1063,8 +1063,9 @@ class MessagingService:
             await ws_manager.broadcast("ai_typing", {"phone": phone, "channel_id": channel_id, "active": False})
 
         max_exec = settings.get("max_executions", 200)
+        retention_days = settings.get("execution_retention_days", 0)
         try:
-            await asyncio.to_thread(prune_executions, max_exec)
+            await asyncio.to_thread(prune_executions, max_exec, retention_days)
         except Exception:
             pass
 
@@ -1158,7 +1159,11 @@ def _conversation_ai_active(contact) -> bool:
     """
     from agent.tools.transfer_to_human import TRANSFER_TAG
     try:
-        conv = conversation_repo.get_open_for_contact(contact.id)
+        # plano 37 A10: lê a conversa DO CANAL do turno (inbox do ContactMemory),
+        # não a mais recente de qualquer canal. Fail-open preservado (D2): conv=None
+        # cai na checagem de tag e retorna True no except — nunca silencia por
+        # resolução.
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
         if conv:
             if not conv["ai_active"]:
                 return False

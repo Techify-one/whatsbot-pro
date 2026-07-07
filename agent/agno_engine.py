@@ -25,6 +25,7 @@ try/except and usage snapshot.
 """
 
 import os
+import re
 import time
 import logging
 from dataclasses import dataclass, field
@@ -76,6 +77,68 @@ def _truncate_result(value, limit: int = TOOL_RESULT_MAX_CHARS):
     if len(s) > limit:
         return s[:limit] + "… (truncado)"
     return s
+
+
+# plano 36 F3: capture of the FULL context sent to the LLM (system prompt +
+# message array) onto an ``llm_context`` step, gated by the ``execution_capture_context``
+# kill-switch (default OFF). Each message is truncated and base64 blobs are scrubbed
+# so a media-heavy turn does not bloat the DB.
+LLM_CONTEXT_MSG_MAX_CHARS = 2000
+LLM_CONTEXT_TOTAL_MAX_CHARS = 20000
+_BASE64_DATA_URI_RE = re.compile(r"data:[^;,\s]*;base64,[A-Za-z0-9+/=]+")
+_LONG_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+
+
+def _context_capture_enabled() -> bool:
+    """Read the ``execution_capture_context`` kill-switch (default OFF, best-effort)."""
+    try:
+        from db.repositories import config_repo
+        return bool(config_repo.get("execution_capture_context", False))
+    except Exception:
+        return False
+
+
+def _scrub_and_truncate(content, limit: int = LLM_CONTEXT_MSG_MAX_CHARS):
+    """Return (scrubbed+truncated string, truncated_flag) for one context message."""
+    try:
+        s = content if isinstance(content, str) else str(content)
+    except Exception:
+        return "", False
+    s = _BASE64_DATA_URI_RE.sub("[base64 removido]", s)
+    s = _LONG_BASE64_RE.sub("[base64 removido]", s)
+    if len(s) > limit:
+        return s[:limit] + "… (truncado)", True
+    return s, False
+
+
+def _capture_llm_context(system_prompt, convo, model_id) -> None:
+    """Emit an ``llm_context`` step with the system prompt + message array.
+
+    No-op when the kill-switch is OFF. Fully best-effort — any failure is swallowed
+    so context capture never breaks the turn. Base64 media blobs are scrubbed and
+    every message is truncated (per-message + total cap).
+    """
+    if not _context_capture_enabled():
+        return
+    try:
+        msgs: list[dict] = []
+        total = 0
+        if system_prompt:
+            c, tr = _scrub_and_truncate(system_prompt)
+            msgs.append({"role": "system", "content": c, "truncated": tr})
+            total += len(c)
+        for m in convo:
+            if total >= LLM_CONTEXT_TOTAL_MAX_CHARS:
+                msgs.append({"role": "system", "content": "… (contexto truncado)",
+                             "truncated": True})
+                break
+            c, tr = _scrub_and_truncate(getattr(m, "content", "") or "")
+            msgs.append({"role": getattr(m, "role", "user") or "user",
+                         "content": c, "truncated": tr})
+            total += len(c)
+        track_step("llm_context", {"model": model_id, "engine": "agno", "messages": msgs})
+    except Exception:
+        logger.debug("llm_context capture failed", exc_info=True)
 # Last-resort model when an AgentSpec carries no model (config-in-DB only path,
 # plano 22). The AgentHandler no longer has an in-code ``model`` attribute.
 from agent.agent_factory import DEFAULT_MODEL as _FALLBACK_MODEL
@@ -503,6 +566,7 @@ async def run_async(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    _capture_llm_context(system_prompt, convo, model_id)
     run_output = await runner.arun(input=convo)
 
     reply = _extract_reply(run_output)
@@ -562,6 +626,7 @@ def run_sync(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    _capture_llm_context(system_prompt, convo, model_id)
     run_output = runner.run(input=convo)
 
     reply = _extract_reply(run_output)
