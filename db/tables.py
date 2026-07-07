@@ -606,6 +606,8 @@ ai_agents = Table(
     # plano 06: roteamento/handoff (consumido pelo motor de routing futuro).
     Column("description", Text, nullable=False, server_default=""),
     Column("is_router", Integer, nullable=False, server_default="0"),
+    # plano 36: agente padrão para novas conversas (semântica radio, espelha is_router).
+    Column("is_default", Integer, nullable=False, server_default="0"),
     Column("routing_targets", _json_type()),                  # JSON array de agent_keys — JSONB (F5)
     Column("hooks_config", _json_type(), nullable=False, server_default="{}"),  # hooks declarativos — JSONB (F5)
     Column("version", Integer, nullable=False, server_default="1"),
@@ -615,6 +617,9 @@ ai_agents = Table(
 # o metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
 Index("ux_ai_agents_single_router", ai_agents.c.is_router,
       unique=True, postgresql_where=text("is_router = 1"))
+# Único agente padrão de novas conversas (plano 36, migration 0043) — espelha o de router.
+Index("ux_ai_agents_single_default", ai_agents.c.is_default,
+      unique=True, postgresql_where=text("is_default = 1"))
 
 
 ai_prompts = Table(
