@@ -152,9 +152,30 @@ def get_by_id(execution_id: int) -> dict | None:
     return execution
 
 
+def _exec_filters(phone: str | None, status: str | None,
+                  conversation_id: int | None,
+                  date_from: float | None, date_to: float | None) -> list:
+    """Shared WHERE clauses for list_executions/count (plano 36 F4)."""
+    clauses = []
+    if phone:
+        clauses.append(executions.c.phone == phone)
+    if status:
+        clauses.append(executions.c.status == status)
+    if conversation_id is not None:
+        clauses.append(executions.c.conversation_id == conversation_id)
+    if date_from is not None:
+        clauses.append(executions.c.started_at >= date_from)
+    if date_to is not None:
+        clauses.append(executions.c.started_at < date_to)
+    return clauses
+
+
 def list_executions(limit: int = 50, offset: int = 0,
                     phone: str | None = None,
-                    status: str | None = None) -> list[dict]:
+                    status: str | None = None,
+                    conversation_id: int | None = None,
+                    date_from: float | None = None,
+                    date_to: float | None = None) -> list[dict]:
     """List executions (newest first) with step count and duration."""
     step_count = (
         select(func.count())
@@ -169,11 +190,7 @@ def list_executions(limit: int = 50, offset: int = 0,
         .limit(limit)
         .offset(offset)
     )
-    where_clauses = []
-    if phone:
-        where_clauses.append(executions.c.phone == phone)
-    if status:
-        where_clauses.append(executions.c.status == status)
+    where_clauses = _exec_filters(phone, status, conversation_id, date_from, date_to)
     if where_clauses:
         stmt = stmt.where(and_(*where_clauses))
 
@@ -191,14 +208,12 @@ def list_executions(limit: int = 50, offset: int = 0,
     return results
 
 
-def count(phone: str | None = None, status: str | None = None) -> int:
-    """Count total executions for pagination."""
+def count(phone: str | None = None, status: str | None = None,
+          conversation_id: int | None = None,
+          date_from: float | None = None, date_to: float | None = None) -> int:
+    """Count total executions for pagination (honours the same filters as list)."""
     stmt = select(func.count()).select_from(executions)
-    where_clauses = []
-    if phone:
-        where_clauses.append(executions.c.phone == phone)
-    if status:
-        where_clauses.append(executions.c.status == status)
+    where_clauses = _exec_filters(phone, status, conversation_id, date_from, date_to)
     if where_clauses:
         stmt = stmt.where(and_(*where_clauses))
     with get_engine().connect() as conn:

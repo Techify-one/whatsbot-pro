@@ -740,7 +740,13 @@ export async function clearLogs() {
 // ── Executions ───────────────────────────────────────────────────
 
 export async function getExecutions(params = {}) {
-  const qs = new URLSearchParams(params).toString();
+  // Drop empty/null params so a blank filter (e.g. conversation_id="") is omitted
+  // instead of sent as ""=422 against the typed endpoint (plano 36 F4).
+  const clean = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') clean[k] = v;
+  }
+  const qs = new URLSearchParams(clean).toString();
   return request('GET', `/api/executions${qs ? '?' + qs : ''}`);
 }
 
