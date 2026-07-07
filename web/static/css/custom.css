@@ -291,3 +291,25 @@ html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { c
   opacity: 0.3;
   cursor: default;
 }
+
+/* Expand/collapse arrow in the bottom mode-switch bar (MarkdownEditor.js): grows
+   the inline box so the whole prompt is visible without scrolling. The chevron
+   points down when collapsed and flips up (.is-tall) when expanded. */
+.wa-md-editor .wa-md-arrow-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  color: rgb(var(--wa-secondary));
+  background: transparent;
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-arrow-btn:hover { color: rgb(var(--wa-text)); }
+.wa-md-editor .wa-md-arrow-btn svg { transition: transform 0.15s ease; }
+.wa-md-editor .wa-md-arrow-btn.is-tall svg { transform: rotate(180deg); }
+
+/* Nested editor rendered inside the full-screen modal: fill the modal body so
+   Toast UI's height:100% resolves against a real height. */
+.wa-md-editor.wa-md-editor-nested,
+.wa-md-editor.wa-md-editor-nested .toastui-editor-defaultUI { height: 100%; }

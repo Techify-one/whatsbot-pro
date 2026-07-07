@@ -17,10 +17,11 @@ import { entityPath } from '../../hooks/useDeepLink.js';
 import { hasPermission, hasAnyPermission } from '../../utils/permissions.js';
 
 // Permissões granulares de IA — cada sub-aba exige sua chave (substituíram o
-// antigo agent.manage). "Agentes" cobre config OU prompt (o editor de prompt
-// some sem agent.prompts.manage); "Configurações" é a config global (settings).
+// antigo agent.manage). "Agentes" cobre config OU qualquer permissão de prompt
+// (editar/versionar/apagar); "Configurações" é a config global (settings).
 const TAB_PERMS = {
-  agents: ['agent.config.manage', 'agent.prompts.manage'],
+  agents: ['agent.config.manage', 'agent.create', 'agent.duplicate',
+    'agent.prompts.edit', 'agent.prompts.version', 'agent.prompts.delete'],
   variables: ['agent.variables.manage'],
   tools: ['agent.tools.manage'],
   general: ['settings.manage'],

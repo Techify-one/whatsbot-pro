@@ -41,7 +41,7 @@ function DeltaChip({ added, removed }) {
   `;
 }
 
-export default function PromptHistoryModal({ agentKey, agentLabel, currentVersion, onClose, onRestored }) {
+export default function PromptHistoryModal({ agentKey, agentLabel, currentVersion, onClose, onRestored, canVersion = true, canDelete = true }) {
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -206,12 +206,16 @@ export default function PromptHistoryModal({ agentKey, agentLabel, currentVersio
                           ${r.version === effectiveCurrent ? html`<span class="px-1.5 py-0.5 rounded-full text-[10px] bg-wa-teal/10 text-wa-teal">atual</span>` : null}
                           <${DeltaChip} added=${r.added_lines} removed=${r.removed_lines} />
                           <span class="ml-auto flex items-center gap-1">
-                            <button type="button" title="Renomear versão"
-                              class="text-wa-secondary hover:text-wa-teal p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                              onClick=${(e) => { e.stopPropagation(); openRename(r); }}>✎</button>
-                            <button type="button" title="Excluir versão"
-                              class="text-wa-secondary hover:text-red-500 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                              onClick=${(e) => { e.stopPropagation(); setDeleteTarget(r); }}>🗑</button>
+                            ${canVersion ? html`
+                              <button type="button" title="Renomear versão"
+                                class="text-wa-secondary hover:text-wa-teal p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick=${(e) => { e.stopPropagation(); openRename(r); }}>✎</button>
+                            ` : null}
+                            ${canDelete ? html`
+                              <button type="button" title="Excluir versão"
+                                class="text-wa-secondary hover:text-red-500 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick=${(e) => { e.stopPropagation(); setDeleteTarget(r); }}>🗑</button>
+                            ` : null}
                           </span>
                         </div>
                         <div class="text-[11px] text-wa-secondary mt-0.5">${fmtDate(r.created_at)}</div>
@@ -248,7 +252,7 @@ export default function PromptHistoryModal({ agentKey, agentLabel, currentVersio
                     ? html`<div class="text-[13px] text-wa-secondary">Calculando diff…</div>`
                     : html`<${PromptDiff} lines=${diff && diff.lines} unifiedDiff=${diff && diff.unified_diff} />`)))}
 
-            ${(!loading && toV != null) ? html`
+            ${(!loading && toV != null && canVersion) ? html`
               <div class="flex justify-end pt-1">
                 <button class="px-3 py-2 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
                   disabled=${restoreBusy}

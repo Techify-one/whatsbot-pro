@@ -69,6 +69,10 @@ function markdownToHtml(md) {
 // them follow the toolbar text color, so light/dark themes work without changes.
 const UNDO_SVG = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
 const REDO_SVG = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
+// Maximize icon: opens the editor in a full-screen modal for comfortable editing.
+const ZOOM_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+// Chevron used by the expand/collapse arrow in the bottom bar (rotates when tall).
+const CHEVRON_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
 
 // Group rapid keystrokes into a single undoable snapshot (ms of inactivity).
 const SNAPSHOT_DELAY = 500;
@@ -82,12 +86,23 @@ function makeToolbarButton(svg, tooltip) {
   return btn;
 }
 
-export function MarkdownEditor({ value, onChange, placeholder, height = '360px' }) {
+export function MarkdownEditor({ value, onChange, placeholder, height = '360px', tallHeight = '640px', nested = false }) {
   const elRef = useRef(null);
   const editorRef = useRef(null);
   // Keep the latest onChange without re-creating the editor on every render.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+
+  // `tall` = inline height toggle (the ⌄ arrow in the bottom bar expands the box
+  // so the whole prompt is visible without scrolling). `expanded` = the full-screen
+  // modal (the ⤢ zoom button). Both are hidden on the `nested` editor that renders
+  // INSIDE the modal, so it can't recursively open another modal.
+  const [tall, setTall] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  // Imperative Toast-UI toolbar buttons flip these React states via refs.
+  const setTallRef = useRef(setTall); setTallRef.current = setTall;
+  const setExpandedRef = useRef(setExpanded); setExpandedRef.current = setExpanded;
+  const arrowBtnRef = useRef(null);
 
   // Self-contained undo/redo history of markdown snapshots. `idx` points at the
   // snapshot currently shown; everything before it can be undone, everything
@@ -95,6 +110,12 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
   const histRef = useRef({ stack: [value || ''], idx: 0, suppress: false, timer: null });
   const undoBtnRef = useRef(null);
   const redoBtnRef = useRef(null);
+  // The last markdown THIS editor emitted upward. When the controlled `value` prop
+  // comes back equal to it, that's our own echo — re-applying it via setMarkdown()
+  // would rebuild the document and jump the scroll to the top on every keystroke.
+  // (Two editors share one `value`, e.g. inline + full-screen modal; each must
+  // still receive genuine external changes and edits from the OTHER editor.)
+  const lastEmittedRef = useRef(value || '');
 
   const Editor = (typeof window !== 'undefined' && window.toastui && window.toastui.Editor) || null;
   const [unavailable] = useState(!Editor);
@@ -132,6 +153,7 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
     h.suppress = true;
     editor.setMarkdown(md, false); // false = keep cursor, don't scroll
     h.suppress = false;
+    lastEmittedRef.current = md;
     if (onChangeRef.current) onChangeRef.current(md);
     refreshButtons();
   };
@@ -160,6 +182,17 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
     undoBtnRef.current = undoBtn;
     redoBtnRef.current = redoBtn;
 
+    // Zoom button at the far right of the toolbar → opens the full-screen modal.
+    // Omitted on the nested (in-modal) editor so it can't reopen itself.
+    const zoomBtn = nested ? null : makeToolbarButton(ZOOM_SVG, 'Abrir em tela cheia');
+    if (zoomBtn) zoomBtn.addEventListener('click', () => setExpandedRef.current(true));
+
+    const historyGroup = [
+      { name: 'undo', tooltip: 'Desfazer', el: undoBtn },
+      { name: 'redo', tooltip: 'Refazer', el: redoBtn },
+    ];
+    if (zoomBtn) historyGroup.push({ name: 'zoom', tooltip: 'Abrir em tela cheia', el: zoomBtn });
+
     const editor = new Editor({
       el: elRef.current,
       height,
@@ -179,10 +212,7 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
         ['ul', 'ol', 'task', 'indent', 'outdent'],
         ['table', 'link'],
         ['code', 'codeblock'],
-        [
-          { name: 'undo', tooltip: 'Desfazer', el: undoBtn },
-          { name: 'redo', tooltip: 'Refazer', el: redoBtn },
-        ],
+        historyGroup,
       ],
     });
     editor.on('change', () => {
@@ -194,6 +224,7 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
       // tab. Only genuine user edits (suppress=false) propagate up + record history.
       if (h.suppress) return;
       const md = editor.getMarkdown();
+      lastEmittedRef.current = md;
       if (onChangeRef.current) onChangeRef.current(md);
       // Debounce so a burst of typing becomes one undo step, not one per key.
       if (h.timer) clearTimeout(h.timer);
@@ -217,6 +248,22 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
     // in markdown it reads "Editor" (click → back to normal formatted editing).
     const switchBar = elRef.current.querySelector('.toastui-editor-mode-switch');
     if (switchBar) {
+      // Expand/collapse arrow (left of the mode toggle): grows the inline box so
+      // the whole prompt is visible without scrolling. Hidden on the nested editor
+      // (the modal is already full height). Rotation follows the `tall` state via
+      // the `tall` effect toggling `.is-tall` on this button.
+      if (!nested) {
+        const arrowBtn = document.createElement('button');
+        arrowBtn.type = 'button';
+        arrowBtn.className = 'wa-md-arrow-btn';
+        arrowBtn.innerHTML = CHEVRON_SVG;
+        arrowBtn.setAttribute('title', 'Expandir a caixa de texto');
+        arrowBtn.setAttribute('aria-label', 'Expandir a caixa de texto');
+        arrowBtn.addEventListener('click', () => setTallRef.current((v) => !v));
+        arrowBtnRef.current = arrowBtn;
+        switchBar.insertBefore(arrowBtn, switchBar.firstChild);
+      }
+
       const toggleBtn = document.createElement('button');
       toggleBtn.type = 'button';
       toggleBtn.className = 'wa-md-mode-toggle';
@@ -287,12 +334,29 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
+    // The modal editor is fully uncontrolled after mount: it only pushes edits UP
+    // (to the parent + the inline editor behind it) and NEVER takes value back in.
+    // Any setMarkdown() here rebuilds the doc and jumps the scroll to the top on
+    // every keystroke — especially in Markdown mode. It's the sole editing surface
+    // while open, so it needs no external sync; it seeds from `initialValue` on mount.
+    if (nested) return;
+    // While the full-screen modal is open this (inline, hidden) editor is frozen:
+    // it must NOT re-apply value changes. Otherwise, when the modal is in Markdown
+    // mode, this WYSIWYG editor would receive the raw text, re-normalize it (adding
+    // `\(` / `1\.` escapes) and emit that back — forcing a setMarkdown() on the modal
+    // editor that scrolls it to the top and corrupts the text mid-typing. It re-syncs
+    // when the modal closes (this effect re-runs because `expanded` is a dep).
+    if (expanded) return;
+    // Our own echo: the parent is just replaying what this editor emitted. Skip —
+    // reapplying would rebuild the doc and scroll to the top mid-typing.
+    if ((value || '') === lastEmittedRef.current) return;
     if ((value || '') !== editor.getMarkdown()) {
       const h = histRef.current;
       if (h.timer) { clearTimeout(h.timer); h.timer = null; }
       h.suppress = true;
       editor.setMarkdown(value || '', false); // false = keep cursor, don't scroll
       h.suppress = false;
+      lastEmittedRef.current = value || '';
       if ((value || '') !== h.stack[h.idx]) {
         h.stack = h.stack.slice(0, h.idx + 1);
         h.stack.push(value || '');
@@ -300,7 +364,30 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
       }
       refreshButtons();
     }
-  }, [value]);
+  }, [value, expanded]);
+
+  // Apply the inline height toggle: grow/shrink the editor and rotate the arrow.
+  // Skipped while the modal is open (the box behind it doesn't need to resize) and
+  // on the nested editor (fixed at 100% of the modal).
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || nested) return;
+    try { editor.setHeight(expanded ? height : (tall ? tallHeight : height)); } catch (e) { /* noop */ }
+    const arrow = arrowBtnRef.current;
+    if (arrow) {
+      arrow.classList.toggle('is-tall', tall);
+      arrow.setAttribute('title', tall ? 'Recolher a caixa de texto' : 'Expandir a caixa de texto');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tall, expanded]);
+
+  // Close the full-screen modal on Escape.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e) => { if (e.key === 'Escape') setExpanded(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [expanded]);
 
   // Follow the app theme live by toggling the dark class on the editor root.
   useEffect(() => {
@@ -323,7 +410,27 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px' 
       value=${value || ''} onInput=${(e) => onChange && onChange(e.target.value)}></textarea>`;
   }
 
-  return html`<div class="wa-md-editor" ref=${elRef}></div>`;
+  return html`
+    <div class="wa-md-editor ${nested ? 'wa-md-editor-nested' : ''}" ref=${elRef}></div>
+    ${expanded ? html`
+      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-3 sm:p-6"
+        onClick=${(e) => { if (e.target === e.currentTarget) setExpanded(false); }}>
+        <div class="bg-wa-bg rounded-2xl shadow-2xl w-full h-full max-w-6xl max-h-[94vh] flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-wa-border shrink-0">
+            <span class="text-[13px] font-medium text-wa-text">Editar prompt</span>
+            <button type="button" title="Fechar (Esc)"
+              class="text-wa-secondary hover:text-wa-text transition-colors p-1 rounded"
+              onClick=${() => setExpanded(false)}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="flex-1 min-h-0 p-3">
+            <${MarkdownEditor} value=${value} onChange=${onChange} placeholder=${placeholder} nested height="100%" />
+          </div>
+        </div>
+      </div>
+    ` : null}
+  `;
 }
 
 export default MarkdownEditor;
