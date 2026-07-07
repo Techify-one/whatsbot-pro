@@ -140,6 +140,13 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # quantidade). Complementa a captura de contexto (que infla cada execução).
     ConfigKey("execution_retention_days", default=0, exposed=True, writable=True),
     ConfigKey("default_ai_enabled", default=True, exposed=True, writable=True),
+    # plano 37 A1 — KILL-SWITCH da memória compacta de tool no contexto do turno.
+    # Injeta um bloco ``system`` curto ("ferramentas já executadas / atributos já
+    # definidos NESTE atendimento") para o modelo parar de re-rodar pesquisas e
+    # regravar atributos idênticos a cada turno (o role ``tool_call`` é excluído do
+    # contexto do LLM, então sem isso o modelo não "lembra" o que já rodou). Default
+    # ON (é o fix pedido; OFF ⇒ comportamento legado, sem o bloco).
+    ConfigKey("ai_tool_memory_enabled", default=True, exposed=True, writable=True),
     # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
     # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —
     # P62/P67). Seeded ON so user tools register automatically; set env
