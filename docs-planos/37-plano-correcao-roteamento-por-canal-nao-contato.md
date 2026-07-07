@@ -394,11 +394,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** manual — compor conversa nova de canal não-default → presence emitido nesse canal, não no WhatsApp.
 
 #### Status de execução — Fase FC2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [api.js](../web/static/js/services/api.js) `sendPresence(phone, action, conversationId, channelId)` → `body.channel_id`. [useComposer.js](../web/static/js/components/contacts/hooks/useComposer.js) passa `channelId` nas 5 chamadas de presence. Backend [contacts.py:1556](../server/routes/contacts.py#L1556) `_channel_for(phone, conversation_id, channel_id)`.
+- **Como foi feito / decisões:** Aditivo (4º arg opcional). `contacts.py` sequenciado após FB1/FB3 (mesmo arquivo).
+- **Problemas / pendências:** Nenhuma. Validação manual da UI recomendada.
+- **Verificação:** `node --check` OK; `python tests/test_endpoints.py` → 1086 passed (presence coberto).
 
 ---
 
