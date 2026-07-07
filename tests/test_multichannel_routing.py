@@ -214,6 +214,34 @@ def test_a6_ensure_ai_agent_scoped_to_inbox(build_app):
         agent_repo.delete("mc_a6")
 
 
+# ── B5 — transcrição escrita na msg do canal do turno (FB5) ─────────────────
+
+def _last_user_content(conv_id: int) -> str | None:
+    from db.tables import messages as _m
+    from db.engine import get_engine
+    from sqlalchemy import select
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(_m.c.content).where(
+                _m.c.conversation_id == conv_id, _m.c.role == "user")
+            .order_by(_m.c.ts.desc()).limit(1)).first()
+    return row[0] if row else None
+
+
+def test_b5_transcription_updates_turn_channel_message(build_app):
+    """FB5: com msg de user nos dois canais (default mais recente), a transcrição
+    escopada ao Telegram atualiza a msg DO Telegram, não a globalmente mais recente."""
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    phone = "5511970000017"
+    s = _seed_two_inboxes(handler, phone, "mc_tg_b5")
+
+    handler.update_last_user_message_content(phone, "TRANSCRITO", channel_id="mc_tg_b5")
+
+    assert _last_user_content(s.tg_conv) == "TRANSCRITO"
+    assert _last_user_content(s.default_conv) == "oi pelo whatsapp"  # intacta
+
+
 # ── B1 — private-AI arquiva a resposta no canal errado (a conversa #41) ──────
 
 def _poll(pred, timeout: float = 4.0, step: float = 0.02):

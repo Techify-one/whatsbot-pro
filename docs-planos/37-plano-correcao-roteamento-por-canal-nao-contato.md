@@ -356,11 +356,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** teste multicanal — áudio no Telegram + texto no GOWA na janela de transcrição → a transcrição atualiza a msg **do Telegram**; suíte de caracterização de áudio verde.
 
 #### Status de execução — Fase FB5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [message_repo.get_last_user_message](../db/repositories/message_repo.py) ganhou filtro opcional `conversation_id`. [handler.py:421](../agent/handler.py#L421) `update_last_user_message_content(phone, new_content, channel_id="default")` resolve a conversa do canal (`get_open_for_contact_scoped`) e escopa o `get_last_user_message`. Caller [messaging_service:964](../app/services/messaging_service.py#L964) passa `channel_id`. Teste forward `test_b5_transcription_updates_turn_channel_message`.
+- **Como foi feito / decisões:** Fail-open — sem conversa aberta no inbox, `conv=None` → `conversation_id=None` → contact-global (legado). Os 3 callers do sandbox passam só 2 posicionais → `channel_id` cai no default (sandbox é single-inbox intencional, §2.4), byte-idêntico.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `pytest tests/test_multichannel_routing.py` → 8 passed; `pytest tests/characterization/test_sandbox_improve_characterization.py` → 15 passed.
 
 ---
 
