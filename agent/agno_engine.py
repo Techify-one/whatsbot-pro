@@ -55,6 +55,27 @@ _RESERVED_TOOL_KWARGS = {
 }
 
 _DEFAULT_MAX_TOKENS = 1024
+# plano 36 F2: the tool result is persisted onto the ``tool_executed`` step so the
+# Executions panel shows input AND output. Results can be huge JSON (e.g.
+# ``pesquisar_ofertas``), so truncate before storing.
+TOOL_RESULT_MAX_CHARS = 4000
+
+
+def _truncate_result(value, limit: int = TOOL_RESULT_MAX_CHARS):
+    """Coerce a tool result to a bounded string for persistence (best-effort).
+
+    None passes through as None (tool returned nothing). Anything longer than
+    ``limit`` is cut with a ``"… (truncado)"`` suffix.
+    """
+    if value is None:
+        return None
+    try:
+        s = value if isinstance(value, str) else str(value)
+    except Exception:
+        return None
+    if len(s) > limit:
+        return s[:limit] + "… (truncado)"
+    return s
 # Last-resort model when an AgentSpec carries no model (config-in-DB only path,
 # plano 22). The AgentHandler no longer has an in-code ``model`` attribute.
 from agent.agent_factory import DEFAULT_MODEL as _FALLBACK_MODEL
@@ -175,7 +196,9 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
             feedback = "" if fr is None else fr
 
         executed.append({"tool": name, "args": args, "result": feedback})
-        track_step("tool_executed", {"tool": name, "args": args})
+        track_step("tool_executed", {
+            "tool": name, "args": args, "result": _truncate_result(feedback),
+        })
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
 
@@ -221,7 +244,9 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
             feedback = "" if fr is None else fr
 
         executed.append({"tool": name, "args": args, "result": feedback})
-        track_step("tool_executed", {"tool": name, "args": args})
+        track_step("tool_executed", {
+            "tool": name, "args": args, "result": _truncate_result(feedback),
+        })
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
 

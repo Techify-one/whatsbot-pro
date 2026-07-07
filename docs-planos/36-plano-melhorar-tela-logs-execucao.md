@@ -149,11 +149,11 @@ WAVE 3   F6(testes de integração + pruning + filtros)   [depende de: F1..F5]  
 **Pronto quando:** um turno com tool call → `get_by_id` retorna o step `tool_executed` com `args` **e** `result` (truncado); tools sem retorno mostram result vazio/None sem quebrar.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-07)
+- **O que foi feito:** `agent/agno_engine.py` — const `TOOL_RESULT_MAX_CHARS = 4000` + helper `_truncate_result(value, limit)`; ambos os entrypoints (async `_make_async_entrypoint` e sync `_make_sync_entrypoint`) agora gravam `result` (truncado) no `track_step("tool_executed", {tool, args, result})`.
+- **Como foi feito / decisões:** truncamento genérico com sufixo `"… (truncado)"`; `None` passa como `None` (tool sem retorno não quebra). Coerção defensiva `str(value)` em try/except. Mudança **genérica no dispatch** — nenhum `if/elif` por nome de tool (regra do repo). O caminho de tool bloqueada/pulada não emite `tool_executed` (inalterado). Não há variável de `error` separada no ponto (o `_dispatch_tool` retorna a mensagem de erro como `feedback`), então o result cobre também falhas.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** smoke do `_truncate_result` (None/curto/truncado/não-str) OK; `tests/test_tool_runner.py`, `tests/test_tool_call_broadcast.py`, `tests/test_tool_call_limit.py` verdes (rodados individualmente — rodar juntos conflita no DROP SCHEMA por processo).
 
 ---
 
