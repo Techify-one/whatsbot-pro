@@ -30,8 +30,8 @@ DEFAULT_AGENT_KEY = "default"
 # ordem/conteúdo do dict ``values`` montado em :func:`save`).
 _SNAPSHOT_COLS = (
     "agent_key", "display_name", "prompt", "prompt_key", "model_config",
-    "tool_names", "enabled", "description", "is_router", "routing_targets",
-    "hooks_config", "version", "updated_at",
+    "tool_names", "enabled", "description", "is_router", "is_default",
+    "routing_targets", "hooks_config", "version", "updated_at",
 )
 
 
@@ -64,6 +64,7 @@ def _row_to_dict(row) -> dict:
     d["hooks_config"] = coerce_json(d.get("hooks_config"), {})
     d["enabled"] = bool(d.get("enabled", 1))
     d["is_router"] = bool(d.get("is_router", 0))
+    d["is_default"] = bool(d.get("is_default", 0))
     return d
 
 
@@ -128,6 +129,7 @@ def save(
     enabled: bool,
     description: str = "",
     is_router: bool = False,
+    is_default: bool = False,
     routing_targets: list[str] | None = None,
     hooks_config: dict | None = None,
     change_note: str | None = None,
@@ -159,6 +161,7 @@ def save(
         and bool(enabled) == bool(existing.get("enabled", True))
         and (description or "") == (existing.get("description") or "")
         and bool(is_router) == bool(existing.get("is_router", False))
+        and bool(is_default) == bool(existing.get("is_default", False))
         and routing_targets == existing.get("routing_targets")
         and (hooks_config or {}) == (existing.get("hooks_config") or {})
     ):
@@ -174,6 +177,7 @@ def save(
         "enabled": 1 if enabled else 0,
         "description": description or "",
         "is_router": 1 if is_router else 0,
+        "is_default": 1 if is_default else 0,
         "routing_targets": _native_json_field(routing_targets, None),
         "hooks_config": _native_json_field(hooks_config, {}),
         "version": version,
@@ -185,11 +189,15 @@ def save(
         # upsert, para nunca violar o índice único parcial (0035).
         if is_router:
             _demote_other_routers(conn, agent_key, now)
+        # Único agente padrão de novas conversas (plano 36): mesma semântica radio.
+        if is_default:
+            _demote_other_defaults(conn, agent_key, now)
         conn.execute(upsert(
             ai_agents, values, conflict_cols=["agent_key"],
             update_cols=["display_name", "prompt", "prompt_key", "model_config",
                          "tool_names", "enabled", "description", "is_router",
-                         "routing_targets", "hooks_config", "version", "updated_at"],
+                         "is_default", "routing_targets", "hooks_config", "version",
+                         "updated_at"],
         ))
         conn.execute(ai_agents_history.insert().values(
             agent_key=agent_key,
@@ -248,6 +256,52 @@ def get_router() -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def _demote_other_defaults(conn, agent_key: str, now: float) -> list[str]:
+    """Set ``is_default = 0`` on every OTHER default agent, inside the caller's txn.
+
+    Radio semantics (plano 36): promoting an agent to "default for new conversations"
+    demotes the current one. Each demotion bumps ``version`` and snapshots to history,
+    so the change trail / rollback keeps working for the demoted agent too.
+    """
+    rows = conn.execute(
+        select(ai_agents).where(ai_agents.c.is_default == 1,
+                                ai_agents.c.agent_key != agent_key)
+    ).mappings().all()
+    demoted: list[str] = []
+    for row in rows:
+        d = dict(row)
+        new_version = (d.get("version") or 0) + 1
+        conn.execute(
+            ai_agents.update()
+            .where(ai_agents.c.agent_key == d["agent_key"])
+            .values(is_default=0, version=new_version, updated_at=now)
+        )
+        snap = {k: d.get(k) for k in _SNAPSHOT_COLS}
+        snap.update({"is_default": 0, "version": new_version, "updated_at": now})
+        conn.execute(ai_agents_history.insert().values(
+            agent_key=d["agent_key"],
+            version=new_version,
+            snapshot=json.dumps(snap, ensure_ascii=False),
+            created_at=now,
+        ))
+        demoted.append(d["agent_key"])
+    return demoted
+
+
+def get_new_conversation_default() -> dict | None:
+    """The agent marked as the default for NEW conversations (plano 36), or ``None``.
+
+    Distinct from :func:`get_default` (the literal ``"default"`` key — the emergency
+    floor used by the runtime). Only the creation stamp
+    (``conversation_repo.default_agent_key_for_inbox``) consults this.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(ai_agents).where(ai_agents.c.is_default == 1)
+        ).mappings().first()
+    return _row_to_dict(row) if row else None
+
+
 def list_history(agent_key: str) -> list[dict]:
     """Version trail (newest first), sem o snapshot completo."""
     with get_engine().connect() as conn:
@@ -284,6 +338,7 @@ def rollback(agent_key: str, version: int) -> dict | None:
         enabled=bool(snap.get("enabled", 1)),
         description=snap.get("description", ""),
         is_router=bool(snap.get("is_router", 0)),
+        is_default=bool(snap.get("is_default", 0)),
         routing_targets=_decode_json(snap.get("routing_targets"), None),
         hooks_config=_decode_json(snap.get("hooks_config"), {}),
     )
