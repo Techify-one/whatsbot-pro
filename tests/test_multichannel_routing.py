@@ -171,6 +171,29 @@ def test_a4_resolve_agent_from_turn_channel(build_app):
         agent_repo.delete("mc_a4_tg")
 
 
+# ── A6 — ensure_ai_agent carimba só a conversa do inbox do turno (FA6) ──────
+
+def test_a6_ensure_ai_agent_scoped_to_inbox(build_app):
+    """FA6: com duas conversas abertas, ``ensure_ai_agent`` escopado ao inbox do
+    Telegram carimba SÓ a conversa do Telegram; a do default fica intacta."""
+    from db.repositories import agent_repo
+
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    s = _seed_two_inboxes(handler, "5511970000015", "mc_tg_a6")
+    agent_repo.save("mc_a6", display_name="A6", prompt="p",
+                    model_config={"model": "openai/gpt-4o-mini"},
+                    tool_names=None, enabled=True)
+    try:
+        default_before = conversation_repo.get(s.default_conv)["active_agent_key"]
+        conversation_repo.ensure_ai_agent(s.contact_id, "mc_a6", s.tg_mem.inbox_id)
+
+        assert conversation_repo.get(s.tg_conv)["active_agent_key"] == "mc_a6"
+        assert conversation_repo.get(s.default_conv)["active_agent_key"] == default_before
+    finally:
+        agent_repo.delete("mc_a6")
+
+
 # ── B1 — private-AI arquiva a resposta no canal errado (a conversa #41) ──────
 
 def _poll(pred, timeout: float = 4.0, step: float = 0.02):

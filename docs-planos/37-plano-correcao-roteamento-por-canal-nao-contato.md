@@ -278,11 +278,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** com 2 conversas abertas do contato, uma resposta da IA num canal carimba `active_agent_key` **só** na conversa daquele canal; `test_agent_routing` verde.
 
 #### Status de execução — Fase FA6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [conversation_repo.py](../db/repositories/conversation_repo.py) `ensure_ai_agent(contact_id, agent_key, inbox_id=None)`: com `inbox_id` usa `get_open_for_contact_inbox` (só a conversa ABERTA do canal), em vez de `get_latest_for_contact` (que incluía fechadas de qualquer canal). [handler.py:361](../agent/handler.py#L361) passa `getattr(contact,"inbox_id",None)`. Teste forward `test_a6_ensure_ai_agent_scoped_to_inbox`.
+- **Como foi feito / decisões:** `inbox_id` opcional (default None) → fail-open pro resolver legado (D2), mas o único caller real (ContactMemory) sempre passa. Resolver por **open** também elimina o risco de carimbar uma conversa fechada (o `if status != "open"` vira redundante, mantido como cinto).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `pytest tests/test_multichannel_routing.py tests/test_transfer_broadcast.py` → 8 passed; `python tests/test_agent_routing.py` → 29 passed.
 
 ---
 

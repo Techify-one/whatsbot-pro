@@ -517,7 +517,8 @@ def assign_agent(conv_id: int, *, assignee_user_id: int | None,
     return _update(conv_id, values)
 
 
-def ensure_ai_agent(contact_id: int, agent_key: str) -> dict | None:
+def ensure_ai_agent(contact_id: int, agent_key: str,
+                    inbox_id: int | None = None) -> dict | None:
     """Attribute the contact's active conversation to the AI agent that is
     answering, so the inbox shows its assignee chip (e.g. "IA padrão") sempre que
     a IA responde — mesmo em conversas reabertas após resolução (que limpa o
@@ -526,8 +527,14 @@ def ensure_ai_agent(contact_id: int, agent_key: str) -> dict | None:
     No-op when a human has taken the chat over (``assignee_user_id`` set), when it
     is already bound to this same agent, or when the conversation is not open.
     Returns the updated conv only when it actually changed, so callers can
-    broadcast a single assignment event."""
-    conv = get_latest_for_contact(contact_id)
+    broadcast a single assignment event.
+
+    Plano 37 (A6): ``inbox_id`` escopa a atribuição à conversa ABERTA do canal do
+    turno — nunca carimba (nem rouba) a conversa de OUTRO canal do mesmo número,
+    inclusive uma **fechada** (o antigo ``get_latest`` incluía fechadas). Fail-open
+    (D2): sem ``inbox_id`` cai no resolver legado por-contato."""
+    conv = (get_open_for_contact_inbox(contact_id, inbox_id)
+            if inbox_id is not None else get_latest_for_contact(contact_id))
     if conv is None:
         return None
     if conv.get("status") != "open":
