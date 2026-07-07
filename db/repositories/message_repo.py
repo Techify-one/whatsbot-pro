@@ -132,6 +132,28 @@ def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
     return [_row_to_dict(r) for r in reversed(rows)]
 
 
+def get_tool_calls_by_conversation(conversation_id: int, limit: int = 50) -> list[dict]:
+    """Return the ``tool_call`` cards of ONE conversation, oldest→newest (plano 37 A1).
+
+    Deliberately does NOT reuse :func:`get_context`'s eligibility filter (which
+    EXCLUDES role='tool_call'): this is the source for the compact tool-memory
+    block that re-injects "what already ran this conversation" so the model stops
+    re-running the same tools between turns. Scoped by ``conversation_id`` (one
+    thread per channel), so a sibling channel's tools don't leak in.
+    """
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(messages)
+            .where(
+                (messages.c.conversation_id == conversation_id)
+                & (messages.c.role == "tool_call")
+            )
+            .order_by(messages.c.ts.desc())
+            .limit(limit)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in reversed(rows)]
+
+
 def get_last(contact_id: int) -> dict | None:
     """Return the most recent message for a contact."""
     with get_engine().connect() as conn:

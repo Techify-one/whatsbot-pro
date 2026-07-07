@@ -281,6 +281,21 @@ async def run_turn(handler, sender: str, text: str, *,
     if eff_split:
         context_messages = handler._encode_history_for_split(context_messages)
 
+    # Plano 37 A1: memória compacta de tool. O role ``tool_call`` é excluído do
+    # contexto do LLM (get_context) e o motor roda stateless, então o modelo
+    # re-executa as mesmas tools todo turno. Injeta um bloco ``system`` curto
+    # ("já executadas / atributos já definidos") que atravessa split_messages
+    # (concatenado ao system prompt) e é herdado por todos os hops de routing.
+    # Best-effort + kill-switch: falha ou OFF ⇒ segue sem o bloco.
+    try:
+        from agent import tool_memory
+        _mem_block = tool_memory.build_block(contact)
+        if _mem_block:
+            context_messages = [*context_messages,
+                                {"role": "system", "content": _mem_block}]
+    except Exception:
+        logger.debug("tool_memory: injeção falhou para %s", sender, exc_info=True)
+
     # Config-in-DB: resolve the DB-driven agent for this contact + the
     # filter.agent.resolve seam. Always returns a spec; a genuinely broken DB
     # raises AgentResolutionError, which we isolate to this one conversation
