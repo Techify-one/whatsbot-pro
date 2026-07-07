@@ -152,6 +152,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
   const [enabled, setEnabled] = useState(agent.enabled !== false);
   const [description, setDescription] = useState(agent.description || '');
   const [isRouter, setIsRouter] = useState(!!agent.is_router);
+  // Padrão para novas conversas (plano 36): flag radio (só um agente). Nome distinto
+  // de `isDefault` (linha abaixo), que significa "é o agente de chave literal default".
+  const [isNewConvDefault, setIsNewConvDefault] = useState(!!agent.is_default);
   // tool_names: null => "todas as tools". Otherwise a list of names.
   const [allTools, setAllTools] = useState(agent.tool_names == null);
   const [toolNames, setToolNames] = useState(
@@ -185,6 +188,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
     setEnabled(agent.enabled !== false);
     setDescription(agent.description || '');
     setIsRouter(!!agent.is_router);
+    setIsNewConvDefault(!!agent.is_default);
     setAllTools(agent.tool_names == null);
     setToolNames(Array.isArray(agent.tool_names) ? [...agent.tool_names] : []);
     setRoutingTargets(Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []);
@@ -260,6 +264,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
         enabled,
         description: description.trim(),
         is_router: isRouter,
+        is_default: isNewConvDefault,
         routing_targets: isRouter ? routingTargets : null,
       });
     }
@@ -272,6 +277,8 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
   const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== selfKey);
   // Único roteador (plano 29 Eixo B): salvar este como roteador rebaixa o atual.
   const currentRouter = otherAgents.find(a => a.is_router);
+  // Único padrão de novas conversas (plano 36): salvar este rebaixa o atual.
+  const currentDefault = otherAgents.find(a => a.is_default);
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
@@ -436,6 +443,21 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
           <input type="checkbox" checked=${isRouter} onChange=${(e) => setIsRouter(e.target.checked)} />
           <span class="text-[14px] text-wa-text">É roteador (handoff/routing)</span>
         </label>
+
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked=${isNewConvDefault} onChange=${(e) => setIsNewConvDefault(e.target.checked)} />
+          <span class="text-[14px] text-wa-text">Padrão para novas conversas</span>
+        </label>
+        <p class="text-[12px] text-wa-secondary -mt-1 ml-6">
+          Novas conversas nascem neste agente. Conversas em andamento não mudam.
+        </p>
+
+        ${isNewConvDefault && currentDefault ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Só pode existir <b>um</b> padrão para novas conversas. Ao salvar, o padrão atual
+            (<b>${currentDefault.display_name || currentDefault.agent_key}</b>) deixará de ser o padrão.
+          </div>
+        ` : null}
 
         ${isRouter && currentRouter ? html`
           <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
@@ -734,6 +756,7 @@ export default function AgentsManager({ initialEntity, currentUser }) {
                   ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Ativo</span>`
                   : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>`}
                 ${a.is_router ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal">router</span>` : null}
+                ${a.is_default ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-500/10 text-blue-600">novas conversas</span>` : null}
                 ${a.agent_key === 'default' ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
               </div>
               <div class="text-[12px] text-wa-secondary mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
