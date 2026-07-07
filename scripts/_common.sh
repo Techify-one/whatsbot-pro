@@ -16,7 +16,7 @@ GOWA_VERSION="${GOWA_VERSION:-8.8.0}"
 # Directories uvicorn watches for hot-reload (core + plugins). uvicorn validates
 # each --reload-dir before booting, so storages/plugins must exist (it is created
 # at runtime by create_app on a fresh install — callers mkdir -p it).
-WHATSBOT_RELOAD_DIRS="server agent config gowa channels db plugins storages/plugins"
+WHATSBOT_RELOAD_DIRS="server agent app ai_engine config gowa channels db plugins storages/plugins"
 
 # Emit the --reload-dir flag list for the uvicorn invocation. Usage:
 #   ./venv/bin/python -m uvicorn server.dev:app --reload $(whatsbot_reload_flags) ...

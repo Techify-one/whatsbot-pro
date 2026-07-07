@@ -280,7 +280,7 @@ def test_improve_happy_unit(build_app):
     assert len(fake_client.create_calls) == 1
     call = fake_client.create_calls[0]
     assert call.get("temperature") == 0.4
-    assert call.get("max_tokens") == 1600
+    assert call.get("max_tokens") == 8000  # bumped from 1600 (reasoning tokens truncavam a análise)
     assert [m["role"] for m in call["messages"]] == ["system", "user"]
 
     golden_assert("sandbox_improve_generate_happy",

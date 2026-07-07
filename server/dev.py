@@ -57,6 +57,7 @@ app = create_app(
         image_model=settings.get("image_model", "google/gemini-2.5-flash"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
         improvement_model=settings.get("improvement_model", ""),
+        improvement_prompt=settings.get("improvement_prompt", ""),
         default_ai_enabled=settings.get("default_ai_enabled", True),
     ),
 )
