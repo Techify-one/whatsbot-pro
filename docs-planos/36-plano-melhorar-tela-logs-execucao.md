@@ -223,11 +223,17 @@ WAVE 3   F6(testes de integração + pruning + filtros)   [depende de: F1..F5]  
 **Pronto quando:** recarregar `/executions` → filtros de período e conversa funcionam e persistem na URL; abrir um detalhe → cabeçalho mostra agente/modelo/tokens/conversa/canal; steps de tool mostram args+result colapsáveis; step de contexto mostra o histórico; tudo legível no modo escuro; `gowa_send` sumiu do código.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-07)
+- **O que foi feito (`web/static/js/components/Executions.js`):**
+  - **Filtros novos** no `LIST_URL_SCHEMA` + estado: `conv` (ID conversa, input number), `from`/`to` (inputs `date`). Integrados ao `useUrlState` (persistem na URL/back-forward) e resetam `page`. Botão **Limpar** quando há filtro ativo.
+  - **Colunas da lista**: `#, Conversa (#id), Canal (channel_label), Telefone, Agente (agent_key), Tipo, Status, Início, Duração, Tokens (total_tokens), Steps` — Conversa priorizada sobre Telefone (D1). Container agora `overflow-auto` (scroll-x para a tabela mais larga).
+  - **Cabeçalho do detalhe**: linha meta com Conversa **#id clicável** (filtra a lista pela conversa via `onOpenConversation`), Canal, Agente, Modelo (derivado dos steps `llm_*`), Tokens (`total_tokens` ou soma dos `llm_response`); + bloco **Rota de agentes** quando há `routing_steps` (parseia o JSON string da coluna, chips `from → to` com `reason` no title).
+  - **Cards por step (registro `STEP_BODY`, sem if/elif gigante)**: `tool_executed` → tool + Argumentos/Resultado colapsáveis (`Collapsible`); `llm_request`/`llm_response` → modelo/tokens/contexto/tools inline; `llm_context` → lista de mensagens (role + conteúdo, flag truncado) expansível; fallback → `JsonBlock`. `agent_key` do step exibido ao lado do badge.
+  - **Kill-switch na tela** (F3): checkbox “Capturar contexto enviado à IA” no header, lê/grava `execution_capture_context` via `getConfig`/`saveConfig` (otimista, reverte em falha) — atende o pedido do usuário (“vem desligado com botão para ligar”).
+  - **Limpeza**: `gowa_send` morto removido de `STEP_COLORS`; adicionadas cores `llm_context` e `routing_halted`.
+- **Como foi feito / decisões:** rewrite do arquivo preservando byte-a-byte a lógica de deep-link (path pushState/popstate + `?step` + `useUrlState`). Inputs novos usam classes `wa-*` (theme-aware); date pickers seguem `color-scheme` global; checkbox `accent-wa-teal`; cards/pre usam `bg-wa-panel`/`text-wa-text`/`border-wa-border`. Modelo exibido como slug cru (P4 → MVP).
+- **Problemas / pendências:** verificação de F5 foi **estática** (sem harness de render no frontend build-less): `node --check` OK, `tests/frontend/check_imports.mjs` (328 imports/141 arquivos) OK, `<//>` confirmado suportado (usado em AuditLog/ConfigPanel). O comportamento de backend que alimenta a tela é coberto em F6.
+- **Verificação:** syntax + import-graph verdes; revisão manual do dark mode (todas as áreas novas em `wa-*`); coexistência `useUrlState`(lista) × `?step`(detalhe) inalterada (deps de filtro estáveis no detalhe).
 
 ---
 
