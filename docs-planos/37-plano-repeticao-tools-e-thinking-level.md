@@ -131,11 +131,14 @@ WAVE 1   A3(verificação integrada A1+A2 na conversa real)   🔴          B2(v
 **Pronto quando:** numa conversa onde o modelo gravou `codigo_oferta` (sem keyword), o fragmento "OFERTA EM FOCO" passa a ser injetado no system prompt do próximo turno (verificável via `oferta_em_foco_fragment` retornando não-vazio) e `pesquisar_ofertas` não é mais chamado para a mesma oferta.
 
 #### Status de execução — Fase A2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(opção a/b/ambas)_
-- **Problemas / pendências:** _(reexportar o .zip canônico do plugin — ver Riscos)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (plugin em `storages/`, fora do git — distribuído por `.zip`)
+- **O que foi feito** (tudo dentro de `storages/plugins/vendas_ia/`, sem tocar no core):
+  - `state.py`: nova constante `CODE_ATTR_KEY = "codigo_oferta"` (o atributo livre que a IA comercial grava direto).
+  - `prompts.py` `_resolve_offercode` (**opção b**): além de `state.get_state` e `oferta_atual`, aceita `codigo_oferta` como fonte de fallback do foco. O `oferta_em_foco_fragment` já valida o offercode contra o Nexus (`fetch_oferta_by_offercode` → `""` se inexistente), então um valor alucinado não injeta bloco falso.
+  - `events.py` (**opção a**): novo handler `on_tool_after` registrado em `EVENT_HANDLERS["tool.after"]`. Quando a IA chama `set_custom_attribute(key="codigo_oferta", value=<offercode>)`, valida o offercode contra o Nexus e **fixa de verdade** via `state.set_offer` (tabela `plugin_vendas_ia_conversa` + espelho `oferta_atual`) — sobrevive ao toggle `mirror_offer_attribute`, aparece no painel, e não depende da triagem por keyword. Guarda de idempotência (não reescreve se já fixado no mesmo offercode).
+- **Como foi feito / decisões:** **ambas (a) + (b)**. (b) resolve o sintoma na hora (o foco liga na leitura do próximo turno); (a) fixa a oferta persistentemente (painel + tabela do plugin), reusando `state.set_offer`/`_mirror` (sem duplicar a lógica de keyword). Sem `if provider ==`, sem tocar no core.
+- **Problemas / pendências:** **reexportar o `.zip` canônico** — o plugin não é versionado no git; gerei `vendas_ia-plugin.zip` (27 arquivos, replicando as exclusões do endpoint de export: `__pycache__/`, `*.db*`) no scratchpad da sessão. **Ação do usuário:** publicar esse `.zip` no repositório de plugins / reinstalar via `Importar (.zip)` para que o fix não se perca numa reinstalação limpa. `py_compile` OK nos 3 arquivos.
+- **Verificação:** compilação (`py_compile`) OK; verificação funcional integrada é a Fase A3 (conversa real).
 
 ---
 
