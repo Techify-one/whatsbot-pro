@@ -289,8 +289,14 @@ export async function updateContactInfo(phone, info) {
   return request('PUT', `/api/contacts/${encodeURIComponent(phone)}/info`, info);
 }
 
-export async function toggleContactAI(phone, enabled) {
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, { enabled });
+export async function toggleContactAI(phone, enabled, opts = {}) {
+  // plano 37 (B3/P2): num contato multicanal, informar a conversa/canal ancora o
+  // card + o flip de ai_active NAQUELE canal — desligar a IA numa conversa não
+  // reflete na outra. Sem os campos, o backend cai no comportamento legado.
+  const body = { enabled };
+  if (opts.conversationId != null) body.conversation_id = opts.conversationId;
+  if (opts.channelId != null) body.channel_id = opts.channelId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, body);
 }
 
 export async function getGroupMembers(groupJid, force = false) {
