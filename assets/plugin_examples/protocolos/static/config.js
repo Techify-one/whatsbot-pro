@@ -32,6 +32,12 @@ const TYPES = [
 // Abas: as 2 primeiras são escopos de rótulos; as demais são configs do plugin.
 const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação'], ['geral', 'Configurações gerais']];
 const FIELD_TABS = ['protocolo', 'atendimento'];
+// Direções da regra "ignorar abertura" (qual lado da conversa é analisado).
+const SKIP_DIRECTIONS = [
+  ['sent', 'Mensagens enviadas (pelo atendente/IA)'],
+  ['received', 'Mensagens recebidas (do contato)'],
+  ['both', 'Ambas'],
+];
 
 function slug(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -49,6 +55,8 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const [protoMsg, setProtoMsg] = useState('');
   const [general, setGeneral] = useState(null);       // configurações gerais do plugin
   const [generalMsg, setGeneralMsg] = useState('');
+  const [skip, setSkip] = useState(null);             // regra "ignorar abertura por regex"
+  const [attrDefs, setAttrDefs] = useState([]);       // atributos (contato+conversa) p/ o skip da avaliação
 
   const load = useCallback(async (sc) => {
     setLoading(true); setMsg('');
@@ -63,8 +71,9 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   // Carrega os rótulos só nas abas de campos (a aba Avaliação não usa field-defs).
   useEffect(() => { if (FIELD_TABS.includes(tab)) load(tab); }, [tab, load]);
 
-  const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' } };
+  const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
   const GENERAL_EMPTY = { auto_assign_conversation_on_close: true };
+  const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
       const d = await reqJson(`${apiBase}/protocol-config`, { headers: authHeaders() });
@@ -81,6 +90,31 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   }, [apiBase]);
   useEffect(() => { loadGeneral(); }, [loadGeneral]);
 
+  const loadSkip = useCallback(async () => {
+    try {
+      const d = await reqJson(`${apiBase}/skip-open-config`, { headers: authHeaders() });
+      setSkip((d && d.ok && d.data) || SKIP_EMPTY);
+    } catch (_) { setSkip(SKIP_EMPTY); }
+  }, [apiBase]);
+  useEffect(() => { loadSkip(); }, [loadSkip]);
+
+  // Definições de atributos personalizados (contato + conversa) p/ o seletor da regra
+  // "não enviar avaliação" (aba Avaliação). O escopo rotula cada opção p/ o operador.
+  const loadAttrDefs = useCallback(async () => {
+    try {
+      const [cc, cv] = await Promise.all([
+        reqJson('/api/custom-attributes?applies_to=contact', { headers: authHeaders() }),
+        reqJson('/api/custom-attributes?applies_to=conversation', { headers: authHeaders() }),
+      ]);
+      const map = (rows, scope) => ((rows && rows.ok && rows.data) || []).map((d) => ({
+        key: d.attribute_key, label: d.display_name || d.attribute_key, scope, type: d.type,
+        options: Array.isArray(d.options) ? d.options : [],
+      }));
+      setAttrDefs([...map(cc, 'contact'), ...map(cv, 'conversation')]);
+    } catch (_) { setAttrDefs([]); }
+  }, []);
+  useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
+
   function update(i, patch) {
     setDefs((list) => list.map((d, j) => (j === i ? { ...d, ...patch } : d)));
   }
@@ -94,7 +128,11 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     const payload = defs.map((d) => ({
       ...d,
       key: d.key && d.key.trim() ? d.key.trim() : slug(d.label),
-      options: (d.options || []).map((s) => String(s).trim()).filter(Boolean),
+      // Opções por linha OU por vírgula (rótulos digitados numa linha só viram opções separadas),
+      // com trim + sem vazios + sem duplicar. Espelha o splitOptionList do filtro (protocolos_tab.js).
+      // Consequência: uma opção não pode conter vírgula — ela seria dividida.
+      options: [...new Set((d.options || [])
+        .flatMap((s) => String(s).split(/[\n,]/)).map((s) => s.trim()).filter(Boolean))],
     }));
     const d = await reqJson(`${apiBase}/field-defs`, {
       method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -114,14 +152,36 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     else setProtoMsg((d && d.error) || 'Falha ao salvar.');
   }
 
-  async function saveGeneral() {
+  // Um único "Salvar configurações" para a aba inteira: grava as configs gerais
+  // (/general-config) E a regra de ignorar abertura (/skip-open-config) de uma vez.
+  async function saveGeralTab() {
     setGeneralMsg('');
-    const d = await reqJson(`${apiBase}/general-config`, {
+    const put = (path, body) => reqJson(`${apiBase}/${path}`, {
       method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(general || GENERAL_EMPTY),
+      body: JSON.stringify(body),
     });
-    if (d && d.ok) { setGeneral(d.data); setGeneralMsg('Configuração salva.'); }
-    else setGeneralMsg((d && d.error) || 'Falha ao salvar.');
+    const [g, s] = await Promise.all([
+      put('general-config', general || GENERAL_EMPTY),
+      put('skip-open-config', skip || SKIP_EMPTY),
+    ]);
+    if (g && g.ok) setGeneral(g.data);
+    if (s && s.ok) setSkip(s.data);
+    const ok = g && g.ok && s && s.ok;
+    setGeneralMsg(ok ? 'Configurações salvas.' : ((g && g.error) || (s && s.error) || 'Falha ao salvar.'));
+  }
+
+  // Regras {key, scope, value} de "não enviar avaliação" — vivem em proto.skip_attrs
+  // (salvas junto no PUT /protocol-config pelo botão "Salvar avaliação").
+  function addSkipAttr() {
+    setProto((p) => ({ ...(p || PROTO_EMPTY),
+      skip_attrs: [...(((p || {}).skip_attrs) || []), { key: '', scope: 'contact', value: '' }] }));
+  }
+  function updateSkipAttr(i, patch) {
+    setProto((p) => ({ ...p,
+      skip_attrs: (((p || {}).skip_attrs) || []).map((r, j) => (j === i ? { ...r, ...patch } : r)) }));
+  }
+  function removeSkipAttr(i) {
+    setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).filter((_, j) => j !== i) }));
   }
 
   function askRemove(i, d) {
@@ -181,7 +241,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
               </div>
               ${(d.type === 'select' || d.type === 'radio' || d.type === 'checkboxes') ? html`
                 <div>
-                  <label class="block text-[12px] text-wa-secondary mb-1">Opções (uma por linha)</label>
+                  <label class="block text-[12px] text-wa-secondary mb-1">Opções (uma por linha ou separadas por vírgula)</label>
                   <textarea class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] min-h-[64px]"
                     disabled=${locked}
                     value=${(d.options || []).join('\n')}
@@ -254,6 +314,46 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
                 onInput=${(e) => setProto((p) => ({ ...p, [k]: { ...p[k], link: e.target.value } }))} />
             </div>
           </div>`)}
+        <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
+          <div class="text-[12px] font-semibold text-wa-text">Não enviar avaliação quando o contato/conversa tiver o atributo:</div>
+          <p class="text-[12px] text-wa-secondary">
+            Se o contato (ou a conversa) tiver um dos atributos personalizados abaixo com o valor
+            indicado, ao finalizar o protocolo <b>nem</b> a mensagem normal <b>nem</b> a privada são enviadas.
+          </p>
+          ${((proto.skip_attrs) || []).map((r, i) => {
+            const def = attrDefs.find((a) => a.key === r.key && a.scope === r.scope);
+            const opts = (def && def.options) || [];
+            return html`
+            <div key=${i} class="flex flex-wrap gap-2 items-end">
+              <div class="flex-1 min-w-[160px]">
+                <label class="block text-[12px] text-wa-secondary mb-1">Atributo</label>
+                <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
+                  value=${`${r.scope}::${r.key}`}
+                  onChange=${(e) => { const v = e.target.value; const ix = v.indexOf('::');
+                    updateSkipAttr(i, { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }}>
+                  <option value="::">— selecione —</option>
+                  ${attrDefs.map((a) => html`<option key=${`${a.scope}::${a.key}`} value=${`${a.scope}::${a.key}`}>${a.label} (${a.scope === 'contact' ? 'contato' : 'conversa'})</option>`)}
+                </select>
+              </div>
+              <div class="flex-1 min-w-[140px]">
+                <label class="block text-[12px] text-wa-secondary mb-1">Valor</label>
+                ${opts.length ? html`
+                  <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
+                    value=${r.value} onChange=${(e) => updateSkipAttr(i, { value: e.target.value })}>
+                    <option value="">— selecione —</option>
+                    ${opts.map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
+                  </select>` : html`
+                  <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" type="text"
+                    value=${r.value} disabled=${!canEdit}
+                    onInput=${(e) => updateSkipAttr(i, { value: e.target.value })} />`}
+              </div>
+              ${canEdit ? html`<button onClick=${() => removeSkipAttr(i)}
+                class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}
+            </div>`;
+          })}
+          ${canEdit ? html`<button onClick=${addSkipAttr}
+            class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">+ Adicionar atributo</button>` : null}
+        </div>
         ${canEdit ? html`
           <div class="flex items-center gap-3">
             <button onClick=${() => setConfirmBox({ message: 'Salvar a configuração de avaliação ao finalizar?', onYes: saveProto })}
@@ -263,7 +363,8 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
       `}
     </div>`;
 
-  // ── Aba de configurações gerais do plugin ──────────────────────────────────
+  // ── Aba de configurações gerais do plugin (inclui a ÁREA "Ignorar abertura") ─
+  // Um único botão "Salvar configurações" no fim salva TODAS as opções desta aba.
   const geral = html`
     <div class="space-y-3">
       ${general === null ? html`<div class="text-[12px] text-wa-secondary">Carregando…</div>` : html`
@@ -281,13 +382,46 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
             </span>
           </label>
         </div>
-        ${canEdit ? html`
-          <div class="flex items-center gap-3">
-            <button onClick=${() => setConfirmBox({ message: 'Salvar as configurações gerais do plugin?', onYes: saveGeneral })}
-              class="px-4 py-1.5 rounded-md text-[13px] bg-wa-teal text-white">Salvar configurações</button>
-            ${generalMsg ? html`<span class="text-[12px] text-wa-secondary">${generalMsg}</span>` : null}
-          </div>` : null}
       `}
+
+      <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
+        <div class="text-[13px] font-semibold text-wa-text">Ignorar abertura por regex</div>
+        <p class="text-[12px] text-wa-secondary">
+          Quando o texto de uma mensagem casar com a <b>regex</b>, o <b>protocolo não é aberto</b> e a
+          conversa é <b>mantida fechada</b> (não reabre) — a mensagem continua salva e visível no painel.
+          Nas <b>enviadas</b> (pelo atendente) ela vai ao WhatsApp normalmente; nas <b>recebidas</b>
+          (do contato) a <b>IA não responde</b> (senão a resposta reabriria a conversa e abriria protocolo).
+          Use a <b>direção</b> para escolher qual lado analisar.
+        </p>
+        ${skip === null ? html`<div class="text-[12px] text-wa-secondary">Carregando…</div>` : html`
+          <label class="flex items-center gap-2 text-[13px] text-wa-text">
+            <input type="checkbox" checked=${!!skip.enabled} disabled=${!canEdit}
+              onChange=${(e) => setSkip((s) => ({ ...(s || SKIP_EMPTY), enabled: e.target.checked }))} />
+            Ativar
+          </label>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Regex</label>
+            <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] font-mono" type="text"
+              placeholder="ex.: PROT-\\d" value=${skip.regex || ''} disabled=${!canEdit}
+              onInput=${(e) => setSkip((s) => ({ ...(s || SKIP_EMPTY), regex: e.target.value }))} />
+          </div>
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">Direção</label>
+            <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
+              value=${skip.direction || 'sent'}
+              onChange=${(e) => setSkip((s) => ({ ...(s || SKIP_EMPTY), direction: e.target.value }))}>
+              ${SKIP_DIRECTIONS.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
+            </select>
+          </div>
+        `}
+      </div>
+
+      ${canEdit ? html`
+        <div class="flex items-center gap-3">
+          <button onClick=${() => setConfirmBox({ message: 'Salvar as configurações gerais do plugin (incluindo a regra de ignorar abertura)?', onYes: saveGeralTab })}
+            class="px-4 py-1.5 rounded-md text-[13px] bg-wa-teal text-white">Salvar configurações</button>
+          ${generalMsg ? html`<span class="text-[12px] text-wa-secondary">${generalMsg}</span>` : null}
+        </div>` : null}
     </div>`;
 
   return html`

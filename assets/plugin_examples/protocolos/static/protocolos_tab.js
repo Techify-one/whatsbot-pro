@@ -166,12 +166,52 @@ function optionFields(defs, scope, singleOnly) {
 // Campos de um escopo como FILTROS — QUALQUER tipo (não só opção). Opção → dropdown (options);
 // os demais (texto/número/data/…) → campo de digitação (busca parcial). A restrição a tipo de
 // opção fica SÓ no AGRUPAMENTO (optionFields), não nos filtros.
+// Desdobra opções unidas por vírgula/quebra-de-linha numa MESMA entrada (rótulos legados
+// digitados numa linha só, ex.: ['teste 1,teste 2, teste 3'] → ['teste 1','teste 2','teste 3']).
+// Trim + sem vazios + sem duplicar, preservando a ordem. Um filtro de opção só é útil com as
+// opções individualizadas (senão vira uma "opção" gigante com vírgulas). Consequência: uma
+// opção de campo não pode conter vírgula — ela seria dividida em opções separadas.
+function splitOptionList(options) {
+  const out = [];
+  const seen = new Set();
+  for (const o of (options || [])) {
+    for (const part of String(o).split(/[\n,]/)) {
+      const p = part.trim();
+      if (p && !seen.has(p)) { seen.add(p); out.push(p); }
+    }
+  }
+  return out;
+}
+
+// Normaliza o valor de um filtro para LISTA (modo múltiplo do OptionListSelect). Tolera valores
+// legados salvos como string única (view antiga) → vira lista de 1 item; vazio → [].
+function asFilterList(v) {
+  return Array.isArray(v) ? v : (v != null && v !== '' ? [v] : []);
+}
+
 function filterableFields(defs, scope) {
   return (defs || [])
     .filter((d) => d && d.key)
     .map((d) => ({ scope, key: d.key, label: d.label || d.key, type: d.type,
-                   options: (OPTION_TYPES.has(d.type) && Array.isArray(d.options)) ? d.options : [],
+                   options: (OPTION_TYPES.has(d.type) && Array.isArray(d.options)) ? splitOptionList(d.options) : [],
                    multiple: !!d.multiple }));
+}
+
+// Fonte ÚNICA de categorias de filtro (ordem + rótulos + partição por escopo) — reusada pela
+// barra de filtros ao vivo (ProtocolosList) E pelo painel "Configurar filtros da aba"
+// (ViewGroupingConfig), p/ as duas nunca divergirem. `nativas` não traz campos (a barra usa
+// widgets próprios; o painel usa a lista fixa de chaves status/atendente/q/periodo/canal);
+// as demais trazem `fields` (campos de protocolo/atendimento) ou `attrs` (atributos de contato).
+// "Outros" é defensivo: captura escopos de campo desconhecidos p/ nada sumir.
+function filterCategories(filterFields, contactAttrDefs) {
+  const ff = filterFields || [];
+  return [
+    { key: 'nativas',      label: 'Nativas' },
+    { key: 'protocolos',   label: 'Protocolos',   fields: ff.filter((d) => d.scope === 'protocolo') },
+    { key: 'atendimentos', label: 'Atendimentos', fields: ff.filter((d) => d.scope === 'atendimento') },
+    { key: 'contato',      label: 'Contato',      attrs:  (contactAttrDefs || []) },
+    { key: 'outros',       label: 'Outros',       fields: ff.filter((d) => d.scope !== 'protocolo' && d.scope !== 'atendimento') },
+  ];
 }
 
 function buildGrouping(view, { users, groupFields, rows, apiPost }) {
@@ -364,7 +404,7 @@ function ProtocolosList({ api, mode }) {
   const [channels, setChannels] = useState([]);  // canais disponíveis p/ o dropdown do filtro "Canal" ([{value,label}])
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState([]);   // filtro Status — LISTA (multi): ['aberto'|'fechado']
   const [q, setQ] = useState('');
   // Padrão ao entrar/F5: intervalo começa HOJE e fica aberto p/ frente (sem teto).
   // Não é persistido — todo (re)carregamento da página volta a "hoje para frente".
@@ -384,7 +424,7 @@ function ProtocolosList({ api, mode }) {
   const [currentUser, setCurrentUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); } catch (e) { return null; }
   });
-  const [assigneeFilter, setAssigneeFilter] = useState(null);  // filtro por atendente (da aba)
+  const [assigneeFilter, setAssigneeFilter] = useState([]);  // filtro por atendente — LISTA (multi) de ids (string)
   const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
@@ -429,7 +469,11 @@ function ProtocolosList({ api, mode }) {
   const filterFields = useMemo(() => [
     ...filterableFields(cols, 'protocolo'),
     ...filterableFields(atendDefs, 'atendimento'),
-  ], [cols, atendDefs]);
+  // "atendente" (rótulo FIXO, tipo `atendente`) NÃO é filtrável como campo de protocolo: seu
+  // valor não vive em `fields` — roteia p/ o assignee NATIVO (assignee_user_id). Deixá-lo aqui
+  // criava um filtro-fantasma (busca em valor inexistente → SEMPRE zero resultados) que ainda
+  // duplicava o dropdown "Atendente" da seção Nativas — este sim é o filtro correto de atendente.
+  ].filter((d) => d.type !== 'atendente'), [cols, atendDefs]);
   // Pode CRIAR novas visualizações (agrupamentos)? Gate do "+ Nova". create_views OU
   // manage_team_views (quem gerencia views de equipe também cria). Default-allow sem RBAC.
   const canCreateViews = (api.services.hasPermission
@@ -459,13 +503,13 @@ function ProtocolosList({ api, mode }) {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (status) params.set('status', status);
+      if (status.length) params.set('status', JSON.stringify(status));
       if (q.trim()) params.set('q', q.trim());
       const of = dayStartEpoch(dateFrom);
       const ot = dayEndEpoch(dateTo);
       if (of != null) params.set('opened_from', String(of));
       if (ot != null) params.set('opened_to', String(ot));
-      if (assigneeFilter != null) params.set('assignee_user_id', String(assigneeFilter));
+      if (assigneeFilter.length) params.set('assignee_user_id', JSON.stringify(assigneeFilter));
       if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
       const [dd, cd, co, ch, ll] = await Promise.all([
         getJson(`${apiBase}/field-defs?scope=protocolo`),
@@ -519,9 +563,9 @@ function ProtocolosList({ api, mode }) {
   // sem date → default (hoje→frente). Reusado pela troca de aba e pelo toggle Pessoal/Equipe.
   const applyFilterDict = (f) => {
     f = f || {};
-    setStatus(availFilter('status') && f.status != null ? f.status : '');
+    setStatus(availFilter('status') ? asFilterList(f.status) : []);
     setQ(availFilter('q') && f.q != null ? f.q : '');
-    setAssigneeFilter(availFilter('atendente') && f.assignee_user_id != null ? f.assignee_user_id : null);
+    setAssigneeFilter(availFilter('atendente') ? asFilterList(f.assignee_user_id).map(String) : []);
     setAttrFilters(f.attrs && typeof f.attrs === 'object'
       ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => availFilter(k))) : {});
     const df = (availFilter('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
@@ -583,10 +627,10 @@ function ProtocolosList({ api, mode }) {
   // Algum filtro (visível ou pré-determinado da aba) ativo? Usado p/ mostrar "Limpar
   // filtros" — assim uma aba com filtro pré-determinado que zera o resultado nunca é um
   // mistério: o usuário vê os controles e limpa para ver todos.
-  const hasViewFilters = !!(status || (q && q.trim()) || assigneeFilter != null
+  const hasViewFilters = !!(status.length || (q && q.trim()) || assigneeFilter.length
     || Object.keys(attrFilters).length || dateTo || (datePreset && datePreset !== null));
   const clearFilters = () => {
-    setStatus(''); setQ(''); setAssigneeFilter(null); setAttrFilters({});
+    setStatus([]); setQ(''); setAssigneeFilter([]); setAttrFilters({});
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
@@ -595,16 +639,16 @@ function ProtocolosList({ api, mode }) {
   // from/to literais; o default "hoje→frente" (sem ajuste) é omitido (= sem filtro de data).
   const buildCurrentFilters = () => {
     const f = {};
-    if (availFilter('status') && status) f.status = status;
+    if (availFilter('status') && status.length) f.status = status;
     if (availFilter('q') && q.trim()) f.q = q.trim();
-    if (availFilter('atendente') && assigneeFilter != null) f.assignee_user_id = assigneeFilter;
+    if (availFilter('atendente') && assigneeFilter.length) f.assignee_user_id = assigneeFilter;
     if (availFilter('periodo')) {
       if (datePreset && datePreset !== 'tudo') f.date = { preset: datePreset, from: '', to: '' };
       else if (datePreset === 'tudo') f.date = { preset: 'tudo', from: '', to: '' };
       else if ((dateFrom && dateFrom !== ymd(new Date())) || dateTo) f.date = { preset: '', from: dateFrom || '', to: dateTo || '' };
     }
     const attrs = {};
-    for (const [k, v] of Object.entries(attrFilters || {})) if (availFilter(k) && v != null && v !== '') attrs[k] = v;
+    for (const [k, v] of Object.entries(attrFilters || {})) if (availFilter(k) && v != null && v !== '' && (!Array.isArray(v) || v.length)) attrs[k] = v;
     if (Object.keys(attrs).length) f.attrs = attrs;
     return f;
   };
@@ -1003,6 +1047,84 @@ function ProtocolosList({ api, mode }) {
       </div>`;
   }
 
+  // ── Barra de filtros categorizada ────────────────────────────────────────────
+  // Mesmo padrão do painel "Configurar filtros da aba" → "Todas": as 5 categorias de
+  // filterCategories() viram seções (título maiúsculo + linha separadora entre elas).
+  // Puramente apresentação — estado, availFilter, attrFilters e serialização inalterados.
+  // Renderiza UM campo dinâmico (é o corpo do antigo .map da barra plana): opção→dropdown,
+  // demais tipos→input de busca parcial. `d = { fk, label, options }`.
+  const renderDynField = (d) => html`
+    <div key=${d.fk} class="w-[180px]">
+      <label class="block text-[12px] text-wa-secondary mb-1 truncate" title=${d.label}>${d.label}</label>
+      ${(d.options && d.options.length)
+        ? html`<${OptionListSelect} options=${d.options} multiple=${true} value=${asFilterList(attrFilters[d.fk])}
+            onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v && v.length) n[d.fk] = v; else delete n[d.fk]; return n; })}
+            placeholder="Todos" float=${true} />`
+        : html`<input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text"
+            value=${attrFilters[d.fk] || ''} placeholder="Filtrar…"
+            onInput=${(e) => setAttrFilters((s) => { const n = { ...s }; const v = e.target.value; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })} />`}
+    </div>`;
+
+  // Campos nativos (widgets próprios), cada um gated pelo seu availFilter — compõem a seção "Nativas".
+  const nativeEls = [
+    availFilter('status') ? html`
+      <div key="status" class="w-[150px]">
+        <label class="block text-[12px] text-wa-secondary mb-1">Status</label>
+        <${OptionListSelect} options=${[{ value: 'aberto', label: 'Aberto' }, { value: 'fechado', label: 'Fechado' }]}
+          multiple=${true} value=${asFilterList(status)}
+          onChange=${(v) => setStatus(v)} placeholder="Todos" float=${true} />
+      </div>` : null,
+    availFilter('atendente') ? html`
+      <div key="atendente" class="w-[170px]">
+        <label class="block text-[12px] text-wa-secondary mb-1">Atendente</label>
+        <${OptionListSelect}
+          options=${users.map((u) => ({ value: String(u.id), label: u.name || `Usuário #${u.id}` }))}
+          multiple=${true} value=${asFilterList(assigneeFilter).map(String)}
+          onChange=${(v) => setAssigneeFilter(v)} placeholder="Todos" float=${true} />
+      </div>` : null,
+    availFilter('canal') ? html`
+      <div key="canal" class="w-[180px]">
+        <label class="block text-[12px] text-wa-secondary mb-1">Canal</label>
+        <${OptionListSelect} options=${channels} multiple=${true}
+          value=${asFilterList(attrFilters['canal'])}
+          onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v && v.length) n['canal'] = v; else delete n['canal']; return n; })}
+          placeholder="Todos" float=${true} />
+      </div>` : null,
+    availFilter('q') ? html`
+      <div key="q" class="flex-1 min-w-[180px]">
+        <label class="block text-[12px] text-wa-secondary mb-1">Buscar cliente</label>
+        <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
+          placeholder="nome ou telefone" onInput=${(e) => setQ(e.target.value)} />
+      </div>` : null,
+    availFilter('periodo') ? html`
+      <div key="periodo">
+        <label class="block text-[12px] text-wa-secondary mb-1">Período (criação)</label>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <input type="date" class="wa-field px-2 py-1.5 rounded-md text-[13px]" value=${dateFrom}
+            onInput=${(e) => onManualDate(e.target.value, dateTo)} />
+          <span class="text-wa-secondary">→</span>
+          <input type="date" class="wa-field px-2 py-1.5 rounded-md text-[13px]" value=${dateTo}
+            onInput=${(e) => onManualDate(dateFrom, e.target.value)} />
+          ${DATE_PRESETS.map(([lbl, d]) => html`<button key=${lbl} onClick=${() => onPresetDate(d, lbl)}
+            class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === lbl ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
+          <button onClick=${onClearDate}
+            class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === 'tudo' ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">Tudo</button>
+        </div>
+      </div>` : null,
+  ].filter(Boolean);
+
+  // Seções na ordem de filterCategories (Nativas → Protocolos → Atendimentos → Contato →
+  // Outros); só as com ≥1 campo visível entram (igual ao .filter(c => c.items.length) do "Todas").
+  const filterSections = filterCategories(filterFields, contactAttrDefs).map((c) => {
+    if (c.key === 'nativas') return { label: c.label, els: nativeEls };
+    const els = c.attrs
+      ? c.attrs.filter((d) => availFilter(`cattr:${d.key}`))
+          .map((d) => renderDynField({ fk: `cattr:${d.key}`, label: d.label, options: d.options }))
+      : (c.fields || []).filter((d) => availFilter(`pf:${d.scope}:${d.key}`))
+          .map((d) => renderDynField({ fk: `pf:${d.scope}:${d.key}`, label: d.label, options: d.options }));
+    return { label: c.label, els };
+  }).filter((s) => s.els.length);
+
   return html`
     <div>
       <!-- Config do AGRUPAMENTO (quais TIPOS de filtro existem nesta aba) — painel recolhível,
@@ -1031,67 +1153,21 @@ function ProtocolosList({ api, mode }) {
             class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização equipe</button>` : null}
           ${prefMsg ? html`<span class="text-[12px] ${prefMsg.includes('Falha') ? 'text-red-500' : 'text-wa-teal'}">${prefMsg}</span>` : null}
         </div>` : null}
-      <!-- Filtros principais (Kanban/Lista alternam no topo, ao lado do título) -->
-      <div class="flex flex-wrap items-end gap-3 mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
-        ${availFilter('status') ? html`
-        <div class="w-[150px]">
-          <label class="block text-[12px] text-wa-secondary mb-1">Status</label>
-          <${OptionListSelect} options=${[{ value: 'aberto', label: 'Aberto' }, { value: 'fechado', label: 'Fechado' }]}
-            value=${status} onChange=${(v) => setStatus(v)} placeholder="Todos" float=${true} />
-        </div>` : null}
-        ${availFilter('atendente') ? html`
-        <div class="w-[170px]">
-          <label class="block text-[12px] text-wa-secondary mb-1">Atendente</label>
-          <${OptionListSelect}
-            options=${users.map((u) => ({ value: String(u.id), label: u.name || `Usuário #${u.id}` }))}
-            value=${assigneeFilter == null ? '' : String(assigneeFilter)}
-            onChange=${(v) => setAssigneeFilter(v === '' ? null : +v)} placeholder="Todos" float=${true} />
-        </div>` : null}
-        ${availFilter('canal') ? html`
-        <div class="w-[180px]">
-          <label class="block text-[12px] text-wa-secondary mb-1">Canal</label>
-          <${OptionListSelect} options=${channels}
-            value=${attrFilters['canal'] || ''}
-            onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n['canal'] = v; else delete n['canal']; return n; })}
-            placeholder="Todos" float=${true} />
-        </div>` : null}
-        ${[...filterFields.map((d) => ({ fk: `pf:${d.scope}:${d.key}`, label: d.label, options: d.options })),
-           ...contactAttrDefs.map((d) => ({ fk: `cattr:${d.key}`, label: d.label, options: d.options }))]
-          .filter((d) => availFilter(d.fk)).map((d) => html`
-          <div key=${d.fk} class="w-[180px]">
-            <label class="block text-[12px] text-wa-secondary mb-1 truncate" title=${d.label}>${d.label}</label>
-            ${(d.options && d.options.length)
-              ? html`<${OptionListSelect} options=${d.options} value=${attrFilters[d.fk] || ''}
-                  onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })}
-                  placeholder="Todos" float=${true} />`
-              : html`<input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text"
-                  value=${attrFilters[d.fk] || ''} placeholder="Filtrar…"
-                  onInput=${(e) => setAttrFilters((s) => { const n = { ...s }; const v = e.target.value; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })} />`}
+      <!-- Filtros principais, categorizados (mesmo padrão do "Configurar filtros da aba" →
+           "Todas"): pilha vertical de seções (título + linha) — Nativas → Protocolos →
+           Atendimentos → Contato → Outros. Kanban/Lista compartilham (barra em ProtocolosList). -->
+      <div class="mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
+        ${filterSections.map((s, i) => html`
+          <div key=${s.label} class="${i > 0 ? 'mt-3 pt-3 border-t border-wa-border' : ''}">
+            <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1.5">${s.label}</div>
+            <div class="flex flex-wrap items-end gap-3">${s.els}</div>
           </div>`)}
-        ${availFilter('q') ? html`
-        <div class="flex-1 min-w-[180px]">
-          <label class="block text-[12px] text-wa-secondary mb-1">Buscar cliente</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
-            placeholder="nome ou telefone" onInput=${(e) => setQ(e.target.value)} />
-        </div>` : null}
-        ${availFilter('periodo') ? html`
-        <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Período (criação)</label>
-          <div class="flex flex-wrap items-center gap-1.5">
-            <input type="date" class="wa-field px-2 py-1.5 rounded-md text-[13px]" value=${dateFrom}
-              onInput=${(e) => onManualDate(e.target.value, dateTo)} />
-            <span class="text-wa-secondary">→</span>
-            <input type="date" class="wa-field px-2 py-1.5 rounded-md text-[13px]" value=${dateTo}
-              onInput=${(e) => onManualDate(dateFrom, e.target.value)} />
-            ${DATE_PRESETS.map(([lbl, d]) => html`<button key=${lbl} onClick=${() => onPresetDate(d, lbl)}
-              class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === lbl ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
-            <button onClick=${onClearDate}
-              class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === 'tudo' ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">Tudo</button>
-          </div>
-        </div>` : null}
-        <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
-        ${hasViewFilters ? html`<button onClick=${clearFilters}
-          class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
+        <!-- Linha de ação final: Atualizar + Limpar filtros -->
+        <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-wa-border">
+          <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
+          ${hasViewFilters ? html`<button onClick=${clearFilters}
+            class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
+        </div>
       </div>
 
       <!-- Abas "Agrupar por" — só no Kanban (agrupamento não se aplica à Lista); aparece
@@ -1338,21 +1414,19 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   // Categorias do checklist (SÓ apresentação — available_filters continua array plano de chaves):
   // Nativas + campos de PROTOCOLO (pf:protocolo:) + de ATENDIMENTO (pf:atendimento:) + de CONTATO
   // (cattr:). "Outros" (defensivo) captura escopos de campo desconhecidos p/ nada sumir do checklist.
-  const CATEGORIES = [
-    { key: 'nativas', label: 'Nativas', items: [
-      ['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
-      ['canal', 'Canal'],
-    ] },
-    { key: 'protocolos', label: 'Protocolos', items:
-      (filterFields || []).filter((d) => d.scope === 'protocolo').map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
-    { key: 'atendimentos', label: 'Atendimentos', items:
-      (filterFields || []).filter((d) => d.scope === 'atendimento').map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
-    { key: 'contato', label: 'Contato', items:
-      (contactAttrDefs || []).map((d) => [`cattr:${d.key}`, d.label]) },
-    { key: 'outros', label: 'Outros', items:
-      (filterFields || []).filter((d) => d.scope !== 'protocolo' && d.scope !== 'atendimento')
-        .map((d) => [`pf:${d.scope}:${d.key}`, d.label]) },
-  ].filter((c) => c.items.length);
+  // Chaves nativas do checklist (lista fixa — a barra ao vivo renderiza widgets próprios p/ elas).
+  const NATIVE_ITEMS = [
+    ['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
+    ['canal', 'Canal'],
+  ];
+  // Derivado da fonte única filterCategories() → pares [key,label] que o `cbox` espera
+  // (`pf:${scope}:${key}` p/ campos, `cattr:${key}` p/ contato). Comportamento inalterado.
+  const CATEGORIES = filterCategories(filterFields, contactAttrDefs).map((c) => ({
+    key: c.key, label: c.label,
+    items: c.key === 'nativas' ? NATIVE_ITEMS
+      : c.attrs ? c.attrs.map((d) => [`cattr:${d.key}`, d.label])
+      : (c.fields || []).map((d) => [`pf:${d.scope}:${d.key}`, d.label]),
+  })).filter((c) => c.items.length);
   // Tipos de filtro que podem existir na aba (flatten das categorias). null na view = TODOS.
   const ALL_FILTER_KEYS = CATEGORIES.flatMap((c) => c.items.map(([k]) => k));
   const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
@@ -1392,6 +1466,16 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
       <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
     </label>`);
 
+  // Escopo dos botões "Selecionar todos"/"Limpar": SÓ a categoria ativa (aba 'todas' = tudo).
+  // Numa categoria, marcar/limpar não mexe nas seleções das OUTRAS categorias.
+  const activeCat = catView === 'todas' ? null : CATEGORIES.find((c) => c.key === catView);
+  const scopeKeys = activeCat ? activeCat.items.map(([k]) => k) : ALL_FILTER_KEYS;
+  const scopeLabel = activeCat ? ` de ${activeCat.label}` : '';
+  const selectScope = () => { setOkMsg(''); setAvailSet((s) => new Set([...s, ...scopeKeys])); };
+  const clearScope = () => { setOkMsg(''); setAvailSet((s) => {
+    const n = new Set(s); scopeKeys.forEach((k) => n.delete(k)); return n;
+  }); };
+
   return html`
     <div class="mb-3 rounded-lg bg-wa-panel border border-wa-border">
       <button type="button" onClick=${() => setOpen((o) => !o)}
@@ -1420,10 +1504,10 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
             </div>`}
         ${err ? html`<div class="mt-3 px-3 py-2 rounded-md text-[13px] bg-red-500/15 border border-red-500 text-red-500 font-semibold">${err}</div>` : null}
         <div class="flex flex-wrap items-center gap-2 mt-3">
-          <button type="button" onClick=${() => { setOkMsg(''); setAvailSet(new Set(ALL_FILTER_KEYS)); }}
-            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Selecionar todos</button>
-          <button type="button" onClick=${() => { setOkMsg(''); setAvailSet(new Set()); }}
-            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Limpar</button>
+          <button type="button" onClick=${selectScope}
+            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Selecionar todos${scopeLabel}</button>
+          <button type="button" onClick=${clearScope}
+            class="px-3 py-2 rounded-lg bg-wa-hover text-wa-text border border-wa-border hover:opacity-90 text-[13px]">Limpar${scopeLabel}</button>
           ${okMsg ? html`<span class="text-[12px] text-wa-teal ml-auto">${okMsg}</span>` : null}
           <button onClick=${save} disabled=${saving}
             class="${okMsg ? '' : 'ml-auto'} px-4 py-2 rounded-lg bg-wa-teal text-white hover:opacity-90 disabled:opacity-50 text-[13px] font-medium">${saving ? 'Salvando…' : 'Salvar configuração da aba'}</button>

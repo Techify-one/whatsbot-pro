@@ -366,3 +366,15 @@ async def get_general_config():
 @router.put("/general-config", dependencies=[plugin_permission("config")])
 async def set_general_config(body: dict):
     return {"ok": True, "data": logic.set_general_config(body or {})}
+
+
+# ── Ignorar abertura por regex (direção configurável) ─────────────────────────
+
+@router.get("/skip-open-config", dependencies=[plugin_permission("view")])
+async def get_skip_open_config():
+    return {"ok": True, "data": logic.get_skip_open_config()}
+
+
+@router.put("/skip-open-config", dependencies=[plugin_permission("edit")])
+async def set_skip_open_config(body: dict):
+    return {"ok": True, "data": logic.set_skip_open_config(body or {})}
