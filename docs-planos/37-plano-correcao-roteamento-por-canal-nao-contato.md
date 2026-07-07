@@ -220,11 +220,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** com 2 canais bindados a agentes/atributos distintos, um turno num canal usa o agente/atributos **daquele** canal; `test_model_factory`/`test_dynamic_registry` verdes.
 
 #### Status de execução — Fase FA2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [agent_factory.py:215](../agent/agent_factory.py#L215) `resolve_active_agent_key` usa `get_open_for_contact_scoped(contact)`; [memory.py:543](../agent/memory.py#L543) `_custom_attr_lines` usa `get_open_for_contact_inbox(self.id, self.inbox_id)` (o `ContactMemory` sempre tem `inbox_id`). Novo teste forward `test_a4_resolve_agent_from_turn_channel`.
+- **Como foi feito / decisões:** `agent_factory` recebe um `contact`-like (pode ser double) → helper scoped com fail-open. `memory` opera sobre `self` (ContactMemory garantido) → `_inbox` direto, mais explícito. Nenhuma mudança de assinatura.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `python tests/test_model_factory.py` → 24 passed; `python tests/test_dynamic_registry.py` → 6 passed; `pytest tests/test_multichannel_routing.py` → 5 passed.
 
 ---
 

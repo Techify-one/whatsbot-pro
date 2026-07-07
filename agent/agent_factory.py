@@ -212,7 +212,9 @@ def resolve_active_agent_key(contact) -> str | None:
     if cid is None:
         return None
     try:
-        conv = conversation_repo.get_open_for_contact(cid)
+        # plano 37: resolve pela conversa do CANAL do turno (inbox do ContactMemory),
+        # não a mais recente de qualquer canal. Fail-open p/ doubles sem inbox_id.
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
         if not conv:
             return None
         if conv.get("active_agent_key"):

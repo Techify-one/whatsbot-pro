@@ -540,7 +540,9 @@ class ContactMemory:
                 return []
             if applies_to == "conversation":
                 from db.tables import conversations as _entity_tbl
-                conv = conversation_repo.get_open_for_contact(self.id)
+                # plano 37: atributos DESTA conversa = a do canal deste ContactMemory
+                # (self.inbox_id), não a mais recente de qualquer canal do contato.
+                conv = conversation_repo.get_open_for_contact_inbox(self.id, self.inbox_id)
                 if not conv:
                     return []
                 entity_id = conv["id"]
