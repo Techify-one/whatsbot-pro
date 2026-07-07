@@ -414,11 +414,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** teste multicanal — `transfer_to_human` no Telegram deixa a IA do WhatsApp **respondendo normalmente**; reabrir/religar num canal não mexe no outro; suíte de transfer/gate verde.
 
 #### Status de execução — Fase FD1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (P1-a — sem migration, decisão do usuário)
+- **O que foi feito:** Removida a checagem de `TRANSFER_TAG` do gate `_conversation_ai_active` ([messaging_service.py:1174](../app/services/messaging_service.py#L1174)); import `tag_repo` órfão removido. A trava passa a ser 100% por-conversa (`ai_active=0`/assignee, que a `transfer_to_human` já grava — [transfer_to_human.py:87](../agent/tools/transfer_to_human.py#L87) — e já inbox-scoped via FA3). A tag `transferido_atendente` continua sendo **gravada** (rótulo visual) e **limpa** na reativação (`_clear_transfer_tag`), só não é mais **lida** como trava. Testes: novo `test_d1_transfer_does_not_silence_sibling_channel`; `test_human_gate` atualizado (2 testes) pra semântica P1-a.
+- **Como foi feito / decisões:** Sem coluna/migration (P1-a). Confirmado que o único ponto que lia a tag como trava era o gate; `transfer_to_human` não precisou mudar (já setava `ai_active=0` na conversa — a trava real). Single-channel inalterado (a conversa transferida fica `ai_active=0` → gate False, idêntico ao efeito da tag antes). Multicanal corrigido: transferir no Telegram deixa o WhatsApp respondendo.
+- **Problemas / pendências:** Nenhuma. `contact.ai_enabled` (flip global do `transfer_to_human` via `set_ai_enabled(False)`) segue sem efeito no gate (não é lido) — coerente com o achado de FB3.
+- **Verificação:** `pytest tests/test_human_gate.py tests/test_multichannel_routing.py` → 16 passed; `pytest tests/test_transfer_broadcast.py` → 2 passed; `python tests/test_agent_routing.py` → 29 passed; `python tests/test_endpoints.py` → 1086 passed.
 
 ---
 

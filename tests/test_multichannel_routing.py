@@ -146,6 +146,32 @@ def test_f0_transferir_agente_stamps_wrong_channel(build_app):
         agent_repo.delete("mc_f0_target")
 
 
+# ── D1 — transferir num canal não silencia o outro (FD1/P1-a) ───────────────
+
+def test_d1_transfer_does_not_silence_sibling_channel(build_app):
+    """FD1/P1-a: ``transfer_to_human`` no Telegram pausa a IA SÓ da conversa do
+    Telegram (ai_active=0). A conversa default segue respondendo — a tag
+    ``transferido_atendente`` (contact-global) NÃO é mais lida como trava."""
+    from app.services.messaging_service import _conversation_ai_active
+    from agent.tools import transfer_to_human as t2h
+
+    built = build_app(["gowa"])
+    handler = built.agent_handler
+    s = _seed_two_inboxes(handler, "5511970000018", "mc_tg_d1")
+    conversation_repo.set_ai_active(s.default_conv, 1)
+    conversation_repo.set_ai_active(s.tg_conv, 1)
+
+    ctx = SimpleNamespace(contact=s.tg_mem, tag_registry=handler.tag_registry)
+    t2h.execute(ctx, {"reason": "quero humano"})
+
+    # A tag foi gravada (rótulo visual, contact-global)...
+    from db.repositories import tag_repo
+    assert t2h.TRANSFER_TAG in (tag_repo.get_contact_tags(s.contact_id) or [])
+    # ...mas o gate é por-conversa: Telegram calado, WhatsApp respondendo.
+    assert _conversation_ai_active(s.tg_mem) is False
+    assert _conversation_ai_active(s.d_mem) is True
+
+
 # ── A4 — resolve_active_agent_key vem do canal do turno (FA2) ───────────────
 
 def test_a4_resolve_agent_from_turn_channel(build_app):
