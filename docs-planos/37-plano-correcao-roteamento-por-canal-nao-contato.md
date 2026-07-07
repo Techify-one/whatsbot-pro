@@ -299,11 +299,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** teste B1 de F0 invertido — a resposta/nota/transcrição da IA privada iniciada no Telegram fica **na conversa do Telegram**; nenhuma conversa WhatsApp fantasma é criada; broadcasts carregam `channel_id`.
 
 #### Status de execução — Fase FB1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (corrige a conversa #41 relatada)
+- **O que foi feito:** `_run_private_ai` resolve `run_channel = _channel_for(phone, conversation_id)` uma vez e o passa a `aprocess_message(channel_id=)`, `broadcast_tool_calls(channel_id=)` e `save_assistant_message(channel_id=)`; o broadcast `new_message` já carregava `channel_id`. `send_private_audio`: `_get_contact(..., channel_id=resolved_channel)` na nota e na transcrição + `"channel_id": resolved_channel` nos dois broadcasts. Asserção B1 do F0 invertida (resposta + contexto no Telegram; **0** assistants na conversa default).
+- **Como foi feito / decisões:** Reusei o `resolved_channel`/`_channel_for` que os call sites de envio JÁ computavam; a assimetria (envio certo, save errado) era a causa raiz. Nenhuma mudança de assinatura (os kwargs já existiam).
+- **Problemas / pendências:** Nenhuma. FC1 (frontend) fecha o outro lado (o painel precisa mandar `channelId` ao INICIAR conversa nova sem `conversation_id`).
+- **Verificação:** `pytest tests/test_multichannel_routing.py` → 6 passed; `python tests/test_endpoints.py` → 1086 passed.
 
 ---
 

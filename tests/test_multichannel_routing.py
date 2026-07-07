@@ -207,12 +207,13 @@ def _poll(pred, timeout: float = 4.0, step: float = 0.02):
 
 
 def test_f0_private_ai_saves_reply_to_wrong_channel(build_app):
-    """B1 (o bug relatado): uma nota "IA lê" numa conversa de Telegram salva a
-    resposta assistant no inbox **default** (WhatsApp), não no Telegram — porque
-    ``_run_private_ai`` chama ``save_assistant_message`` sem ``channel_id``.
+    """B1 (FB1 corrigido — a conversa #41): uma nota "IA lê" numa conversa de
+    Telegram salva a resposta assistant no inbox **do Telegram**, não no default —
+    ``_run_private_ai`` agora threada ``channel_id`` para ``aprocess_message`` e
+    ``save_assistant_message``.
 
-    Caracteriza o ``channel_id`` que ``save_assistant_message`` recebe. F-REG
-    inverte para o canal do Telegram."""
+    Caracteriza o ``channel_id`` que ``save_assistant_message`` recebe + a conversa
+    real onde a resposta caiu."""
     from tests.fakes import fake_agent_reply
 
     built = build_app(["gowa"])
@@ -221,6 +222,7 @@ def test_f0_private_ai_saves_reply_to_wrong_channel(build_app):
     s = _seed_two_inboxes(handler, phone, "mc_tg_priv")
 
     saved_channels: list[str] = []
+    aproc_channels: list[str] = []
     orig = handler.save_assistant_message
 
     def _spy(p, text, **kw):
@@ -229,7 +231,7 @@ def test_f0_private_ai_saves_reply_to_wrong_channel(build_app):
 
     handler.save_assistant_message = _spy
     try:
-        with fake_agent_reply("segue a resposta", handler=handler):
+        with fake_agent_reply("segue a resposta", handler=handler) as rec:
             r = built.client.post(f"/api/contacts/{phone}/private-message", json={
                 "text": "responde o cliente",
                 "conversation_id": s.tg_conv,
@@ -238,8 +240,20 @@ def test_f0_private_ai_saves_reply_to_wrong_channel(build_app):
             })
             assert r.status_code == 200, r.text
             assert _poll(lambda: bool(saved_channels)), "private-AI não rodou a tempo"
+        aproc_channels = [c[2].get("channel_id") for c in rec.calls]
     finally:
         handler.save_assistant_message = orig
 
-    # BUG (F0): a resposta foi salva no canal default, não no do Telegram.
-    assert saved_channels == ["default"]
+    # CORRETO (FB1): resposta salva no canal do Telegram; contexto lido do Telegram.
+    assert saved_channels == ["mc_tg_priv"]
+    assert aproc_channels == ["mc_tg_priv"]
+    # Nenhuma resposta assistant caiu na conversa default (WhatsApp fantasma #41).
+    from db.tables import messages as _m
+    from db.engine import get_engine
+    from sqlalchemy import select, func
+    with get_engine().connect() as conn:
+        default_assistants = conn.execute(
+            select(func.count()).select_from(_m).where(
+                _m.c.conversation_id == s.default_conv,
+                _m.c.role == "assistant")).scalar()
+    assert default_assistants == 0

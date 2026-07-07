@@ -1026,11 +1026,17 @@ def register_routes(app, deps):
         regular assistant message. If False, each reply part is saved as a
         private note (stays only in the panel).
         """
+        # plano 37 (B1 — a conversa #41): resolve o canal de ORIGEM uma vez e use-o
+        # em TODO o fluxo (contexto lido, cards de tool, resposta salva), senão a IA
+        # privada iniciada num canal não-default (ex.: Telegram) misfila pro
+        # WhatsApp 'default'.
+        run_channel = _channel_for(phone, conversation_id)
         try:
             result = await agent_handler.aprocess_message(
                 phone, text,
                 save_user_message=False,
                 save_response=False,
+                channel_id=run_channel,
             )
             reply_text = (result.reply or "").strip()
         except asyncio.CancelledError:
@@ -1043,7 +1049,8 @@ def register_routes(app, deps):
         if result.tool_calls:
             try:
                 await deps.broadcast_tool_calls(
-                    phone, result.tool_calls, result.contact_info)
+                    phone, result.tool_calls, result.contact_info,
+                    channel_id=run_channel)
             except Exception as e:
                 logger.warning("[PrivateAI] broadcast_tool_calls failed for %s: %s",
                                phone, e)
@@ -1074,7 +1081,7 @@ def register_routes(app, deps):
                 # 'default' e não roteria no painel — plano 11) and use the row
                 # add_message RETURNS (id/ts/conversation_id) instead of a racy
                 # get_last.
-                note_channel = _channel_for(phone, conversation_id)
+                note_channel = run_channel
                 saved_note = None
                 try:
                     def _save_note(p=part):
@@ -1097,7 +1104,7 @@ def register_routes(app, deps):
                     {"phone": phone, "channel_id": note_channel, "message": note_msg})
                 continue
 
-            channel_id = _channel_for(phone, conversation_id)
+            channel_id = run_channel
             state.recently_sent[f"{channel_id}:{phone}:{part[:120]}"] = time.time()
             send_failed = False
             send_error = ""
@@ -1124,6 +1131,7 @@ def register_routes(app, deps):
                     agent_handler.save_assistant_message, phone, part,
                     msg_id=msg_id,
                     status="failed" if send_failed else "sent",
+                    channel_id=run_channel,
                 )
             except Exception as e:
                 logger.error("[PrivateAI] failed to save assistant message: %s", e)
@@ -1283,7 +1291,7 @@ def register_routes(app, deps):
         db_content = note_text or "[Áudio]"
         try:
             def _save():
-                contact = agent_handler._get_contact(phone)
+                contact = agent_handler._get_contact(phone, channel_id=resolved_channel)
                 contact.add_message("private_note", db_content,
                                     media_type="audio", media_path=rel_path)
                 return message_repo.get_last(contact.id)
@@ -1304,18 +1312,21 @@ def register_routes(app, deps):
         }
         if saved and saved.get("_id"):
             note_msg["_id"] = saved["_id"]
-        await ws_manager.broadcast("new_message", {"phone": phone, "message": note_msg})
+        await ws_manager.broadcast("new_message", {
+            "phone": phone, "channel_id": resolved_channel, "message": note_msg})
 
         # Visible "Transcrição privada" card — only when the channel opted in.
         if card_text:
             try:
                 await asyncio.to_thread(
-                    lambda: agent_handler._get_contact(phone).add_message(
+                    lambda: agent_handler._get_contact(
+                        phone, channel_id=resolved_channel).add_message(
                         "transcription", card_text))
             except Exception as e:
                 logger.error("[Private] Failed to save transcription for %s: %s", phone, e)
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
+                "channel_id": resolved_channel,
                 "message": {
                     "role": "transcription",
                     "content": card_text,
