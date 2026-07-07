@@ -19,7 +19,7 @@ import time
 from fastapi import Depends, Query, Request
 
 from server.helpers import _ok, _err
-from server.deps import require_permission, install_exception_handlers
+from server.deps import require_permission, install_exception_handlers, PermissionDeniedError
 from server.authz import has_permission
 from db.repositories import (
     agent_repo, agent_prompt_repo, prompt_repo, variable_repo, tool_repo,
@@ -87,9 +87,23 @@ def register_routes(app, deps):
             return _err("Agente não encontrado.", status=404)
         return _ok(row)
 
-    @app.put("/api/ai/agents/{agent_key}",
-             dependencies=[Depends(require_permission("agent.config.manage"))])
+    @app.put("/api/ai/agents/{agent_key}")
     async def save_agent(request: Request, agent_key: str, body: dict):
+        # RBAC granular: criar, duplicar e editar são permissões distintas.
+        #  - agente NOVO (chave inexistente): exige agent.create, ou
+        #    agent.duplicate quando a requisição veio do botão "Duplicar"
+        #    (body.duplicate=true);
+        #  - agente EXISTENTE: exige agent.config.manage.
+        # O prompt continua gated por agent.prompts.edit (mais abaixo).
+        # Default-allow legado (has_permission → True sem usuário) preservado.
+        existing = await asyncio.to_thread(agent_repo.get, agent_key)
+        is_create = existing is None
+        if is_create:
+            needed = "agent.duplicate" if body.get("duplicate") else "agent.create"
+        else:
+            needed = "agent.config.manage"
+        if not has_permission(request, needed):
+            raise PermissionDeniedError()
         model_config = body.get("model_config", {})
         if not isinstance(model_config, dict):
             return _err("model_config deve ser um objeto.")
@@ -109,13 +123,14 @@ def register_routes(app, deps):
         # cascade always lands on it) — it must never be disabled.
         if agent_key == agent_repo.DEFAULT_AGENT_KEY and not bool(body.get("enabled", True)):
             return _err("O agente padrão não pode ser desativado.", status=400)
-        # Prompt é permissão separada (agent.prompts.manage). Quem só tem
+        # Prompt é permissão separada (agent.prompts.edit). Quem só tem
         # agent.config.manage edita modelo/tools/roteamento mas NÃO altera o
         # prompt: preservamos o prompt atual (agente novo nasce sem prompt →
         # cai no DEFAULT_SYSTEM_PROMPT). "hide, don't disable" no backend.
         prompt = body.get("prompt", "")
-        if not has_permission(request, "agent.prompts.manage"):
-            existing = await asyncio.to_thread(agent_repo.get, agent_key)
+        if not has_permission(request, "agent.prompts.edit"):
+            # Sem permissão de editar prompt: preserva o prompt atual (agente
+            # existente) ou nasce vazio (novo/duplicado → cai no prompt padrão).
             prompt = (existing or {}).get("prompt", "") or ""
         row = await asyncio.to_thread(
             agent_repo.save, agent_key,
@@ -138,7 +153,7 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.put("/api/ai/agents/{agent_key}/prompt",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.edit"))])
     async def save_agent_prompt(agent_key: str, body: dict):
         """Patch only an agent's inline prompt, preserving its other fields.
 
@@ -199,15 +214,23 @@ def register_routes(app, deps):
         return _ok({"deleted": True})
 
     # ── History / rollback (plano 06) ───────────────────────────────────
+    # O histórico do agente inteiro É o versionamento (histórico/comparar/
+    # restaurar), então exige agent.prompts.version — igual à trilha dedicada do
+    # prompt. Como o snapshot empacota prompt + config, o rollback só restaura a
+    # config se o usuário também tiver agent.config.manage (senão preserva a atual).
     @app.get("/api/ai/agents/{agent_key}/history",
-             dependencies=[Depends(require_permission("agent.config.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_history(agent_key: str):
         return _ok(await asyncio.to_thread(agent_repo.list_history, agent_key))
 
     @app.post("/api/ai/agents/{agent_key}/rollback/{version}",
-              dependencies=[Depends(require_permission("agent.config.manage"))])
-    async def agent_rollback(agent_key: str, version: int):
-        row = await asyncio.to_thread(agent_repo.rollback, agent_key, version)
+              dependencies=[Depends(require_permission("agent.prompts.version"))])
+    async def agent_rollback(request: Request, agent_key: str, version: int):
+        # Restaura só o que o usuário pode mudar: config só com agent.config.manage;
+        # o prompt já está liberado (a rota exige agent.prompts.version).
+        preserve_config = not has_permission(request, "agent.config.manage")
+        row = await asyncio.to_thread(
+            agent_repo.rollback, agent_key, version, False, preserve_config)
         if not row:
             return _err("Versão não encontrada.", status=404)
         _emit_changed("agent", agent_key)
@@ -217,12 +240,12 @@ def register_routes(app, deps):
 
     # ── Dedicated prompt version trail (git-like, additive to /history) ──
     @app.get("/api/ai/agents/{agent_key}/prompt/history",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_prompt_history(agent_key: str):
         return _ok(await asyncio.to_thread(agent_prompt_repo.list_history, agent_key))
 
     @app.get("/api/ai/agents/{agent_key}/prompt/history/{version}",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_prompt_version(agent_key: str, version: int):
         row = await asyncio.to_thread(agent_prompt_repo.get_version, agent_key, version)
         if not row:
@@ -230,7 +253,7 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.get("/api/ai/agents/{agent_key}/prompt/diff",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_prompt_diff(
         agent_key: str,
         from_version: int = Query(..., alias="from"),
@@ -243,7 +266,7 @@ def register_routes(app, deps):
         return _ok(d)
 
     @app.patch("/api/ai/agents/{agent_key}/prompt/history/{version}",
-               dependencies=[Depends(require_permission("agent.prompts.manage"))])
+               dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_prompt_rename(agent_key: str, version: int, body: dict):
         row = await asyncio.to_thread(
             agent_prompt_repo.rename_version, agent_key, version, body.get("note"))
@@ -253,7 +276,7 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.delete("/api/ai/agents/{agent_key}/prompt/history/{version}",
-                dependencies=[Depends(require_permission("agent.prompts.manage"))])
+                dependencies=[Depends(require_permission("agent.prompts.delete"))])
     async def agent_prompt_delete(agent_key: str, version: int):
         ok = await asyncio.to_thread(
             agent_prompt_repo.delete_version, agent_key, version)
@@ -263,7 +286,7 @@ def register_routes(app, deps):
         return _ok({"version": version})
 
     @app.post("/api/ai/agents/{agent_key}/prompt/restore/{version}",
-              dependencies=[Depends(require_permission("agent.prompts.manage"))])
+              dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def agent_prompt_restore(agent_key: str, version: int):
         row = await asyncio.to_thread(agent_prompt_repo.restore, agent_key, version)
         if not row:
@@ -274,12 +297,12 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.get("/api/ai/prompts/{prompt_key}/history",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def prompt_history(prompt_key: str):
         return _ok(await asyncio.to_thread(prompt_repo.list_history, prompt_key))
 
     @app.post("/api/ai/prompts/{prompt_key}/rollback/{version}",
-              dependencies=[Depends(require_permission("agent.prompts.manage"))])
+              dependencies=[Depends(require_permission("agent.prompts.version"))])
     async def prompt_rollback(prompt_key: str, version: int):
         row = await asyncio.to_thread(prompt_repo.rollback, prompt_key, version)
         if not row:
@@ -303,13 +326,13 @@ def register_routes(app, deps):
 
     # ── Prompts ─────────────────────────────────────────────────────────
     @app.get("/api/ai/prompts",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.edit"))])
     async def list_prompts():
         rows = await asyncio.to_thread(prompt_repo.list_all)
         return _ok(rows)
 
     @app.get("/api/ai/prompts/{prompt_key}",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.edit"))])
     async def get_prompt(prompt_key: str):
         row = await asyncio.to_thread(prompt_repo.get, prompt_key)
         if not row:
@@ -317,7 +340,7 @@ def register_routes(app, deps):
         return _ok(row)
 
     @app.put("/api/ai/prompts/{prompt_key}",
-             dependencies=[Depends(require_permission("agent.prompts.manage"))])
+             dependencies=[Depends(require_permission("agent.prompts.edit"))])
     async def save_prompt(prompt_key: str, body: dict):
         row = await asyncio.to_thread(prompt_repo.save, prompt_key, body.get("body", ""))
         _emit_changed("prompt", prompt_key)

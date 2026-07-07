@@ -134,7 +134,7 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, onCancel, busy, onOpenPromptHistory, canConfig, canPrompts }) {
+function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, onCancel, busy, onOpenPromptHistory, isDuplicate, canConfig, canCreate, canDuplicate, canPromptEdit, canPromptVersion, canPromptDelete }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
@@ -197,9 +197,17 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
   // be empty (it is the fallback every other agent inherits). Other agents may
   // leave it blank to fall back to the app default.
   const isDefault = !isNew && agent.agent_key === 'default';
-  // Prompts-only: usuário com agent.prompts.manage mas SEM agent.config.manage
-  // edita apenas o prompt (endpoint dedicado). A config do agente fica oculta.
-  const promptOnly = !canConfig && canPrompts;
+  // Campos de config (nome, modelo, tools, roteamento) são editáveis ao editar
+  // um agente existente (agent.config.manage) OU ao criar/duplicar um novo
+  // (agent.create / agent.duplicate — criar já inclui a config inicial).
+  const canEditConfigFields = canConfig || (isNew && (isDuplicate ? canDuplicate : canCreate));
+  // Prompts-only: usuário com agent.prompts.edit mas SEM agent.config.manage
+  // edita apenas o prompt de um agente EXISTENTE (endpoint dedicado). Não vale
+  // para criação (novo agente vai pelo save completo).
+  const promptOnly = !isNew && !canConfig && canPromptEdit;
+  // O botão "Versões do prompt" abre o histórico (comparar/restaurar/apagar);
+  // basta ter versionar OU apagar.
+  const canPromptVersioning = canPromptVersion || canPromptDelete;
 
   function toggleTool(name) {
     setToolNames(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
@@ -245,6 +253,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
       onSave(finalKey, {
         display_name: displayName.trim(),
         prompt: prompt,
+        // Sinaliza ao backend que é uma duplicação (exige agent.duplicate em vez
+        // de agent.create). Só relevante na criação de um agente novo.
+        duplicate: isNew && isDuplicate,
         change_note: changeNote.trim() || null,
         version_mode: pendingMode,
         model_config: buildModelConfig(),
@@ -287,14 +298,14 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
           <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] disabled:opacity-60"
-            type="text" value=${displayName} disabled=${!canConfig}
+            type="text" value=${displayName} disabled=${!canEditConfigFields}
             onInput=${(e) => setDisplayName(e.target.value)} />
         </div>
 
         <div>
           <div class="flex items-center justify-between mb-1 gap-2">
             <label class="block text-[12px] text-wa-secondary">Prompt do agente</label>
-            ${canPrompts ? html`
+            ${canPromptVersioning ? html`
               <button type="button"
                 class="px-2 py-1 rounded-md text-[11px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
                 disabled=${isNew}
@@ -302,7 +313,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
                 onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
             ` : null}
           </div>
-          ${canPrompts ? html`
+          ${canPromptEdit ? html`
             <${MarkdownEditor}
               value=${prompt}
               onChange=${setPrompt}
@@ -315,7 +326,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
               value=${changeNote} onInput=${(e) => setChangeNote(e.target.value)} />
           ` : html`
             <div class="wa-field w-full px-3 py-2 rounded-md text-[13px] whitespace-pre-wrap max-h-48 overflow-y-auto opacity-80">${prompt || '(sem prompt — usa o padrão do app)'}</div>
-            <div class="text-[11px] text-wa-secondary mt-1">Você não tem permissão para editar o prompt (agent.prompts.manage).</div>
+            <div class="text-[11px] text-wa-secondary mt-1">Você não tem permissão para editar o prompt (agent.prompts.edit).</div>
           `}
           ${placeholders.length > 0 ? html`
             <div class="mt-2">
@@ -329,7 +340,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
           ` : null}
         </div>
 
-        ${canConfig ? html`
+        ${canEditConfigFields ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Modelo${isDefault ? ' (obrigatório)' : ''}</label>
           <${ModelSelect}
@@ -515,7 +526,15 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
 
 export default function AgentsManager({ initialEntity, currentUser }) {
   const canConfig = hasPermission(currentUser, 'agent.config.manage');
-  const canPrompts = hasPermission(currentUser, 'agent.prompts.manage');
+  // Criar/duplicar são permissões próprias (separadas de config.manage, que
+  // agora só cobre editar agente existente).
+  const canCreate = hasPermission(currentUser, 'agent.create');
+  const canDuplicate = hasPermission(currentUser, 'agent.duplicate');
+  // Prompt granular: edit (editar texto), version (histórico/comparar/restaurar),
+  // delete (apagar versões). Substituíram o antigo agent.prompts.manage.
+  const canPromptEdit = hasPermission(currentUser, 'agent.prompts.edit');
+  const canPromptVersion = hasPermission(currentUser, 'agent.prompts.version');
+  const canPromptDelete = hasPermission(currentUser, 'agent.prompts.delete');
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -670,7 +689,7 @@ export default function AgentsManager({ initialEntity, currentUser }) {
           Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
           na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
         </p>
-        ${!formOpen && canConfig ? html`
+        ${!formOpen && canCreate ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
             onClick=${() => { setCreating(true); setEditing(null); setError(''); }}>+ Novo agente</button>
         ` : null}
@@ -681,15 +700,21 @@ export default function AgentsManager({ initialEntity, currentUser }) {
       <div ref=${formRef}>
         ${creating ? html`
           <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
+            isDuplicate=${creating !== true}
             existingKeys=${agents.map(a => a.agent_key)}
-            tools=${tools} canConfig=${canConfig} canPrompts=${canPrompts}
+            tools=${tools} canConfig=${canConfig} canCreate=${canCreate}
+            canDuplicate=${canDuplicate} canPromptEdit=${canPromptEdit}
+            canPromptVersion=${canPromptVersion} canPromptDelete=${canPromptDelete}
             onSave=${handleSave} onSavePrompt=${handleSavePrompt}
             onCancel=${() => setCreating(null)} busy=${busy} />
         ` : null}
 
         ${editing ? html`
           <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-            tools=${tools} canConfig=${canConfig} canPrompts=${canPrompts}
+            isDuplicate=${false}
+            tools=${tools} canConfig=${canConfig} canCreate=${canCreate}
+            canDuplicate=${canDuplicate} canPromptEdit=${canPromptEdit}
+            canPromptVersion=${canPromptVersion} canPromptDelete=${canPromptDelete}
             onSave=${handleSave} onSavePrompt=${handleSavePrompt}
             onCancel=${() => setEditing(null)} busy=${busy}
             onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
@@ -726,13 +751,24 @@ export default function AgentsManager({ initialEntity, currentUser }) {
               ${a.description ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${a.description}</div>` : null}
             </div>
             <div class="flex gap-1 shrink-0 flex-wrap justify-end">
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => { setEditing(a); setCreating(null); setError(''); }}>Editar</button>
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => startDuplicate(a)}>Duplicar</button>
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => openHistory(a)}>Histórico</button>
-              ${a.agent_key !== 'default' ? html`
+              <!-- Cada botão aparece conforme a permissão (RBAC): Editar abre o
+                   formulário do agente (config e/ou prompt — o prompt fica
+                   desabilitado sem agent.prompts.edit); Histórico é o
+                   versionamento do agente inteiro; Duplicar/Excluir são de
+                   config. Some quando o usuário não pode fazer a ação. -->
+              ${(canConfig || canPromptEdit) ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => { setEditing(a); setCreating(null); setError(''); }}>Editar</button>
+              ` : null}
+              ${canDuplicate ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => startDuplicate(a)}>Duplicar</button>
+              ` : null}
+              ${canPromptVersion ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => openHistory(a)}>Histórico</button>
+              ` : null}
+              ${(a.agent_key !== 'default' && canConfig) ? html`
                 <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
                   onClick=${() => handleDelete(a)}>Excluir</button>
               ` : null}
@@ -756,6 +792,8 @@ export default function AgentsManager({ initialEntity, currentUser }) {
           agentKey=${promptHistoryFor.agent_key}
           agentLabel=${promptHistoryFor.display_name || promptHistoryFor.agent_key}
           currentVersion=${null}
+          canVersion=${canPromptVersion}
+          canDelete=${canPromptDelete}
           onClose=${() => setPromptHistoryFor(null)}
           onRestored=${(restored) => {
             setPromptHistoryFor(null);

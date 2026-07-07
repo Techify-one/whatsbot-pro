@@ -26,9 +26,11 @@ ROLE_DEFAULTS = {
         "conversation.read", "conversation.reply", "conversation.assign",
         "conversation.resolve", "contact.read", "contact.write", "contact.import",
         "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
-        # IA granular (substitui o antigo agent.manage — gestor recebe as 4)
-        "agent.config.manage", "agent.prompts.manage", "agent.tools.manage",
-        "agent.variables.manage",
+        # IA granular (substitui o antigo agent.manage — gestor recebe todas).
+        # Prompt dividido em edit/version/delete (substitui agent.prompts.manage).
+        "agent.config.manage", "agent.create", "agent.duplicate",
+        "agent.prompts.edit", "agent.prompts.version", "agent.prompts.delete",
+        "agent.tools.manage", "agent.variables.manage",
         "quickreply.manage", "template.create", "template.delete", "audit.read",
         # Plano 24 — gestor recebe as 9 novas (database.manage fica admin-only)
         "contact.delete", "conversation.delete", "tag.manage",

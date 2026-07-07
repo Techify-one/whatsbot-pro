@@ -21,10 +21,16 @@ export function hasAnyPermission(user, keys) {
 }
 
 // Chaves de permissão da área de IA — substituíram o genérico agent.manage.
-// Ver domain/permission_catalog.py e a migração 0037_granular_ai_perms.
+// O prompt foi dividido em edit/version/delete (substitui agent.prompts.manage).
+// Ver domain/permission_catalog.py e as migrações 0037_granular_ai_perms /
+// 0042_granular_prompt_perms.
 export const AI_PERMS = [
   'agent.config.manage',
-  'agent.prompts.manage',
+  'agent.create',
+  'agent.duplicate',
+  'agent.prompts.edit',
+  'agent.prompts.version',
+  'agent.prompts.delete',
   'agent.tools.manage',
   'agent.variables.manage',
 ];
