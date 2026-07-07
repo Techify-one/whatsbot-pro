@@ -336,11 +336,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** join/leave/promote/demote num canal não-default grava o card na conversa daquele canal; teste de webhook de grupo verde.
 
 #### Status de execução — Fase FB4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** [channel_webhook.py:231](../server/routes/channel_webhook.py#L231): `agent_handler._get_contact(chat_id, channel_id=ev.channel_id)` + `"channel_id": ev.channel_id` no broadcast `new_message`. Alinha o único ramo do loop que salvava sem `ev.channel_id` (o `emit_with_filter` irmão já o usava).
+- **Como foi feito / decisões:** Mudança de 1 linha + campo aditivo no broadcast. `ev.channel_id` já disponível no loop.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `python tests/test_plugin_events.py` → 23 passed (standalone); `pytest tests/characterization/test_group_mentions_characterization.py` → 29 passed/1 skip. O 1 fail em `test_gowa_plugin.py` (setup ImportError de plugin standalone) é **pré-existente** — confirmado com `git stash` (49/1 idêntico sem a mudança).
 
 ---
 

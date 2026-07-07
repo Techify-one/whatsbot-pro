@@ -228,12 +228,17 @@ def register_routes(app, deps):
                             notice = await asyncio.to_thread(
                                 group_mentions.describe_change, ctype, jids)
                             if notice:
-                                contact_obj = agent_handler._get_contact(chat_id)
+                                # plano 37 (B4): grava o card no canal que recebeu o
+                                # evento (todos os outros ramos já usam ev.channel_id),
+                                # senão o roster card cairia no inbox 'default'.
+                                contact_obj = agent_handler._get_contact(
+                                    chat_id, channel_id=ev.channel_id)
                                 await asyncio.to_thread(contact_obj.add_message,
                                                         "system_notice", notice)
                                 if ws_manager is not None:
                                     await ws_manager.broadcast("new_message", {
                                         "phone": chat_id,
+                                        "channel_id": ev.channel_id,
                                         "message": {"role": "system_notice",
                                                     "content": notice, "ts": time.time()}})
                     await emit_with_filter("group.participants_changed", {
