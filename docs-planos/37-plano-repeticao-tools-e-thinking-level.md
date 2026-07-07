@@ -176,8 +176,10 @@ WAVE 1   A3(verificação integrada A1+A2 na conversa real)   🔴          B2(v
 **Pronto quando:** `pesquisar_ofertas` não reaparece nos turnos 2+ para a mesma oferta; tokens/latência por turno caem visivelmente.
 
 #### Status de execução — Fase A3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (barreira automatizável verde; medição de tokens ao vivo = manual)
+- **O que foi feito:** `tests/test_tool_memory_injection.py` (**novo**) — verificação **ponta-a-ponta** via `agent_run_service.run_turn` com `agno_engine.run_async` mockado (captura o array `messages` real que chega ao motor). Semeia "turno 1 já rodou `pesquisar_ofertas` + gravou `codigo_oferta`", roda o turno 2 e assevera que o bloco de memória chegou ao motor: contém "Memória deste atendimento", `pesquisar_ofertas(termo: failover)` e `codigo_oferta=O06C57F42`, e que a linha `→ resultado` NÃO vaza. 2º teste: kill-switch OFF ⇒ bloco ausente do motor (controle).
+- **Como interpretar:** isto prova o **mecanismo do A1** (o modelo do turno 2 passa a enxergar o que já rodou → não repete), que era o "pronto quando" da Fase A1 e a parte automatizável do A3. A parte do A2 (fragmento OFERTA EM FOCO ligado por `codigo_oferta`) e a **medição real de queda de tokens/latência por turno** (baseline execs 129–132: 40k/54k/64k tokens, 25–41s) exigem a **instância viva + Nexus configurado + plugin `vendas_ia` carregado** — passo **manual**, fora do harness de testes.
+- **Verificação:** `pytest tests/test_tool_memory_injection.py` → 2 passed. (Unit do A1: `tests/test_tool_memory.py` → 5 passed.) **Pendência de validação manual do usuário:** rodar 3–4 turnos na conversa real e confirmar `pesquisar_ofertas` 1× + queda de tokens/latência.
 
 ---
 
