@@ -54,6 +54,15 @@ def default_agent_key_for_inbox(inbox_id: int) -> str | None:
             return inbox["default_agent_key"]
     except Exception:
         logger.debug("conversation create: inbox default_agent_key lookup failed")
+    # plano 36: agente marcado como padrão de novas conversas (is_default=1) — só
+    # vale para o CARIMBO de criação; o runtime segue no piso "default". Conversas
+    # em andamento não mudam. Só adota se o agente existe e está habilitado.
+    try:
+        entry = agent_repo.get_new_conversation_default()
+        if entry and entry.get("enabled") and entry.get("agent_key"):
+            return entry["agent_key"]
+    except Exception:
+        logger.debug("conversation create: is_default agent lookup failed")
     return agent_repo.DEFAULT_AGENT_KEY
 
 
