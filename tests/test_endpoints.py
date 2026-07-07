@@ -2021,6 +2021,97 @@ _cmr, _ecmr = _alogic.normalize_values("protocolo", {"motivos": ["A"]})
 check("select múltiplo obrigatório preenchido -> ok", _ecmr is None and _cmr.get("motivos") == ["A"])
 _alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
 
+# ── Protocolos: Ignorar abertura por regex (direção) + pular avaliação por atributos ──
+section("Protocolos Ignorar abertura / Pular avaliação")
+
+class _CtxExtras:
+    def __init__(self, extras):
+        self.extras = extras
+
+def _msgs(user_text):  # lista estilo OpenAI (última msg = trigger do contato)
+    return [{"role": "system", "content": "sp"}, {"role": "user", "content": user_text}]
+
+# Feature 1 — regra "ignorar abertura" (config + matcher + before_reopen)
+_sk = _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("skip-open round-trip", _sk == {"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("direção sent casa enviada", _alogic._skip_open_matches("PROT-9", "sent") is True)
+check("direção sent NÃO casa recebida", _alogic._skip_open_matches("PROT-9", "received") is False)
+# ENVIADA (operador) → before_reopen impede reabrir (mensagem ainda vai ao WhatsApp).
+check("before_reopen sent+casa -> False (não reabre)",
+      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-1"}), True) is False)
+check("before_reopen user na direção sent -> não bloqueia",
+      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-1"}), True) is True)
+# RECEBIDA (contato) → mensagem aparece (não dropa); só a resposta da IA é abortada via
+# suppress_ai_on_ignored (filter.llm.messages → None). Protocolo pulado em on_inbound.
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "received"})
+check("suppress_ai aborta IA p/ recebida que casa (received)",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-2")) is None)
+check("suppress_ai deixa IA rodar p/ recebida que NÃO casa",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("oi tudo bem")) == _msgs("oi tudo bem"))
+# notify_on_ignored: silencia (sem badge/som/alerta) a recebida que casa.
+check("notify_on_ignored: recebida que casa -> silenciosa (False)",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-2"}), True) is False)
+check("notify_on_ignored: recebida que NÃO casa -> notifica (True)",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "oi"}), True) is True)
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("notify_on_ignored NÃO silencia quando direção só sent",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-3"}), True) is True)
+check("suppress_ai NÃO aborta quando direção só sent",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-3")) == _msgs("PROT-3"))
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "both"})
+check("suppress_ai aborta na direção both",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-4")) is None)
+check("both: before_reopen sent também bloqueia",
+      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-4"}), True) is False)
+check("suppress_ai ignora value não-lista", _alogic.suppress_ai_on_ignored(_CtxExtras({}), "x") == "x")
+_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+check("desligado -> suppress_ai deixa IA rodar",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-5")) == _msgs("PROT-5"))
+check("direção inválida cai em sent",
+      _alogic.set_skip_open_config({"enabled": True, "regex": "x", "direction": "zzz"})["direction"] == "sent")
+_alogic.set_skip_open_config({"enabled": True, "regex": "[bad", "direction": "both"})
+check("regex inválida -> False sem exceção", _alogic._skip_open_matches("qq", "sent") is False)
+_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+check("desligado -> matcher False", _alogic._skip_open_matches("PROT-3", "sent") is False)
+check("desligado -> before_reopen mantém value",
+      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
+
+# Feature 2 — pular avaliação por atributos (contato + conversa)
+check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
+check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
+check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
+check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
+check("sanitize descarta scope inválido",
+      _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
+
+from db.repositories import custom_attribute_repo as _ca_repo
+from db.repositories import conversation_repo as _sk_conv_repo
+from db.tables import contacts as _contacts_tbl, conversations as _conv_tbl
+_skc = contact_repo.get_or_create("5511900000042")
+_skcid = _skc["id"]
+_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "não possui"})
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
+check("skip_attrs round-trip na protocol-config",
+      _alogic.get_protocol_config().get("skip_attrs")
+      == [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}])
+check("skip avaliação por atributo de CONTATO -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
+_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
+check("valor diferente -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is False)
+_skconv = _sk_conv_repo.resolve_for_contact(_skcid, "5511900000042@s.whatsapp.net")
+_ca_repo.set_values(_conv_tbl, _skconv["id"], {"origem": "spam"})
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "origem", "scope": "conversation", "value": "spam"}]})
+check("skip avaliação por atributo de CONVERSA -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is True)
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
+check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
+_alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════

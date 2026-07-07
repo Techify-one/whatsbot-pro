@@ -276,9 +276,14 @@ class ContactMemory:
         # burst of concurrent saves, can be a DIFFERENT message → wrong _id/ts).
         return saved
 
-    def ensure_conversation_live(self, role: str = "user") -> int | None:
+    def ensure_conversation_live(self, role: str = "user",
+                                 reopen: bool | None = None) -> int | None:
         """Materialize the atendimento thread at INGEST time (t=0) WITHOUT saving a
         message (plano 25 Fase 2, bug #2 — "aba notifica antes da lista").
+
+        ``reopen=False`` materializa/exibe a conversa mas mantém uma FECHADA fechada (não
+        reabre no t=0) — usado pela regra "ignorar abertura" (direção received): a mensagem
+        aparece, mas a conversa continua resolvida.
 
         The receive pipeline is two-phase: the inbound message is only saved by the
         batch (t≈``message_batch_delay``), which is also where ``add_message`` would
@@ -294,7 +299,7 @@ class ContactMemory:
         message and does NOT emit ``message.persisted`` (those belong to the real save
         in the batch). Returns the conversation_id (``None`` if resolution failed).
         Best-effort — never blocks ingest."""
-        conv, conversation_id, transition = self._resolve_conversation(role)
+        conv, conversation_id, transition = self._resolve_conversation(role, reopen=reopen)
         if conversation_id is not None:
             try:
                 conversation_repo.touch_activity(conversation_id)

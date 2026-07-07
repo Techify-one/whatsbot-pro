@@ -732,13 +732,21 @@ def register_routes(app, deps):
             return _err("Mensagem bloqueada por plugin.", status=400)
         message = filtered
 
+        # Regra "ignorar abertura" (plugin): um filtro pode impedir que este envio do
+        # operador REABRA uma conversa fechada (mantém fechada quando o texto casa a
+        # regex). Sem plugin registrado, apply_filter devolve True → reopen=None (default).
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "assistant", "text": message})
+        _reopen = False if not _allow_reopen else None
+
         # Sandbox/test contact — never goes over GOWA (the number isn't real).
         # Persist the operator message locally and broadcast it, no error.
         if await asyncio.to_thread(_is_sandbox_contact, phone):
             msg_data = await asyncio.to_thread(
                 agent_handler.save_operator_message, phone, message, status="operator",
                 reply_to_msg_id=reply_to,
-                sent_by_user_id=_uid, sent_by_name=_uname,
+                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
             )
             await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
             await emit_with_filter("message.sent", {
@@ -798,7 +806,7 @@ def register_routes(app, deps):
                 agent_handler.save_operator_message, phone, message,
                 status="failed" if send_failed else "operator",
                 msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=channel_id,
-                sent_by_user_id=_uid, sent_by_name=_uname,
+                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
             )
         except Exception as e:
             logger.error("[Send] Failed to save message for %s: %s", phone, e)

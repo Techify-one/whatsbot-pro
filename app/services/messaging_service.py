@@ -257,9 +257,15 @@ class MessagingService:
             "sent_by_name": sent_by_name,
         }
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
+        # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a legenda casar
+        # a regex (consistente com on_outbound, que já pula o protocolo). Sem plugin → None.
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "assistant", "text": emit_text})
         contact.add_message("assistant", content, media_type=kind,
                             media_path=rel_path, status="operator", msg_id=msg_id,
-                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
+                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            reopen=(False if not _allow_reopen else None))
 
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
@@ -812,8 +818,15 @@ class MessagingService:
                     logger.info("[Batch] Processing %d text messages from %s: %s",
                                 len(text_parts), phone, combined[:80])
                     last_msg_id = text_msg_ids[-1] if text_msg_ids else None
+                    # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
+                    # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
+                    # plugin registrado → apply_filter devolve True → reopen=None (default).
+                    _allow_reopen = await apply_filter(
+                        "filter.conversation.before_reopen", True,
+                        {"phone": phone, "role": "user", "text": combined})
                     contact.add_message("user", combined, msg_id=last_msg_id,
-                                        reply_to_msg_id=text_reply_to)
+                                        reply_to_msg_id=text_reply_to,
+                                        reopen=(False if not _allow_reopen else None))
                     await emit_with_filter("message.saved", {
                         "phone": phone, "text": combined, "msg_id": last_msg_id,
                         "media_type": None, "media_path": None,
