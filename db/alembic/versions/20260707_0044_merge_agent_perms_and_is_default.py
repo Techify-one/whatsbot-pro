@@ -17,14 +17,17 @@ stamp atual. As duas linhagens tocam tabelas disjuntas (``executions``/``ai_agen
 vs ``permissions``), então a ordem entre elas é irrelevante. Sem operações
 próprias — só reconcilia o grafo.
 
-Revision ID: 0044_merge_agent_perms_is_default
+Revision ID: 0044_merge_perms_is_default
 Revises: 0043_agent_is_default, 0043_agent_create_duplicate
 Create Date: 2026-07-07
+
+Nota: o ``revision`` cabe em ``alembic_version.version_num`` (``varchar(32)``) —
+mantido curto de propósito (o id descritivo completo vai no nome do arquivo).
 """
 from typing import Sequence, Union
 
 
-revision: str = "0044_merge_agent_perms_is_default"
+revision: str = "0044_merge_perms_is_default"
 down_revision: Union[str, Sequence[str], None] = (
     "0043_agent_is_default",
     "0043_agent_create_duplicate",
