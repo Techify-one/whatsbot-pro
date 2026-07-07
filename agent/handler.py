@@ -319,7 +319,7 @@ class AgentHandler:
         logger.error("Resolução de agente falhou para %s: %s", sender, exc)
         try:
             from db.repositories import conversation_repo
-            conv = (conversation_repo.get_open_for_contact(contact.id)
+            conv = (conversation_repo.get_open_for_contact_scoped(contact)
                     if getattr(contact, "id", None) else None)
             conversation_id = conv["id"] if conv else None
             content = ("[WhatsBot] Não foi possível resolver o agente de IA desta "

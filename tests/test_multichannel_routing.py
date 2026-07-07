@@ -75,10 +75,9 @@ def _seed_two_inboxes(handler, phone: str, tg_channel: str):
 # ── A10 — gate de IA lê o canal errado ──────────────────────────────────────
 
 def test_f0_gate_ai_reads_wrong_channel(build_app):
-    """A10: com a conversa ``default`` pausada (ai_active=0) e a do Telegram ativa,
-    ``_conversation_ai_active`` para o contato do Telegram devolve **False** hoje
-    (lê a conversa default, mais recente). Deveria devolver True (o Telegram está
-    ativo). F-REG inverte para True."""
+    """A10 (FA3 corrigido): com a conversa ``default`` pausada (ai_active=0) e a do
+    Telegram ativa, ``_conversation_ai_active`` para o contato do Telegram devolve
+    **True** — lê a conversa do canal do turno (Telegram), não a default."""
     from app.services.messaging_service import _conversation_ai_active
 
     built = build_app(["gowa"])
@@ -86,7 +85,11 @@ def test_f0_gate_ai_reads_wrong_channel(build_app):
     conversation_repo.set_ai_active(s.default_conv, 0)   # WhatsApp pausada
     conversation_repo.set_ai_active(s.tg_conv, 1)        # Telegram ativa
 
-    # BUG (F0): lê a conversa default (pausada) → cala a IA no canal errado.
+    # CORRETO (FA3): a IA do Telegram responde independente da default pausada.
+    assert _conversation_ai_active(s.tg_mem) is True
+    # E o inverso: pausar o Telegram cala só o Telegram, não a default.
+    conversation_repo.set_ai_active(s.tg_conv, 0)
+    conversation_repo.set_ai_active(s.default_conv, 1)
     assert _conversation_ai_active(s.tg_mem) is False
 
 
