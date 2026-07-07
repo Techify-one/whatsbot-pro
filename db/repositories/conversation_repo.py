@@ -218,6 +218,21 @@ def get_latest_for_contact_inbox(contact_id: int, inbox_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_open_for_contact_scoped(contact) -> dict | None:
+    """Open conversation of a ``contact``-like object, scoped to ITS inbox (plano 37).
+
+    Idioma central da correção "por-canal, não por-contato": recebe um objeto com
+    ``.id`` e (idealmente) ``.inbox_id`` — todo ``ContactMemory``/``ctx.contact``
+    tem ambos — e resolve a conversa aberta DAQUELE inbox, nunca a mais recente de
+    qualquer canal. Fail-open (D2): um double de teste/legado sem ``inbox_id`` cai
+    no resolver channel-blind, preservando byte-a-byte o comportamento antigo. É o
+    ÚNICO ponto sancionado a chamar ``get_open_for_contact`` como fallback."""
+    inbox_id = getattr(contact, "inbox_id", None)
+    if inbox_id is not None:
+        return get_open_for_contact_inbox(contact.id, inbox_id)
+    return get_open_for_contact(contact.id)
+
+
 def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                            opened_at: float | None = None,
                            inbox_id: int = DEFAULT_INBOX_ID,

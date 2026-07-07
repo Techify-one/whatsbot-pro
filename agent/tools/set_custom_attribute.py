@@ -89,7 +89,7 @@ def execute(ctx, args: dict) -> str | None:
         # not the scope the LLM originally requested (plano 19).
         args["scope"] = scope
         if scope == "conversation":
-            conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+            conv = conversation_repo.get_open_for_contact_scoped(ctx.contact)
             if not conv:
                 return "Erro: não há conversa aberta para gravar este atributo."
             ca_repo.set_values(conversations_table, conv["id"], {key: norm})

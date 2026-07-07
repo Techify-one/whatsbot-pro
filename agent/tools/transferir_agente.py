@@ -77,7 +77,7 @@ def execute(ctx, args: dict) -> str | None:
             return (f"Erro: o agente '{target}' não existe ou está desativado. "
                     f"Agentes disponíveis: {', '.join(disponiveis) or '(nenhum)'}.")
 
-        conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+        conv = conversation_repo.get_open_for_contact_scoped(ctx.contact)
         if not conv:
             return "Erro: não há conversa aberta para transferir."
 
