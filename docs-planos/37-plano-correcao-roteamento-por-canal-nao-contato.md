@@ -241,11 +241,11 @@ WAVE 5   F-REG (regressão multicanal — inverte F0)            🔴 depois de 
 **Pronto quando:** teste A10 (gate) de F0 invertido — `_conversation_ai_active(contact_telegram)` reflete a conversa **do Telegram**; cards de erro/takeover/atributo caem no fio correto; suíte de mensagens/caracterização verde.
 
 #### Status de execução — Fase FA3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** 5 swaps para `get_open_for_contact_scoped(contact)`: [handler.py:322](../agent/handler.py#L322) (`_emit_resolution_error`), messaging_service em `broadcast_tool_calls` (conversa-scope attr broadcast + o `conversation_assigned` pós-transfer), `maybe_emit_ai_takeover` (dedupe `has_event`) e o gate `_conversation_ai_active`. Asserção A10 do F0 invertida (gate reflete o canal do turno + o caso inverso).
+- **Como foi feito / decisões:** No gate mantive o fail-open explícito: `conv=None` cai na checagem de `TRANSFER_TAG` (linha intacta — Cluster D fica pra FD1) e retorna True no `except`. Todos os `contact` aqui são `ContactMemory` reais (têm `inbox_id`); o helper scoped é usado por uniformidade. `handler.py` é compartilhado com FA6/FB5 — apliquei em ordem (FA3 primeiro, linhas disjuntas 322/361/420).
+- **Problemas / pendências:** Rodar as 3 characterization juntas falha por contaminação de estado cross-file (engine process-global — documentado na memória "pytest tests/ não roda inteiro"); cada arquivo isolado passa. Não é regressão desta fase.
+- **Verificação:** `pytest tests/test_human_gate.py tests/test_multichannel_routing.py tests/test_tool_call_broadcast.py tests/test_transfer_broadcast.py` → 16 passed. Isolados: `test_webhook_characterization` 26 passed, `test_agent_turn_characterization` 5 passed, `test_lifecycle_characterization` 6 passed/1 skipped.
 
 ---
 
