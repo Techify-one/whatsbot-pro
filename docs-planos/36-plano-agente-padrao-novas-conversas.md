@@ -145,6 +145,43 @@ Agentes).
   conversas" → Salvar**. O `"default"` é rebaixado; toda conversa **nova** nasce no BIA
   Router. Abertas atuais: inalteradas.
 
+## Status de execução (2026-07-07)
+
+Implementado na ordem F1→F7, um commit por fase, verde a cada uma. Base: branch
+`developer`, herdando o `AgentsManager.js` já atualizado pelo plano 37b (37b mergeado
+antes — confirmado). **Correção vs. o doc**: a migration encadeia depois do head **real**
+`0042_exec_conversation_channel` (o doc citava `0041`/número `0042`, desatualizado) →
+revisão **`0043_agent_is_default`**.
+
+- **F1** (`db/tables.py` + `db/alembic/versions/20260707_0043_agent_is_default.py`):
+  coluna `ai_agents.is_default` + índice único parcial `ux_ai_agents_single_default`.
+  Migration guardada/idempotente/reversível (add_column → rebaixa duplicatas → seed
+  condicional do `"default"` só se ninguém já for padrão → índice). Validada no test DB:
+  `upgrade`/`downgrade`/`upgrade` roundtrip limpo; coluna+índice presentes.
+- **F2** (`agent_repo.py`): `save()` aceita `is_default` (dedup/values/update_cols),
+  rebaixa o anterior via `_demote_other_defaults` (bump+snapshot); `get_new_conversation_default()`;
+  `rollback()` repassa a flag; `_row_to_dict`/`_SNAPSHOT_COLS` incluem o campo.
+- **F3** (`server/routes/ai_engine.py`): `save_agent` lê `is_default` do body; `save_agent_prompt`
+  preserva a flag da linha existente (patch só-prompt não derruba).
+- **F4** (`conversation_repo.py`): `default_agent_key_for_inbox` → `inbox.default_agent_key`
+  → `get_new_conversation_default()` (se `enabled`) → piso `"default"`. Runtime intocado.
+- **F5** (`AgentsManager.js`): checkbox "Padrão para novas conversas" (estado `isNewConvDefault`,
+  distinto do `isDefault`=chave literal), hint, aviso de rebaixamento (espelha o do roteador),
+  `is_default` no payload; pill "novas conversas" no card. Dark-safe (tints de precedente).
+- **F6** (`tests/test_agent_default.py` +8, `tests/test_endpoints.py` +4): radio/índice/carimbo/
+  **não-muda-em-andamento** + round-trip pelo endpoint. Suíte de endpoints: **1090 passed**.
+  Regressão: ai_agents_jsonb 26 ✓ · agent_json_hardening 25 ✓ · agent_routing 29 ✓ ·
+  conversation_race + improve_scope 6 ✓.
+- **F7** (operacional — do usuário): a migration roda no boot (`alembic upgrade head`) →
+  **reiniciar o servidor uma vez**; depois **Configurações de IA → Agentes → \<agente\> →
+  marcar "Padrão para novas conversas" → Salvar**. O padrão anterior é rebaixado; toda
+  conversa **nova** nasce nesse agente. Conversas abertas atuais: inalteradas.
+
+**Pontos em aberto resolvidos**: nome da flag = `is_default` (mantido, espelha `is_router`);
+reabertura de conversa fechada adota o padrão novo (aceito — é ciclo novo).
+
+Commits: F1 schema · F2 agent_repo · F3 routes · F4 carimbo · F5 frontend · F6 testes.
+
 ## Fora de escopo
 
 - Padrão **por inbox** na UI (a coluna `inbox.default_agent_key` e o endpoint já existem;
