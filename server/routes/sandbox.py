@@ -118,7 +118,11 @@ def register_routes(app, deps):
             "bot_name": state.bot_name,
         })
         try:
-            await asyncio.to_thread(prune_executions, settings.get("max_executions", 200))
+            await asyncio.to_thread(
+                prune_executions,
+                settings.get("max_executions", 200),
+                settings.get("execution_retention_days", 0),
+            )
         except Exception:
             pass
 

@@ -12,6 +12,7 @@ Context variable design:
 
 import contextvars
 import logging
+import time
 
 from db.repositories import execution_repo
 
@@ -139,11 +140,28 @@ def get_current_execution_id() -> int | None:
     return _current_execution.get()
 
 
-def prune_executions(max_keep: int) -> None:
-    """Remove old executions beyond the configured limit."""
+def prune_executions(max_keep: int, retention_days: int = 0) -> None:
+    """Remove old executions beyond the configured limits.
+
+    Prunes by COUNT (keep the newest ``max_keep``) and, when ``retention_days`` > 0,
+    also by AGE (drop anything older than N days). ``execution_steps`` cascade with
+    the execution (FK ``ON DELETE CASCADE``), so the captured context/tool results
+    go with it. Both passes are best-effort. (plano 36 F3: day-based retention.)
+    """
     try:
         deleted = execution_repo.prune(max_keep)
         if deleted:
             logger.info("Pruned %d old executions (keeping %d).", deleted, max_keep)
     except Exception as e:
         logger.warning("Failed to prune executions: %s", e)
+    try:
+        days = int(retention_days or 0)
+    except (TypeError, ValueError):
+        days = 0
+    if days > 0:
+        try:
+            removed = execution_repo.delete_older_than(time.time() - days * 86400)
+            if removed:
+                logger.info("Pruned %d executions older than %d days.", removed, days)
+        except Exception as e:
+            logger.warning("Failed to prune executions by age: %s", e)

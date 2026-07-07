@@ -170,11 +170,20 @@ WAVE 3   F6(testes de integração + pruning + filtros)   [depende de: F1..F5]  
 **Pronto quando:** com `execution_capture_context=ON`, um turno grava um step `llm_context` com system prompt + mensagens truncadas (sem base64); com OFF, não grava; poda por quantidade/dias remove execução + contexto junto (CASCADE).
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-07)
+- **O que foi feito:**
+  - `config/settings.py` — 2 chaves em `CONFIG_KEYS`: `execution_capture_context` (bool, **default False** = kill-switch OFF, exposta+writable) e `execution_retention_days` (int, default 0, exposta+writable). Como derivam de `CONFIG_KEYS`, entram automaticamente em `DEFAULT_CONFIG`/GET/allow-list do PUT.
+  - `agent/agno_engine.py` — `import re`; consts `LLM_CONTEXT_MSG_MAX_CHARS=2000`, `LLM_CONTEXT_TOTAL_MAX_CHARS=20000`; helpers `_context_capture_enabled()` (lê o kill-switch, best-effort), `_scrub_and_truncate()` (remove base64 data-URI + runs longos de base64, trunca por msg), `_capture_llm_context(system_prompt, convo, model_id)` (emite step `llm_context` com system + mensagens truncadas). Chamado após o `track_step("llm_request")` nos dois paths (`run_async`/`run_sync`).
+  - `agent/execution.py` — `import time`; `prune_executions(max_keep, retention_days=0)` agora também poda por idade via `delete_older_than` quando `retention_days>0` (CASCADE leva os steps junto).
+  - Call sites de poda passam `execution_retention_days`: `app/services/messaging_service.py` (`_after_send`-equivalente) e `server/routes/sandbox.py` (`_after_send`).
+- **Como foi feito / decisões:**
+  - **P3 → kill-switch OFF por default** (decisão do usuário): conservador, banco não cresce até ligar. Toggle na tela em F5.
+  - **P1 já decidido no plano → step `llm_context`** (não coluna): reaproveita `execution_steps` (JSON + CASCADE) e cobre 1º hop + hops de routing pelo mesmo boundary do engine.
+  - Boundary escolhido: o do engine (`run_async`/`run_sync`), onde `system_prompt` e `convo` já existem juntos — cobre routing sem tocar em `agent_run_service.py` (evita colisão com a outra IA que mexe lá).
+  - Base64 scrub defensivo: convo já é texto (transcrições), mas o scrub protege contra qualquer blob; runs ≥200 chars do charset base64 viram `[base64 removido]` (texto normal tem espaços, não casa).
+  - Toda a captura é best-effort (try/except engole; `track_step` no-op fora de contexto) — nunca quebra o turno.
+- **Problemas / pendências:** nenhuma. (Não reduzi `max_executions` default quando a captura está ON — a retenção por dias/quantidade + kill-switch OFF já seguram o tamanho; deixado como config do operador.)
+- **Verificação:** contra o Postgres de teste — capture ON emite `llm_context` (system + 3 msgs, base64 removido); OFF não emite nada; truncação por msg OK em texto com espaços; poda por dias remove execução antiga e preserva a recente (CASCADE). `tests/test_routing_engine.py` (26/0) e `tests/test_agent_routing.py` (29/0) verdes.
 
 ---
 
