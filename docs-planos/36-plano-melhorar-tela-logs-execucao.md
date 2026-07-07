@@ -249,11 +249,16 @@ WAVE 3   F6(testes de integração + pruning + filtros)   [depende de: F1..F5]  
 **Pronto quando:** suíte verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`), cobrindo filtros novos + persistência + pruning.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-07)
+- **O que foi feito:** novo `tests/endpoints/test_p36_executions.py` (pytest-collected, engine process-global via `_engine_ready`; endpoint via fixture `client`), 13 testes cobrindo:
+  - **F1** — `create(kwargs)` + `set_channel` (update parcial: não sobrescreve campo não passado).
+  - **F4** — repo: filtro por `conversation_id` e janela de data (fim-de-dia inclusivo); `_parse_date` (yyyy-mm-dd/empty/None/inválido/end_of_day); endpoint: `GET /api/executions?conversation_id=` filtra e `date_from` inválido não dá 500.
+  - **F2** — dirige o **entrypoint real de tool** (`build_functions` sync com handler fake) e assere que `tool_executed.data.result` é persistido **truncado** (e o LLM ainda recebe o feedback completo); tool sem retorno grava `result=None` sem quebrar.
+  - **F3** — `_capture_llm_context` com kill-switch ON grava `llm_context` (system + msgs, base64 removido) e trunca msg longa; OFF não grava nada.
+  - **F3 poda** — `prune_executions(retention_days=1)` remove execução antiga + steps por CASCADE e mantém a recente; poda por quantidade não derruba as mais novas.
+- **Como foi feito / decisões:** testes de poda por quantidade evitam assumir DB pristino (tabela compartilhada na sessão) — assertam invariантes relativas (recentes sobrevivem, total não cresce). O entrypoint sync roda sem loop porque `apply_filter_sync`/`emit_with_filter_sync` são no-op sem plugins/loop registrados. Round-trip da migration foi verificado manualmente na F1 (não incluído na suíte para não mexer no schema da sessão, que o `tests/pg.py` recria por processo).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `tests/endpoints/test_p36_executions.py` **13 passed**; `tests/endpoints/` inteiro **47 passed** (coexistência com irmãos no engine de sessão); `python tests/test_endpoints.py` **1086 passed, 0 failed**.
 
 ---
 
