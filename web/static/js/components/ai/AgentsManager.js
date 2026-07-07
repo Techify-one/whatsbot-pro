@@ -146,6 +146,9 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
   const [temperature, setTemperature] = useState(numField(mc.temperature));
   const [topP, setTopP] = useState(numField(mc.top_p));
   const [maxTokens, setMaxTokens] = useState(numField(mc.max_tokens));
+  // Nível de pensamento (plano 37 B1): texto livre → model_config.thinking_level,
+  // que o backend traduz para reasoning_effort (model_factory._ALIASES).
+  const [thinkingLevel, setThinkingLevel] = useState(mc.thinking_level || '');
   const [enabled, setEnabled] = useState(agent.enabled !== false);
   const [description, setDescription] = useState(agent.description || '');
   const [isRouter, setIsRouter] = useState(!!agent.is_router);
@@ -178,6 +181,7 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
     setTemperature(numField(mc2.temperature));
     setTopP(numField(mc2.top_p));
     setMaxTokens(numField(mc2.max_tokens));
+    setThinkingLevel(mc2.thinking_level || '');
     setEnabled(agent.enabled !== false);
     setDescription(agent.description || '');
     setIsRouter(!!agent.is_router);
@@ -214,9 +218,13 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
     if (temperature !== '') out.temperature = parseFloat(temperature);
     if (topP !== '') out.top_p = parseFloat(topP);
     if (maxTokens !== '') out.max_tokens = parseInt(maxTokens, 10);
+    // thinking_level (plano 37 B1): só emite quando preenchido; limpar o campo
+    // remove a chave. Também é EXCLUÍDO do preserve abaixo, senão um valor antigo
+    // de `mc` sobreviveria como chave-fantasma mesmo o usuário tendo limpado o input.
+    if (thinkingLevel.trim()) out.thinking_level = thinkingLevel.trim();
     // Preserve any extra keys the UI doesn't surface (e.g. provider-specific).
     for (const [k, v] of Object.entries(mc)) {
-      if (!['model', 'temperature', 'top_p', 'max_tokens'].includes(k)) out[k] = v;
+      if (!['model', 'temperature', 'top_p', 'max_tokens', 'thinking_level'].includes(k)) out[k] = v;
     }
     return out;
   }
@@ -365,6 +373,17 @@ function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, on
         <div class="text-[11px] text-wa-secondary -mt-1">
           max_tokens: modelos de raciocínio gastam esse orçamento para "pensar" antes de responder —
           valores baixos podem zerar a resposta. Piso aplicado: 256 (1024 quando reasoning_effort está definido).
+        </div>
+
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Nível de pensamento</label>
+          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+            type="text" placeholder="— padrão do modelo —"
+            value=${thinkingLevel} onInput=${(e) => setThinkingLevel(e.target.value)} />
+          <div class="text-[11px] text-wa-secondary mt-1">
+            Esforço de raciocínio (vira <span class="font-mono">reasoning_effort</span>). Conforme o modelo:
+            openai <span class="font-mono">minimal/low/medium/high</span>. Deixe vazio para o padrão.
+          </div>
         </div>
 
         <div>

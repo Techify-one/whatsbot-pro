@@ -154,11 +154,15 @@ WAVE 1   A3(verificação integrada A1+A2 na conversa real)   🔴          B2(v
 **Pronto quando:** abrir um agente → seção Avançado mostra `thinking_level` com o valor atual; salvar com `low` grava `model_config.thinking_level="low"`; limpar o campo remove a chave; legível no modo escuro.
 
 #### Status de execução — Fase B1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (frontend puro — sem backend)
+- **O que foi feito** (`web/static/js/components/ai/AgentsManager.js`, `AgentForm`):
+  - **Estado**: `const [thinkingLevel, setThinkingLevel] = useState(mc.thinking_level || '')` (espelha `temperature`/`topP`).
+  - **Re-sync**: `setThinkingLevel(mc2.thinking_level || '')` no `useEffect` de troca de revisão (senão o campo ficaria preso ao valor da 1ª montagem ao restaurar versão).
+  - **Input**: `<input type="text" class="wa-field ...">` rotulado "Nível de pensamento" na seção Avançado (logo após a dica de max_tokens), com dica curta (`vira reasoning_effort; openai minimal/low/medium/high; vazio = padrão`). `.wa-field` ⇒ legível no modo escuro.
+  - **Persistência** em `buildModelConfig()`: `if (thinkingLevel.trim()) out.thinking_level = thinkingLevel.trim();` e `'thinking_level'` **incluído na exclusão do loop de preserve** — limpar o campo remove a chave (sem valor-fantasma preservado de `mc`).
+- **Como foi feito / decisões:** texto livre (D3), sem auto-mapeamento por família de modelo. Zero backend — `model_config` já trafega inteiro (`agent_repo.save` persiste o JSON) e `model_factory._ALIASES` já traduz `thinking_level`→`reasoning_effort`.
+- **Problemas / pendências:** nenhuma. Validação de round-trip real é a Fase B2.
+- **Verificação:** `node --check` no arquivo → OK (sintaxe). Todos os 5 call sites de `thinkingLevel` consistentes (init/resync/persist/exclude/input).
 
 ---
 
