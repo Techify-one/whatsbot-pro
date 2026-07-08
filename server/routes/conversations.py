@@ -83,6 +83,10 @@ def register_routes(app, deps):
     async def _send_conv_read_receipts(channel_id: str, phone: str, msg_ids: list[str]):
         """Read receipts for ONE conversation, routed through its own channel."""
         for mid in msg_ids:
+            # Notas privadas notificadas usam msg_id sintético ("pn:…") inexistente no
+            # provedor — pular (não é uma mensagem real do canal).
+            if str(mid).startswith("pn:"):
+                continue
             try:
                 await asyncio.to_thread(outbound.mark_read, channel_id, phone, mid)
             except Exception as e:

@@ -221,6 +221,7 @@ async def create_kanban_view(body: dict, request: Request):
         group_date_grain=(body or {}).get("group_date_grain"),
         filters=(body or {}).get("filters") or {},
         available_filters=(body or {}).get("available_filters"),
+        favorite_filters=(body or {}).get("favorite_filters"),
         column_order=(body or {}).get("column_order"),
         visibility_roles=(body or {}).get("visibility_roles"),
         visibility_users_include=(body or {}).get("visibility_users_include"),
@@ -243,7 +244,7 @@ async def update_kanban_view(vid: int, body: dict, request: Request):
         return _err(msg, status=403)
     # Repassa só o que veio no body (ausente = mantém o atual, via sentinela no logic).
     extra = {}
-    for k in ("available_filters", "column_order", "visibility_roles",
+    for k in ("available_filters", "favorite_filters", "column_order", "visibility_roles",
               "visibility_users_include", "visibility_users_exclude"):
         if isinstance(body, dict) and k in body:
             extra[k] = body[k]

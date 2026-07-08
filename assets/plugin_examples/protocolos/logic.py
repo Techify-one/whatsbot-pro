@@ -1096,6 +1096,7 @@ def _view_dict(row) -> dict:
     d = dict(row)
     d["filters"] = _safe_json(d.get("filters"))  # JSON TEXT → dict
     d["available_filters"] = _avail_list(d.get("available_filters"))  # JSON array | None (=todos)
+    d["favorite_filters"] = _avail_list(d.get("favorite_filters"))  # JSON array | None (=nenhum favorito)
     d["column_order"] = _avail_list(d.get("column_order"))  # ordem das colunas (list[str] | None)
     # ACL de visibilidade (quem pode ver): grupos (role keys) + usuários incluídos/excluídos.
     d["visibility_roles"] = _avail_list(d.get("visibility_roles"))          # list[str] | None
@@ -1214,6 +1215,7 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
                        group_date_mode=None,
                        group_date_from=None, group_date_to=None, group_date_grain=None,
                        filters=None, available_filters=None,
+                       favorite_filters=None,
                        column_order=None, visibility_roles=None, visibility_users_include=None,
                        visibility_users_exclude=None,
                        owner_user_id=None) -> tuple[dict | None, str | None]:
@@ -1233,6 +1235,7 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
     ts = now()
     fjson = json.dumps(filters if isinstance(filters, dict) else {})
     afjson = json.dumps([str(x) for x in available_filters]) if isinstance(available_filters, list) else None
+    favjson = _dump_str_list(favorite_filters)  # favoritos ([]/None → NULL = nenhum favorito)
     cojson = _dump_str_list(column_order)  # ordem das colunas ([]/None → NULL = ordem padrão)
     gak = (group_attr_key or None) if group_by == "attr" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
@@ -1249,15 +1252,15 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
             text(f"INSERT INTO {_VIEWS_TABLE} "
                  "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
                  " group_date_from, group_date_to, group_date_grain, "
-                 " filters, available_filters, column_order, visibility_roles, "
+                 " filters, available_filters, favorite_filters, column_order, visibility_roles, "
                  " visibility_users_include, visibility_users_exclude, position, "
                  " created_at, updated_at) "
                  "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :gdf, :gdt, :gdg, "
-                 " :filters, :af, :co, :vr, "
+                 " :filters, :af, :fav, :co, :vr, "
                  " :vi, :ve, :pos, :ts, :ts)"),
             {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
              "gak": gak, "gdm": gdm, "gdf": gdf, "gdt": gdt, "gdg": gdg,
-             "filters": fjson, "af": afjson, "co": cojson,
+             "filters": fjson, "af": afjson, "fav": favjson, "co": cojson,
              "vr": vroles, "vi": vinc, "ve": vexc, "pos": int(pos), "ts": ts},
         )
         # Re-seleciona a linha recém-criada de forma portável (SQLite/Postgres): created_at
@@ -1275,6 +1278,7 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
                        group_date_mode=None,
                        group_date_from=None, group_date_to=None, group_date_grain=None,
                        filters=None, available_filters=_UNSET,
+                       favorite_filters=_UNSET,
                        column_order=_UNSET, visibility_roles=_UNSET,
                        visibility_users_include=_UNSET,
                        visibility_users_exclude=_UNSET) -> tuple[dict | None, str | None]:
@@ -1293,6 +1297,9 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     # available_filters: _UNSET = mantém atual; None = TODOS (NULL); lista = allow-list.
     af_src = cur.get("available_filters") if available_filters is _UNSET else available_filters
     afjson = json.dumps([str(x) for x in af_src]) if isinstance(af_src, list) else None
+    # favorite_filters: _UNSET = mantém atual; lista/None substitui ([]/None → NULL = nenhum favorito).
+    fav_src = cur.get("favorite_filters") if favorite_filters is _UNSET else favorite_filters
+    favjson = _dump_str_list(fav_src)
     # column_order: _UNSET = mantém atual; lista/None substitui ([]/None → NULL = ordem padrão).
     co_src = cur.get("column_order") if column_order is _UNSET else column_order
     cojson = _dump_str_list(co_src)
@@ -1326,12 +1333,13 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
                  "group_attr_key = :gak, group_date_mode = :gdm, "
                  "group_date_from = :gdf, group_date_to = :gdt, group_date_grain = :gdg, "
                  "filters = :filters, "
-                 "available_filters = :af, column_order = :co, visibility_roles = :vr, "
+                 "available_filters = :af, favorite_filters = :fav, column_order = :co, "
+                 "visibility_roles = :vr, "
                  "visibility_users_include = :vi, visibility_users_exclude = :ve, "
                  "updated_at = :ts WHERE id = :id"),
             {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
              "gdf": gdf, "gdt": gdt, "gdg": gdg,
-             "filters": fjson, "af": afjson, "co": cojson, "vr": vrjson, "vi": vijson,
+             "filters": fjson, "af": afjson, "fav": favjson, "co": cojson, "vr": vrjson, "vi": vijson,
              "ve": vejson, "ts": ts, "id": int(vid)},
         )
     _broadcast_changed(None, None)
