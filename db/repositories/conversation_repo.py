@@ -327,6 +327,19 @@ _enriched_from = conversation_query.enriched_from
 _finalize_conv = conversation_query.finalize_conv
 
 
+def _notify_private_enabled() -> bool:
+    """A conta optou por notificar mensagens privadas? (config global, default off).
+
+    Quando ligada, a nota privada participa do preview/ordenação da sidebar (vira a
+    "última mensagem": sobe ao topo + texto + cadeado). Espelha o mesmo gate usado em
+    ``agent.memory`` para o badge verde. Defensivo — nunca quebra a listagem."""
+    from db.repositories import config_repo
+    try:
+        return bool(config_repo.get("notify_private_messages", False))
+    except Exception:
+        return False
+
+
 def _attach_labels(rows: list[dict]) -> list[dict]:
     """Enrich finalized conversation rows with their conversation-label names.
 
@@ -343,7 +356,7 @@ def _attach_labels(rows: list[dict]) -> list[dict]:
 
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
                        assignee_user_id: int | None = None, is_archived: int | None = None,
-                       inbox_ids: list[int] | None = None,
+                       inbox_ids: list[int] | None = None, current_user_id: int | None = None,
                        limit: int = 100, offset: int = 0) -> list[dict]:
     """List conversations with contact + channel info + last-message preview +
     per-conversation unread, pinned-first then newest. Feeds the conversa-cêntrica
@@ -352,7 +365,7 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
     ``inbox_ids`` scopes visibility to a set of inboxes (inbox membership): ``None``
     means no scoping (sees all); an empty list means the user is a member of no
     inbox and sees nothing."""
-    stmt = select(*_enriched_columns()).select_from(_enriched_from())
+    stmt = select(*_enriched_columns(_notify_private_enabled(), current_user_id)).select_from(_enriched_from())
     if status is not None:
         stmt = stmt.where(conversations.c.status == status)
     if inbox_id is not None:
@@ -373,11 +386,12 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
 
 
 def list_filtered(where, *, inbox_ids: list[int] | None = None,
+                  current_user_id: int | None = None,
                   limit: int = 50, offset: int = 0) -> list[dict]:
     """List conversations matching a pre-built (injection-safe) WHERE from db.filters.
 
     ``inbox_ids`` scopes by inbox membership (see :func:`list_conversations`)."""
-    stmt = select(*_enriched_columns()).select_from(_enriched_from())
+    stmt = select(*_enriched_columns(_notify_private_enabled(), current_user_id)).select_from(_enriched_from())
     if where is not None:
         stmt = stmt.where(where)
     if inbox_ids is not None:
@@ -391,12 +405,12 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
     return _attach_labels([_finalize_conv(r) for r in rows])
 
 
-def get_with_channel(conv_id: int) -> dict | None:
+def get_with_channel(conv_id: int, current_user_id: int | None = None) -> dict | None:
     """One conversation enriched with contact + channel + preview + unread (plano 11).
 
     Used by the conversa-cêntrico chat endpoint to render the header (channel badge,
     contact name) without re-resolving by phone (which would fuse channels)."""
-    stmt = (select(*_enriched_columns()).select_from(_enriched_from())
+    stmt = (select(*_enriched_columns(_notify_private_enabled(), current_user_id)).select_from(_enriched_from())
             .where(conversations.c.id == conv_id))
     with get_engine().connect() as conn:
         row = conn.execute(stmt).mappings().first()

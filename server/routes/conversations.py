@@ -16,7 +16,7 @@ import time
 from fastapi import Request
 
 from db.repositories import (conversation_repo, custom_attribute_repo, contact_repo,
-                             message_repo, user_repo, agent_repo)
+                             message_repo, user_repo, agent_repo, mention_repo)
 from db.repositories.custom_attribute_validate import validate_value
 from server.avatars import avatar_version
 from db import filters as conv_filters
@@ -102,11 +102,14 @@ def register_routes(app, deps):
         if denied:
             return denied
         limit = max(1, min(limit, 200))
+        _u = current_user(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_conversations,
             status=status, inbox_id=inbox_id, assignee_user_id=assignee_user_id,
             is_archived=1 if archived else 0,
-            inbox_ids=visible_inbox_ids(request), limit=limit, offset=offset)
+            inbox_ids=visible_inbox_ids(request),
+            current_user_id=(_u.get("id") if _u else None),
+            limit=limit, offset=offset)
         return _ok({"conversations": rows})
 
     @app.get("/api/atendimentos/filter-schema")
@@ -144,9 +147,12 @@ def register_routes(app, deps):
             # Safety net: malformed input must be a clean 400, never a 500.
             logger.warning("Filtro inválido: %s", e)
             return _err("Filtro inválido.", status=400)
+        _u = current_user(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where,
-            inbox_ids=visible_inbox_ids(request), limit=spec.limit, offset=spec.offset)
+            inbox_ids=visible_inbox_ids(request),
+            current_user_id=(_u.get("id") if _u else None),
+            limit=spec.limit, offset=spec.offset)
         return _ok({"conversations": rows, "count": len(rows)})
 
     @app.get("/api/atendimentos/assignable-agents")
@@ -171,6 +177,18 @@ def register_routes(app, deps):
         ]
         return _ok({"users": human_list, "ai_agents": ai_list})
 
+    @app.get("/api/mentions/unread-count")
+    async def mentions_unread_count(request: Request):
+        """Quantas menções não-lidas o usuário logado tem (badge da aba Menções).
+        Gated por conversation.read. Registrado antes do ``/{conv_id}`` literal."""
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        _u = current_user(request)
+        uid = _u.get("id") if _u else None
+        count = 0 if uid is None else await asyncio.to_thread(mention_repo.unread_count, uid)
+        return _ok({"count": count})
+
     @app.get("/api/atendimentos/{conv_id}")
     async def get_conversation(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.read")
@@ -178,7 +196,10 @@ def register_routes(app, deps):
             return denied
         # Enriched row (channel_id/provider/name + display fields + custom_attributes)
         # so the "Informações da conversa" panel has everything it renders (A.3).
-        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        _u = current_user(request)
+        conv = await asyncio.to_thread(
+            conversation_repo.get_with_channel, conv_id,
+            (_u.get("id") if _u else None))
         if not conv:
             return _err("Conversa não encontrada.", status=404)
         if _inbox_hidden(request, conv.get("inbox_id")):
@@ -198,9 +219,11 @@ def register_routes(app, deps):
             return denied
         vis = visible_inbox_ids(request)
         can_read_contact = has_permission(request, "contact.read")
+        _u = current_user(request)
+        _uid = _u.get("id") if _u else None
 
         def _load():
-            conv = conversation_repo.get_with_channel(conv_id)
+            conv = conversation_repo.get_with_channel(conv_id, _uid)
             if conv is None:
                 return None, None, [], []
             # Inbox membership scoping: hide (as 404) before any mark-read side effect.
@@ -225,6 +248,14 @@ def register_routes(app, deps):
                 for cm in agent_handler.iter_cached_contacts(phone):
                     if cm.unread_count:
                         cm.unread_count = max(0, cm.unread_count - len(ids))
+            # Abrir a conversa limpa as MINHAS menções não-lidas nela (badge "@" + aba
+            # Menções). Independe de unread_count (menção pode existir sem não-lida). Best-effort.
+            if mark_read and _uid is not None and conv.get("has_user_mention"):
+                try:
+                    mention_repo.mark_read(_uid, conv_id)
+                    conv["has_user_mention"] = False
+                except Exception:
+                    logger.exception("Falha ao marcar menções lidas na conversa %s", conv_id)
             msgs = message_repo.get_by_conversation(conv_id)
             return conv, contact, msgs, ids
 

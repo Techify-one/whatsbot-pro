@@ -19,6 +19,8 @@
 // with the selection hook's detail loader so reads gate on the same visibility.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
+import { notify } from '../../../services/notify.js';
+import { showBrowserNotification, playNotificationSound, getNotifPref } from '../../../utils/notifications.js';
 import { optimisticDupIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
@@ -54,6 +56,8 @@ export function useConversationWsEvents(opts) {
     pageVisibleRef,
     // selection: background re-fetch of the OPEN thread (plano 33 F2)
     reloadOpenThread,
+    // usuário logado — filtra `mention_created` (colaboração estilo Chatwoot)
+    currentUserId,
   } = opts;
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
@@ -67,6 +71,8 @@ export function useConversationWsEvents(opts) {
   const wsConnectedOnceRef = useRef(false);    // skip the first WS connect (initial fetch covers it)
   const reloadOpenThreadRef = useRef(null);    // plano 33 F2 — freshest thread reloader for the []-dep onWsConnect
   reloadOpenThreadRef.current = reloadOpenThread;
+  const currentUserIdRef = useRef(null);       // freshest logged-in user id for the []-dep mention handler
+  currentUserIdRef.current = currentUserId;
 
   // Coalesce every "a conversation not in the list just changed" trigger
   // (new_message for an unknown row, conversation_created, WS reconnect) into ONE
@@ -128,6 +134,24 @@ export function useConversationWsEvents(opts) {
     if (name === 'conversation_upsert') {
       if (data == null || data.id == null) return;
       setContacts(prev => upsertConversationRow(prev, convRowToSidebarRow(data)));
+      return;
+    }
+    // Menção INTERNA numa nota privada (colaboração estilo Chatwoot). Só reage se EU
+    // fui mencionado: acende o badge "@" na linha + toast + (opcional) som/desktop.
+    // A conversa atualmente ABERTA já vai ler a menção ao carregar — não incomoda.
+    if (name === 'mention_created') {
+      const uid = currentUserIdRef.current;
+      const targets = (data && data.mentioned_user_ids) || [];
+      if (uid == null || !targets.includes(uid)) return;
+      const convId = data.conversation_id;
+      if (convId != null && selectedConvIdRef.current === convId) return;  // já estou nela
+      setContacts(prev => prev.map(c =>
+        c.conversation_id === convId ? { ...c, has_user_mention: true } : c));
+      const who = data.actor_name ? `${data.actor_name} mencionou você` : 'Você foi mencionado';
+      const body = data.preview ? `${who}: ${data.preview}` : who;
+      notify(body, { kind: 'info' });
+      if (getNotifPref('browser')) showBrowserNotification('WhatsBot — menção', body);
+      if (getNotifPref('sound')) playNotificationSound();
       return;
     }
     const cid = data && data.contact_id;

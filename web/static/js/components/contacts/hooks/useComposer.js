@@ -39,6 +39,7 @@ const INPUT_MAX_HEIGHT = 120;
 export function useComposer({
   api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
+  collectMentions = null, resetMentions = null,
 }) {
   const [input, setInput] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -173,12 +174,16 @@ export function useComposer({
           _localId: localId, _status: 'sending',
         }],
       } : prev);
+      // Menções (@atendente / @time) resolvidas do texto final; zera após enviar.
+      const mm = collectMentions ? collectMentions(text) : { mentions: [], mention_inbox: false };
       try {
         const res = await sendPrivateMessage(phone, text, {
           aiRead: aiReadPrivate,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
           conversationId,
           channelId,  // plano 37 (C1): conversa nova em canal não-default não misfila
+          mentions: mm.mentions,
+          mentionInbox: mm.mention_inbox,
         });
         updateMsgByLocalId(localId, () => ({
           _status: res.ok ? null : 'failed',
@@ -188,6 +193,7 @@ export function useComposer({
         console.error('Private send error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
       }
+      if (resetMentions) resetMentions();
       inputRef.current?.focus();
       return;
     }

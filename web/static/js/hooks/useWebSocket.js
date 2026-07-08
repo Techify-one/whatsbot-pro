@@ -46,6 +46,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       conversation_updated: conv ? conv('conversation_updated') : undefined,
       conversation_deleted: conv ? conv('conversation_deleted') : undefined,
       conversation_labels_changed: conv ? conv('conversation_labels_changed') : undefined,
+      mention_created: conv ? conv('mention_created') : undefined,
     });
     return unsubscribe;
   }, []);
