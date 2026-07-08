@@ -722,6 +722,11 @@ def _emit_proto_notice(event_type: str, *, conversation_id: int | None = None,
     (aberta→última). Best-effort: nunca levanta (um aviso jamais quebra a ação)."""
     try:
         from server import system_notices
+        # A atendimento âncora pode ter sido deletada (protocolo órfão: contato/conversa
+        # excluídos). Sem thread viva não há onde mostrar o card — no-op LIMPO em vez de
+        # tentar inserir e cair num FK error logado (barulho à toa; o fechar já concluiu).
+        if conversation_id is not None and conversation_repo.get(conversation_id) is None:
+            return
         if conversation_id is not None:
             system_notices.emit_conversation_notice(
                 event_type=event_type, conversation_id=conversation_id,
@@ -842,16 +847,20 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     # ser resolvidos pela UI — auto-encerra-os aqui para não travar o Finalizar (robustez).
     open_cycles = _open_cycles_of_protocolo(atid)
     orphan = [c for c in open_cycles if not _cycle_is_resolvable(c)]
-    if orphan:
-        _close_orphan_cycles(orphan)
-    if len(orphan) < len(open_cycles):
+    live = [c for c in open_cycles if _cycle_is_resolvable(c)]
+    if live:
         return None, ("Existe um atendimento aberto neste protocolo — "
                       "resolva-o antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
-    # está salvo (a UI grava os campos antes de fechar).
+    # está salvo (a UI grava os campos antes de fechar). Valida ANTES de qualquer
+    # escrita para não deixar efeito colateral (ciclo órfão encerrado) num erro.
     err = _missing_required("protocolo", _effective_values("protocolo", at))
     if err:
         return None, err
+    # Só órfãos (ou nenhum ciclo aberto) e required OK: encerra os ciclos órfãos
+    # (conversa deletada — não resolvíveis pela UI) e finaliza o protocolo.
+    if orphan:
+        _close_orphan_cycles(orphan)
     ts = now()
     # Atendente do protocolo: se existe rótulo Atendente e ele JÁ definiu um atendente
     # (at.assignee_user_id, gravado no salvar antes de finalizar), mantém-se esse; senão

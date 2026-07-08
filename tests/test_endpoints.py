@@ -2196,27 +2196,53 @@ check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": 
 _alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
 
 # Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
+from sqlalchemy import text as _sa_text
+from db.tables import messages as _msgs_t
 _rob_c = contact_repo.get_or_create("5511900000077")
 _rob_proto = _alogic.ensure_protocolo_for_contact(
     _rob_c["id"], phone="5511900000077", name="Robustez")
-# (a) ciclo ÓRFÃO: conversation_id que NÃO existe no core -> close auto-encerra e NÃO trava.
+# atendente preenchido (rótulo fixo obrigatório) — replica o caso do print onde o protocolo
+# órfão já tinha atendente e finaliza sem pedir nada.
+with _get_engine().begin() as _rc:
+    _rc.execute(_sa_text("UPDATE plugin_protocolos_protocolos SET assignee_user_id=1, "
+                         "assignee_name='Admin' WHERE id=:i"), {"i": _rob_proto["id"]})
+# (a) ciclo ÓRFÃO (conversation_id inexistente no core) + required OK -> close auto-encerra
+#     o órfão e finaliza SEM travar com 'resolva-o antes'.
 _alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
-_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"])
+_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"], assignee_user_id=1, assignee_name="Admin")
 check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
       not (_rob_err and "resolva-o antes" in _rob_err))
+check("close: protocolo órfão finaliza (status fechado)", _rob_err is None)
 check("close: ciclo órfão foi auto-encerrado",
       _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
+# (a2) SEM required (sem atendente): retorna erro de obrigatório e NÃO deixa efeito colateral
+#      (o ciclo órfão continua ABERTO — validação ANTES de qualquer escrita).
+_rob_c2 = contact_repo.get_or_create("5511900000078")
+_rob_proto_nr = _alogic.ensure_protocolo_for_contact(
+    _rob_c2["id"], phone="5511900000078", name="Sem atendente")
+_alogic._insert_cycle(999_000_113, _rob_c2["id"], _rob_proto_nr["id"])
+_, _rob_err_nr = _alogic.close_protocolo(_rob_proto_nr["id"])  # sem assignee
+check("close sem required -> erro de obrigatório", bool(_rob_err_nr) and "brigat" in _rob_err_nr)
+check("close sem required -> ciclo órfão SEGUE aberto (sem efeito colateral)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto_nr["id"])) == 1)
 # (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
 _rob_proto2 = _alogic.ensure_protocolo_for_contact(
-    _rob_c["id"], phone="5511900000077", name="Robustez")  # get-or-create: mesmo protocolo aberto? já fechado -> novo
+    _rob_c["id"], phone="5511900000077", name="Robustez")  # proto1 fechado -> novo protocolo aberto
 _rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
 _alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
 _, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
 check("close: ciclo com conversa viva ainda exige resolver antes",
       bool(_rob_err2) and "resolva-o antes" in _rob_err2)
+check("close: conversa viva NÃO é encerrada (ciclo segue aberto)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto2["id"])) == 1)
 # (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
 _res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
 check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
+# (d) _emit_proto_notice numa conversa deletada -> no-op limpo (sem exceção, sem row órfã).
+_alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, contact_id=_rob_c["id"])
+check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
+      _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
+          .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
