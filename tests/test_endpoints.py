@@ -556,6 +556,54 @@ check(
 r = client.post("/api/contacts/5511999990001/private-message", json={"text": ""})
 check("POST /private-message (empty) -> 400", r.status_code == 400)
 
+# ── Notificação de mensagens privadas (config notify_private_messages) ───────────
+# Padrão OFF: uma nota privada NÃO incrementa a não-lida (ícone verde / contagem da
+# aba) — preserva o comportamento legado. Ligada: acende (mesmo encanamento da
+# não-lida de cliente, via unread_count + conversation_upsert). Contato isolado para
+# não colidir com a não-lida deixada por outros testes.
+section("Contacts — Private Message Notification")
+_np_phone = "5511999990077"
+
+_u_before = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna A"})
+check("POST /private-message (notif OFF) -> 200", r.status_code == 200)
+_u_off = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages OFF -> unread-count inalterado", _u_off == _u_before)
+
+r = client.put("/api/config", json={"notify_private_messages": True})
+check("PUT /api/config notify_private_messages=True -> 200", r.status_code == 200)
+check("GET /api/config -> notify_private_messages persisted",
+      client.get("/api/config").json()["data"].get("notify_private_messages") is True)
+
+_u_before_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna B"})
+check("POST /private-message (notif ON) -> 200", r.status_code == 200)
+_pn_on = r.json()["data"]
+_u_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages ON -> unread-count (aba) incrementa", _u_on == _u_before_on + 1)
+
+# Badge VERDE por-conversa: a nota privada notificada participa do unread por-conversa
+# (subquery unread_msg_ids ⋈ messages) via um msg_id sintético, então o atendimento
+# mostra unread_count > 0 (mark_read=false p/ não zerar ao observar).
+_conv_id = _pn_on.get("conversation_id")
+_rconv = client.get(f"/api/atendimentos/{_conv_id}?mark_read=false")
+check("notify ON -> atendimento GET 200", _rconv.status_code == 200)
+_conv = (_rconv.json().get("data") or {}).get("conversation") or {}
+check("notify ON -> badge verde por-conversa (unread_count>0)", (_conv.get("unread_count") or 0) > 0)
+
+# Abrir o atendimento (GET .../messages, mark_read=True) zera o verde E a aba: o msg_id
+# sintético é apagado de unread_msg_ids e o contador do contato decrementa — reusando
+# mark_conversation_read, sem código de clear novo.
+_rread = client.get(f"/api/atendimentos/{_conv_id}/messages")  # mark_read=True (default) → limpa
+check("notify ON -> abrir atendimento (messages) retorna 200", _rread.status_code == 200)
+_conv_after = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify ON -> verde zera após abrir o atendimento", (_conv_after.get("unread_count") or 0) == 0)
+_u_read = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify ON -> aba zera após abrir o atendimento", _u_read == _u_before_on)
+
+# Reset da config para não afetar as checagens seguintes.
+client.put("/api/config", json={"notify_private_messages": False})
+
 # ═══════════════════════════════════════════════════════════════════
 #  9. Contact send image
 # ═══════════════════════════════════════════════════════════════════

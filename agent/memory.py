@@ -2,6 +2,7 @@ import base64
 import logging
 import mimetypes
 import time
+import uuid
 from pathlib import Path
 
 from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
@@ -230,6 +231,30 @@ class ContactMemory:
         except Exception:
             logger.exception("Falha ao emitir conversation_upsert para %s", self.phone)
 
+    @staticmethod
+    def _notify_private_enabled() -> bool:
+        """A conta optou por notificar mensagens privadas? (config global, default off)."""
+        try:
+            from db.repositories import config_repo
+            return bool(config_repo.get("notify_private_messages", False))
+        except Exception:
+            return False
+
+    def _notify_private_unread(self, conversation_id: int, msg_id: str) -> None:
+        """Marca a nota privada como não-lida (badge verde + aba) reaproveitando o
+        encanamento de msg_id: ``increment_unread`` bump o ``contacts.unread_count`` E
+        insere a linha ``unread_msg_ids`` (que a subquery por-conversa conta). Depois
+        força o ``conversation_upsert`` para a sidebar refletir ao vivo. Todos os
+        caminhos de leitura (mark_as_read / mark_conversation_read / …) já limpam isso
+        sem mudança. Defensivo — nunca quebra o save."""
+        try:
+            from db.repositories import unread_repo
+            from agent.message_listeners import emit_conversation_upsert_row
+            unread_repo.increment_unread(self.id, msg_id)
+            emit_conversation_upsert_row(conversation_id)
+        except Exception:
+            logger.exception("Falha ao notificar nota privada para %s", self.phone)
+
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
@@ -244,6 +269,17 @@ class ContactMemory:
         # AFTER the INSERT — byte-identical ordering for any save not preceded by an
         # ingest materialization (user message row first, then the created notice card).
         conv, conversation_id, transition = self._resolve_conversation(role, reopen=reopen)
+        # Notificação de nota privada (opt-in ``notify_private_messages``): dá à nota um
+        # ``msg_id`` sintético para ela PARTICIPAR do encanamento de não-lida baseado em
+        # msg_id — o mesmo que uma mensagem de cliente usa. Assim ela acende o badge verde
+        # POR-CONVERSA (subquery ``unread_msg_ids ⋈ messages.msg_id`` por conversa) E a
+        # contagem da aba (``contacts.unread_count``), e é limpa por TODOS os caminhos de
+        # leitura existentes sem código novo. Som fica de fora (nunca toca hoje). Off (ou
+        # msg_id já presente) → comportamento legado byte-a-byte (msg_id=None).
+        notify_private = False
+        if role == "private_note" and msg_id is None and self._notify_private_enabled():
+            msg_id = "pn:" + uuid.uuid4().hex
+            notify_private = True
         saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
@@ -262,11 +298,17 @@ class ContactMemory:
             # directly (not via the bus) keeps it exactly-once and synchronous.
             self._emit_message_persisted(conversation_id, role, msg_id, saved)
             self._run_lifecycle_reactions(conversation_id, transition, conv, role)
-            # plano 28: Event-Carried State Transfer — after the INSERT (preview/unread
-            # now real), push the authoritative list row so the sidebar upserts it by
-            # conversation_id without a stale refetch. Panel-only roles are gated out
-            # inside the helper. Never breaks the save.
-            self._broadcast_conversation_upsert(conversation_id, role)
+            if notify_private:
+                # Bump o unread baseado em msg_id (contato + subquery por-conversa) e
+                # FORÇA o upsert do row (a nota é preview-excluded, então o broadcast
+                # normal a barraria — mas o unread precisa chegar na sidebar).
+                self._notify_private_unread(conversation_id, msg_id)
+            else:
+                # plano 28: Event-Carried State Transfer — after the INSERT (preview/unread
+                # now real), push the authoritative list row so the sidebar upserts it by
+                # conversation_id without a stale refetch. Panel-only roles are gated out
+                # inside the helper. Never breaks the save.
+                self._broadcast_conversation_upsert(conversation_id, role)
         # Touch updated_at
         contact_repo.update(self.id)
         # Return the inserted row (id/ts/conversation_id/…) so callers that need
