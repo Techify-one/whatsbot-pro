@@ -12,6 +12,7 @@ import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
 import { ModelSelect } from '../ModelSelect.js';
+import { MarkdownEditor } from '../MarkdownEditor.js';
 
 const html = htm.bind(h);
 
@@ -262,12 +263,10 @@ export default function GeneralSettings() {
           incorreta (botão direito numa resposta da IA → "Gerar melhoria"). Deixe igual
           ao padrão para acompanhar melhorias futuras do sistema.
         </span>
-        <textarea
+        <${MarkdownEditor}
           value=${improvementPrompt}
-          onInput=${(e) => setImprovementPrompt(e.target.value)}
-          rows="8"
-          class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono leading-relaxed resize-y"
-        ></textarea>
+          onChange=${setImprovementPrompt}
+          placeholder="Instruções enviadas ao modelo ao gerar a análise de uma resposta marcada como incorreta." />
       </div>
 
       <!-- Save -->
