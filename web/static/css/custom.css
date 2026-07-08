@@ -276,6 +276,17 @@ html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { c
    required to override it. */
 .wa-md-editor .toastui-editor-md-tab-container { display: none !important; }
 
+/* Keep the WHOLE toolbar on one line so no button is pushed into the "..." overflow
+   menu. Toast UI moves the trailing group (our undo/redo/zoom) into a dropdown once
+   the cumulative item width passes `clientWidth - 50`. With 21 items + 5 dividers the
+   default spacing (button margin 5px, divider margin 12px, toolbar padding 25px) tips
+   just over the edge at typical panel widths — redo/zoom end up hidden behind "...".
+   Tightening the spacing frees ~200px so every button stays visible inline. */
+.wa-md-editor .toastui-editor-defaultUI-toolbar { padding: 0 8px; }
+.wa-md-editor .toastui-editor-defaultUI-toolbar button { margin: 7px 2px; }
+.wa-md-editor .toastui-editor-toolbar-item-wrapper { margin: 7px 2px; }
+.wa-md-editor .toastui-editor-toolbar-divider { margin: 14px 6px; }
+
 /* Undo/redo buttons: a custom toolbar group floated to the far right of the bar
    (the float itself is applied inline in JS via margin-left:auto on the group). */
 .wa-md-editor .wa-md-history-btn {
