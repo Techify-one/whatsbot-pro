@@ -29,6 +29,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [systemNoticeConvLabels, setSystemNoticeConvLabels] = useState(true);
   const [systemNoticeStatus, setSystemNoticeStatus] = useState(true);
   const [systemNoticeAi, setSystemNoticeAi] = useState(true);
+  // Notificação de mensagens privadas (nota interna do operador) — desligado por padrão.
+  const [notifyPrivateMessages, setNotifyPrivateMessages] = useState(false);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
   const [webPassword, setWebPassword] = useState('');
@@ -38,7 +40,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
-  // (avisos | avancado). Roda uma vez, quando o
+  // (avisos | notificacoes | avancado). Roda uma vez, quando o
   // conteúdo já montou (config carregada).
   const sectionScrolledRef = useRef(false);
   useEffect(() => {
@@ -61,6 +63,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       setSystemNoticeConvLabels(config.system_notice_conv_labels ?? true);
       setSystemNoticeStatus(config.system_notice_status ?? true);
       setSystemNoticeAi(config.system_notice_ai ?? true);
+      setNotifyPrivateMessages(config.notify_private_messages ?? false);
       setMaxExecutions(config.max_executions ?? 200);
       setAuditRetentionDays(config.audit_retention_days ?? 365);
     }
@@ -73,6 +76,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       system_notice_conv_labels: systemNoticeConvLabels,
       system_notice_status: systemNoticeStatus,
       system_notice_ai: systemNoticeAi,
+      notify_private_messages: notifyPrivateMessages,
       max_executions: parseInt(maxExecutions, 10) || 200,
       audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
     };
@@ -169,6 +173,22 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
             IA e atributos
           </label>
           <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu a conversa", trocar o agente ativo e definir atributos.</span>
+        </div>
+      <//>
+
+      <!-- Section: Notificações -->
+      <${Section} id="notificacoes" title="Notificações">
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${notifyPrivateMessages}
+              onChange=${(e) => setNotifyPrivateMessages(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Notificar mensagens privadas
+          </label>
+          <span class="text-xs text-wa-secondary">Ao adicionar uma nota privada (mensagem interna, não enviada ao contato), acende o ícone verde na conversa e a contagem na aba do navegador. Não toca som.</span>
         </div>
       <//>
 

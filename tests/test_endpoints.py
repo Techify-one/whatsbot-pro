@@ -556,6 +556,54 @@ check(
 r = client.post("/api/contacts/5511999990001/private-message", json={"text": ""})
 check("POST /private-message (empty) -> 400", r.status_code == 400)
 
+# ── Notificação de mensagens privadas (config notify_private_messages) ───────────
+# Padrão OFF: uma nota privada NÃO incrementa a não-lida (ícone verde / contagem da
+# aba) — preserva o comportamento legado. Ligada: acende (mesmo encanamento da
+# não-lida de cliente, via unread_count + conversation_upsert). Contato isolado para
+# não colidir com a não-lida deixada por outros testes.
+section("Contacts — Private Message Notification")
+_np_phone = "5511999990077"
+
+_u_before = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna A"})
+check("POST /private-message (notif OFF) -> 200", r.status_code == 200)
+_u_off = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages OFF -> unread-count inalterado", _u_off == _u_before)
+
+r = client.put("/api/config", json={"notify_private_messages": True})
+check("PUT /api/config notify_private_messages=True -> 200", r.status_code == 200)
+check("GET /api/config -> notify_private_messages persisted",
+      client.get("/api/config").json()["data"].get("notify_private_messages") is True)
+
+_u_before_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna B"})
+check("POST /private-message (notif ON) -> 200", r.status_code == 200)
+_pn_on = r.json()["data"]
+_u_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages ON -> unread-count (aba) incrementa", _u_on == _u_before_on + 1)
+
+# Badge VERDE por-conversa: a nota privada notificada participa do unread por-conversa
+# (subquery unread_msg_ids ⋈ messages) via um msg_id sintético, então o atendimento
+# mostra unread_count > 0 (mark_read=false p/ não zerar ao observar).
+_conv_id = _pn_on.get("conversation_id")
+_rconv = client.get(f"/api/atendimentos/{_conv_id}?mark_read=false")
+check("notify ON -> atendimento GET 200", _rconv.status_code == 200)
+_conv = (_rconv.json().get("data") or {}).get("conversation") or {}
+check("notify ON -> badge verde por-conversa (unread_count>0)", (_conv.get("unread_count") or 0) > 0)
+
+# Abrir o atendimento (GET .../messages, mark_read=True) zera o verde E a aba: o msg_id
+# sintético é apagado de unread_msg_ids e o contador do contato decrementa — reusando
+# mark_conversation_read, sem código de clear novo.
+_rread = client.get(f"/api/atendimentos/{_conv_id}/messages")  # mark_read=True (default) → limpa
+check("notify ON -> abrir atendimento (messages) retorna 200", _rread.status_code == 200)
+_conv_after = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify ON -> verde zera após abrir o atendimento", (_conv_after.get("unread_count") or 0) == 0)
+_u_read = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify ON -> aba zera após abrir o atendimento", _u_read == _u_before_on)
+
+# Reset da config para não afetar as checagens seguintes.
+client.put("/api/config", json={"notify_private_messages": False})
+
 # ═══════════════════════════════════════════════════════════════════
 #  9. Contact send image
 # ═══════════════════════════════════════════════════════════════════
@@ -1672,6 +1720,20 @@ check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"
 check("pfield -> round-trip scope+key",
       _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
       and _v1.get("group_attr_key") == "motivo_abertura")
+# favorite_filters: default None; create com lista faz round-trip; update com _UNSET preserva,
+# None limpa. Espelha o modelo de available_filters.
+check("create view -> favorite_filters default None", _v1.get("favorite_filters") is None)
+_vf, _evf = _alogic.create_kanban_view(name="Favoritos", scope="personal", group_by="status",
+                                       available_filters=["status", "atendente", "periodo"],
+                                       favorite_filters=["status", "periodo"], owner_user_id=101)
+check("create view -> favorite_filters round-trip",
+      _evf is None and _vf.get("favorite_filters") == ["status", "periodo"])
+_vf2, _evf2 = _alogic.update_kanban_view(_vf["id"], name="Favoritos v2")
+check("update sem favorite_filters -> preserva (_UNSET)",
+      _evf2 is None and _vf2.get("favorite_filters") == ["status", "periodo"])
+_vf3, _evf3 = _alogic.update_kanban_view(_vf["id"], favorite_filters=None)
+check("update favorite_filters=None -> limpa", _evf3 is None and _vf3.get("favorite_filters") is None)
+_alogic.delete_kanban_view(_vf["id"])
 _v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
                                       group_date_mode="mes", owner_user_id=101)
 check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))

@@ -192,6 +192,14 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # ``audit_log``. Checado por evento (sem restart). Toggle na tela Auditoria,
     # gated por ``audit.manage``.
     ConfigKey("audit_enabled", default=True, exposed=True, writable=True),
+    # Notificação de mensagens privadas (nota interna do operador — role
+    # ``private_note``). Desligado por padrão: preserva o comportamento atual (nota
+    # privada não acende ícone verde nem contagem na aba). Ligado ⇒ a nota privada
+    # incrementa ``unread_count`` do contato e emite ``conversation_upsert`` (mesmo
+    # encanamento da não-lida de cliente). Nunca toca som hoje (ver o seam em
+    # ``web/static/js/components/shell/App.js``); a chave é exposta no GET só para o
+    # cliente ler esse gate de som futuro.
+    ConfigKey("notify_private_messages", default=False, exposed=True, writable=True),
     # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
     ConfigKey("inactivity_timeout_min", default=30),
     ConfigKey("response_delay_min", default=1.0),

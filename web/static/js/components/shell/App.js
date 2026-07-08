@@ -304,6 +304,13 @@ export function App({ onLogout, hasPassword, currentUser }) {
   useEffect(() => {
     if (!newMessage) return;
     const m = newMessage.message;
+    // Nota privada (mensagem interna do operador): o ícone verde na conversa e a
+    // contagem na aba do navegador são dirigidos pelo backend (unread_count, quando
+    // a conta liga `notify_private_messages`) — nada a fazer aqui para eles. O SOM
+    // fica DESLIGADO para nota privada hoje. Ponto de extensão futuro, gated pela
+    // MESMA config da conta (já chega ao cliente via GET /api/config):
+    //   if (configRef.current?.notify_private_messages && getNotifPref('sound')) playNotificationSound();
+    if (m && m.role === 'private_note') return;
     if (!m || m.role !== 'user') return;
     // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
     // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
