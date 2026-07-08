@@ -5,8 +5,9 @@
 //   2. an active PLUGIN SCREEN (config:false, mounted via PluginScreen)
 //   3. a core screen (the big tab === '…' chain), default 'contacts' → Contacts,
 //      final fallback → Sandbox.
-// Behavior, layout wrappers (max-w-5xl / max-none), PageHeader back targets, and
-// every prop passed to each screen are unchanged.
+// Behavior, PageHeader back targets, and every prop passed to each screen are
+// unchanged. Layout wrappers are full-width (w-full p-4) so every core screen
+// fills the viewport with no side gutters (was max-w-5xl mx-auto, centered/1024px).
 import { h } from 'preact';
 import htm from 'htm';
 import { Dashboard } from '../Dashboard.js';
@@ -31,7 +32,7 @@ const html = htm.bind(h);
 
 function PermissionDenied({ label = 'esta tela' }) {
   return html`
-    <div class="max-w-5xl mx-auto p-4">
+    <div class="w-full p-4">
       <div class="rounded-lg border border-wa-border bg-wa-bg p-4 text-[14px] text-wa-secondary">
         Você não tem permissão para acessar ${label}.
       </div>
@@ -61,55 +62,55 @@ export function ScreenRouter({
       </div>`;
   }
   if (activePluginScreen) {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title=${activePluginScreen.title} onBack=${() => setTab('contacts')} />
         <${PluginScreen} screen=${activePluginScreen} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'quick-replies') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Respostas Rápidas" onBack=${() => setTab('contacts')} />
         <${QuickReplies} initialEntity=${entFor('quick-replies')} />
       </div>`;
   }
   if (tab === 'custom-attributes') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Atributos Personalizados" onBack=${() => setTab('contacts')} />
         <${CustomAttributesManager} initialEntity=${entFor('custom-attributes')} />
       </div>`;
   }
   if (tab === 'runtime') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Runtime" onBack=${() => setTab('contacts')} />
         <${RuntimePanel} />
       </div>`;
   }
   if (tab === 'users') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
         <${UsersManager} initialEntity=${entFor('users')} />
       </div>`;
   }
   if (tab === 'audit') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Auditoria" onBack=${() => setTab('contacts')} />
         <${AuditLog} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'ai') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Configurações de IA" onBack=${() => setTab('contacts')} />
         <${AgentEngine} initialEntity=${entFor('ai')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'plugins') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Plugins" onBack=${() => setTab('contacts')} />
         <${PluginsManager} initialEntity=${entFor('plugins')} onPluginsChanged=${onPluginsChanged} />
       </div>`;
   }
   if (tab === 'dashboard') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Configurações Gerais" onBack=${() => setTab('contacts')} />
         <${Dashboard}
           config=${config}
@@ -128,13 +129,13 @@ export function ScreenRouter({
     return html`<${Contacts} ...${contactsProps} />`;
   }
   if (tab === 'costs') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Custos de IA" onBack=${() => setTab('contacts')} />
         <${CostsDashboard} />
       </div>`;
   }
   if (tab === 'executions') {
-    return html`<div class="max-w-5xl mx-auto p-4 h-full">
+    return html`<div class="w-full p-4 h-full">
         <${PageHeader} title="Execuções" onBack=${() => {
           if (window.location.pathname.match(/^\/executions\/\d+$/)) {
             history.pushState(null, '', '/executions');
@@ -150,7 +151,7 @@ export function ScreenRouter({
     if (!hasPermission(currentUser, 'contact.read')) {
       return html`<${PermissionDenied} label="a tela de contatos" />`;
     }
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Contatos" onBack=${() => setTab('contacts')} />
         <${ContactsListScreen} initialEntity=${entFor('contatos')} currentUser=${currentUser} />
       </div>`;
@@ -169,7 +170,7 @@ export function ScreenRouter({
     return null;
   }
   if (tab === 'channels') {
-    return html`<div class="max-w-5xl mx-auto p-4">
+    return html`<div class="w-full p-4">
         <${PageHeader} title="Canais" onBack=${() => setTab('contacts')} />
         <${ChannelsManager} initialEntity=${entFor('channels')} />
       </div>`;
