@@ -413,9 +413,9 @@ export function MarkdownEditor({ value, onChange, placeholder, height = '360px',
   return html`
     <div class="wa-md-editor ${nested ? 'wa-md-editor-nested' : ''}" ref=${elRef}></div>
     ${expanded ? html`
-      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-3 sm:p-6"
+      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-2 sm:p-3"
         onClick=${(e) => { if (e.target === e.currentTarget) setExpanded(false); }}>
-        <div class="bg-wa-bg rounded-2xl shadow-2xl w-full h-full max-w-6xl max-h-[94vh] flex flex-col overflow-hidden">
+        <div class="bg-wa-bg rounded-2xl shadow-2xl w-full h-full flex flex-col overflow-hidden">
           <div class="flex items-center justify-between px-4 py-3 border-b border-wa-border shrink-0">
             <span class="text-[13px] font-medium text-wa-text">Editar prompt</span>
             <button type="button" title="Fechar (Esc)"
