@@ -226,6 +226,10 @@ def register_routes(app, deps):
     async def _send_read_receipts(phone: str, msg_ids: list[str]):
         """Send read receipts to GOWA in background (best-effort)."""
         for mid in msg_ids:
+            # Notas privadas notificadas carregam um msg_id sintético ("pn:…") que não
+            # existe no provedor — nunca mandar read-receipt dele.
+            if str(mid).startswith("pn:"):
+                continue
             try:
                 await asyncio.to_thread(gowa_client.mark_as_read, mid, phone)
                 logger.info("[ReadReceipt] Sent for %s msg %s", phone, mid)

@@ -45,7 +45,12 @@ def broadcast_conversation_upsert(conversation_id: int, role: str) -> None:
     Gated by :data:`LIST_PANEL_ONLY_ROLES` — panel-only saves (``tool_call``,
     ``private_note``, ``system_notice``, ...) never change a conversation's
     last-message preview, so they must not emit a list update. Defensive: a failed
-    broadcast never breaks the save."""
+    broadcast never breaks the save.
+
+    NOTE: a private note that opts into notification (``notify_private_messages``)
+    IS pushed live, but NOT through here — ``ContactMemory.add_message`` handles it
+    with a forced upsert AFTER bumping the msg_id-based unread, so the preview gate
+    above still holds (private_note keeps ``_PREVIEW_EXCLUDED``)."""
     if role in LIST_PANEL_ONLY_ROLES:
         return
     try:
@@ -56,6 +61,20 @@ def broadcast_conversation_upsert(conversation_id: int, role: str) -> None:
             broadcast("conversation_upsert", row)
     except Exception:
         logger.exception("Falha ao emitir conversation_upsert para conversa %s", conversation_id)
+
+
+def emit_conversation_upsert_row(conversation_id: int) -> None:
+    """Force-emit the authoritative list row for ``conversation_id`` regardless of
+    role (used by the private-note notification path — the note is preview-excluded
+    but its unread must reach the sidebar). Defensive: never breaks the save."""
+    try:
+        from db.repositories import conversation_repo
+        from plugins.context import broadcast
+        row = conversation_repo.get_row_for_broadcast(conversation_id)
+        if row is not None:
+            broadcast("conversation_upsert", row)
+    except Exception:
+        logger.exception("Falha ao emitir conversation_upsert (privada) para conversa %s", conversation_id)
 
 
 def _broadcast_conversation_created(conversation_id: int, contact_id: int,
