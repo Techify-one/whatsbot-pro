@@ -2243,6 +2243,21 @@ _alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, cont
 check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
       _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
           .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
+# (e) Opção B — avaliação PULADA em protocolo órfão (conversa do protocolo foi excluída).
+_orf_c = contact_repo.get_or_create("5511900000079")
+_orf_conv = _sk_conv_repo.resolve_for_contact(_orf_c["id"], "5511900000079@s.whatsapp.net")
+_orf_proto = _alogic.ensure_protocolo_for_contact(
+    _orf_c["id"], phone="5511900000079", name="Órfão aval")
+_alogic._insert_cycle(_orf_conv["id"], _orf_c["id"], _orf_proto["id"])
+check("_is_orphan_protocolo -> False com conversa viva",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is False)
+contact_repo.delete(_orf_c["id"])   # exclui contato -> cascade apaga a conversa -> protocolo órfão
+check("_is_orphan_protocolo -> True após conversa excluída",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is True)
+# send_protocol_on_close é best-effort e no harness get_deps()=None (sai cedo); a decisão
+# de pular está isolada em _is_orphan_protocolo (testada acima) — chamamos p/ garantir no-raise.
+_alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
+check("send_protocol_on_close(órfão) não levanta", True)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)

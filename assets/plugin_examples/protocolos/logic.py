@@ -2126,6 +2126,21 @@ def _latest_conversation_of_protocolo(atid: int) -> int | None:
         return None
 
 
+def _is_orphan_protocolo(at: dict) -> bool:
+    """True quando a conversa (atendimento) MAIS RECENTE do protocolo já não existe no
+    core — o contato/conversa foi excluído e o protocolo ficou órfão. Nesse caso não há
+    contexto/alvo válido para a avaliação: enviá-la cairia na conversa NOVA do mesmo
+    número (sem relação com este protocolo). Só considera órfão quando há um
+    conversation_id gravado que sumiu; protocolo sem conversa nenhuma não é órfão."""
+    conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+    if conv_id is None:
+        return False
+    try:
+        return conversation_repo.get(conv_id) is None
+    except Exception:  # noqa: BLE001 — na dúvida, não trata como órfão (não pula)
+        return False
+
+
 def _attr_value_matches(stored, wanted) -> bool:
     """True se o valor ARMAZENADO do atributo bate com o valor DESEJADO da regra.
 
@@ -2204,6 +2219,15 @@ def send_protocol_on_close(at: dict) -> None:
         # Canal da atendimento mais recente do protocolo (conversation-scoped), com
         # fallback contact-scoped — evita fundir canais em multicanal (plano 11).
         conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+
+        # Protocolo ÓRFÃO (conversa do atendimento foi excluída): não há alvo válido para a
+        # avaliação — enviá-la agora cairia na conversa NOVA do mesmo número, sem relação com
+        # este protocolo antigo. Pula o envio (WhatsApp + nota privada) e só registra o motivo.
+        if _is_orphan_protocolo(at):
+            logger.info("protocolos: avaliação pulada (protocolo órfão — conversa inexistente) "
+                        "— protocolo %s", (at or {}).get("id"))
+            return
+
         channel_id = (_channel_for_conversation(conv_id)
                       or _channel_for_contact((at or {}).get("contact_id")))
 
