@@ -591,6 +591,15 @@ check("notify ON -> atendimento GET 200", _rconv.status_code == 200)
 _conv = (_rconv.json().get("data") or {}).get("conversation") or {}
 check("notify ON -> badge verde por-conversa (unread_count>0)", (_conv.get("unread_count") or 0) > 0)
 
+# Preview + subida ao topo: com a config ligada a nota privada vira a "última mensagem"
+# da sidebar (conteúdo + role + ts), então a linha sobe e desenha o cadeado no front.
+check("notify ON -> preview = conteúdo da nota privada",
+      _conv.get("last_message") == "nota interna B")
+check("notify ON -> last_message_role = 'private_note' (dispara o cadeado)",
+      _conv.get("last_message_role") == "private_note")
+check("notify ON -> last_message_ts avança (sobe ao topo)",
+      (_conv.get("last_message_ts") or 0) > 0)
+
 # Abrir o atendimento (GET .../messages, mark_read=True) zera o verde E a aba: o msg_id
 # sintético é apagado de unread_msg_ids e o contador do contato decrementa — reusando
 # mark_conversation_read, sem código de clear novo.
@@ -603,6 +612,12 @@ check("notify ON -> aba zera após abrir o atendimento", _u_read == _u_before_on
 
 # Reset da config para não afetar as checagens seguintes.
 client.put("/api/config", json={"notify_private_messages": False})
+
+# Gate do preview: com a config DESLIGADA a nota privada volta a ser pulada no preview
+# da sidebar (comportamento legado) — não vira a última mensagem, então não há cadeado.
+_conv_off = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify OFF -> preview NÃO reflete a nota privada (legado)",
+      _conv_off.get("last_message_role") != "private_note")
 
 # ═══════════════════════════════════════════════════════════════════
 #  9. Contact send image
@@ -4897,6 +4912,75 @@ check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
 r = client.put("/api/channels/p32_cloud_c",
                json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
 check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+
+
+# ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
+# @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
+# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. Modo de teste é
+# open/legacy (sem sessão → current_user=None), então o autor (sent_by) e os endpoints
+# que dependem de current_user ficam None; as peças por-usuário são checadas via repo.
+# Fica no FIM da suíte (depois do /auth/bootstrap, que exige zero usuários).
+section("Contacts — Private Note Mentions")
+from db.repositories import user_repo as _mrepo_users, mention_repo, inbox_member_repo, conversation_repo as _mrepo_conv
+
+_u_a = _mrepo_users.create(email="mention_a@test.com", name="Atendente A",
+                           password_hash="x", role_keys=["atendente"])
+_u_b = _mrepo_users.create(email="mention_b@test.com", name="Atendente B",
+                           password_hash="x", role_keys=["atendente"])
+_mn_phone = "5511999990088"
+_mentionee = _u_a["id"]
+_mentionee_before = mention_repo.unread_count(_mentionee)
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                json={"text": "por favor confirmar este caso", "mentions": [_mentionee]})
+check("POST /private-message com mentions -> 200", r.status_code == 200)
+_mn_conv = (r.json().get("data") or {}).get("conversation_id")
+check("private-message mentions -> devolve conversation_id", _mn_conv is not None)
+check("mention_repo.unread_count incrementa para o mencionado",
+      mention_repo.unread_count(_mentionee) == _mentionee_before + 1)
+
+_row_for_mentionee = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=True para o usuário mencionado",
+      bool((_row_for_mentionee or {}).get("has_user_mention")) is True)
+_row_for_none = _mrepo_conv.get_with_channel(_mn_conv, None)
+check("has_user_mention=False sem usuário (broadcast/anônimo)",
+      bool((_row_for_none or {}).get("has_user_mention")) is False)
+
+_cleared = mention_repo.mark_read(_mentionee, _mn_conv)
+check("mention_repo.mark_read limpa a menção", _cleared >= 1)
+check("unread_count volta ao baseline após ler",
+      mention_repo.unread_count(_mentionee) == _mentionee_before)
+_row_after = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=False após abrir/ler",
+      bool((_row_after or {}).get("has_user_mention")) is False)
+
+# @time = membros da caixa de entrada da conversa (uma menção por membro).
+_inbox_id = (_row_for_mentionee or {}).get("inbox_id")
+_team_ids = [_u_a["id"], _u_b["id"]]
+if _inbox_id is not None:
+    inbox_member_repo.set_members(_inbox_id, _team_ids)
+    _before_team = {uid: mention_repo.unread_count(uid) for uid in _team_ids}
+    r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                    json={"text": "time, olhem isso", "mention_inbox": True})
+    check("POST /private-message mention_inbox -> 200", r.status_code == 200)
+    check("mention_inbox gera menção para cada membro da caixa",
+          all(mention_repo.unread_count(uid) == _before_team[uid] + 1 for uid in _team_ids))
+
+# Anexos privados: imagem + documento viram nota privada (media_type/path), 200.
+_img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+r = client.post(f"/api/contacts/{_mn_phone}/private-image",
+                files={"image": ("nota.png", _img, "image/png")},
+                data={"caption": "print do erro"})
+check("POST /private-image -> 200", r.status_code == 200)
+check("private-image -> nota com media_type=image",
+      (r.json().get("data") or {}).get("media_type") == "image")
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-document",
+                files={"document": ("relatorio.pdf", b"%PDF-1.4 fake", "application/pdf")},
+                data={"caption": ""})
+check("POST /private-document -> 200", r.status_code == 200)
+check("private-document -> nota com media_type=document",
+      (r.json().get("data") or {}).get("media_type") == "document")
 
 
 print(f"\n{'='*60}")

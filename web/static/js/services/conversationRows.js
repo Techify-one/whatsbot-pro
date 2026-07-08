@@ -43,6 +43,7 @@ export function matchesStatus(c, statusFilter) {
 export function matchesAssignment(c, tab, uid) {
   if (tab === 'mine') return uid != null && c.assignee_user_id === uid;
   if (tab === 'unassigned') return isUnassigned(c);
+  if (tab === 'mentions') return !!c.has_user_mention;  // fui mencionado numa nota privada
   return true;  // 'all'
 }
 
@@ -336,6 +337,9 @@ export function buildRows(contacts, conversations) {
           last_message_msg_id: cv.last_message_msg_id || c.last_message_msg_id,
           unread_count: cv.unread_count != null ? cv.unread_count : c.unread_count,
           has_unread_mention: cv.has_unread_mention != null ? cv.has_unread_mention : c.has_unread_mention,
+          // Menção INTERNA (nota privada) direcionada ao usuário logado — badge "@"
+          // + aba Menções. Vem por-conversa do backend (has_user_mention).
+          has_user_mention: !!cv.has_user_mention,
         });
       }
     }
