@@ -1206,8 +1206,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 33 permissions", _perm_count == 33)
-check("RBAC seed -> role_permissions populated (gestor 28 + atendente 5)", _rp_count == 33)
+check("RBAC seed -> 37 permissions", _perm_count == 37)
+check("RBAC seed -> role_permissions populated (gestor 32 + atendente 5)", _rp_count == 37)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1246,7 +1246,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 33 permissions", len([p for p in _perms if p != "*"]) == 33)
+check("admin me -> all 37 permissions", len([p for p in _perms if p != "*"]) == 37)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -1264,7 +1264,7 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 28 perms, no '*'", "*" not in _gperms and len(_gperms) == 28)
+check("gestor resolver -> 32 perms, no '*'", "*" not in _gperms and len(_gperms) == 32)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1273,8 +1273,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 33 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 33)
+check("GET /api/roles -> 3 roles + 37 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 37)
 
 r = client.get("/api/users")
 check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
@@ -1453,9 +1453,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 28)
-check("GET /api/roles -> admin shows all 33",
-      len(_by_key["admin"]["permission_keys"]) == 33)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 32)
+check("GET /api/roles -> admin shows all 37",
+      len(_by_key["admin"]["permission_keys"]) == 37)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1509,7 +1509,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 28 perms", len(_rrepo.get_role_permissions("gestor")) == 28)
+check("gestor restored to 32 perms", len(_rrepo.get_role_permissions("gestor")) == 32)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio
