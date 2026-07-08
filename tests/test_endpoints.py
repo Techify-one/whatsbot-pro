@@ -2195,6 +2195,29 @@ _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "h
 check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
 _alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
 
+# Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
+_rob_c = contact_repo.get_or_create("5511900000077")
+_rob_proto = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")
+# (a) ciclo ÓRFÃO: conversation_id que NÃO existe no core -> close auto-encerra e NÃO trava.
+_alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
+_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"])
+check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
+      not (_rob_err and "resolva-o antes" in _rob_err))
+check("close: ciclo órfão foi auto-encerrado",
+      _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
+# (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
+_rob_proto2 = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")  # get-or-create: mesmo protocolo aberto? já fechado -> novo
+_rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
+_alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
+_, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
+check("close: ciclo com conversa viva ainda exige resolver antes",
+      bool(_rob_err2) and "resolva-o antes" in _rob_err2)
+# (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
+_res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
+check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
@@ -2440,6 +2463,49 @@ _cm.add_message("private_note", "anotação interna")
 check("private_note NÃO reabre conversa closed",
       _conv_repo.get(_live_conv["id"])["status"] == "closed")
 _conv_repo.set_status(_live_conv["id"], "open")  # restaura p/ os testes seguintes
+
+# ── Regra "ignorar abertura": contato NOVO que casa a regex NÃO abre atendimento ──
+# (create_closed): a conversa nasce FECHADA — mensagem salva/visível, sem atendimento
+# aberto nem card de sistema. reopen=None/True seguem criando ABERTA.
+_ci_new = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
+                                 source_id=f"{_cid}@s.whatsapp.net")
+_jid_new = f"{_cid}@s.whatsapp.net"
+# fecha qualquer conversa aberta do par p/ o próximo resolve ver "nenhuma aberta"... na
+# verdade create só olha get_latest; usamos um contato NOVO dedicado p/ isolar o caso.
+_skc_new = contact_repo.get_or_create("5500011199999")  # contato novo, sem conversa
+_ci_skn = _ci_repo.get_or_create(inbox_id=1, contact_id=_skc_new["id"],
+                                 source_id=f"{_skc_new['id']}@s.whatsapp.net")
+_conv_closed, _ev_closed = _conv_repo.resolve_for_contact_ex(
+    _skc_new["id"], f"{_skc_new['id']}@s.whatsapp.net", create_closed=True)
+check("create_closed: contato novo -> conversa FECHADA", _conv_closed["status"] == "closed")
+check("create_closed: sem transição 'created' (sem card)", _ev_closed is None)
+# control: contato novo diferente sem create_closed -> ABERTA (comportamento inalterado)
+_skc_open = contact_repo.get_or_create("5500011188888")
+_conv_open, _ev_open = _conv_repo.resolve_for_contact_ex(
+    _skc_open["id"], f"{_skc_open['id']}@s.whatsapp.net", create_closed=False)
+check("control: sem create_closed -> conversa ABERTA", _conv_open["status"] == "open")
+check("control: transição 'created'", _ev_open == "created")
+# wiring via ContactMemory: ensure_conversation_live('user', reopen=False) -> fechada,
+# add_message('user', reopen=False) mantém fechada (batch re-resolve a MESMA thread).
+_cm_skip = _CM("5500011177777")  # contato novo
+_conv_id_skip = _cm_skip.ensure_conversation_live("user", False)
+check("ensure_conversation_live(reopen=False) -> cria conversa", _conv_id_skip is not None)
+check("ensure_conversation_live(reopen=False) -> FECHADA",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+_cm_skip.add_message("user", "não abrir proto", reopen=False)
+check("add_message(reopen=False) mantém a MESMA conversa fechada",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+with _get_engine().connect() as _conn:
+    _skip_msg = _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id).where(_msgs_t.c.contact_id == _cm_skip.id)
+        .where(_msgs_t.c.role == "user").order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
+check("mensagem ignorada fica salva e vinculada à conversa fechada",
+      _skip_msg == _conv_id_skip)
+# control via memória: contato novo, reopen=None (regra padrão) -> ABERTA
+_cm_norm = _CM("5500011166666")
+_conv_id_norm = _cm_norm.ensure_conversation_live("user", None)
+check("control memória: reopen=None -> conversa ABERTA",
+      _conv_repo.get(_conv_id_norm)["status"] == "open")
 
 # Fatia 2: gate ai_active por conversa
 from server.routes.webhook import _conversation_ai_active as _ai_gate

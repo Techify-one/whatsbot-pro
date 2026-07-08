@@ -786,6 +786,49 @@ def _open_cycles_of_protocolo(atid: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _cycle_is_resolvable(cycle: dict) -> bool:
+    """Um ciclo aberto só é 'resolvível' pela UI se aponta para uma conversa (atendimento)
+    que AINDA existe no core — é a conversa que o operador abre no popup 'Resolver
+    atendimento'. Ciclos órfãos (``conversation_id`` NULL ou conversa deletada) não têm
+    caminho de UI para resolver e travariam o Finalizar para sempre."""
+    cid = (cycle or {}).get("conversation_id")
+    if not cid:
+        return False
+    try:
+        return conversation_repo.get(cid) is not None
+    except Exception:  # noqa: BLE001 — indisponibilidade do repo não deve travar o fechar
+        return True  # fail-safe: na dúvida, trata como resolvível (não auto-encerra)
+
+
+def _close_orphan_cycles(cycles: list[dict]) -> None:
+    """Encerra (ended_at = agora) ciclos abertos órfãos — sem conversa viva no core —
+    para que o protocolo possa ser finalizado. Best-effort."""
+    ids = [c["id"] for c in cycles if c.get("id") is not None]
+    if not ids:
+        return
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_atendimentos "
+                 "SET ended_at = :ts, updated_at = :ts "
+                 "WHERE id = ANY(:ids) AND ended_at IS NULL"),
+            {"ts": ts, "ids": ids},
+        )
+
+
+def _close_orphan_cycles_of_conversation(conversation_id: int) -> None:
+    """Encerra ciclos abertos de uma conversa (atendimento) que não existe mais no core.
+    Best-effort — usado pelo resolve gracioso quando a conversa foi deletada."""
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_atendimentos "
+                 "SET ended_at = :ts, updated_at = :ts "
+                 "WHERE conversation_id = :cid AND ended_at IS NULL"),
+            {"ts": ts, "cid": conversation_id},
+        )
+
+
 def close_protocolo(atid: int, assignee_user_id: int | None = None,
                       assignee_name: str = "") -> tuple[dict | None, str | None]:
     at = get_protocolo(atid)
@@ -794,8 +837,14 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     if at["status"] == "fechado":
         return at, None
     # Só finaliza quando a ÚLTIMA atendimento do protocolo estiver resolvida: se há ciclo
-    # aberto, força resolver antes (a UI abre o popup "Resolver atendimento"). HTTP 400.
-    if _open_cycles_of_protocolo(atid):
+    # aberto RESOLVÍVEL (conversa viva no core), força resolver antes (a UI abre o popup
+    # "Resolver atendimento"). HTTP 400. Ciclos ÓRFÃOS (conversa deletada/NULL) não têm como
+    # ser resolvidos pela UI — auto-encerra-os aqui para não travar o Finalizar (robustez).
+    open_cycles = _open_cycles_of_protocolo(atid)
+    orphan = [c for c in open_cycles if not _cycle_is_resolvable(c)]
+    if orphan:
+        _close_orphan_cycles(orphan)
+    if len(orphan) < len(open_cycles):
         return None, ("Existe um atendimento aberto neste protocolo — "
                       "resolva-o antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
@@ -1583,7 +1632,16 @@ def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str =
     resolveu (assignee_user_id + assignee_name) no ciclo."""
     atend = conversation_repo.get(conversation_id)
     if not atend:
-        return None, "Atendimento não encontrada."
+        # Robustez: a conversa não existe mais no core (deletada) mas um ciclo aberto
+        # ainda a referencia. Não há o que "resolver" no atendimento — encerra o(s)
+        # ciclo(s) órfão(s) daquela conversa (best-effort) para não travar o Finalizar,
+        # e retorna no-op de sucesso em vez de 404.
+        try:
+            _close_orphan_cycles_of_conversation(conversation_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("protocolos: falha ao encerrar ciclo órfão de conv %s: %s",
+                           conversation_id, e)
+        return None, None
     contact_id = atend["contact_id"]
     contact = contact_repo.get(contact_id) or {}
     at = ensure_protocolo_for_contact(

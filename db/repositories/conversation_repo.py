@@ -83,11 +83,13 @@ def _default_ai_enabled() -> bool:
 def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_id: int,
                          opened_at: float | None, ai_active: int | None,
                          is_archived: int, active_agent_key: str | None,
-                         origin: str | None) -> dict:
+                         origin: str | None, status: str = "open") -> dict:
     """Insert a conversation row on an EXISTING transaction ``conn`` and return it.
 
     Shared by :func:`create` (opens its own txn) and :func:`_create_open_atomic`
-    (checks-then-inserts inside one txn to close the brand-new-contact race)."""
+    (checks-then-inserts inside one txn to close the brand-new-contact race).
+    ``status`` defaults to ``"open"``; the "ignorar abertura" rule inserts a
+    brand-new thread already ``"closed"`` (plano regex: contato novo não abre atendimento)."""
     now = time.time()
     opened = opened_at if opened_at is not None else now
     if ai_active is None:
@@ -97,7 +99,7 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
     display_id = _next_display_id(conn)
     result = conn.execute(conversations.insert().values(
         display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
-        contact_inbox_id=contact_inbox_id, status="open", is_archived=is_archived,
+        contact_inbox_id=contact_inbox_id, status=status, is_archived=is_archived,
         ai_active=ai_active, active_agent_key=active_agent_key, origin=origin,
         opened_at=opened, last_activity_at=opened,
         custom_attributes={}, created_at=now, updated_at=now,
@@ -111,19 +113,20 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
 def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
            opened_at: float | None = None, ai_active: int | None = None,
            is_archived: int = 0, active_agent_key: str | None = None,
-           origin: str | None = None) -> dict:
+           origin: str | None = None, status: str = "open") -> dict:
     """Insert a new conversation. ``origin`` (plano 28) records who started the
     thread — ``inbound`` (customer), ``outbound``/``manual`` (operator), ``imported``
     (chat import) — and drives the sidebar visibility gate. Always inserts — but at
     most ONE conversation per (contact, inbox) may be OPEN (partial unique index
     ``uq_atend_open_contact_inbox``, migration 0036; raises ``IntegrityError``
-    otherwise). The inbound auto-create dedup lives in :func:`_create_open_atomic`."""
+    otherwise; ``status="closed"`` está fora do índice, então múltiplas fechadas são
+    permitidas). The inbound auto-create dedup lives in :func:`_create_open_atomic`."""
     with get_engine().begin() as conn:
         return _insert_conversation(
             conn, inbox_id=inbox_id, contact_id=contact_id,
             contact_inbox_id=contact_inbox_id, opened_at=opened_at,
             ai_active=ai_active, is_archived=is_archived,
-            active_agent_key=active_agent_key, origin=origin)
+            active_agent_key=active_agent_key, origin=origin, status=status)
 
 
 def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
@@ -245,7 +248,8 @@ def get_open_for_contact_scoped(contact) -> dict | None:
 def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                            opened_at: float | None = None,
                            inbox_id: int = DEFAULT_INBOX_ID,
-                           origin: str | None = None) -> tuple[dict, str | None]:
+                           origin: str | None = None,
+                           create_closed: bool = False) -> tuple[dict, str | None]:
     """Like :func:`resolve_for_contact` but also reports the lifecycle transition.
 
     Returns ``(conv, event)`` where ``event`` is ``"created"`` (a brand-new
@@ -253,6 +257,14 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     reactivated by this inbound), or ``None`` (already-open conversation, no
     transition). Lets callers surface an automatic system notice (plano 12 §3)
     without re-querying the prior status.
+
+    ``create_closed`` (regra "ignorar abertura"): quando NÃO há conversa ainda para o
+    contato/inbox, cria-a já FECHADA em vez de aberta — um contato novo cuja mensagem
+    casa a regex de "não abrir protocolo" não deve abrir um atendimento. A conversa
+    fechada mantém a mensagem salva/visível (aba "Fechado") sem card de sistema
+    (``event=None``). Não afeta uma conversa já existente (aí o ramo abaixo decide
+    reabrir/manter). Como a conversa nasce ``status="closed"``, fica fora do índice
+    ``uq_atend_open_contact_inbox`` e não passa pelo dedup de :func:`_create_open_atomic`.
 
     ``origin`` (plano 28) stamps a brand-new conversation's provenance. Concurrency:
     if two inbound messages of a brand-new contact resolve in parallel, both see
@@ -269,6 +281,11 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
         inbox_id=inbox_id, contact_id=contact_id, source_id=jid, source_jid=jid)
     conv = get_latest_for_contact_inbox(contact_id, inbox_id)
     if conv is None:
+        if create_closed:
+            row = create(
+                inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
+                opened_at=opened_at, origin=origin, status="closed")
+            return row, None  # sem card "Conversa iniciada": conversa nasce fechada
         row, created = _create_open_atomic(
             inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
             opened_at=opened_at, origin=origin)
@@ -281,7 +298,8 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
 def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                         opened_at: float | None = None,
                         inbox_id: int = DEFAULT_INBOX_ID,
-                        origin: str | None = None) -> dict:
+                        origin: str | None = None,
+                        create_closed: bool = False) -> dict:
     """Return the active conversation for a contact IN a given inbox (plano 01 F2 / plano 11 F1).
 
     Idempotent: get_or_creates the contact_inbox on ``inbox_id`` (JID = source_id,
@@ -295,7 +313,8 @@ def resolve_for_contact(contact_id: int, jid: str, *, reopen_if_closed: bool = F
     """
     conv, _event = resolve_for_contact_ex(
         contact_id, jid, reopen_if_closed=reopen_if_closed,
-        opened_at=opened_at, inbox_id=inbox_id, origin=origin)
+        opened_at=opened_at, inbox_id=inbox_id, origin=origin,
+        create_closed=create_closed)
     conv = dict(conv)
     conv["created"] = (_event == "created")
     return conv
