@@ -433,6 +433,7 @@ function ProtocolosList({ api, mode }) {
   const [actionMsg, setActionMsg] = useState(null);  // {text, error}
   const [savingPref, setSavingPref] = useState(false);  // salvando filtros pessoais/equipe
   const [prefMsg, setPrefMsg] = useState('');           // feedback do salvar/alternar origem
+  const [filtersOpen, setFiltersOpen] = useState(false); // botão "Filtros": expande os NÃO-favoritos
   const [detail, setDetail] = useState(null);        // {protocolo, atendimentos}
   const [detailWarning, setDetailWarning] = useState(''); // aviso no detalhe (vindo do drag p/ "Fechado")
   const appliedViewRef = useRef(null);               // última aba cujos filtros já foram aplicados
@@ -482,6 +483,9 @@ function ProtocolosList({ api, mode }) {
   // Gate da barra de filtros ao vivo. Chaves: status|atendente|q|periodo|canal|pf:<scope>:<key>|cattr:<key>.
   const availArr = (activeView && Array.isArray(activeView.available_filters)) ? activeView.available_filters : null;
   const availFilter = (key) => !availArr || availArr.includes(key);
+  // Favoritos: sempre visíveis na barra; os demais disponíveis ficam atrás do botão "Filtros".
+  const favArr = (activeView && Array.isArray(activeView.favorite_filters)) ? activeView.favorite_filters : [];
+  const isFavorite = (key) => favArr.includes(key);
 
   const dragRef = useRef(null);     // protocolo sendo arrastado
   const draggedRef = useRef(false); // distingue clique de arrasto
@@ -596,6 +600,14 @@ function ProtocolosList({ api, mode }) {
     const usePersonal = v.pref && v.pref.use_personal;
     applyFilterDict((usePersonal ? (v.pref.personal_filters || {}) : (v.filters || {})) || {});
   }, [activeViewId, views, activeView]);
+
+  // Estado do botão "Filtros" ao trocar de aba: recolhido quando a aba tem favoritos (eles já
+  // aparecem sempre); expandido quando não há favoritos, p/ views existentes não ficarem com a
+  // barra vazia (retrocompat).
+  useEffect(() => {
+    const fav = (activeView && Array.isArray(activeView.favorite_filters)) ? activeView.favorite_filters : [];
+    setFiltersOpen(fav.length === 0);
+  }, [activeViewId, activeView]);
 
   // Atendentes (p/ as colunas do kanban "por atendente"). Reusa o serviço do core.
   useEffect(() => {
@@ -718,6 +730,21 @@ function ProtocolosList({ api, mode }) {
       setColOrderDraft(null);
       setViews((vs) => vs.map((x) => String(x.id) === String(v.id) ? { ...x, filters: f, column_order: co } : x));
     } catch (_) { setSavingPref(false); setPrefMsg('Falha ao salvar visualização da equipe.'); }
+  };
+
+  // Botão ÚNICO "Salvar visualização de filtros": salva na ORIGEM atual (Pessoal x Equipe),
+  // sempre depois de um pop-up de confirmação. Reusa savePersonalFilters/saveTeamFilters como
+  // a lógica de gravação (não duplica). Equipe sem permissão de editar é barrado antes (botão
+  // desabilitado no render), então aqui só cai no caminho permitido.
+  const saveViewFilters = async () => {
+    const v = activeView;
+    if (!v || v.id == null || v.id === FALLBACK_VIEW.id) return;
+    const usePersonal = !!(v.pref && v.pref.use_personal);
+    const ok = await api.ui.openModal((close) => html`<${ConfirmDialog}
+      message=${`Salvar os filtros atuais como padrão da visualização ${usePersonal ? 'Pessoal' : 'da Equipe'}?`}
+      okLabel="Salvar" onOk=${() => close(true)} onCancel=${() => close(false)} />`);
+    if (!ok) return;
+    if (usePersonal) await savePersonalFilters(); else await saveTeamFilters();
   };
 
   // Id do protocolo atualmente aberto no detalhe (espelha ?detail= na URL). Ref p/ o
@@ -1065,38 +1092,39 @@ function ProtocolosList({ api, mode }) {
             onInput=${(e) => setAttrFilters((s) => { const n = { ...s }; const v = e.target.value; if (v) n[d.fk] = v; else delete n[d.fk]; return n; })} />`}
     </div>`;
 
-  // Campos nativos (widgets próprios), cada um gated pelo seu availFilter — compõem a seção "Nativas".
-  const nativeEls = [
-    availFilter('status') ? html`
+  // Campos nativos (widgets próprios), cada um gated pelo seu availFilter — compõem a seção
+  // "Nativas". Cada item guarda a CHAVE p/ o particionamento favorito x não-favorito abaixo.
+  const nativeItems = [
+    availFilter('status') ? { key: 'status', el: html`
       <div key="status" class="w-[150px]">
         <label class="block text-[12px] text-wa-secondary mb-1">Status</label>
         <${OptionListSelect} options=${[{ value: 'aberto', label: 'Aberto' }, { value: 'fechado', label: 'Fechado' }]}
           multiple=${true} value=${asFilterList(status)}
           onChange=${(v) => setStatus(v)} placeholder="Todos" float=${true} />
-      </div>` : null,
-    availFilter('atendente') ? html`
+      </div>` } : null,
+    availFilter('atendente') ? { key: 'atendente', el: html`
       <div key="atendente" class="w-[170px]">
         <label class="block text-[12px] text-wa-secondary mb-1">Atendente</label>
         <${OptionListSelect}
           options=${users.map((u) => ({ value: String(u.id), label: u.name || `Usuário #${u.id}` }))}
           multiple=${true} value=${asFilterList(assigneeFilter).map(String)}
           onChange=${(v) => setAssigneeFilter(v)} placeholder="Todos" float=${true} />
-      </div>` : null,
-    availFilter('canal') ? html`
+      </div>` } : null,
+    availFilter('canal') ? { key: 'canal', el: html`
       <div key="canal" class="w-[180px]">
         <label class="block text-[12px] text-wa-secondary mb-1">Canal</label>
         <${OptionListSelect} options=${channels} multiple=${true}
           value=${asFilterList(attrFilters['canal'])}
           onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v && v.length) n['canal'] = v; else delete n['canal']; return n; })}
           placeholder="Todos" float=${true} />
-      </div>` : null,
-    availFilter('q') ? html`
+      </div>` } : null,
+    availFilter('q') ? { key: 'q', el: html`
       <div key="q" class="flex-1 min-w-[180px]">
         <label class="block text-[12px] text-wa-secondary mb-1">Buscar cliente</label>
         <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
           placeholder="nome ou telefone" onInput=${(e) => setQ(e.target.value)} />
-      </div>` : null,
-    availFilter('periodo') ? html`
+      </div>` } : null,
+    availFilter('periodo') ? { key: 'periodo', el: html`
       <div key="periodo">
         <label class="block text-[12px] text-wa-secondary mb-1">Período (criação)</label>
         <div class="flex flex-wrap items-center gap-1.5">
@@ -1110,20 +1138,31 @@ function ProtocolosList({ api, mode }) {
           <button onClick=${onClearDate}
             class="px-2.5 py-1 rounded-md text-[12px] border ${datePreset === 'tudo' ? 'bg-wa-teal text-white border-wa-teal' : 'border-wa-border text-wa-text hover:bg-wa-hover'}">Tudo</button>
         </div>
-      </div>` : null,
+      </div>` } : null,
   ].filter(Boolean);
 
-  // Seções na ordem de filterCategories (Nativas → Protocolos → Atendimentos → Contato →
-  // Outros); só as com ≥1 campo visível entram (igual ao .filter(c => c.items.length) do "Todas").
-  const filterSections = filterCategories(filterFields, contactAttrDefs).map((c) => {
-    if (c.key === 'nativas') return { label: c.label, els: nativeEls };
+  // Constrói as seções (Nativas → Protocolos → Atendimentos → Contato → Outros) na ordem de
+  // filterCategories, mantendo SÓ os campos cuja chave passa em `keep` (predicado de partição).
+  // Reusa a mesma montagem; só as seções com ≥1 campo entram. Usado 2x: favoritos e não-favoritos.
+  const buildSections = (keep) => filterCategories(filterFields, contactAttrDefs).map((c) => {
+    if (c.key === 'nativas') {
+      return { label: c.label, els: nativeItems.filter((it) => keep(it.key)).map((it) => it.el) };
+    }
     const els = c.attrs
-      ? c.attrs.filter((d) => availFilter(`cattr:${d.key}`))
+      ? c.attrs.filter((d) => availFilter(`cattr:${d.key}`) && keep(`cattr:${d.key}`))
           .map((d) => renderDynField({ fk: `cattr:${d.key}`, label: d.label, options: d.options }))
-      : (c.fields || []).filter((d) => availFilter(`pf:${d.scope}:${d.key}`))
+      : (c.fields || []).filter((d) => availFilter(`pf:${d.scope}:${d.key}`) && keep(`pf:${d.scope}:${d.key}`))
           .map((d) => renderDynField({ fk: `pf:${d.scope}:${d.key}`, label: d.label, options: d.options }));
     return { label: c.label, els };
   }).filter((s) => s.els.length);
+
+  // Favoritos: sempre visíveis. Não-favoritos: só quando o botão "Filtros" está aberto.
+  // Na BARRA a divisão por categorias NÃO aparece (lista plana) — a categorização fica só no
+  // painel "Configurar filtros da aba". buildSections dá a ordem (Nativas→…→Outros) e aqui
+  // achatamos os campos numa única fila.
+  const favEls = buildSections((k) => isFavorite(k)).flatMap((s) => s.els);
+  const restEls = buildSections((k) => !isFavorite(k)).flatMap((s) => s.els);
+  const hasRest = restEls.length > 0;
 
   return html`
     <div>
@@ -1147,21 +1186,35 @@ function ProtocolosList({ api, mode }) {
               <input type="radio" name=${`src-${activeView.id}`} checked=${!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(false)} /> Equipe
             </label>
           </div>
-          <button onClick=${savePersonalFilters} disabled=${savingPref}
-            class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização pessoal</button>
-          ${canEditView(activeView) ? html`<button onClick=${saveTeamFilters} disabled=${savingPref}
-            class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização equipe</button>` : null}
+          ${(() => {
+            // Em Equipe sem permissão de editar a view não dá pra salvar o padrão da equipe:
+            // botão desabilitado + dica p/ trocar pra Pessoal. (Alternar o rádio é sempre livre.)
+            const usePersonal = !!(activeView.pref && activeView.pref.use_personal);
+            const blockedTeam = !usePersonal && !canEditView(activeView);
+            return html`
+              <button onClick=${saveViewFilters} disabled=${savingPref || blockedTeam}
+                title=${blockedTeam ? 'Sem permissão para salvar a visualização da equipe — selecione Pessoal' : ''}
+                class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização de filtros</button>
+              ${blockedTeam ? html`<span class="text-[12px] text-wa-secondary">Sem permissão para salvar a visualização da equipe — selecione Pessoal.</span>` : null}`;
+          })()}
           ${prefMsg ? html`<span class="text-[12px] ${prefMsg.includes('Falha') ? 'text-red-500' : 'text-wa-teal'}">${prefMsg}</span>` : null}
         </div>` : null}
       <!-- Filtros principais, categorizados (mesmo padrão do "Configurar filtros da aba" →
            "Todas"): pilha vertical de seções (título + linha) — Nativas → Protocolos →
-           Atendimentos → Contato → Outros. Kanban/Lista compartilham (barra em ProtocolosList). -->
+           Atendimentos → Contato → Outros. Kanban/Lista compartilham (barra em ProtocolosList).
+           FAVORITOS aparecem sempre; os demais ficam atrás do botão "Filtros" (recolhível). -->
       <div class="mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
-        ${filterSections.map((s, i) => html`
-          <div key=${s.label} class="${i > 0 ? 'mt-3 pt-3 border-t border-wa-border' : ''}">
-            <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1.5">${s.label}</div>
-            <div class="flex flex-wrap items-end gap-3">${s.els}</div>
-          </div>`)}
+        ${favEls.length ? html`<div class="flex flex-wrap items-end gap-3">${favEls}</div>` : null}
+        <!-- Botão "Filtros": expande/recolhe os filtros NÃO-favoritos disponíveis. Só aparece
+             quando existe ≥1 desses (senão nada a expandir). Lista plana (sem categorias). -->
+        ${hasRest ? html`
+          <div class="${favEls.length ? 'mt-3 pt-3 border-t border-wa-border' : ''}">
+            <button type="button" onClick=${() => setFiltersOpen((o) => !o)}
+              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">
+              <span class="text-wa-secondary w-3">${filtersOpen ? '▾' : '▸'}</span>Filtros
+            </button>
+            ${filtersOpen ? html`<div class="mt-3 flex flex-wrap items-end gap-3">${restEls}</div>` : null}
+          </div>` : null}
         <!-- Linha de ação final: Atualizar + Limpar filtros -->
         <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-wa-border">
           <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
@@ -1430,15 +1483,27 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   // Tipos de filtro que podem existir na aba (flatten das categorias). null na view = TODOS.
   const ALL_FILTER_KEYS = CATEGORIES.flatMap((c) => c.items.map(([k]) => k));
   const initAvail = (view && Array.isArray(view.available_filters)) ? view.available_filters : null;
+  const initFav = (view && Array.isArray(view.favorite_filters)) ? view.favorite_filters : [];
   const [open, setOpen] = useState(false);
   const [availSet, setAvailSet] = useState(() => new Set(initAvail == null ? ALL_FILTER_KEYS : initAvail));
+  // Favoritos: sempre visíveis na barra (não recolhíveis pelo botão "Filtros"). Subconjunto de availSet.
+  const [favSet, setFavSet] = useState(() => new Set(initFav));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [okMsg, setOkMsg] = useState('');
   const [catView, setCatView] = useState('todas');  // categoria ativa do checklist ('todas' = agrupado com cabeçalhos)
   const isAvail = (key) => availSet.has(key);
+  // Desmarcar a disponibilidade tira o favorito junto (favorito precisa estar disponível).
   const toggleAvail = (key) => { setOkMsg(''); setAvailSet((s) => {
-    const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n;
+    const n = new Set(s); if (n.has(key)) { n.delete(key); setFavSet((f) => { const g = new Set(f); g.delete(key); return g; }); } else n.add(key); return n;
+  }); };
+  const isFav = (key) => favSet.has(key);
+  // Marcar favorito garante disponível (senão não apareceria na barra). Desmarcar só tira o favorito.
+  const toggleFav = (key) => { setOkMsg(''); setFavSet((f) => {
+    const g = new Set(f);
+    if (g.has(key)) { g.delete(key); }
+    else { g.add(key); setAvailSet((s) => { const n = new Set(s); n.add(key); return n; }); }
+    return g;
   }); };
 
   const save = async () => {
@@ -1448,10 +1513,13 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
       // O body NÃO leva filters → o backend preserva os VALORES pré-determinados da equipe.
       const enabled = ALL_FILTER_KEYS.filter((k) => availSet.has(k));
       const available_filters = enabled.length === ALL_FILTER_KEYS.length ? null : enabled;
+      // favorite_filters: subconjunto disponível marcado como favorito; vazio → null (nenhum).
+      const favorites = ALL_FILTER_KEYS.filter((k) => favSet.has(k) && availSet.has(k));
+      const favorite_filters = favorites.length ? favorites : null;
       const r = await fetch(`${apiBase}/kanban-views/${view.id}`, {
         method: 'PUT',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ available_filters }),
+        body: JSON.stringify({ available_filters, favorite_filters }),
       });
       const j = await r.json().catch(() => ({}));
       if (!(j && j.ok)) { setErr((j && j.error) || 'Falha ao salvar.'); setSaving(false); return; }
@@ -1461,10 +1529,17 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   };
 
   // Renderiza os checkboxes de uma lista [[key,label],...] (reusado nas duas vistas do checklist).
+  // Cada item: caixa de disponibilidade + rótulo + estrela dourada de FAVORITO (sempre visível
+  // na barra). A estrela só faz sentido quando disponível — clicar nela auto-habilita o filtro.
   const cbox = (items) => items.map(([key, lbl]) => html`
-    <label key=${key} class="inline-flex items-center gap-1.5 cursor-pointer">
-      <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
-    </label>`);
+    <span key=${key} class="inline-flex items-center gap-1.5">
+      <label class="inline-flex items-center gap-1.5 cursor-pointer">
+        <input type="checkbox" checked=${isAvail(key)} onChange=${() => toggleAvail(key)} /> ${lbl}
+      </label>
+      <button type="button" onClick=${() => toggleFav(key)}
+        title=${isFav(key) ? 'Filtro favorito (sempre visível) — clique para remover' : 'Marcar como favorito (sempre visível na barra)'}
+        class="leading-none text-[15px] ${isFav(key) ? 'text-amber-400' : 'text-wa-secondary hover:text-amber-400'}">${isFav(key) ? '★' : '☆'}</button>
+    </span>`);
 
   // Escopo dos botões "Selecionar todos"/"Limpar": SÓ a categoria ativa (aba 'todas' = tudo).
   // Numa categoria, marcar/limpar não mexe nas seleções das OUTRAS categorias.
@@ -1472,9 +1547,10 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   const scopeKeys = activeCat ? activeCat.items.map(([k]) => k) : ALL_FILTER_KEYS;
   const scopeLabel = activeCat ? ` de ${activeCat.label}` : '';
   const selectScope = () => { setOkMsg(''); setAvailSet((s) => new Set([...s, ...scopeKeys])); };
-  const clearScope = () => { setOkMsg(''); setAvailSet((s) => {
-    const n = new Set(s); scopeKeys.forEach((k) => n.delete(k)); return n;
-  }); };
+  const clearScope = () => { setOkMsg('');
+    setAvailSet((s) => { const n = new Set(s); scopeKeys.forEach((k) => n.delete(k)); return n; });
+    setFavSet((f) => { const g = new Set(f); scopeKeys.forEach((k) => g.delete(k)); return g; });  // sem disponibilidade → sem favorito
+  };
 
   return html`
     <div class="mb-3 rounded-lg bg-wa-panel border border-wa-border">
