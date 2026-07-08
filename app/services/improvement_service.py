@@ -33,6 +33,35 @@ from db.repositories import agent_repo, conversation_repo, execution_repo, messa
 logger = logging.getLogger(__name__)
 
 
+# Default system prompt for the one-shot improvement analysis. Editable by the
+# operator via config key ``improvement_prompt`` (Configurações → IA); an empty
+# override falls back to this text, so tweaks to this constant reach every
+# install that never customised the prompt.
+DEFAULT_IMPROVEMENT_PROMPT = (
+    "Você é um especialista em qualidade de agentes de IA conversacionais "
+    "para atendimento no WhatsApp. Sua tarefa é analisar uma resposta que a "
+    "IA deu a um cliente e que foi marcada por um operador humano como "
+    "incorreta ou insatisfatória. O sistema pode usar VÁRIOS agentes no "
+    "mesmo turno (um roteador que transfere para agentes especializados): "
+    "você receberá, na ordem em que atuaram, o prompt de CADA agente que "
+    "participou, as ferramentas atribuídas a cada um e as que cada um "
+    "realmente usou, além do histórico da conversa e do feedback do "
+    "operador. Atenção: as mensagens do histórico NÃO são atribuíveis a um "
+    "agente específico — apenas as ferramentas e a cadeia de agentes são. "
+    "Com base nisso você deve: (1) diagnosticar a causa provável do "
+    "problema, apontando QUAL agente (ou a passagem entre eles) "
+    "provavelmente originou o erro; e (2) recomendar ajustes CONCRETOS e "
+    "acionáveis no prompt do(s) agente(s) responsável(is) (e, quando fizer "
+    "sentido, no uso ou na descrição das ferramentas) para que esse tipo "
+    "de erro não se repita. Seja objetivo e prático: cite trechos do "
+    "prompt quando útil e evite generalidades. NÃO reescreva a resposta ao "
+    "cliente — foque em como melhorar o(s) agente(s). Escreva em português "
+    "brasileiro e estruture a saída em duas seções de markdown: "
+    "'**Diagnóstico**' e '**Recomendações**' (uma lista de itens "
+    "acionáveis)."
+)
+
+
 def _find_execution_around(phone: str, ts: float) -> dict | None:
     """Best-effort: the FULL execution (steps + routing) that produced ``ts``.
 
@@ -238,29 +267,10 @@ def generate_improvement(handler, phone: str, target_message: dict,
     # 4. Operator feedback (optional).
     feedback_block = feedback.strip() or "(o operador não detalhou o que saiu errado)"
 
-    analysis_system = (
-        "Você é um especialista em qualidade de agentes de IA conversacionais "
-        "para atendimento no WhatsApp. Sua tarefa é analisar uma resposta que a "
-        "IA deu a um cliente e que foi marcada por um operador humano como "
-        "incorreta ou insatisfatória. O sistema pode usar VÁRIOS agentes no "
-        "mesmo turno (um roteador que transfere para agentes especializados): "
-        "você receberá, na ordem em que atuaram, o prompt de CADA agente que "
-        "participou, as ferramentas atribuídas a cada um e as que cada um "
-        "realmente usou, além do histórico da conversa e do feedback do "
-        "operador. Atenção: as mensagens do histórico NÃO são atribuíveis a um "
-        "agente específico — apenas as ferramentas e a cadeia de agentes são. "
-        "Com base nisso você deve: (1) diagnosticar a causa provável do "
-        "problema, apontando QUAL agente (ou a passagem entre eles) "
-        "provavelmente originou o erro; e (2) recomendar ajustes CONCRETOS e "
-        "acionáveis no prompt do(s) agente(s) responsável(is) (e, quando fizer "
-        "sentido, no uso ou na descrição das ferramentas) para que esse tipo "
-        "de erro não se repita. Seja objetivo e prático: cite trechos do "
-        "prompt quando útil e evite generalidades. NÃO reescreva a resposta ao "
-        "cliente — foque em como melhorar o(s) agente(s). Escreva em português "
-        "brasileiro e estruture a saída em duas seções de markdown: "
-        "'**Diagnóstico**' e '**Recomendações**' (uma lista de itens "
-        "acionáveis)."
-    )
+    # Operator-editable system prompt (config ``improvement_prompt``); empty
+    # override falls back to the code default.
+    analysis_system = (getattr(handler, "improvement_prompt", "") or "").strip() \
+        or DEFAULT_IMPROVEMENT_PROMPT
     analysis_user = (
         f"## Agentes do turno (na ordem em que atuaram)\n{agents_block}\n\n"
         f"## Histórico recente da conversa\n{history_block}\n\n"
@@ -286,7 +296,12 @@ def generate_improvement(handler, phone: str, target_message: dict,
         response = client.chat.completions.create(
             model=analysis_model,
             temperature=0.4,
-            max_tokens=1600,
+            # Generoso de propósito: o modelo do agente pode ser de raciocínio
+            # (deepseek-v4-pro) e os reasoning_tokens contam contra este teto de
+            # forma NÃO-determinística (0 a ~1700+ no mesmo prompt). Com 1600/4000
+            # a análise era truncada no meio da frase quando o raciocínio disparava
+            # (finish_reason=length). 8000 cobre reasoning pesado + análise completa.
+            max_tokens=8000,
             timeout=120,
             messages=[
                 {"role": "system", "content": analysis_system},
@@ -294,7 +309,25 @@ def generate_improvement(handler, phone: str, target_message: dict,
             ],
         )
         handler._record_usage(phone, "improvement", analysis_model, response)
-        return (response.choices[0].message.content or "").strip()
+        choice = response.choices[0]
+        msg = choice.message
+        # Robust content read: some models leave ``content`` empty and put the
+        # text in ``reasoning_content``/``reasoning``; fall back to those.
+        text = (msg.content or "").strip()
+        if not text:
+            text = (getattr(msg, "reasoning_content", None)
+                    or getattr(msg, "reasoning", None) or "").strip()
+        if not text:
+            # Never return "" — that renders as a bare "🔧 Análise de melhoria"
+            # card. Surface the reason so a recurrence is diagnosable.
+            finish = getattr(choice, "finish_reason", None)
+            logger.warning(
+                "Improvement analysis returned empty content for %s "
+                "(model=%s, finish_reason=%s)", phone, analysis_model, finish)
+            return ("[WhatsBot] O modelo não retornou texto de análise "
+                    f"(finish_reason={finish}). Tente gerar novamente ou troque "
+                    "o modelo em Configurações → IA.")
+        return text
     except Exception as e:
         logger.error("Improvement analysis failed for %s: %s", phone, e)
         return f"[WhatsBot] Falha ao gerar a análise de melhoria: {e}"
