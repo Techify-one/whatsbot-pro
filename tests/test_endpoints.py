@@ -1720,6 +1720,20 @@ check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"
 check("pfield -> round-trip scope+key",
       _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
       and _v1.get("group_attr_key") == "motivo_abertura")
+# favorite_filters: default None; create com lista faz round-trip; update com _UNSET preserva,
+# None limpa. Espelha o modelo de available_filters.
+check("create view -> favorite_filters default None", _v1.get("favorite_filters") is None)
+_vf, _evf = _alogic.create_kanban_view(name="Favoritos", scope="personal", group_by="status",
+                                       available_filters=["status", "atendente", "periodo"],
+                                       favorite_filters=["status", "periodo"], owner_user_id=101)
+check("create view -> favorite_filters round-trip",
+      _evf is None and _vf.get("favorite_filters") == ["status", "periodo"])
+_vf2, _evf2 = _alogic.update_kanban_view(_vf["id"], name="Favoritos v2")
+check("update sem favorite_filters -> preserva (_UNSET)",
+      _evf2 is None and _vf2.get("favorite_filters") == ["status", "periodo"])
+_vf3, _evf3 = _alogic.update_kanban_view(_vf["id"], favorite_filters=None)
+check("update favorite_filters=None -> limpa", _evf3 is None and _vf3.get("favorite_filters") is None)
+_alogic.delete_kanban_view(_vf["id"])
 _v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
                                       group_date_mode="mes", owner_user_id=101)
 check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
