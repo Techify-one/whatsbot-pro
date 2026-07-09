@@ -187,6 +187,21 @@ class OutboundRouter:
         except Exception:  # noqa: BLE001
             logger.debug("mark_read failed on %s", channel_id, exc_info=True)
 
+    def fetch_avatar(self, channel_id: str, chat_id: str) -> bytes | None:
+        """Profile photo bytes for ``chat_id`` on ``channel_id`` (plano 38 F5), via the
+        channel's ``fetch_avatar`` hook. Returns ``None`` when the channel has no live
+        instance or its provider doesn't implement avatars (Telegram/Cloud) — the
+        ``None`` is the gate, so no cross-provider GOWA fetch ever happens."""
+        inst = self.get(channel_id)
+        if inst is None or not chat_id:
+            return None
+        try:
+            data = inst.fetch_avatar(chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("fetch_avatar failed on %s", channel_id, exc_info=True)
+            return None
+        return data if isinstance(data, bytes) else None
+
     def react(self, channel_id: str, chat_id: str, msg_id: str, emoji: str) -> None:
         if not self.supports(channel_id, "reactions"):
             return

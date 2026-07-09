@@ -155,7 +155,12 @@ def build_test_app(
         from tests.fakes import FakeGowaClient
         gowa_client = FakeGowaClient()
     gowa_manager = MagicMock()
-    agent_handler = AgentHandler(api_key="test-key-fake", max_context_messages=10)
+    # Mirror production (main.py): the handler's global default_ai_enabled is seeded
+    # from settings, so a settings_overrides={"default_ai_enabled": ...} reaches the
+    # per-conversation seed (plano 38 F1) exactly as it does live.
+    agent_handler = AgentHandler(
+        api_key="test-key-fake", max_context_messages=10,
+        default_ai_enabled=settings.get("default_ai_enabled", True))
 
     application = create_app(
         settings=settings,

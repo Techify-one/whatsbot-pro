@@ -193,9 +193,14 @@ class ContactMemory:
             # pode forçar reopen=False p/ NÃO reabrir uma conversa fechada (ex.: a mensagem
             # de avaliação enviada no FECHAR do protocolo não deve reabrir o atendimento).
             reopen_closed = (role in ("user", "assistant")) if reopen is None else bool(reopen)
+            # plano 38 F1: seed a brand-new conversation's ai_active from the
+            # PER-CHANNEL "IA padrão p/ novos contatos" toggle (self._default_ai_enabled,
+            # already resolved via ai_settings in handler._get_contact) instead of only
+            # the global default. Only applies on CREATE — a reopen never re-seeds.
+            seed = 1 if self._default_ai_enabled else 0
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._jid(), reopen_if_closed=reopen_closed,
-                inbox_id=self.inbox_id, origin=origin)
+                inbox_id=self.inbox_id, origin=origin, ai_active_seed=seed)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
