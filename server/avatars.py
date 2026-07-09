@@ -33,18 +33,22 @@ def avatar_version(settings, phone: str) -> int:
         return 0
 
 
-async def refresh_avatar(deps, phone: str) -> bool:
-    """Fetch the current avatar from GOWA and overwrite the cached file if it is
-    new or has changed. Returns True when the file was created/updated.
+async def refresh_avatar(deps, phone: str, channel_id: str = "default") -> bool:
+    """Fetch the current avatar via the contact's CHANNEL and overwrite the cached
+    file if it is new or has changed. Returns True when the file was created/updated.
 
-    Best-effort: never raises. When GOWA returns no avatar, the existing cache
-    (if any) is kept untouched.
+    plano 38 F5: routed through ``outbound_router.fetch_avatar`` (the channel's
+    ``fetch_avatar`` hook) instead of a hardcoded ``gowa_client.get_avatar``, so a
+    contact that lives only on Telegram/Cloud (whose provider returns ``None``) never
+    triggers a GOWA fetch. Best-effort: never raises. When the channel returns no
+    avatar, the existing cache (if any) is kept untouched.
     """
     if not phone:
         return False
     path = avatars_dir(deps.settings) / f"{phone}.jpg"
     try:
-        data = await asyncio.to_thread(deps.gowa_client.get_avatar, phone)
+        data = await asyncio.to_thread(
+            deps.outbound_router.fetch_avatar, channel_id or "default", phone)
     except Exception as e:
         logger.debug("[Avatar] refresh fetch failed for %s: %s", phone, e)
         return False
@@ -61,10 +65,10 @@ async def refresh_avatar(deps, phone: str) -> bool:
         return False
 
 
-async def refresh_and_broadcast(deps, phone: str) -> bool:
+async def refresh_and_broadcast(deps, phone: str, channel_id: str = "default") -> bool:
     """Refresh a single avatar; if it changed, broadcast ``avatar_updated`` with
     the new version so connected clients update without a reload."""
-    changed = await refresh_avatar(deps, phone)
+    changed = await refresh_avatar(deps, phone, channel_id)
     if changed:
         try:
             await deps.ws_manager.broadcast(

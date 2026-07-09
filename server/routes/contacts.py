@@ -8,7 +8,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import File, Form, Request, Response, UploadFile
+from fastapi import Body, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from gowa.client import GOWASendError
 
@@ -225,16 +225,21 @@ def register_routes(app, deps):
             "Fora da janela de 24h: só é possível enviar um template aprovado.",
             status=409, data={"reason": "session_window_closed"})
 
-    async def _send_read_receipts(phone: str, msg_ids: list[str]):
-        """Send read receipts to GOWA in background (best-effort)."""
+    async def _send_read_receipts(phone: str, msg_ids: list[str], channel_id: str = "default"):
+        """Send read receipts via the conversation's channel (best-effort, plano 38 F3).
+
+        Routed through ``outbound.mark_read`` (capability/registry) instead of a
+        hardcoded ``gowa_client.mark_as_read`` so a Telegram/Cloud conversa não
+        recebe um receipt GOWA para um id que o GOWA não resolve. ``mark_read`` já
+        no-op sem canal vivo."""
         for mid in msg_ids:
             # Notas privadas notificadas carregam um msg_id sintético ("pn:…") que não
             # existe no provedor — nunca mandar read-receipt dele.
             if str(mid).startswith("pn:"):
                 continue
             try:
-                await asyncio.to_thread(gowa_client.mark_as_read, mid, phone)
-                logger.info("[ReadReceipt] Sent for %s msg %s", phone, mid)
+                await asyncio.to_thread(outbound.mark_read, channel_id, phone, mid)
+                logger.info("[ReadReceipt] Sent for %s msg %s (channel=%s)", phone, mid, channel_id)
             except Exception as e:
                 logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
 
@@ -622,9 +627,15 @@ def register_routes(app, deps):
         if data is None or data == "__hidden__":
             return _err("Contato não encontrado.", status=404)
         if msg_ids:
-            asyncio.create_task(_send_read_receipts(phone, msg_ids))
-        # Check group send permissions (fresh check on every contact load)
-        if data.get("is_group") and state.bot_phone:
+            # plano 38 F3: route the receipt through the viewed conversation's channel
+            # (falls back to 'default'/GOWA on the legacy all-channels view).
+            asyncio.create_task(_send_read_receipts(
+                phone, msg_ids, data.get("channel_id") or "default"))
+        # Check group send permissions (fresh check on every contact load). plano 38 F4:
+        # only for channels whose provider supports groups (GOWA) — a Telegram/Cloud
+        # group must not fire the GOWA-specific can_bot_send_in_group.
+        group_channel = data.get("channel_id") or "default"
+        if data.get("is_group") and state.bot_phone and outbound.supports(group_channel, "groups"):
             try:
                 can_send = await asyncio.to_thread(
                     gowa_client.can_bot_send_in_group, phone, state.bot_phone)
@@ -640,7 +651,9 @@ def register_routes(app, deps):
         # background; if the photo changed, an `avatar_updated` WS event updates
         # it live. Include the current version for immediate cache-busting.
         data["avatar_v"] = avatar_version(settings, phone)
-        asyncio.create_task(refresh_and_broadcast(deps, phone))
+        # plano 38 F5: refresh via the viewed conversation's channel (default/GOWA on
+        # the legacy all-channels view). A Telegram/Cloud-only contact won't hit GOWA.
+        asyncio.create_task(refresh_and_broadcast(deps, phone, data.get("channel_id") or "default"))
         return _ok(data)
 
     @app.delete("/api/contacts/{phone}")
@@ -1781,7 +1794,7 @@ def register_routes(app, deps):
         return _ok({"status": "ok"})
 
     @app.post("/api/contacts/{phone}/read")
-    async def mark_contact_read(phone: str, request: Request):
+    async def mark_contact_read(phone: str, request: Request, body: dict = Body(default={})):
         """Mark all messages from this contact as read (reset unread_count)."""
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -1791,7 +1804,9 @@ def register_routes(app, deps):
             return contact.mark_as_read()
         msg_ids = await asyncio.to_thread(_mark)
         if msg_ids:
-            asyncio.create_task(_send_read_receipts(phone, msg_ids))
+            # plano 38 F3: route the receipt through the conversation's channel.
+            channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+            asyncio.create_task(_send_read_receipts(phone, msg_ids, channel_id))
         return _ok({"message": "Marcado como lido."})
 
     @app.post("/api/contacts/mark-all-unread")
@@ -1889,8 +1904,10 @@ def register_routes(app, deps):
         return _ok({"ai_enabled": result})
 
     @app.get("/api/contacts/{phone}/avatar")
-    async def get_contact_avatar(phone: str, request: Request):
-        """Return contact's WhatsApp profile photo (cached on disk)."""
+    async def get_contact_avatar(phone: str, request: Request,
+                                 conversation_id: int | None = None,
+                                 channel_id: str | None = None):
+        """Return contact's profile photo (cached on disk)."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
@@ -1901,9 +1918,11 @@ def register_routes(app, deps):
         if avatar_path.exists():
             return FileResponse(str(avatar_path), media_type="image/jpeg")
 
-        # Fetch from GOWA on-demand
+        # plano 38 F5: fetch on-demand via the contact's channel (registry hook), not a
+        # hardcoded GOWA call. A Telegram/Cloud-only contact returns None → 204.
+        channel = _channel_for(phone, conversation_id, channel_id)
         try:
-            data = await asyncio.to_thread(gowa_client.get_avatar, phone)
+            data = await asyncio.to_thread(outbound.fetch_avatar, channel, phone)
         except Exception:
             data = None
 

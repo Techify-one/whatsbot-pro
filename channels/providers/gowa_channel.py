@@ -309,6 +309,17 @@ class GOWAChannel(Channel):
         except Exception:  # noqa: BLE001
             logger.debug("gowa revoke failed", exc_info=True)
 
+    def fetch_avatar(self, chat_id: str) -> bytes | None:
+        """Profile photo bytes via this device's GOWA ``/user/avatar`` (plano 38 F5)."""
+        if self._client is None:
+            return None
+        try:
+            data = self._client.get_avatar(chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("gowa fetch_avatar failed", exc_info=True)
+            return None
+        return data if isinstance(data, bytes) else None
+
     def check_phone(self, phone: str) -> dict:
         """Verify the number on WhatsApp via GOWA ``/user/check`` (resolves the BR
         canonical phone too). Propagates ``GOWASendError`` so the caller can surface

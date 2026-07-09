@@ -199,9 +199,15 @@ class ContactMemory:
             # (regra padrão) e reopen=True seguem criando aberta. Uma conversa já existente cai
             # no ramo de reabrir/manter do repo, então create_closed não a afeta.
             create_closed = (reopen is False)
+            # plano 38 F1: seed a brand-new conversation's ai_active from the
+            # PER-CHANNEL "IA padrão p/ novos contatos" toggle (self._default_ai_enabled,
+            # already resolved via ai_settings in handler._get_contact) instead of only
+            # the global default. Only applies on CREATE — a reopen never re-seeds.
+            seed = 1 if self._default_ai_enabled else 0
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._jid(), reopen_if_closed=reopen_closed,
-                inbox_id=self.inbox_id, origin=origin, create_closed=create_closed)
+                inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
+                ai_active_seed=seed)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
