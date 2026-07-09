@@ -66,6 +66,16 @@ class GOWAChannel(Channel):
         self._client = gowa_client
         self._manager = gowa_manager
 
+    # ── source_id form (dedup key — plano 42) ────────────────────────
+    @classmethod
+    def source_id_for(cls, phone: str, is_group: bool) -> str:
+        """WhatsApp JID form: ``<phone>@g.us`` for groups, ``<phone>@s.whatsapp.net``
+        otherwise — byte-identical to the pre-plano-42 ``ContactMemory._jid`` and the
+        migration 0013 backfill, so existing ``contact_inboxes.source_id`` rows keep
+        resolving. ``is_group`` (from the contact row) selects group vs person."""
+        suffix = "g.us" if is_group else "s.whatsapp.net"
+        return f"{phone}@{suffix}"
+
     # ── Provider descriptor (plano 33) ───────────────────────────────
     @classmethod
     def provider_descriptor(cls) -> dict:

@@ -36,6 +36,7 @@ from plugins.events import (
     register_plugin_filters,
     emit as emit_event,
 )
+from server import balance_monitor
 from server.balance_monitor import set_runtime as _set_balance_runtime
 
 logger = logging.getLogger(__name__)
@@ -292,6 +293,12 @@ def create_app(
         from app.services.ws_projections import register_lifecycle_ws_projection
         register_lifecycle_ws_projection(ws_manager)
         _set_balance_runtime(ws_manager, _loop, settings)
+        # plano 42 C: seed the balance cache at boot (fire-and-forget) so the first
+        # GET /api/balance serves a cached snapshot before any LLM call primes it —
+        # closing the window the old 502 lived in. A dead/slow proxy just no-ops.
+        _bal_key = settings.get("openrouter_api_key", "")
+        if _bal_key:
+            _loop.create_task(balance_monitor.prime_cache(_bal_key))
         # Lifecycle: plugins finished loading + bus is live, now broadcast
         for loaded in registry.loaded.values():
             emit_event("plugin.loaded", {

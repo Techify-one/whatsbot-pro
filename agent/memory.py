@@ -34,6 +34,44 @@ def resolve_inbox_id(channel_id: str) -> int:
     return inbox_id
 
 
+# channel_id -> provider name cache (plano 42). A channel's provider is immutable
+# for the life of the channel, so a process-lifetime cache with no TTL is safe —
+# same rationale as _INBOX_BY_CHANNEL above.
+_PROVIDER_BY_CHANNEL: dict[str, str | None] = {}
+
+
+def _resolve_provider_class(channel_id: str):
+    """Provider CLASS that owns ``channel_id`` (plano 42 A1), or ``None``.
+
+    Resolves the provider NAME from the channel row (cached process-lifetime) and
+    the CLASS from the wired ChannelRegistry — the only registry that also carries
+    plugin providers. Cycle-free: ``plugins.context`` only TYPE_CHECKING-imports
+    ``agent.memory``, and ``agent.prompt_builder`` already uses this same accessor
+    from the agent layer. Returns ``None`` whenever unresolved (registry not wired
+    — e.g. tests/legacy — channel row missing, or provider not registered) so the
+    caller falls back byte-identically to the WhatsApp JID form."""
+    cid = channel_id or DEFAULT_CHANNEL_ID
+    if cid in _PROVIDER_BY_CHANNEL:
+        provider = _PROVIDER_BY_CHANNEL[cid]
+    else:
+        try:
+            from db.repositories import channel_repo
+            row = channel_repo.get(cid)
+            provider = (row or {}).get("provider")
+        except Exception:
+            logger.exception("Falha ao resolver provider do canal %s", cid)
+            provider = None
+        _PROVIDER_BY_CHANNEL[cid] = provider
+    if not provider:
+        return None
+    try:
+        from plugins.context import get_channel_runtime
+        registry, _outbound, _ingest = get_channel_runtime()
+        return registry.get_provider(provider) if registry is not None else None
+    except Exception:
+        return None
+
+
 class TagRegistry:
     """Global tag registry backed by the tags table."""
 
@@ -164,9 +202,28 @@ class ContactMemory:
         )
 
     def _jid(self) -> str:
-        """Reconstruct the WhatsApp JID, mirroring the 0013 backfill (source_id)."""
+        """Historical WhatsApp JID form, mirroring the 0013 backfill (source_id).
+        The fail-safe when the provider can't be resolved (registry not wired in
+        tests/legacy) — see :meth:`_source_id`."""
         suffix = "g.us" if self.is_group else "s.whatsapp.net"
         return f"{self.phone}@{suffix}"
+
+    def _source_id(self) -> str:
+        """Channel-native ``source_id`` for this contact's conversation, resolved via
+        the PROVIDER of ``self.channel_id`` (plano 42 A1). GOWA keeps the WhatsApp
+        JID suffix; native-id providers (Telegram/Cloud) use the bare id. Fail-safe:
+        on any unresolved provider it falls back to :meth:`_jid` (WhatsApp suffix),
+        byte-identical to the pre-plano-42 behavior — so nothing regresses for the
+        default GOWA channel or in the test suite (which typically doesn't wire the
+        channel registry)."""
+        cls = _resolve_provider_class(self.channel_id)
+        if cls is not None:
+            try:
+                return cls.source_id_for(self.phone, self.is_group)
+            except Exception:
+                logger.exception("source_id_for falhou no canal %s; usando JID",
+                                 self.channel_id)
+        return self._jid()
 
     def _resolve_conversation(self, role: str, *,
                               reopen: bool | None = None) -> tuple[dict | None, int | None, str | None]:
@@ -205,7 +262,7 @@ class ContactMemory:
             # the global default. Only applies on CREATE — a reopen never re-seeds.
             seed = 1 if self._default_ai_enabled else 0
             conv, transition = conversation_repo.resolve_for_contact_ex(
-                self.id, self._jid(), reopen_if_closed=reopen_closed,
+                self.id, self._source_id(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
                 ai_active_seed=seed)
             return conv, conv["id"], transition

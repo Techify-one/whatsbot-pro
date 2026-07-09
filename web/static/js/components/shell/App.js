@@ -252,7 +252,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/balance', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (res && res.ok && res.data && res.data.low_balance_enabled && res.data.below_threshold) {
+        // plano 42 C: available===false is the degraded shape (proxy down, no
+        // cache) — never open the modal for it (it also lacks below_threshold).
+        if (res && res.ok && res.data && res.data.available !== false && res.data.low_balance_enabled && res.data.below_threshold) {
           setLowBalance({
             remaining: res.data.remaining,
             total_credits: res.data.total_credits,
