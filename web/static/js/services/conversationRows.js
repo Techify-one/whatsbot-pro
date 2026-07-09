@@ -465,6 +465,19 @@ export function upsertConversationRow(prev, incoming) {
     for (const k of UPSERT_MSG_FIELDS) {
       if (incoming[k] !== undefined) patch[k] = incoming[k];
     }
+    // Rajada de mensagens (envio rápido / concorrente): vários `conversation_upsert`
+    // saem com o MESMO `last_message_ts` (todos veem a última mensagem) mas com
+    // `unread_count` fora de ordem (ex.: 3,4,4,5) porque cada emit lê o subquery num
+    // instante diferente. Como o "último a chegar" venceria com um valor defasado, o
+    // badge travava abaixo do real. Quando o ts NÃO avança (mesmo instante), a
+    // não-lida só CRESCE até ser lida (a leitura zera por outro evento: messages_read
+    // / abrir a conversa) — então pega o MAX para convergir na contagem verdadeira.
+    if (incomingTs === existingTs) {
+      if (incoming.unread_count !== undefined)
+        patch.unread_count = Math.max(existing.unread_count || 0, incoming.unread_count || 0);
+      if (incoming.unread_ai_count !== undefined)
+        patch.unread_ai_count = Math.max(existing.unread_ai_count || 0, incoming.unread_ai_count || 0);
+    }
   }
   // Activity/sort bump is always forward-only.
   patch.updated_at = Math.max(existing.updated_at || 0, incoming.updated_at || 0);
