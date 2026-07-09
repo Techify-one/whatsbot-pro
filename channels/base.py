@@ -259,6 +259,15 @@ class Channel(ABC):
     def react(self, chat_id: str, msg_id: str, emoji: str) -> None: ...
     def revoke(self, chat_id: str, msg_id: str) -> None: ...
 
+    def fetch_avatar(self, chat_id: str) -> Optional[bytes]:
+        """Current profile photo bytes for ``chat_id`` (plano 38 F5), or ``None``.
+
+        Optional hook: avatar caching is a per-provider feature. The default returns
+        ``None`` — the ``None`` IS the gate, so a provider that doesn't implement it
+        (Telegram/Cloud) never triggers a GOWA fetch and the cache is left untouched.
+        GOWA overrides it (calls its device-scoped ``get_avatar``)."""
+        return None
+
     def send_template(self, *args, **kwargs) -> SendResult:
         raise NotImplementedError(f"{self.provider} does not support templates")
 

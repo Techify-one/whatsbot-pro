@@ -127,7 +127,8 @@ def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
 
 
 def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
-                        opened_at: float | None, origin: str | None) -> tuple[dict, bool]:
+                        opened_at: float | None, origin: str | None,
+                        ai_active_seed: int | None = None) -> tuple[dict, bool]:
     """Race-safe get-or-create of the OPEN conversation for (contact, inbox).
 
     Closes the brand-new-contact double-create: when two inbound messages of a
@@ -155,7 +156,8 @@ def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int
             row = _insert_conversation(
                 conn, inbox_id=inbox_id, contact_id=contact_id,
                 contact_inbox_id=contact_inbox_id, opened_at=opened_at,
-                ai_active=None, is_archived=0, active_agent_key=None, origin=origin)
+                ai_active=ai_active_seed, is_archived=0, active_agent_key=None,
+                origin=origin)
             return row, True
     except IntegrityError:
         # Loser of the open-conversation race (uq_atend_open_contact_inbox): the
@@ -245,7 +247,8 @@ def get_open_for_contact_scoped(contact) -> dict | None:
 def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool = False,
                            opened_at: float | None = None,
                            inbox_id: int = DEFAULT_INBOX_ID,
-                           origin: str | None = None) -> tuple[dict, str | None]:
+                           origin: str | None = None,
+                           ai_active_seed: int | None = None) -> tuple[dict, str | None]:
     """Like :func:`resolve_for_contact` but also reports the lifecycle transition.
 
     Returns ``(conv, event)`` where ``event`` is ``"created"`` (a brand-new
@@ -263,6 +266,12 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     thread (``event=None``) instead of creating a duplicate. Multiple CLOSED
     conversations per contact/inbox remain allowed (the atendimento model keeps
     the history).
+
+    ``ai_active_seed`` (plano 38 F1) is the per-channel ``default_ai_enabled`` toggle
+    (``1``/``0``) resolved by the caller (``ContactMemory`` already holds it). It seeds
+    ``ai_active`` ONLY on a brand-new conversation (CREATE); a reopen never re-seeds
+    (preserves a manual pause). ``None`` keeps the legacy global fallback
+    (:func:`_default_ai_enabled`), so callers that don't pass it are byte-identical.
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(
@@ -271,7 +280,7 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     if conv is None:
         row, created = _create_open_atomic(
             inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
-            opened_at=opened_at, origin=origin)
+            opened_at=opened_at, origin=origin, ai_active_seed=ai_active_seed)
         return row, ("created" if created else None)
     if reopen_if_closed and conv["status"] == "closed":
         return set_status(conv["id"], "open"), "reopened"
@@ -382,6 +391,23 @@ def get_with_channel(conv_id: int) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(stmt).mappings().first()
     return _finalize_conv(row) if row else None
+
+
+def channel_id_for_contact(contact_id: int) -> str | None:
+    """The channel of a contact's MOST RECENT conversation (plano 38 F6).
+
+    Lets a per-contact background job (avatar sweep) route through the right provider
+    instead of assuming GOWA. ``None`` when the contact has no conversation yet (skip)
+    or resolution fails. Best-effort — never raises."""
+    try:
+        conv = get_latest_for_contact(contact_id)
+        if conv is None:
+            return None
+        enriched = get_with_channel(conv["id"])
+        return enriched.get("channel_id") if enriched else None
+    except Exception:
+        logger.debug("channel_id_for_contact failed for %s", contact_id, exc_info=True)
+        return None
 
 
 def get_row_for_broadcast(conv_id: int) -> dict | None:

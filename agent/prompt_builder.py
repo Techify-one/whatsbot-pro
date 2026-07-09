@@ -23,9 +23,27 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from agent import group_mentions
-from plugins.context import PromptContext
+from plugins.context import PromptContext, get_channel_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _channel_supports_groups(channel_id: str | None) -> bool:
+    """Whether ``channel_id``'s provider supports groups (plano 38 F7).
+
+    Capability-driven via the wired ``outbound_router`` (never ``if provider ==``).
+    Fail-open to ``True`` when the runtime isn't wired (legacy/tests) or the channel
+    is unknown — preserves the previous behavior (GOWA is the default) so nothing
+    that worked before goes silent; only a channel that explicitly declares
+    ``groups=False`` (Telegram/Cloud) is gated out."""
+    _registry, outbound, _ingest = get_channel_runtime()
+    if outbound is None:
+        return True
+    cid = channel_id or "default"
+    inst = outbound.get(cid)
+    if inst is None:
+        return True
+    return outbound.supports(cid, "groups")
 
 
 def build_system_prompt(handler, contact, base_prompt: str | None = None,
@@ -43,17 +61,22 @@ def build_system_prompt(handler, contact, base_prompt: str | None = None,
         gname = f" chamado '{contact.group_name}'" if contact.group_name else ""
         prompt += (
             f"\n\n--- Contexto de grupo ---\n"
-            f"Esta é uma conversa de grupo do WhatsApp{gname}.\n"
+            f"Esta é uma conversa de grupo{gname}.\n"
             "As mensagens de usuários estão no formato '[Nome]: mensagem'.\n"
             "Quando responder, leve em conta quem fez a pergunta e responda "
             "de forma natural ao grupo.\n"
             "--- Fim do contexto de grupo ---"
         )
-        # Inject participant names so the AI can @mention a specific member.
-        try:
-            members = group_mentions.get_members(contact.phone)
-        except Exception:
-            members = []
+        # Inject participant names so the AI can @mention a specific member — só para
+        # canais cujo provider suporta grupos (GOWA). plano 38 F7: um grupo de outro
+        # provider (Telegram/Cloud) não dispara o get_group_info do GOWA com um id que
+        # o GOWA não resolve; sem capability → lista de membros vazia (fallback atual).
+        members = []
+        if _channel_supports_groups(getattr(contact, "channel_id", None)):
+            try:
+                members = group_mentions.get_members(contact.phone)
+            except Exception:
+                members = []
         named = [m["name"] for m in members if m.get("name")]
         if named:
             prompt += (
