@@ -113,7 +113,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     ctxMenu, setCtxMenu, ctxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleResolveConversation,
     handleCreateTag, applyTagResults, resolveAssignee,
   } = actions;
 
@@ -405,9 +405,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           convLoading=${ctxConv.loading}
           convError=${ctxConv.error}
           users=${users}
+          agentsUsers=${agentsUsers}
+          agentsAi=${agentsAi}
           currentUserId=${currentUserId}
           currentUser=${currentUser}
           onAssignConversation=${handleAssignConversation}
+          onAssignAgent=${handleAssignAgent}
           onResolveConversation=${handleResolveConversation}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => {
