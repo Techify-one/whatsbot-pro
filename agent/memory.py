@@ -193,9 +193,15 @@ class ContactMemory:
             # pode forçar reopen=False p/ NÃO reabrir uma conversa fechada (ex.: a mensagem
             # de avaliação enviada no FECHAR do protocolo não deve reabrir o atendimento).
             reopen_closed = (role in ("user", "assistant")) if reopen is None else bool(reopen)
+            # regra "ignorar abertura": um caller que força reopen=False p/ NÃO reabrir também
+            # NÃO deve ABRIR um atendimento num contato NOVO — cria a conversa já FECHADA (a
+            # mensagem fica salva/visível, sem atendimento aberto nem protocolo). reopen=None
+            # (regra padrão) e reopen=True seguem criando aberta. Uma conversa já existente cai
+            # no ramo de reabrir/manter do repo, então create_closed não a afeta.
+            create_closed = (reopen is False)
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._jid(), reopen_if_closed=reopen_closed,
-                inbox_id=self.inbox_id, origin=origin)
+                inbox_id=self.inbox_id, origin=origin, create_closed=create_closed)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)

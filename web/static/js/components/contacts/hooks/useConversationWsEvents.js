@@ -19,6 +19,8 @@
 // with the selection hook's detail loader so reads gate on the same visibility.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
+import { notify } from '../../../services/notify.js';
+import { showBrowserNotification, playNotificationSound, getNotifPref } from '../../../utils/notifications.js';
 import { optimisticDupIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
@@ -54,6 +56,8 @@ export function useConversationWsEvents(opts) {
     pageVisibleRef,
     // selection: background re-fetch of the OPEN thread (plano 33 F2)
     reloadOpenThread,
+    // usuário logado — filtra `mention_created` (colaboração estilo Chatwoot)
+    currentUserId,
   } = opts;
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
@@ -64,9 +68,12 @@ export function useConversationWsEvents(opts) {
   const aiTypingTimers = useRef({});
   const convListRefetchTimer = useRef(null);   // debounce for membership-change refetch
   const listRefetchTimer = useRef(null);       // debounce/coalesce for new-conversation refetch
+  const openReadSyncTimer = useRef(null);      // debounce: sync backend read of the OPEN conversa (nota privada)
   const wsConnectedOnceRef = useRef(false);    // skip the first WS connect (initial fetch covers it)
   const reloadOpenThreadRef = useRef(null);    // plano 33 F2 — freshest thread reloader for the []-dep onWsConnect
   reloadOpenThreadRef.current = reloadOpenThread;
+  const currentUserIdRef = useRef(null);       // freshest logged-in user id for the []-dep mention handler
+  currentUserIdRef.current = currentUserId;
 
   // Coalesce every "a conversation not in the list just changed" trigger
   // (new_message for an unknown row, conversation_created, WS reconnect) into ONE
@@ -103,7 +110,7 @@ export function useConversationWsEvents(opts) {
       if (visible && selectedRef.current) {
         markAsRead(selectedRef.current);
         setContacts(prev => prev.map(c =>
-          isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
+          isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
         ));
       }
     };
@@ -127,7 +134,52 @@ export function useConversationWsEvents(opts) {
     // reads data.conversation_id) does not apply; handle it first and return.
     if (name === 'conversation_upsert') {
       if (data == null || data.id == null) return;
-      setContacts(prev => upsertConversationRow(prev, convRowToSidebarRow(data)));
+      const row = convRowToSidebarRow(data);
+      // Se a conversa está ABERTA e a aba visível, o operador já está vendo tudo →
+      // considerar lida: zera o badge LOCALMENTE (sem flash verde de nota privada
+      // própria). NÃO chama markAsRead por-evento: durante um envio em rajada isso
+      // apagava as linhas de não-lida no meio da rajada e cada `conversation_upsert`
+      // emitia unread_count=1 → o badge de uma conversa NÃO aberta ficava travado em
+      // "1" em vez da contagem real. Em vez disso, agenda UM markAsRead (debounce) que
+      // só dispara se eu ainda estiver na conversa — mantém a contagem correta para
+      // conversas não abertas e zera a aberta sem corromper nada.
+      if (pageVisibleRef.current && isOpenRow(row)
+          && ((row.unread_count || 0) > 0 || (row.unread_ai_count || 0) > 0)) {
+        row.unread_count = 0;
+        row.unread_ai_count = 0;
+        const _phone = row.phone;
+        const _convId = row.conversation_id;
+        if (_phone) {
+          if (openReadSyncTimer.current) clearTimeout(openReadSyncTimer.current);
+          openReadSyncTimer.current = setTimeout(() => {
+            // Só sincroniza se AINDA estou vendo esta mesma conversa e a aba visível.
+            if (pageVisibleRef.current
+                && (selectedConvIdRef.current === _convId
+                    || (_convId == null && selectedRef.current === _phone))) {
+              markAsRead(_phone);
+            }
+          }, 500);
+        }
+      }
+      setContacts(prev => upsertConversationRow(prev, row));
+      return;
+    }
+    // Menção INTERNA numa nota privada (colaboração estilo Chatwoot). Só reage se EU
+    // fui mencionado: acende o badge "@" na linha + toast + (opcional) som/desktop.
+    // A conversa atualmente ABERTA já vai ler a menção ao carregar — não incomoda.
+    if (name === 'mention_created') {
+      const uid = currentUserIdRef.current;
+      const targets = (data && data.mentioned_user_ids) || [];
+      if (uid == null || !targets.includes(uid)) return;
+      const convId = data.conversation_id;
+      if (convId != null && selectedConvIdRef.current === convId) return;  // já estou nela
+      setContacts(prev => prev.map(c =>
+        c.conversation_id === convId ? { ...c, has_user_mention: true } : c));
+      const who = data.actor_name ? `${data.actor_name} mencionou você` : 'Você foi mencionado';
+      const body = data.preview ? `${who}: ${data.preview}` : who;
+      notify(body, { kind: 'info' });
+      if (getNotifPref('browser')) showBrowserNotification('WhatsBot — menção', body);
+      if (getNotifPref('sound')) playNotificationSound();
       return;
     }
     const cid = data && data.contact_id;

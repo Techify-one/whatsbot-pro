@@ -13,8 +13,8 @@
 // candidate filtering); this hook keeps the state, the fetch effects, the
 // caret-aware insertion, and the keyboard navigation. Behavior-preserving: same
 // regexes, same debounce-free open/close, same member-roster live update.
-import { useState, useEffect } from 'preact/hooks';
-import { getGroupMembers, getQuickReplies } from '../../../services/api.js';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import { getGroupMembers, getQuickReplies, getAssignableAgents } from '../../../services/api.js';
 import {
   detectMentionToken, detectQuickReplyToken, replaceToken,
   mentionLabel, mentionCandidates, quickReplyCandidates,
@@ -32,9 +32,17 @@ import {
  */
 export function useTokenAutocomplete({
   phone, sandbox, contact, groupParticipantsChanged, input, setInput, inputRef,
+  mode = 'reply',
 }) {
   // Group @mention autocomplete: list of participants + open menu state.
   const [members, setMembers] = useState([]);
+  // @mention INTERNA (nota privada, estilo Chatwoot): atendentes do painel +
+  // um item "Time (caixa)". Fonte = /assignable-agents. As escolhas são rastreadas
+  // por rótulo → user_id (picksRef) e o flag de time, lidos no envio (collectMentions).
+  const [internalAgents, setInternalAgents] = useState([]);
+  const picksRef = useRef(new Map());   // '@Nome' inserido -> user_id
+  const teamPickedRef = useRef(false);  // "@Time" escolhido?
+  const isPrivate = mode === 'private';
   // mentionMenu: { query, start (index of '@' in input), index (highlighted) } | null
   const [mentionMenu, setMentionMenu] = useState(null);
   // Quick replies (plano 04): global list loaded once + the "/atalho" menu.
@@ -55,6 +63,23 @@ export function useTokenAutocomplete({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [phone, contact && contact.is_group]);
+
+  // Fetch internal agents (painel) for private-note @mention autocomplete. Cheap,
+  // loaded once when the private composer is first used.
+  useEffect(() => {
+    if (sandbox || !isPrivate || internalAgents.length) return;
+    let cancelled = false;
+    getAssignableAgents()
+      .then(res => { if (!cancelled && res && res.ok) setInternalAgents(res.data.users || []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isPrivate, sandbox]);
+
+  // Trocar de conversa zera as escolhas de menção pendentes (não vazam para outra thread).
+  useEffect(() => {
+    picksRef.current = new Map();
+    teamPickedRef.current = false;
+  }, [phone]);
 
   // A member joined/left the OPEN group. The server already applied the delta
   // (added member with its push name, or dropped a removed one) and ships the
@@ -89,15 +114,31 @@ export function useTokenAutocomplete({
 
   // Candidate getters (pure parsing delegated to composerTokens).
   function getMentionCandidates(query) {
+    // Nota privada: atendentes internos + "Time (caixa)" (≠ participantes do grupo).
+    if (isPrivate) {
+      const q = (query || '').toLowerCase();
+      const list = [];
+      if (!q || 'time'.startsWith(q) || 'caixa'.startsWith(q) || 'equipe'.startsWith(q)) {
+        list.push({ team: true, name: 'Time (caixa)' });
+      }
+      for (const a of internalAgents) {
+        const name = a.name || a.email || '';
+        if (name.toLowerCase().includes(q)) {
+          list.push({ internal: true, user_id: a.id, name, is_admin: a.is_admin });
+        }
+      }
+      return list.slice(0, 8);
+    }
     return mentionCandidates(query, members);
   }
   function getQuickReplyCandidates(query) {
     return quickReplyCandidates(query, quickReplies);
   }
 
-  // Detect an "@token" at the cursor and open/close the mention menu.
+  // Detect an "@token" at the cursor and open/close the mention menu. Habilitado
+  // em grupos (menção de participante) OU no modo privado (menção de atendente/time).
   function updateMentionMenu(el, val) {
-    if (sandbox || !(contact && contact.is_group)) { setMentionMenu(null); return; }
+    if (sandbox || !(isPrivate || (contact && contact.is_group))) { setMentionMenu(null); return; }
     const pos = (el && el.selectionStart != null) ? el.selectionStart : val.length;
     const tok = detectMentionToken(val.slice(0, pos), pos);
     if (tok) setMentionMenu({ query: tok.query, start: tok.start, index: 0 });
@@ -109,7 +150,15 @@ export function useTokenAutocomplete({
     if (!cand || !mentionMenu) return;
     const el = inputRef.current;
     const pos = (el && el.selectionStart != null) ? el.selectionStart : input.length;
-    const label = cand.special ? 'todos' : mentionLabel(cand);
+    // Rótulo inserido no texto. No modo privado rastreamos a escolha (rótulo → user_id
+    // ou flag de time) para o envio saber os destinatários.
+    let label;
+    if (isPrivate) {
+      if (cand.team) { label = 'Time'; teamPickedRef.current = true; }
+      else { label = cand.name || ''; if (cand.user_id != null) picksRef.current.set(label, cand.user_id); }
+    } else {
+      label = cand.special ? 'todos' : mentionLabel(cand);
+    }
     const { value: newVal, caret } = replaceToken(input, mentionMenu.start, pos, '@' + label + ' ');
     setInput(newVal);
     setMentionMenu(null);
@@ -119,6 +168,22 @@ export function useTokenAutocomplete({
         el.setSelectionRange(caret, caret);
       }
     }, 0);
+  }
+
+  // No envio: dado o texto final, resolve os destinatários realmente presentes (o
+  // operador pode ter apagado um "@Nome"). Zera após enviar via resetMentions.
+  function collectMentions(text) {
+    const t = text || '';
+    const ids = [];
+    for (const [label, uid] of picksRef.current.entries()) {
+      if (t.includes('@' + label)) ids.push(uid);
+    }
+    const mention_inbox = !!(teamPickedRef.current && t.includes('@Time'));
+    return { mentions: Array.from(new Set(ids)), mention_inbox };
+  }
+  function resetMentions() {
+    picksRef.current = new Map();
+    teamPickedRef.current = false;
   }
 
   // Detect a "/token" at the cursor and open/close the quick-reply menu. Unlike
@@ -211,5 +276,6 @@ export function useTokenAutocomplete({
     mentionMenu, setMentionMenu, quickReplyMenu, setQuickReplyMenu,
     getMentionCandidates, getQuickReplyCandidates, mentionLabel,
     updateMenus, applyMention, applyQuickReply, handleMenuKeyDown,
+    collectMentions, resetMentions,
   };
 }

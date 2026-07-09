@@ -417,6 +417,24 @@ test('upsertConversationRow: present → scoped MERGE (message fields only, not 
   assert.equal(row.conv_ai_active, 0);         // NOT clobbered
 });
 
+test('upsertConversationRow: burst with tied last_message_ts converges on MAX unread (not the last-arriving stale count)', () => {
+  // Envio rápido/concorrente de várias mensagens: os `conversation_upsert` saem com o
+  // MESMO last_message_ts mas unread_count fora de ordem (3,4,4,6,5). O badge deve
+  // convergir na contagem real (6), não travar no último a chegar (5).
+  let rows = [{ conversation_id: 42, phone: '5511', last_message: 'a', last_message_ts: 1000, unread_count: 0 }];
+  for (const uc of [3, 4, 4, 6, 5]) {
+    rows = upsertConversationRow(rows, { conversation_id: 42, phone: '5511', last_message: String(uc), last_message_ts: 1000, unread_count: uc });
+  }
+  assert.equal(rows[0].unread_count, 6);          // MAX across the tied-ts burst
+});
+
+test('upsertConversationRow: a NEWER message (ts advances) still overwrites unread downward (read then 1 new)', () => {
+  // Não é rajada: ts avança → sobrescreve normalmente (permite a queda pós-leitura).
+  const prev = [{ conversation_id: 42, phone: '5511', last_message: 'x', last_message_ts: 1000, unread_count: 6 }];
+  const next = upsertConversationRow(prev, { conversation_id: 42, phone: '5511', last_message: 'nova', last_message_ts: 2000, unread_count: 1 });
+  assert.equal(next[0].unread_count, 1);          // ts avançou → overwrite (não MAX)
+});
+
 test('upsertConversationRow: guard — older snapshot never regresses the preview', () => {
   const prev = [{ conversation_id: 42, phone: '5511', last_message: 'novo', last_message_ts: 2000, unread_count: 5 }];
   const stale = convRowToSidebarRow({ ...ENRICHED, last_message: 'velho', last_message_ts: 1000, unread_count: 1 });

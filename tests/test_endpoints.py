@@ -591,6 +591,15 @@ check("notify ON -> atendimento GET 200", _rconv.status_code == 200)
 _conv = (_rconv.json().get("data") or {}).get("conversation") or {}
 check("notify ON -> badge verde por-conversa (unread_count>0)", (_conv.get("unread_count") or 0) > 0)
 
+# Preview + subida ao topo: com a config ligada a nota privada vira a "última mensagem"
+# da sidebar (conteúdo + role + ts), então a linha sobe e desenha o cadeado no front.
+check("notify ON -> preview = conteúdo da nota privada",
+      _conv.get("last_message") == "nota interna B")
+check("notify ON -> last_message_role = 'private_note' (dispara o cadeado)",
+      _conv.get("last_message_role") == "private_note")
+check("notify ON -> last_message_ts avança (sobe ao topo)",
+      (_conv.get("last_message_ts") or 0) > 0)
+
 # Abrir o atendimento (GET .../messages, mark_read=True) zera o verde E a aba: o msg_id
 # sintético é apagado de unread_msg_ids e o contador do contato decrementa — reusando
 # mark_conversation_read, sem código de clear novo.
@@ -603,6 +612,12 @@ check("notify ON -> aba zera após abrir o atendimento", _u_read == _u_before_on
 
 # Reset da config para não afetar as checagens seguintes.
 client.put("/api/config", json={"notify_private_messages": False})
+
+# Gate do preview: com a config DESLIGADA a nota privada volta a ser pulada no preview
+# da sidebar (comportamento legado) — não vira a última mensagem, então não há cadeado.
+_conv_off = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify OFF -> preview NÃO reflete a nota privada (legado)",
+      _conv_off.get("last_message_role") != "private_note")
 
 # ═══════════════════════════════════════════════════════════════════
 #  9. Contact send image
@@ -2195,6 +2210,70 @@ _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "h
 check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
 _alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
 
+# Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
+from sqlalchemy import text as _sa_text
+from db.tables import messages as _msgs_t
+_rob_c = contact_repo.get_or_create("5511900000077")
+_rob_proto = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")
+# atendente preenchido (rótulo fixo obrigatório) — replica o caso do print onde o protocolo
+# órfão já tinha atendente e finaliza sem pedir nada.
+with _get_engine().begin() as _rc:
+    _rc.execute(_sa_text("UPDATE plugin_protocolos_protocolos SET assignee_user_id=1, "
+                         "assignee_name='Admin' WHERE id=:i"), {"i": _rob_proto["id"]})
+# (a) ciclo ÓRFÃO (conversation_id inexistente no core) + required OK -> close auto-encerra
+#     o órfão e finaliza SEM travar com 'resolva-o antes'.
+_alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
+_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"], assignee_user_id=1, assignee_name="Admin")
+check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
+      not (_rob_err and "resolva-o antes" in _rob_err))
+check("close: protocolo órfão finaliza (status fechado)", _rob_err is None)
+check("close: ciclo órfão foi auto-encerrado",
+      _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
+# (a2) SEM required (sem atendente): retorna erro de obrigatório e NÃO deixa efeito colateral
+#      (o ciclo órfão continua ABERTO — validação ANTES de qualquer escrita).
+_rob_c2 = contact_repo.get_or_create("5511900000078")
+_rob_proto_nr = _alogic.ensure_protocolo_for_contact(
+    _rob_c2["id"], phone="5511900000078", name="Sem atendente")
+_alogic._insert_cycle(999_000_113, _rob_c2["id"], _rob_proto_nr["id"])
+_, _rob_err_nr = _alogic.close_protocolo(_rob_proto_nr["id"])  # sem assignee
+check("close sem required -> erro de obrigatório", bool(_rob_err_nr) and "brigat" in _rob_err_nr)
+check("close sem required -> ciclo órfão SEGUE aberto (sem efeito colateral)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto_nr["id"])) == 1)
+# (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
+_rob_proto2 = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")  # proto1 fechado -> novo protocolo aberto
+_rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
+_alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
+_, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
+check("close: ciclo com conversa viva ainda exige resolver antes",
+      bool(_rob_err2) and "resolva-o antes" in _rob_err2)
+check("close: conversa viva NÃO é encerrada (ciclo segue aberto)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto2["id"])) == 1)
+# (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
+_res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
+check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
+# (d) _emit_proto_notice numa conversa deletada -> no-op limpo (sem exceção, sem row órfã).
+_alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, contact_id=_rob_c["id"])
+check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
+      _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
+          .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
+# (e) Opção B — avaliação PULADA em protocolo órfão (conversa do protocolo foi excluída).
+_orf_c = contact_repo.get_or_create("5511900000079")
+_orf_conv = _sk_conv_repo.resolve_for_contact(_orf_c["id"], "5511900000079@s.whatsapp.net")
+_orf_proto = _alogic.ensure_protocolo_for_contact(
+    _orf_c["id"], phone="5511900000079", name="Órfão aval")
+_alogic._insert_cycle(_orf_conv["id"], _orf_c["id"], _orf_proto["id"])
+check("_is_orphan_protocolo -> False com conversa viva",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is False)
+contact_repo.delete(_orf_c["id"])   # exclui contato -> cascade apaga a conversa -> protocolo órfão
+check("_is_orphan_protocolo -> True após conversa excluída",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is True)
+# send_protocol_on_close é best-effort e no harness get_deps()=None (sai cedo); a decisão
+# de pular está isolada em _is_orphan_protocolo (testada acima) — chamamos p/ garantir no-raise.
+_alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
+check("send_protocol_on_close(órfão) não levanta", True)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
@@ -2440,6 +2519,49 @@ _cm.add_message("private_note", "anotação interna")
 check("private_note NÃO reabre conversa closed",
       _conv_repo.get(_live_conv["id"])["status"] == "closed")
 _conv_repo.set_status(_live_conv["id"], "open")  # restaura p/ os testes seguintes
+
+# ── Regra "ignorar abertura": contato NOVO que casa a regex NÃO abre atendimento ──
+# (create_closed): a conversa nasce FECHADA — mensagem salva/visível, sem atendimento
+# aberto nem card de sistema. reopen=None/True seguem criando ABERTA.
+_ci_new = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
+                                 source_id=f"{_cid}@s.whatsapp.net")
+_jid_new = f"{_cid}@s.whatsapp.net"
+# fecha qualquer conversa aberta do par p/ o próximo resolve ver "nenhuma aberta"... na
+# verdade create só olha get_latest; usamos um contato NOVO dedicado p/ isolar o caso.
+_skc_new = contact_repo.get_or_create("5500011199999")  # contato novo, sem conversa
+_ci_skn = _ci_repo.get_or_create(inbox_id=1, contact_id=_skc_new["id"],
+                                 source_id=f"{_skc_new['id']}@s.whatsapp.net")
+_conv_closed, _ev_closed = _conv_repo.resolve_for_contact_ex(
+    _skc_new["id"], f"{_skc_new['id']}@s.whatsapp.net", create_closed=True)
+check("create_closed: contato novo -> conversa FECHADA", _conv_closed["status"] == "closed")
+check("create_closed: sem transição 'created' (sem card)", _ev_closed is None)
+# control: contato novo diferente sem create_closed -> ABERTA (comportamento inalterado)
+_skc_open = contact_repo.get_or_create("5500011188888")
+_conv_open, _ev_open = _conv_repo.resolve_for_contact_ex(
+    _skc_open["id"], f"{_skc_open['id']}@s.whatsapp.net", create_closed=False)
+check("control: sem create_closed -> conversa ABERTA", _conv_open["status"] == "open")
+check("control: transição 'created'", _ev_open == "created")
+# wiring via ContactMemory: ensure_conversation_live('user', reopen=False) -> fechada,
+# add_message('user', reopen=False) mantém fechada (batch re-resolve a MESMA thread).
+_cm_skip = _CM("5500011177777")  # contato novo
+_conv_id_skip = _cm_skip.ensure_conversation_live("user", False)
+check("ensure_conversation_live(reopen=False) -> cria conversa", _conv_id_skip is not None)
+check("ensure_conversation_live(reopen=False) -> FECHADA",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+_cm_skip.add_message("user", "não abrir proto", reopen=False)
+check("add_message(reopen=False) mantém a MESMA conversa fechada",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+with _get_engine().connect() as _conn:
+    _skip_msg = _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id).where(_msgs_t.c.contact_id == _cm_skip.id)
+        .where(_msgs_t.c.role == "user").order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
+check("mensagem ignorada fica salva e vinculada à conversa fechada",
+      _skip_msg == _conv_id_skip)
+# control via memória: contato novo, reopen=None (regra padrão) -> ABERTA
+_cm_norm = _CM("5500011166666")
+_conv_id_norm = _cm_norm.ensure_conversation_live("user", None)
+check("control memória: reopen=None -> conversa ABERTA",
+      _conv_repo.get(_conv_id_norm)["status"] == "open")
 
 # Fatia 2: gate ai_active por conversa
 from server.routes.webhook import _conversation_ai_active as _ai_gate
@@ -4790,6 +4912,75 @@ check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
 r = client.put("/api/channels/p32_cloud_c",
                json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
 check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+
+
+# ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
+# @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
+# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. Modo de teste é
+# open/legacy (sem sessão → current_user=None), então o autor (sent_by) e os endpoints
+# que dependem de current_user ficam None; as peças por-usuário são checadas via repo.
+# Fica no FIM da suíte (depois do /auth/bootstrap, que exige zero usuários).
+section("Contacts — Private Note Mentions")
+from db.repositories import user_repo as _mrepo_users, mention_repo, inbox_member_repo, conversation_repo as _mrepo_conv
+
+_u_a = _mrepo_users.create(email="mention_a@test.com", name="Atendente A",
+                           password_hash="x", role_keys=["atendente"])
+_u_b = _mrepo_users.create(email="mention_b@test.com", name="Atendente B",
+                           password_hash="x", role_keys=["atendente"])
+_mn_phone = "5511999990088"
+_mentionee = _u_a["id"]
+_mentionee_before = mention_repo.unread_count(_mentionee)
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                json={"text": "por favor confirmar este caso", "mentions": [_mentionee]})
+check("POST /private-message com mentions -> 200", r.status_code == 200)
+_mn_conv = (r.json().get("data") or {}).get("conversation_id")
+check("private-message mentions -> devolve conversation_id", _mn_conv is not None)
+check("mention_repo.unread_count incrementa para o mencionado",
+      mention_repo.unread_count(_mentionee) == _mentionee_before + 1)
+
+_row_for_mentionee = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=True para o usuário mencionado",
+      bool((_row_for_mentionee or {}).get("has_user_mention")) is True)
+_row_for_none = _mrepo_conv.get_with_channel(_mn_conv, None)
+check("has_user_mention=False sem usuário (broadcast/anônimo)",
+      bool((_row_for_none or {}).get("has_user_mention")) is False)
+
+_cleared = mention_repo.mark_read(_mentionee, _mn_conv)
+check("mention_repo.mark_read limpa a menção", _cleared >= 1)
+check("unread_count volta ao baseline após ler",
+      mention_repo.unread_count(_mentionee) == _mentionee_before)
+_row_after = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=False após abrir/ler",
+      bool((_row_after or {}).get("has_user_mention")) is False)
+
+# @time = membros da caixa de entrada da conversa (uma menção por membro).
+_inbox_id = (_row_for_mentionee or {}).get("inbox_id")
+_team_ids = [_u_a["id"], _u_b["id"]]
+if _inbox_id is not None:
+    inbox_member_repo.set_members(_inbox_id, _team_ids)
+    _before_team = {uid: mention_repo.unread_count(uid) for uid in _team_ids}
+    r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                    json={"text": "time, olhem isso", "mention_inbox": True})
+    check("POST /private-message mention_inbox -> 200", r.status_code == 200)
+    check("mention_inbox gera menção para cada membro da caixa",
+          all(mention_repo.unread_count(uid) == _before_team[uid] + 1 for uid in _team_ids))
+
+# Anexos privados: imagem + documento viram nota privada (media_type/path), 200.
+_img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+r = client.post(f"/api/contacts/{_mn_phone}/private-image",
+                files={"image": ("nota.png", _img, "image/png")},
+                data={"caption": "print do erro"})
+check("POST /private-image -> 200", r.status_code == 200)
+check("private-image -> nota com media_type=image",
+      (r.json().get("data") or {}).get("media_type") == "image")
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-document",
+                files={"document": ("relatorio.pdf", b"%PDF-1.4 fake", "application/pdf")},
+                data={"caption": ""})
+check("POST /private-document -> 200", r.status_code == 200)
+check("private-document -> nota com media_type=document",
+      (r.json().get("data") or {}).get("media_type") == "document")
 
 
 print(f"\n{'='*60}")

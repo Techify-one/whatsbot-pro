@@ -241,10 +241,11 @@ export function Composer({
             </div>
           ` : ''}
         </div>
-        ${mode === 'private' ? '' : html`
+        ${html`
           <div ref=${attachMenuRef} class="relative shrink-0">
-            <button type="button" class="p-[8px] ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
-              disabled=${sessionClosed} onClick=${handleAttachClick}>
+            <button type="button" class="p-[8px] ${(sessionClosed && mode !== 'private') ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+              disabled=${sessionClosed && mode !== 'private'} onClick=${handleAttachClick}
+              title=${mode === 'private' ? 'Anexar à nota privada' : 'Anexar'}>
               <${AttachIcon} />
             </button>
             ${attachMenuOpen ? html`
@@ -279,22 +280,31 @@ export function Composer({
             const sel = Math.min(mentionMenu.index || 0, cands.length - 1);
             return html`
               <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] max-h-[210px] overflow-y-auto bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] z-30 wa-scrollbar">
-                ${cands.map((c, i) => html`
+                ${cands.map((c, i) => {
+                  const isSpecial = c.special || c.team;
+                  const dispName = c.name || mentionLabel(c);
+                  const key = c.team ? '@time' : c.special ? '@todos'
+                    : c.internal ? ('u' + c.user_id) : c.phone;
+                  const avatar = isSpecial ? (c.team ? '👥' : '@') : ((dispName || '?').slice(0, 1).toUpperCase());
+                  const fullLabel = c.team ? 'Time — todos da caixa'
+                    : c.special ? 'todos — todos os membros' : dispName;
+                  return html`
                   <button
                     type="button"
-                    key=${c.special ? '@todos' : c.phone}
+                    key=${key}
                     onMouseDown=${(ev) => { ev.preventDefault(); applyMention(c); }}
                     class="w-full text-left px-[12px] py-[7px] text-[14px] flex items-center gap-[8px] ${i === sel ? 'bg-wa-hover' : ''} hover:bg-wa-hover"
                   >
-                    <span class="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[12px] shrink-0 ${c.special ? 'bg-wa-teal text-white' : 'bg-wa-border text-wa-text'}">
-                      ${c.special ? '@' : (mentionLabel(c) || '?').slice(0, 1).toUpperCase()}
+                    <span class="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[12px] shrink-0 ${isSpecial ? 'bg-wa-teal text-white' : 'bg-wa-border text-wa-text'}">
+                      ${avatar}
                     </span>
                     <span class="text-wa-text truncate">
-                      ${c.special ? 'todos — todos os membros' : mentionLabel(c)}
-                      ${(!c.special && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
+                      ${fullLabel}
+                      ${(!isSpecial && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
                     </span>
                   </button>
-                `)}
+                `;
+                })}
               </div>
             `;
           })() : ''}

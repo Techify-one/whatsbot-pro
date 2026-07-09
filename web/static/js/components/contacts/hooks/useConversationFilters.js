@@ -84,6 +84,7 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
     all: statusTagFiltered.length,
     mine: currentUserId == null ? 0 : statusTagFiltered.filter(c => c.assignee_user_id === currentUserId).length,
     unassigned: statusTagFiltered.filter(isUnassigned).length,
+    mentions: statusTagFiltered.filter(c => c.has_user_mention).length,
   }), [statusTagFiltered, currentUserId]);
 
   const displayedContacts = useMemo(
