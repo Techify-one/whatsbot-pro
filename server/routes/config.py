@@ -211,23 +211,38 @@ def register_routes(app, deps):
         api_key = settings.get("openrouter_api_key", "")
         if not api_key:
             return _err("API key não configurada.", status=400)
+        threshold = float(settings.get("low_balance_threshold", 0.50) or 0.50)
+        low_enabled = bool(settings.get("low_balance_enabled", True))
+        account_url = settings.get("account_url", "")
         balance = await balance_monitor.fetch_balance(api_key)
         if balance is None:
             cached = balance_monitor.get_cached()
             if cached is None:
-                return _err("Não foi possível consultar o saldo.", status=502)
+                # plano 42 C: degrade instead of 502 — the proxy /credits is down
+                # AND there is no cached snapshot yet (e.g. right after boot, before
+                # any LLM call). Respond 200 with available:false so the panel shows
+                # "saldo indisponível" instead of an alarming error / "sem saldo".
+                return _ok({
+                    "available": False,
+                    "balance": None,
+                    "reason": "Não foi possível consultar o saldo (proxy indisponível).",
+                    "threshold": threshold,
+                    "low_balance_enabled": low_enabled,
+                    "account_url": account_url,
+                })
             balance = {
                 "total_credits": cached.get("total_credits", 0.0),
                 "total_usage": cached.get("total_usage", 0.0),
                 "remaining": cached.get("remaining", 0.0),
             }
-        threshold = float(settings.get("low_balance_threshold", 0.50) or 0.50)
         return _ok({
             **balance,
+            "available": True,
+            "balance": balance["remaining"],   # plano 42 C: alias for the FE gate
             "threshold": threshold,
-            "low_balance_enabled": bool(settings.get("low_balance_enabled", True)),
+            "low_balance_enabled": low_enabled,
             "below_threshold": balance["remaining"] < threshold,
-            "account_url": settings.get("account_url", ""),
+            "account_url": account_url,
         })
 
     @app.get("/api/status")

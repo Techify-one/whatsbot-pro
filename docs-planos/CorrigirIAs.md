@@ -61,7 +61,28 @@ atividade do Telegram (18:57:24) — confirma o leak cross-channel.
 2. Observar que aparece uma conversa duplicada também no canal WhatsApp.
 3. Se a conversa do WhatsApp estiver com IA ligada, a IA responde nela.
 
-**Correção:** _(a preencher)_
+**Correção:** ✅ Resolvido (plano 42 A1+A2).
+- A forma do `source_id` virou responsabilidade do **PROVIDER**: novo classmethod
+  `Channel.source_id_for(phone, is_group)` ([channels/base.py](../channels/base.py))
+  com default **bare** (id nativo); `GOWAChannel` sobrescreve appendando
+  `@s.whatsapp.net`/`@g.us`
+  ([channels/providers/gowa_channel.py](../channels/providers/gowa_channel.py)) —
+  byte-idêntico ao backfill 0013. `ContactMemory` resolve a forma pelo provider do
+  seu `channel_id` (`_source_id()` em [agent/memory.py](../agent/memory.py), via o
+  ChannelRegistry wired), com **fail-safe** ao sufixo WhatsApp quando o provider não
+  resolve (registry não-wired/legado) — o GOWA de produção fica inalterado, zero
+  regressão. Nenhum `if provider == "gowa"` no core (D3).
+- Migration [0046_source_id_native](../db/alembic/versions/20260709_0046_source_id_native.py)
+  re-âncora as linhas já gravadas: strip do sufixo WhatsApp em
+  `contact_inboxes.source_id`/`source_jid` de inboxes de provider ≠ gowa,
+  **consolidando colisões** (re-aponta `atendimentos.contact_inbox_id` p/ a linha
+  canônica MIN(id) e apaga a duplicada, nessa ordem p/ não violar FK/unique). Down =
+  no-op documentado.
+- Testes: [tests/test_source_id_per_channel.py](../tests/test_source_id_per_channel.py)
+  (GOWA→sufixo, não-GOWA→bare, fail-safe unwired→sufixo) +
+  [tests/test_migration_0046_source_id.py](../tests/test_migration_0046_source_id.py)
+  (strip + consolidação de colisão + GOWA intacto). Round-trip
+  `upgrade→downgrade→upgrade` limpo no Postgres.
 
 ---
 
@@ -124,7 +145,16 @@ corretamente barrada ("Permissão negada").
 Usuário membro só do WhatsApp não deve ver, abrir nem carregar mensagens de
 conversas de inbox do qual não é membro (nem por contato, nem por URL direta).
 
-**Correção:** _(depende do #1 — reavaliar após corrigir o contato fantasma)_
+**Correção:** ✅ Resolvido como CONSEQUÊNCIA do #1 (plano 42 WS B). Confirmado que o
+backend JÁ aplica `visible_inbox_ids` nos 4 pontos de leitura
+([server/authz.py](../server/authz.py), rotas em
+[server/routes/conversations.py](../server/routes/conversations.py)) — **não havia
+furo de isolamento independente**. O leak era 100% o `contact_inbox` FANTASMA do #1
+(agora prevenido por A1 e limpo por A2). Travado contra regressão por
+[tests/test_conversation_read_isolation.py](../tests/test_conversation_read_isolation.py):
+um usuário membro só do inbox A recebe **404** no GET de conversa/mensagens do inbox B
+e não vê B na lista de conversas (mas VÊ a própria — controle que prova ser scoping,
+não negação total).
 
 ---
 
@@ -135,7 +165,7 @@ Erros vistos no DevTools durante o teste (para histórico):
 | Endpoint | Status | Interpretação | Ação |
 |----------|--------|---------------|------|
 | `/api/users` | **403** (várias) | **Esperado** — `atendente` não tem permissão de gerenciar usuários; o RBAC está barrando certo. O ruído é a UI CHAMAR o endpoint mesmo sem permissão. | Cosmético. Ideal: frontend não chamar `/api/users` quando o usuário não tem a permissão (esconder a chamada, não só a tela). Baixa prioridade. |
-| `/api/balance` | **502** (várias) | Gateway error ao consultar saldo (proxy Techify `/credits`). Pode ser transitório (proxy fora) OU erro real do balance_monitor. | ⚠️ Investigar: confirmar se o proxy Techify responde e se `access_token`/`account_url` estão configurados. Se for intermitente, o painel fica sem saldo. |
+| `/api/balance` | **502** (várias) | Gateway error ao consultar saldo (proxy Techify `/credits`). Pode ser transitório (proxy fora) OU erro real do balance_monitor. | ✅ Resolvido (plano 42 WS C). Diagnóstico C0: o proxy Techify está **UP e rápido** (~250ms) — era hiccup transitório / cache frio no boot (nenhuma LLM call ainda populou o cache). O endpoint agora **degrada p/ 200 `available:false`** em vez de 502 quando o proxy está fora e sem cache ([server/routes/config.py](../server/routes/config.py)); o cache é primado no boot (fire-and-forget, [server/balance_monitor.py](../server/balance_monitor.py) `prime_cache` + [server/app.py](../server/app.py)); o frontend tolera `available:false` sem abrir modal ([App.js](../web/static/js/components/shell/App.js)). O 400 de "sem api_key" permanece. Testes: [tests/test_balance_degradation.py](../tests/test_balance_degradation.py). |
 | `/api/contacts/7687698423/send` | **500** | Envio na conversa FANTASMA do WhatsApp (Defeito #1). O backend estoura 500 ao tentar mandar pro `7687698423@s.whatsapp.net` (não existe no WhatsApp). | Parte do **Defeito #1**. Bônus: o erro deveria virar um 4xx tratado, não 500 cru. |
 
 > Nota: o **500** e o **403** são consequências esperadas do cenário de teste
