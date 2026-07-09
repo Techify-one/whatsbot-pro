@@ -722,6 +722,11 @@ def _emit_proto_notice(event_type: str, *, conversation_id: int | None = None,
     (aberta→última). Best-effort: nunca levanta (um aviso jamais quebra a ação)."""
     try:
         from server import system_notices
+        # A atendimento âncora pode ter sido deletada (protocolo órfão: contato/conversa
+        # excluídos). Sem thread viva não há onde mostrar o card — no-op LIMPO em vez de
+        # tentar inserir e cair num FK error logado (barulho à toa; o fechar já concluiu).
+        if conversation_id is not None and conversation_repo.get(conversation_id) is None:
+            return
         if conversation_id is not None:
             system_notices.emit_conversation_notice(
                 event_type=event_type, conversation_id=conversation_id,
@@ -786,6 +791,49 @@ def _open_cycles_of_protocolo(atid: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _cycle_is_resolvable(cycle: dict) -> bool:
+    """Um ciclo aberto só é 'resolvível' pela UI se aponta para uma conversa (atendimento)
+    que AINDA existe no core — é a conversa que o operador abre no popup 'Resolver
+    atendimento'. Ciclos órfãos (``conversation_id`` NULL ou conversa deletada) não têm
+    caminho de UI para resolver e travariam o Finalizar para sempre."""
+    cid = (cycle or {}).get("conversation_id")
+    if not cid:
+        return False
+    try:
+        return conversation_repo.get(cid) is not None
+    except Exception:  # noqa: BLE001 — indisponibilidade do repo não deve travar o fechar
+        return True  # fail-safe: na dúvida, trata como resolvível (não auto-encerra)
+
+
+def _close_orphan_cycles(cycles: list[dict]) -> None:
+    """Encerra (ended_at = agora) ciclos abertos órfãos — sem conversa viva no core —
+    para que o protocolo possa ser finalizado. Best-effort."""
+    ids = [c["id"] for c in cycles if c.get("id") is not None]
+    if not ids:
+        return
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_atendimentos "
+                 "SET ended_at = :ts, updated_at = :ts "
+                 "WHERE id = ANY(:ids) AND ended_at IS NULL"),
+            {"ts": ts, "ids": ids},
+        )
+
+
+def _close_orphan_cycles_of_conversation(conversation_id: int) -> None:
+    """Encerra ciclos abertos de uma conversa (atendimento) que não existe mais no core.
+    Best-effort — usado pelo resolve gracioso quando a conversa foi deletada."""
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_atendimentos "
+                 "SET ended_at = :ts, updated_at = :ts "
+                 "WHERE conversation_id = :cid AND ended_at IS NULL"),
+            {"ts": ts, "cid": conversation_id},
+        )
+
+
 def close_protocolo(atid: int, assignee_user_id: int | None = None,
                       assignee_name: str = "") -> tuple[dict | None, str | None]:
     at = get_protocolo(atid)
@@ -794,15 +842,25 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     if at["status"] == "fechado":
         return at, None
     # Só finaliza quando a ÚLTIMA atendimento do protocolo estiver resolvida: se há ciclo
-    # aberto, força resolver antes (a UI abre o popup "Resolver atendimento"). HTTP 400.
-    if _open_cycles_of_protocolo(atid):
+    # aberto RESOLVÍVEL (conversa viva no core), força resolver antes (a UI abre o popup
+    # "Resolver atendimento"). HTTP 400. Ciclos ÓRFÃOS (conversa deletada/NULL) não têm como
+    # ser resolvidos pela UI — auto-encerra-os aqui para não travar o Finalizar (robustez).
+    open_cycles = _open_cycles_of_protocolo(atid)
+    orphan = [c for c in open_cycles if not _cycle_is_resolvable(c)]
+    live = [c for c in open_cycles if _cycle_is_resolvable(c)]
+    if live:
         return None, ("Existe um atendimento aberto neste protocolo — "
                       "resolva-o antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
-    # está salvo (a UI grava os campos antes de fechar).
+    # está salvo (a UI grava os campos antes de fechar). Valida ANTES de qualquer
+    # escrita para não deixar efeito colateral (ciclo órfão encerrado) num erro.
     err = _missing_required("protocolo", _effective_values("protocolo", at))
     if err:
         return None, err
+    # Só órfãos (ou nenhum ciclo aberto) e required OK: encerra os ciclos órfãos
+    # (conversa deletada — não resolvíveis pela UI) e finaliza o protocolo.
+    if orphan:
+        _close_orphan_cycles(orphan)
     ts = now()
     # Atendente do protocolo: se existe rótulo Atendente e ele JÁ definiu um atendente
     # (at.assignee_user_id, gravado no salvar antes de finalizar), mantém-se esse; senão
@@ -1583,7 +1641,16 @@ def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str =
     resolveu (assignee_user_id + assignee_name) no ciclo."""
     atend = conversation_repo.get(conversation_id)
     if not atend:
-        return None, "Atendimento não encontrada."
+        # Robustez: a conversa não existe mais no core (deletada) mas um ciclo aberto
+        # ainda a referencia. Não há o que "resolver" no atendimento — encerra o(s)
+        # ciclo(s) órfão(s) daquela conversa (best-effort) para não travar o Finalizar,
+        # e retorna no-op de sucesso em vez de 404.
+        try:
+            _close_orphan_cycles_of_conversation(conversation_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("protocolos: falha ao encerrar ciclo órfão de conv %s: %s",
+                           conversation_id, e)
+        return None, None
     contact_id = atend["contact_id"]
     contact = contact_repo.get(contact_id) or {}
     at = ensure_protocolo_for_contact(
@@ -2059,6 +2126,21 @@ def _latest_conversation_of_protocolo(atid: int) -> int | None:
         return None
 
 
+def _is_orphan_protocolo(at: dict) -> bool:
+    """True quando a conversa (atendimento) MAIS RECENTE do protocolo já não existe no
+    core — o contato/conversa foi excluído e o protocolo ficou órfão. Nesse caso não há
+    contexto/alvo válido para a avaliação: enviá-la cairia na conversa NOVA do mesmo
+    número (sem relação com este protocolo). Só considera órfão quando há um
+    conversation_id gravado que sumiu; protocolo sem conversa nenhuma não é órfão."""
+    conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+    if conv_id is None:
+        return False
+    try:
+        return conversation_repo.get(conv_id) is None
+    except Exception:  # noqa: BLE001 — na dúvida, não trata como órfão (não pula)
+        return False
+
+
 def _attr_value_matches(stored, wanted) -> bool:
     """True se o valor ARMAZENADO do atributo bate com o valor DESEJADO da regra.
 
@@ -2137,6 +2219,15 @@ def send_protocol_on_close(at: dict) -> None:
         # Canal da atendimento mais recente do protocolo (conversation-scoped), com
         # fallback contact-scoped — evita fundir canais em multicanal (plano 11).
         conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+
+        # Protocolo ÓRFÃO (conversa do atendimento foi excluída): não há alvo válido para a
+        # avaliação — enviá-la agora cairia na conversa NOVA do mesmo número, sem relação com
+        # este protocolo antigo. Pula o envio (WhatsApp + nota privada) e só registra o motivo.
+        if _is_orphan_protocolo(at):
+            logger.info("protocolos: avaliação pulada (protocolo órfão — conversa inexistente) "
+                        "— protocolo %s", (at or {}).get("id"))
+            return
+
         channel_id = (_channel_for_conversation(conv_id)
                       or _channel_for_contact((at or {}).get("contact_id")))
 

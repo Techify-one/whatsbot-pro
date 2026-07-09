@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import io
+import json
 import logging
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from gowa.client import GOWASendError
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
 from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories import inbox_repo
+from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from agent import group_mentions
@@ -1166,6 +1168,73 @@ def register_routes(app, deps):
                 "ts": time.time(),
             })
 
+    def _parse_mentions_field(raw: str) -> list:
+        """Decodifica o campo multipart ``mentions`` (JSON de user_ids). Silencioso."""
+        if not raw:
+            return []
+        try:
+            val = json.loads(raw)
+            return val if isinstance(val, list) else []
+        except (ValueError, TypeError):
+            return []
+
+    def _parse_mention_targets(raw_mentions, mention_inbox, inbox_id) -> list[int]:
+        """Junta os user_ids citados explicitamente com os membros da caixa (quando
+        ``mention_inbox``). "Time" = membros da inbox da conversa (decisão de projeto).
+        Robusto a tipos (str/int); silencioso em erro."""
+        targets: list[int] = []
+        for m in (raw_mentions or []):
+            try:
+                targets.append(int(m))
+            except (TypeError, ValueError):
+                continue
+        if mention_inbox and inbox_id is not None:
+            try:
+                targets.extend(inbox_member_repo.member_ids(int(inbox_id)))
+            except Exception:
+                logger.debug("mention: falha ao expandir membros da caixa %s", inbox_id)
+        return targets
+
+    async def _record_private_mentions(*, saved: dict, phone: str, contact_id: int,
+                                        channel_id: str, actor: dict | None,
+                                        raw_mentions, mention_inbox: bool,
+                                        preview: str) -> None:
+        """Grava as menções de uma nota privada e emite ``mention_created`` (in-app).
+
+        Defensivo: uma falha aqui NUNCA quebra o save da nota."""
+        try:
+            conv_id = (saved or {}).get("conversation_id")
+            # add_message devolve `id`; message_repo.get_last devolve `_id`.
+            msg_id = (saved or {}).get("id") or (saved or {}).get("_id")
+            if not conv_id or not msg_id:
+                return
+            inbox_id = await asyncio.to_thread(
+                _resolve_inbox_id, conv_id, channel_id)
+            actor_uid = (actor or {}).get("id")
+            actor_name = (actor or {}).get("name")
+            targets = _parse_mention_targets(raw_mentions, mention_inbox, inbox_id)
+            n = await asyncio.to_thread(
+                mention_repo.add_many,
+                message_id=int(msg_id), conversation_id=int(conv_id),
+                contact_id=int(contact_id), mentioned_user_ids=targets,
+                actor_user_id=actor_uid, actor_name=actor_name)
+            if not n:
+                return
+            recipients = [uid for uid in dict.fromkeys(targets)
+                          if uid and uid != actor_uid]
+            await ws_manager.broadcast("mention_created", {
+                "conversation_id": int(conv_id),
+                "contact_id": int(contact_id),
+                "phone": phone,
+                "channel_id": channel_id,
+                "inbox_id": inbox_id,
+                "mentioned_user_ids": recipients,
+                "actor_name": actor_name,
+                "preview": (preview or "")[:120],
+            })
+        except Exception:
+            logger.exception("Falha ao registrar menções da nota privada para %s", phone)
+
     @app.post("/api/contacts/{phone}/private-message")
     async def send_private_message(phone: str, body: dict, request: Request):
         """Save a message that stays in the panel — never delivered to the contact.
@@ -1189,6 +1258,7 @@ def register_routes(app, deps):
 
         ai_read = bool(body.get("ai_read", False))
         ai_reply = bool(body.get("ai_reply", True))
+        _u = current_user(request)
 
         # Bind the note to the conversation's channel (senão cai no inbox 'default'
         # e não roteia no painel — plano 11).
@@ -1196,11 +1266,22 @@ def register_routes(app, deps):
         try:
             def _save():
                 contact = agent_handler._get_contact(phone, channel_id=note_channel)
-                return contact.add_message("private_note", text)
-            saved = await asyncio.to_thread(_save)
+                saved_row = contact.add_message(
+                    "private_note", text,
+                    sent_by_user_id=(_u.get("id") if _u else None),
+                    sent_by_name=(_u.get("name") if _u else None))
+                return contact.id, saved_row
+            contact_id, saved = await asyncio.to_thread(_save)
         except Exception as e:
             logger.error("[Private] Failed to save private message for %s: %s", phone, e)
             return _err(f"Erro ao salvar mensagem privada: {e}", status=500)
+
+        # Menções (@atendente / @time) — colaboração estilo Chatwoot. Grava as linhas
+        # em `mentions` e emite `mention_created` (toast/badge/aba). Best-effort.
+        await _record_private_mentions(
+            saved=saved, phone=phone, contact_id=contact_id, channel_id=note_channel,
+            actor=_u, raw_mentions=body.get("mentions"),
+            mention_inbox=bool(body.get("mention_inbox", False)), preview=text)
 
         # Carry the DB row id (delete without reload) + conversation_id/channel_id
         # so the panel routes the note to the right thread (plano 11). Uses the row
@@ -1212,6 +1293,8 @@ def register_routes(app, deps):
             "status": None,
             "conversation_id": (saved or {}).get("conversation_id"),
         }
+        if _u and _u.get("name"):
+            note_msg["sent_by_name"] = _u.get("name")
         if saved and saved.get("id"):
             note_msg["_id"] = saved["id"]
         await ws_manager.broadcast(
@@ -1235,6 +1318,8 @@ def register_routes(app, deps):
         ai_reply: str = Form("true"),
         conversation_id: str = Form(""),
         channel_id: str = Form(""),
+        mentions: str = Form(""),
+        mention_inbox: str = Form("false"),
     ):
         """Record an audio note that stays in the panel — never sent to the contact.
 
@@ -1301,16 +1386,25 @@ def register_routes(app, deps):
         # (media_type=audio, so the transcription text isn't shown in that bubble).
         note_text = ai_text or card_text
         db_content = note_text or "[Áudio]"
+        _u = current_user(request)
         try:
             def _save():
                 contact = agent_handler._get_contact(phone, channel_id=resolved_channel)
                 contact.add_message("private_note", db_content,
-                                    media_type="audio", media_path=rel_path)
-                return message_repo.get_last(contact.id)
-            saved = await asyncio.to_thread(_save)
+                                    media_type="audio", media_path=rel_path,
+                                    sent_by_user_id=(_u.get("id") if _u else None),
+                                    sent_by_name=(_u.get("name") if _u else None))
+                return contact.id, message_repo.get_last(contact.id)
+            contact_id, saved = await asyncio.to_thread(_save)
         except Exception as e:
             logger.error("[Private] Failed to save private audio for %s: %s", phone, e)
             return _err(f"Erro ao salvar áudio privado: {e}", status=500)
+
+        await _record_private_mentions(
+            saved=saved, phone=phone, contact_id=contact_id, channel_id=resolved_channel,
+            actor=_u, raw_mentions=_parse_mentions_field(mentions),
+            mention_inbox=str(mention_inbox).lower() in ("1", "true", "yes", "on"),
+            preview=note_text or "[Áudio]")
 
         # Broadcast/return "[Áudio]" (not the transcription) so the operator's
         # optimistic bubble dedups cleanly; the player renders from media_path.
@@ -1360,6 +1454,121 @@ def register_routes(app, deps):
 
         logger.info("[Private] Saved private audio for %s (ai_read=%s, ai_reply=%s, "
                     "card=%s)", phone, ai_read_b, ai_reply_b, bool(card_text))
+        return _ok(note_msg)
+
+    async def _save_private_media(*, phone: str, request: Request, upload: UploadFile,
+                                  kind: str, conversation_id: str, channel_id: str,
+                                  mentions_raw: str, mention_inbox_raw: str,
+                                  caption: str = "") -> dict:
+        """Persist a panel-only media private note (image/document) + record mentions.
+
+        Espelha ``/private-audio`` para mídia estática: grava em ``statics/outbox/``,
+        salva ``role='private_note'`` com ``media_type``/``media_path`` (autoria), emite
+        ``new_message`` e registra as menções. Nunca vai ao GOWA."""
+        resolved_channel = _channel_for(phone, conversation_id, channel_id)
+        filename = upload.filename or ("imagem.jpg" if kind == "image" else "arquivo")
+        safe_name = Path(filename).name
+        suffix = Path(safe_name).suffix or (".jpg" if kind == "image" else "")
+        stem = Path(safe_name).stem or kind
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        dest.write_bytes(await upload.read())
+        rel_path = f"statics/outbox/{dest.name}"
+
+        if kind == "image":
+            db_content = caption.strip() or "[Imagem]"
+        else:
+            db_content = f"[Documento enviado: {safe_name}]"
+            if caption.strip():
+                db_content = f"{db_content}\n{caption.strip()}"
+
+        _u = current_user(request)
+
+        def _save():
+            contact = agent_handler._get_contact(phone, channel_id=resolved_channel)
+            contact.add_message("private_note", db_content,
+                                media_type=kind, media_path=rel_path,
+                                sent_by_user_id=(_u.get("id") if _u else None),
+                                sent_by_name=(_u.get("name") if _u else None))
+            return contact.id, message_repo.get_last(contact.id)
+        contact_id, saved = await asyncio.to_thread(_save)
+
+        note_msg = {
+            "role": "private_note", "content": db_content,
+            "ts": (saved or {}).get("ts", time.time()),
+            "media_type": kind, "media_path": rel_path, "status": None,
+        }
+        if _u and _u.get("name"):
+            note_msg["sent_by_name"] = _u.get("name")
+        if saved and saved.get("_id"):
+            note_msg["_id"] = saved["_id"]
+        await ws_manager.broadcast("new_message", {
+            "phone": phone, "channel_id": resolved_channel, "message": note_msg})
+
+        await _record_private_mentions(
+            saved=saved, phone=phone, contact_id=contact_id, channel_id=resolved_channel,
+            actor=_u, raw_mentions=_parse_mentions_field(mentions_raw),
+            mention_inbox=str(mention_inbox_raw).lower() in ("1", "true", "yes", "on"),
+            preview=db_content)
+        return note_msg
+
+    @app.post("/api/contacts/{phone}/private-image")
+    async def send_private_image(
+        phone: str,
+        request: Request,
+        image: UploadFile = File(...),
+        caption: str = Form(""),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+        mentions: str = Form(""),
+        mention_inbox: str = Form("false"),
+    ):
+        """Imagem como nota privada — só no painel, nunca enviada ao contato."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
+        try:
+            note_msg = await _save_private_media(
+                phone=phone, request=request, upload=image, kind="image",
+                conversation_id=conversation_id, channel_id=channel_id,
+                mentions_raw=mentions, mention_inbox_raw=mention_inbox, caption=caption)
+        except Exception as e:
+            logger.error("[Private] Failed to save private image for %s: %s", phone, e)
+            return _err(f"Erro ao salvar imagem privada: {e}", status=500)
+        logger.info("[Private] Saved private image for %s", phone)
+        return _ok(note_msg)
+
+    @app.post("/api/contacts/{phone}/private-document")
+    async def send_private_document(
+        phone: str,
+        request: Request,
+        document: UploadFile = File(...),
+        caption: str = Form(""),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+        mentions: str = Form(""),
+        mention_inbox: str = Form("false"),
+    ):
+        """Documento como nota privada — só no painel, nunca enviado ao contato."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
+        try:
+            note_msg = await _save_private_media(
+                phone=phone, request=request, upload=document, kind="document",
+                conversation_id=conversation_id, channel_id=channel_id,
+                mentions_raw=mentions, mention_inbox_raw=mention_inbox, caption=caption)
+        except Exception as e:
+            logger.error("[Private] Failed to save private document for %s: %s", phone, e)
+            return _err(f"Erro ao salvar documento privado: {e}", status=500)
+        logger.info("[Private] Saved private document for %s", phone)
         return _ok(note_msg)
 
     @app.post("/api/contacts/{phone}/retry-send")

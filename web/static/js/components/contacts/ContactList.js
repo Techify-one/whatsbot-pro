@@ -37,6 +37,14 @@ const PinIcon = () => html`
     <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
   </svg>
 `;
+// Cadeado — prefixo do preview quando a última mensagem é uma nota privada
+// (role 'private_note'), notificada na sidebar via `notify_private_messages`. Mesmo
+// path do card "Mensagem privada" em SystemMessageCard.js.
+const LockIcon = () => html`
+  <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" class="inline-block shrink-0 align-[-1px] mr-[3px]">
+    <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/>
+  </svg>
+`;
 
 // Atendimento-cêntrico (plano 11 D1): cada linha é um ATENDIMENTO. A identidade é a
 // conversation_id (linhas sem atendimento caem no phone) — usada como key do Preact e
@@ -546,7 +554,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                               )}
                             </span>`
                           : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
-                            ${c.last_message_role === 'assistant' ? (() => {
+                            ${c.last_message_role === 'private_note' ? html`<${LockIcon} />` : ''}${c.last_message_role === 'assistant' ? (() => {
                               const st = c.last_message_status;
                               if (st === 'sent') return html`<${SingleCheckIcon} />`;
                               if (st === 'delivered' || st === 'operator') return html`<${DoubleCheckIcon} color="#92a58c" />`;
@@ -555,8 +563,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             })() : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
-                      ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention) ? html`
+                      ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention || c.has_user_mention) ? html`
                         <div class="flex items-center gap-[4px] ml-auto pl-[6px] shrink-0">
+                          ${c.has_user_mention ? html`
+                            <span class="text-violet-400 font-bold text-[17px] leading-none" title="Você foi mencionado numa nota privada">@</span>
+                          ` : null}
                           ${c.has_unread_mention ? html`
                             <span class="text-wa-badge font-bold text-[17px] leading-none" title="Você foi mencionado">@</span>
                           ` : null}

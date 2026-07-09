@@ -179,7 +179,7 @@ export function useConversationSelection({
     const isPageVisible = pageVisibleRef.current;
     if (isPageVisible) {
       setContacts(prev => prev.map(c =>
-        isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
+        isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
       ));
     }
     const convId = selectedConvId;

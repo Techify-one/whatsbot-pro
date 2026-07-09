@@ -495,6 +495,32 @@ unread_msg_ids = Table(
 Index("idx_unread_contact", unread_msg_ids.c.contact_id)
 
 
+# Menção direcionada a um usuário (atendente) numa nota privada — colaboração
+# estilo Chatwoot. Distinta de `contacts.has_unread_mention` (que é @menção do BOT
+# em grupo do WhatsApp, nível-contato): esta é POR-USUÁRIO. Uma nota privada que
+# menciona N usuários gera N linhas. `read_at` NULL = não-lida (badge "@" + aba
+# Menções); vira timestamp quando o usuário abre a conversa. FKs lógicas (sem
+# constraint em user, igual ao resto do schema) — não quebra se o usuário sumir.
+mentions = Table(
+    "mentions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("message_id", Integer,
+           ForeignKey("messages.id", ondelete="CASCADE"), nullable=False),
+    Column("conversation_id", Integer,
+           ForeignKey("atendimentos.id", ondelete="CASCADE"), nullable=False),
+    Column("contact_id", Integer,
+           ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False),
+    Column("mentioned_user_id", Integer, nullable=False),      # FK lógica -> users.id
+    Column("actor_user_id", Integer),                          # quem mencionou (FK lógica)
+    Column("actor_name", Text),                                # snapshot do nome do autor
+    Column("created_at", Float, nullable=False),
+    Column("read_at", Float),                                  # NULL = não-lida
+)
+Index("idx_mentions_user_unread", mentions.c.mentioned_user_id, mentions.c.read_at)
+Index("idx_mentions_conversation", mentions.c.conversation_id)
+
+
 executions = Table(
     "executions",
     metadata,

@@ -414,6 +414,7 @@ export function ConversationFilterBar({
       <!-- Assignment tabs -->
       <div class="flex items-center gap-1 px-[12px] mt-1 border-b border-wa-border overflow-x-auto wa-scrollbar">
         ${hasIdentity ? tabBtn('mine', 'Minhas', counts.mine) : null}
+        ${(hasIdentity && (counts.mentions > 0 || assignmentTab === 'mentions')) ? tabBtn('mentions', 'Menções', counts.mentions) : null}
         ${tabBtn('unassigned', 'Não atribuídas', counts.unassigned)}
         ${tabBtn('all', 'Todas', counts.all)}
       </div>

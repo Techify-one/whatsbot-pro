@@ -82,11 +82,14 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     setContactData, updateMsgByLocalId,
     updateMenus: (el, val) => autocompleteRef.current && autocompleteRef.current.updateMenus(el, val),
     closeMentionMenu: () => autocompleteRef.current && autocompleteRef.current.setMentionMenu(null),
+    collectMentions: (text) => autocompleteRef.current
+      ? autocompleteRef.current.collectMentions(text) : { mentions: [], mention_inbox: false },
+    resetMentions: () => autocompleteRef.current && autocompleteRef.current.resetMentions(),
     openTemplatePicker,
   });
 
   const autocomplete = useTokenAutocomplete({
-    phone, sandbox, contact, groupParticipantsChanged,
+    phone, sandbox, contact, groupParticipantsChanged, mode: composer.mode,
     input: composer.input, setInput: composer.setInput, inputRef: composer.inputRef,
   });
   autocompleteRef.current = autocomplete;

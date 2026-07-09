@@ -211,6 +211,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setGlobalTags,
     pageVisibleRef,
     reloadOpenThread,
+    currentUserId,
   });
 
   // Search box: clear the phone-check error as the operator types (preserves the

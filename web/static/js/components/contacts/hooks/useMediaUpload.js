@@ -9,7 +9,7 @@
 // Behavior-preserving: same optimistic-message shapes (sandbox vs operator),
 // same blob/object-URL handling, same `session_window_closed` steering.
 import { useState, useRef, useEffect } from 'preact/hooks';
-import { sendPrivateAudio } from '../../../services/api.js';
+import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
 
 /**
  * @param {Object} opts
@@ -118,11 +118,12 @@ export function useMediaUpload({
 
   async function confirmPendingMedia() {
     if (!pendingMedia || sending) return;
-    // Private audio note stays in the panel — never sent to the contact — so it
-    // bypasses the 24h-window gate entirely.
-    const isPrivateAudio = pendingMedia.type === 'audio' && mode === 'private';
+    // Nota privada com mídia (áudio/imagem/documento) fica só no painel — nunca vai ao
+    // contato — então ignora a janela de 24h.
+    const isPrivate = mode === 'private';
+    const isPrivateAudio = pendingMedia.type === 'audio' && isPrivate;
     // 24h window closed (WhatsApp Cloud): media also requires a template.
-    if (sessionClosed && !isPrivateAudio) {
+    if (sessionClosed && !isPrivate) {
       cancelPendingMedia();
       openTemplatePicker();
       return;
@@ -145,7 +146,20 @@ export function useMediaUpload({
           sent_by_name: (currentUser && currentUser.name) || undefined };
 
     let optimistic, sendPromise;
-    if (media.type === 'image') {
+    if (media.type === 'image' && isPrivate) {
+      // Imagem como nota privada (só no painel).
+      optimistic = { role: 'private_note', content: caption || '[Imagem]',
+                     media_type: 'image', media_path: localUrl, status: null };
+      sendPromise = sendPrivateImage(phone, media.file, caption, { conversationId, channelId });
+    } else if (media.type === 'document' && isPrivate) {
+      // Documento como nota privada (só no painel).
+      const docContent = caption
+        ? `[Documento enviado: ${media.filename}]\n${caption}`
+        : `[Documento enviado: ${media.filename}]`;
+      optimistic = { role: 'private_note', content: docContent,
+                     media_type: 'document', media_path: localUrl, status: null };
+      sendPromise = sendPrivateDocument(phone, media.file, caption, { conversationId, channelId });
+    } else if (media.type === 'image') {
       optimistic = { ...base, content: caption, media_type: 'image', media_path: localUrl };
       sendPromise = api.sendImage(phone, media.file, caption, conversationId, channelId);
     } else if (media.type === 'document') {

@@ -270,7 +270,15 @@ export async function sendPrivateMessage(phone, text, opts = {}) {
   // conversation_id ainda), o channelId é a única pista do canal — sem ele a nota
   // e a rodada de IA misfilam pro WhatsApp 'default'. Espelha sendPrivateAudio.
   if (opts.channelId != null) body.channel_id = opts.channelId;
+  // Menções (@atendente / @time) — colaboração estilo Chatwoot.
+  if (Array.isArray(opts.mentions) && opts.mentions.length) body.mentions = opts.mentions;
+  if (opts.mentionInbox) body.mention_inbox = true;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/private-message`, body);
+}
+
+// Contagem de menções não-lidas do usuário logado (badge da aba "Menções").
+export async function getMentionsUnreadCount() {
+  return request('GET', '/api/mentions/unread-count');
 }
 
 export async function markAsRead(phone) {
@@ -346,6 +354,25 @@ export async function sendPrivateAudio(phone, blob, filename = 'voice.ogg', opts
 export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
   return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-document`,
     { document: file, caption, ..._scopeFields(conversationId, channelId) });
+}
+
+// Anexos como NOTA PRIVADA (só no painel). Espelham sendPrivateAudio e aceitam
+// as mesmas menções (@atendente / @time) via campos multipart.
+function _mentionFields(opts = {}) {
+  const f = {};
+  if (Array.isArray(opts.mentions) && opts.mentions.length) f.mentions = JSON.stringify(opts.mentions);
+  if (opts.mentionInbox) f.mention_inbox = 'true';
+  return f;
+}
+
+export async function sendPrivateImage(phone, file, caption = '', opts = {}) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/private-image`,
+    { image: file, caption, ..._scopeFields(opts.conversationId, opts.channelId), ..._mentionFields(opts) });
+}
+
+export async function sendPrivateDocument(phone, file, caption = '', opts = {}) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/private-document`,
+    { document: file, caption, ..._scopeFields(opts.conversationId, opts.channelId), ..._mentionFields(opts) });
 }
 
 export async function sendPresence(phone, action = 'start', conversationId = null,
