@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from db.repositories import contact_repo
+from db.repositories import contact_repo, conversation_repo
 from agent import group_mentions
 from plugins.events import emit as emit_event, emit_with_filter
 from server.avatars import refresh_and_broadcast
@@ -185,30 +185,34 @@ async def qr_poll_loop(deps):
 
 
 async def avatar_fetch_task(deps):
-    """Keep WhatsApp profile photos fresh for all contacts.
+    """Keep profile photos fresh for all contacts, per-channel (plano 38 F6).
 
-    Runs an initial sweep once connected, then re-sweeps every
-    ``AVATAR_REFRESH_INTERVAL`` seconds. Each pass re-fetches every contact's
-    avatar and overwrites the cached file only when it actually changed (new
-    photo, removed photo handled by keeping the last one), broadcasting
-    ``avatar_updated`` so open clients update live.
+    Runs an initial sweep after a warm-up, then re-sweeps every
+    ``AVATAR_REFRESH_INTERVAL`` seconds. Each pass resolves each contact's CHANNEL
+    (its most recent conversation) and refreshes via that provider's ``fetch_avatar``
+    hook, overwriting the cached file only when it actually changed and broadcasting
+    ``avatar_updated`` so open clients update live. A contact whose channel doesn't
+    implement avatars (Telegram/Cloud) returns None → cache kept, no GOWA call.
+
+    The sweep no longer BLOCKS on the GOWA connection: a warm-up delay lets GOWA
+    stabilize, but a down/absent GOWA doesn't stop non-GOWA contacts from refreshing
+    (their provider is independent). GOWA contacts simply get None while GOWA is down.
     """
     state = deps.state
     settings = deps.settings
     avatars_dir = settings.data_dir / "statics" / "avatars"
     avatars_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wait until WhatsApp is connected
-    while not state.stop_event.is_set():
-        if state.connected:
-            break
-        await asyncio.sleep(3)
+    # Warm-up: give providers a moment to come up after boot (interruptible), but do
+    # NOT gate the whole sweep on the GOWA connection — non-GOWA contacts are refreshed
+    # regardless, and GOWA contacts no-op cleanly while GOWA is down.
+    slept = 0
+    while slept < 8 and not state.stop_event.is_set():
+        await asyncio.sleep(2)
+        slept += 2
 
     if state.stop_event.is_set():
         return
-
-    # Give GOWA a moment to stabilize after connection
-    await asyncio.sleep(5)
 
     while not state.stop_event.is_set():
         try:
@@ -226,12 +230,17 @@ async def avatar_fetch_task(deps):
             phone = c.get("phone", "")
             if not phone:
                 continue
+            # Resolve the contact's channel; skip contacts with no conversation yet.
+            channel_id = await asyncio.to_thread(
+                conversation_repo.channel_id_for_contact, c.get("id"))
+            if not channel_id:
+                continue
             try:
-                if await refresh_and_broadcast(deps, phone):
+                if await refresh_and_broadcast(deps, phone, channel_id):
                     changed += 1
             except Exception as e:
                 logger.debug("[Avatar] refresh failed for %s: %s", phone, e)
-            # Rate limit to avoid overwhelming GOWA
+            # Rate limit to avoid overwhelming the provider
             await asyncio.sleep(0.5)
 
         logger.info("[Avatar] Sweep done: %d updated (of %d contacts)",

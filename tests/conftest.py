@@ -284,7 +284,9 @@ def app(_engine_ready, seed, mock_gowa_manager, mock_gowa_client):
     from server.app import create_app
 
     settings = Settings()
-    agent_handler = AgentHandler(api_key="test-key-fake", max_context_messages=10)
+    agent_handler = AgentHandler(
+        api_key="test-key-fake", max_context_messages=10,
+        default_ai_enabled=settings.get("default_ai_enabled", True))
 
     application = create_app(
         settings=settings,
