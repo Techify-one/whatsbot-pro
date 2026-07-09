@@ -15,7 +15,7 @@ import {
   markAsRead, markAsUnread, setConversationAi, deleteConversation, deleteContact,
   archiveContact, pinContact, createTag, updateContactTags,
   getMe, getAssignableAgents, getUsers, getTags,
-  getContactConversation, getConversation, assignConversation,
+  getContactConversation, getConversation, assignConversation, assignAgent,
 } from '../../../services/api.js';
 import { resolveConversation } from '../../../utils/resolveConversation.js';
 
@@ -159,6 +159,24 @@ export function useConversationActions({
     }
   }, [patchCtxConv]);
 
+  // Unified assign (plano 10) for the context menu — routes to a HUMAN or an AI
+  // subagent via the same endpoint AssigneePicker uses. `payload` is the assignAgent
+  // body: {kind:'none'} | {kind:'user',userId} | {kind:'ai',agentKey}. Patches all
+  // three fields the menu reads (human clears AI + IA off; AI clears human + IA on).
+  const handleAssignAgent = useCallback(async (convId, payload) => {
+    const res = await assignAgent(convId, payload);
+    if (res && res.ok && res.data && res.data.conversation) {
+      const c = res.data.conversation;
+      patchCtxConv({
+        assignee_user_id: c.assignee_user_id,
+        active_agent_key: c.active_agent_key,
+        ai_active: c.ai_active,
+      });
+    } else {
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
+    }
+  }, [patchCtxConv]);
+
   const handleResolveConversation = useCallback(async (convId, status) => {
     // Funnel through resolveConversation so the beforeResolve filter (plugins) runs
     // here too. Pass an object so the filter gets the conversation id for context.
@@ -258,7 +276,7 @@ export function useConversationActions({
     ctxMenu, setCtxMenu, ctxConv, setCtxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleResolveConversation,
     handleCreateTag, applyTagResults, resolveAssignee,
   };
 }

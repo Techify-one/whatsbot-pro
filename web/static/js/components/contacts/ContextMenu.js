@@ -4,38 +4,60 @@ import htm from 'htm';
 import { updateContactTags } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { TagPicker } from './TagPicker.js';
+import { AssigneeList } from './AssigneeList.js';
 
 const html = htm.bind(h);
 
+// Approximate flyout width (px) — used to decide which side to open on.
+const FLYOUT_WIDTH = 264;
+
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, currentUserId, currentUser = null, onAssignConversation, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
+export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
   // P48 (hide, don't disable): each affordance is gated by the permission that
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
   const can = (p) => hasPermission(currentUser, p);
   const canEditContact = can('contact.read') && can('contact.write');
   const ref = useRef(null);
-  const [showTags, setShowTags] = useState(false);
-  const [showAssign, setShowAssign] = useState(false);
+  // A single submenu is open at a time; it renders as a flyout beside the menu
+  // (`openSub` = 'tags' | 'assign' | null) instead of expanding inline. Opens on
+  // hover; a short close delay lets the pointer travel from the trigger into the
+  // flyout (and back) without it flickering shut.
+  const [openSub, setOpenSub] = useState(null);
+  const [flyoutSide, setFlyoutSide] = useState('right');
+  const closeTimer = useRef(null);
+  const openSubmenu = (name) => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } setOpenSub(name); };
+  const scheduleClose = () => { if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => setOpenSub(null), 180); };
   const [confirmDeleteConv, setConfirmDeleteConv] = useState(false);
   // Start at the raw click point; `useLayoutEffect` below measures the rendered
-  // menu and clamps it inside the viewport (the menu can be taller than the
-  // bottom gap, and grows when the Tags/Assign submenus expand).
+  // menu and clamps it inside the viewport.
   const [pos, setPos] = useState({ left: x, top: y });
 
   // Conversation-level menu state (assign attendant / resolve). The sidebar rows
   // are contact-level, so `conv` is resolved lazily by the parent on right-click.
-  const userList = Array.isArray(users) ? users : [];
+  // The assign flyout lists HUMAN agents + AI subagents (assignable-agents endpoint).
+  const humanAgents = Array.isArray(agentsUsers) ? agentsUsers : (Array.isArray(users) ? users : []);
+  const aiAgents = Array.isArray(agentsAi) ? agentsAi : [];
   const assigneeId = conv ? conv.assignee_user_id : null;
+  const activeAgentKey = conv ? conv.active_agent_key : null;
   const isOpen = conv ? conv.status === 'open' : null;
   const canAct = !!(conv && conv.id != null) && !convLoading;
   // Hide the whole assign section in legacy single-password mode (no identity and
-  // no listable users) — assignment is meaningless there.
-  const showAssignSection = (currentUserId != null || userList.length > 0) && can('conversation.assign');
+  // no listable agents) — assignment is meaningless there.
+  const showAssignSection = (currentUserId != null || humanAgents.length > 0 || aiAgents.length > 0) && can('conversation.assign');
   const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
-  const assignee = assigneeId != null ? userList.find(u => u.id === assigneeId) : null;
-  const assigneeLabel = assigneeId != null ? (assignee ? userName(assignee) : `#${assigneeId}`) : null;
+  // Trigger label: resolve either the human assignee or the active AI subagent.
+  let assigneeLabel = null;
+  if (assigneeId != null) {
+    const assignee = humanAgents.find(u => u.id === assigneeId);
+    assigneeLabel = assignee ? userName(assignee) : `#${assigneeId}`;
+  } else if (activeAgentKey) {
+    const a = aiAgents.find(x => x.agent_key === activeAgentKey);
+    assigneeLabel = a ? a.display_name : activeAgentKey;
+  }
+  const me = currentUserId != null ? { id: currentUserId } : null;
+  const pickAssign = (payload) => { if (onAssignAgent && conv && conv.id != null) onAssignAgent(conv.id, payload); };
 
   useEffect(() => {
     function handleClick(e) {
@@ -45,11 +67,18 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
     return () => document.removeEventListener('mousedown', handleClick);
   }, [onClose]);
 
-  // Reset the inline delete confirmation when the menu targets a different row.
-  useEffect(() => { setConfirmDeleteConv(false); }, [phone, conv && conv.id]);
+  // Reset the delete confirmation and any open flyout only when the menu targets a
+  // different contact row. Keyed on `phone` alone (NOT conv.id): toggling a tag
+  // refetches the conversation, briefly flipping conv → null → conv, and keying on
+  // conv.id here would close the Tags flyout on every tag click.
+  useEffect(() => { setConfirmDeleteConv(false); setOpenSub(null); }, [phone]);
+
+  // Clear the pending close timer on unmount.
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
 
   // Keep the menu inside the viewport. Measure the real rendered size and clamp
-  // both axes; re-run whenever the content height changes (submenus toggling).
+  // both axes. Also decide which side the flyout should open on: right by default,
+  // flip to left when the flyout would overflow the right viewport edge.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -66,9 +95,21 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
     }
     if (top < margin) top = margin;
     setPos({ left, top });
-  }, [x, y, showTags, showAssign, confirmDeleteConv, conv && conv.id]);
+    setFlyoutSide(left + rect.width + FLYOUT_WIDTH + margin > window.innerWidth ? 'left' : 'right');
+  }, [x, y, confirmDeleteConv, conv && conv.id]);
 
   const { left, top } = pos;
+
+  // Flyout panel positioned beside the menu (cascading submenu). The parent row is
+  // `relative`; the flyout anchors to its top edge and opens right (default) or left
+  // (near the right viewport edge). The base menu is `overflow-visible` so it isn't clipped.
+  const flyoutCls = `absolute top-0 z-[110] w-64 bg-wa-panel border border-wa-border rounded-lg shadow-lg ${flyoutSide === 'left' ? 'right-full' : 'left-full'}`;
+  // Chevron pointing toward where the flyout opens.
+  const SubArrow = () => html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0">
+    ${flyoutSide === 'left'
+      ? html`<path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/>`
+      : html`<path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/>`}
+  </svg>`;
 
   async function toggleTag(tagName) {
     const current = contactTags || [];
@@ -81,10 +122,17 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
     }
   }
 
+  async function clearAllTags() {
+    const res = await updateContactTags(phone, []);
+    if (res.ok) {
+      onTagsUpdate(phone, res.data.tags);
+    }
+  }
+
   return html`
     <div
       ref=${ref}
-      class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[200px] max-h-[85vh] overflow-y-auto wa-scrollbar"
+      class="fixed z-[100] bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[200px] overflow-visible"
       style="left:${left}px;top:${top}px"
     >
       ${canAct && can('conversation.reply') ? html`
@@ -147,92 +195,68 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       </button>
       ` : null}
 
-      <!-- Tags toggle -->
+      <!-- Tags (flyout) -->
       ${canEditContact ? html`
-      <button
-        onClick=${() => setShowTags(prev => !prev)}
-        class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-      >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-          <path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/>
-        </svg>
-        Tags
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${showTags ? 'rotate-180' : ''}">
-          <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
-        </svg>
-      </button>
-
-      ${showTags ? html`
-        <${TagPicker}
-          globalTags=${globalTags}
-          isActive=${(name) => (contactTags || []).includes(name)}
-          onToggle=${toggleTag}
-          onCreateTag=${onCreateTag}
-        />
+      <div class="relative" onMouseEnter=${() => openSubmenu('tags')} onMouseLeave=${scheduleClose}>
+        <button
+          onClick=${() => openSubmenu('tags')}
+          class="w-full text-left px-4 py-[10px] text-[14.5px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${openSub === 'tags' ? 'bg-wa-hover text-wa-text' : 'text-wa-text'}"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/>
+          </svg>
+          Tags
+          <${SubArrow} />
+        </button>
+        ${openSub === 'tags' ? html`
+          <div class=${flyoutCls}>
+            <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+              <${TagPicker}
+                globalTags=${globalTags}
+                isActive=${(name) => (contactTags || []).includes(name)}
+                onToggle=${toggleTag}
+                onCreateTag=${onCreateTag}
+                onClearAll=${clearAllTags}
+              />
+            </div>
+          </div>
+        ` : null}
+      </div>
       ` : null}
-      ` : null}
 
-      <!-- Conversation: assign attendant (submenu) -->
+      <!-- Conversation: assign attendant / AI subagent (flyout) -->
       ${showAssignSection ? html`
-        <div class="border-t border-wa-border">
+        <div class="relative border-t border-wa-border" onMouseEnter=${() => openSubmenu('assign')} onMouseLeave=${scheduleClose}>
           <button
-            onClick=${() => setShowAssign(prev => !prev)}
-            class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
+            onClick=${() => openSubmenu('assign')}
+            class="w-full text-left px-4 py-[10px] text-[14.5px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${openSub === 'assign' ? 'bg-wa-hover text-wa-text' : 'text-wa-text'}"
           >
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
               <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
             </svg>
             <span class="shrink-0">Atribuir atendente</span>
             ${assigneeLabel ? html`<span class="text-[11px] text-wa-secondary truncate" title=${assigneeLabel}>${assigneeLabel}</span>` : null}
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0 transition-transform ${showAssign ? 'rotate-180' : ''}">
-              <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
-            </svg>
+            <${SubArrow} />
           </button>
-          ${showAssign ? html`
-            <div class="border-t border-wa-border">
+          ${openSub === 'assign' ? html`
+            <div class=${flyoutCls}>
               ${convLoading ? html`
-                <div class="px-4 py-[8px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
+                <div class="px-4 py-[10px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
               ` : !conv ? html`
-                <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma conversa para este contato</div>
+                <div class="px-4 py-[10px] text-[13px] text-wa-secondary">Nenhuma conversa para este contato</div>
               ` : html`
-                ${(currentUserId != null && assigneeId !== currentUserId) ? html`
-                  <button
-                    onClick=${() => onAssignConversation && onAssignConversation(conv.id, currentUserId)}
-                    class="w-full text-left px-4 py-[8px] text-[13px] text-wa-teal hover:bg-wa-hover transition-colors flex items-center gap-3"
-                  >
-                    <span class="w-[16px] h-[16px] shrink-0"></span>
-                    Atribuir a mim
-                  </button>
-                ` : null}
-                <div class="max-h-[200px] overflow-y-auto wa-scrollbar">
-                  ${userList.length === 0 ? html`
-                    <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Sem usuários para listar</div>
-                  ` : userList.map(u => {
-                    const active = u.id === assigneeId;
-                    return html`
-                      <button
-                        key=${u.id}
-                        onClick=${() => onAssignConversation && onAssignConversation(conv.id, u.id)}
-                        class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-                        title=${active ? 'Atribuída a este atendente' : 'Atribuir a este atendente'}
-                      >
-                        <span class="w-[16px] h-[16px] shrink-0 flex items-center justify-center text-wa-teal">
-                          ${active ? html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>` : ''}
-                        </span>
-                        <span class="truncate ${active ? 'font-medium' : ''}">${userName(u)}</span>
-                      </button>
-                    `;
-                  })}
+                <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                  <${AssigneeList}
+                    users=${humanAgents}
+                    aiAgents=${aiAgents}
+                    me=${me}
+                    assigneeUserId=${assigneeId}
+                    activeAgentKey=${activeAgentKey}
+                    onPick=${(payload) => { pickAssign(payload); }}
+                    showAssignToMe=${currentUserId != null}
+                    searchPlaceholder="Buscar atendentes"
+                  />
                 </div>
-                ${assigneeId != null ? html`
-                  <button
-                    onClick=${() => onAssignConversation && onAssignConversation(conv.id, null)}
-                    class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-3 border-t border-wa-border"
-                  >
-                    <span class="w-[16px] h-[16px] shrink-0"></span>
-                    Remover atribuição
-                  </button>
-                ` : null}
               `}
             </div>
           ` : null}
