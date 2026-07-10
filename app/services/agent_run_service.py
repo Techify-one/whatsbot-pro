@@ -379,13 +379,18 @@ async def run_turn(handler, sender: str, text: str, *,
         # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
         # agent answer this same message. No-op when no handoff occurred, so
         # the single-agent path is unchanged.
-        result, executed_tools, usage_dict, _ = await _continue_routing(
+        result, executed_tools, usage_dict, routing_steps = await _continue_routing(
             handler, contact, sender, context_messages, agent_spec,
             result, executed_tools, usage_dict, disable_tools=disable_tools)
         reply = result.reply
+        # Agente que EFETIVAMENTE respondeu: o último hop do routing (ou o resolvido
+        # no início, sem handoff). Capturado ANTES de qualquer efeito colateral do
+        # turno (ex.: transfer_to_human zera o active_agent_key da conversa), então é
+        # a fonte confiável para atribuir a resposta e os cards de tool ao agente.
+        final_agent_key = routing_steps[-1]["to"] if routing_steps else agent_spec.agent_key
 
         if save_response:
-            contact.add_message("assistant", reply)
+            contact.add_message("assistant", reply, agent_key=final_agent_key)
         logger.info("Processed message from %s", sender)
 
         updated_info = None
@@ -403,7 +408,8 @@ async def run_turn(handler, sender: str, text: str, *,
             "ts": time.time(),
         })
 
-        return ProcessResult(reply=reply, tool_calls=executed_tools, contact_info=updated_info)
+        return ProcessResult(reply=reply, tool_calls=executed_tools,
+                             contact_info=updated_info, agent_key=final_agent_key)
 
     except asyncio.CancelledError:
         raise

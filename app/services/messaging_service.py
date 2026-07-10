@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 
 from channels import ai_settings
-from db.repositories import contact_repo, conversation_repo
+from db.repositories import agent_repo, contact_repo, conversation_repo
 from agent import group_mentions
 from server import system_notices
 from server.execution import (
@@ -307,7 +307,8 @@ class MessagingService:
 
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 
-    async def send_reply(self, channel_id: str, phone: str, reply: str):
+    async def send_reply(self, channel_id: str, phone: str, reply: str, *,
+                         agent_key: str | None = None):
         """Send reply (possibly split into multiple parts) and broadcast.
 
         Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
@@ -328,6 +329,9 @@ class MessagingService:
         if reply is None:
             logger.info("[Batch] reply for %s aborted by filter.reply.raw", phone)
             return
+
+        # Nome exibível do agente (resolvido 1× por resposta) para "IA - <NOME>".
+        agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
 
         split_enabled = ai_settings.value(
             channel_id, "split_messages", settings.get("split_messages", True))
@@ -406,11 +410,16 @@ class MessagingService:
             sent_parts.append((part, part_msg_id))
 
             # Broadcast each part to frontend individually
+            _ai_msg = {"role": "assistant", "content": part, "ts": time.time(),
+                       "status": "sent", "msg_id": part_msg_id}
+            if agent_key:
+                _ai_msg["agent_key"] = agent_key
+            if agent_name:
+                _ai_msg["agent_name"] = agent_name
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
                 "channel_id": channel_id,
-                "message": {"role": "assistant", "content": part, "ts": time.time(),
-                            "status": "sent", "msg_id": part_msg_id},
+                "message": _ai_msg,
             })
 
             # Plugin event: AI reply leg
@@ -426,7 +435,7 @@ class MessagingService:
             try:
                 await asyncio.to_thread(agent_handler.save_assistant_message, phone, part,
                                         msg_id=part_msg_id, status="sent",
-                                        channel_id=channel_id)
+                                        channel_id=channel_id, agent_key=agent_key)
                 # Increment unread AI count (operator hasn't seen this reply yet)
                 contact = agent_handler._get_contact(phone, channel_id=channel_id)
                 if contact:
@@ -456,11 +465,17 @@ class MessagingService:
 
     async def broadcast_tool_calls(self, phone: str, tool_calls: list[dict],
                                    contact_info: dict | None = None,
-                                   *, channel_id: str = "default"):
-        """Broadcast private messages for each tool call executed by the LLM."""
+                                   *, channel_id: str = "default",
+                                   agent_key: str | None = None):
+        """Broadcast private messages for each tool call executed by the LLM.
+
+        ``agent_key`` (do ProcessResult do turno) atribui os cards de tool ao agente
+        que os executou, para o painel exibir "Ferramenta IA - <NOME>"."""
         ws_manager = self.ws_manager
         agent_handler = self.agent_handler
         settings = self.settings
+        # Nome exibível do agente (resolvido 1× para todos os cards deste turno).
+        agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
         for tc in tool_calls:
@@ -488,7 +503,7 @@ class MessagingService:
             saved = None
             try:
                 saved = await asyncio.to_thread(
-                    contact.add_message, "tool_call", content)
+                    contact.add_message, "tool_call", content, agent_key=agent_key)
             except Exception as e:
                 logger.error("[ToolCall] failed to save tool_call card for %s: %s",
                              phone, e)
@@ -497,6 +512,10 @@ class MessagingService:
                 "content": content,
                 "ts": (saved or {}).get("ts", time.time()),
             }
+            if agent_key:
+                tc_message["agent_key"] = agent_key
+            if agent_name:
+                tc_message["agent_name"] = agent_name
             if saved and saved.get("conversation_id") is not None:
                 tc_message["conversation_id"] = saved["conversation_id"]
             if saved and saved.get("id"):
@@ -572,6 +591,13 @@ class MessagingService:
                     "ai_active": conv.get("ai_active"),
                     "ts": time.time(),
                 })
+                # Card "IA pausada" no fio: a IA se auto-desligou ao transferir para
+                # humano. Sem ``actor`` (não foi um operador) → texto genérico. Gated
+                # pelo grupo ``system_notice_ai``; best-effort (emit engole exceções).
+                await asyncio.to_thread(
+                    system_notices.emit_conversation_notice,
+                    event_type="ai_off", conversation_id=conv["id"],
+                    contact_id=contact.id, phone=phone)
 
     # ── Audio Transcription Delivery ──────────────────────────────────────────
 
@@ -693,14 +719,15 @@ class MessagingService:
                 return
             await asyncio.sleep(0.3)
 
-    async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str):
+    async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str, *,
+                                      agent_key: str | None = None):
         """Wait for contact to stop typing, mark sending=True, then send (uncancellable phase)."""
         state = self.state
         key = (channel_id, phone)
         await self._wait_typing_paused(channel_id, phone)
         state.sending[key] = True
         try:
-            await self.send_reply(channel_id, phone, reply)
+            await self.send_reply(channel_id, phone, reply, agent_key=agent_key)
         finally:
             state.sending[key] = False
 
@@ -861,7 +888,7 @@ class MessagingService:
                                     save_user_message=False, save_response=False,
                                     channel_id=channel_id)
                                 if result.tool_calls:
-                                    await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
+                                    await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                                 if result.reply:
                                     if result.reply.startswith("[WhatsBot]"):
                                         contact.add_message("system_notice", result.reply)
@@ -870,7 +897,7 @@ class MessagingService:
                                             "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                                         })
                                     else:
-                                        await self._send_with_typing_guard(channel_id, phone, result.reply)
+                                        await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
                                         await self.maybe_emit_ai_takeover(phone, channel_id)
                                 elif not result.aborted:
                                     # A5 (plano 31 F4): reply vazio calava sem rastro —
@@ -1027,7 +1054,7 @@ class MessagingService:
                         channel_id=channel_id,
                     )
                     if result.tool_calls:
-                        await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
+                        await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                     if result.reply:
                         if result.reply.startswith("[WhatsBot]"):
                             contact.add_message("system_notice", result.reply)
@@ -1036,7 +1063,7 @@ class MessagingService:
                                 "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                             })
                         else:
-                            await self._send_with_typing_guard(channel_id, phone, result.reply)
+                            await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
                             await self.maybe_emit_ai_takeover(phone, channel_id)
                     elif not result.aborted:
                         # A5 (plano 31 F4): mesmo tratamento do caminho texto

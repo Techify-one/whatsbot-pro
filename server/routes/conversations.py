@@ -257,6 +257,17 @@ def register_routes(app, deps):
                 except Exception:
                     logger.exception("Falha ao marcar menções lidas na conversa %s", conv_id)
             msgs = message_repo.get_by_conversation(conv_id)
+            # Atribuição de agente: resolve agent_key → display_name (dedupe por chave)
+            # para o painel exibir "IA - <NOME>" / "Ferramenta IA - <NOME>".
+            _an_cache: dict = {}
+            for _m in msgs:
+                _ak = _m.get("agent_key")
+                if not _ak:
+                    continue
+                if _ak not in _an_cache:
+                    _an_cache[_ak] = agent_repo.display_name_for(_ak)
+                if _an_cache[_ak]:
+                    _m["agent_name"] = _an_cache[_ak]
             return conv, contact, msgs, ids
 
         conv, contact, msgs, msg_ids = await asyncio.to_thread(_load)

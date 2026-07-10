@@ -275,6 +275,7 @@ class ContactMemory:
                     reply_to_msg_id: str | None = None,
                     sent_by_user_id: int | None = None,
                     sent_by_name: str | None = None,
+                    agent_key: str | None = None,
                     reopen: bool | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
@@ -300,6 +301,7 @@ class ContactMemory:
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
             conversation_id=conversation_id,
             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+            agent_key=agent_key,
         )
         if conversation_id is not None:
             try:
