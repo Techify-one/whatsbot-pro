@@ -18,10 +18,14 @@ import time
 
 from agent.execution import (  # noqa: F401 — re-export
     set_current_execution,
+    set_current_contact_id,
+    get_current_contact_id,
     create_execution,
     complete_execution,
     track_step,
     set_execution_channel,
+    set_execution_texts,
+    mark_execution_has_ai,
     get_current_execution_id,
     prune_executions,
 )
@@ -72,6 +76,21 @@ async def aend_execution(exec_id: int, error: str | None = None) -> None:
 async def atrack_step(step_type: str, data: dict | None = None, status: str = "ok") -> None:
     """Async wrapper — delegates to track_step via to_thread."""
     await asyncio.to_thread(track_step, step_type, data, status)
+
+
+async def aset_execution_texts(*, input_text: str | None = None,
+                               output_text: str | None = None,
+                               msg_id: str | None = None) -> None:
+    """Async wrapper — stamp the denormalized search columns onto the execution."""
+    await asyncio.to_thread(
+        set_execution_texts, input_text=input_text,
+        output_text=output_text, msg_id=msg_id,
+    )
+
+
+async def amark_execution_has_ai() -> None:
+    """Async wrapper — flag the current execution as AI-invoking (has_ai=1)."""
+    await asyncio.to_thread(mark_execution_has_ai)
 
 
 async def aset_execution_channel(conversation_id: int | None = None,

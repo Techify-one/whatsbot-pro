@@ -41,7 +41,7 @@ from agent import group_mentions
 from server import system_notices
 from server.execution import (
     astart_execution, aend_execution, atrack_step, prune_executions,
-    astamp_execution_channel,
+    astamp_execution_channel, aset_execution_texts, set_current_contact_id,
 )
 from server.helpers import parse_split_reply
 from server.transcription import maybe_transcribe, format_media_content
@@ -443,6 +443,8 @@ class MessagingService:
             "parts": len(parts),
             "reply_preview": full_reply[:200],
         })
+        # Nexus plan: denormalize the final AI reply for the "Msg da IA" search.
+        await aset_execution_texts(output_text=full_reply[:2000] or None)
         logger.info("[Batch] Replied to %s/%s (%d parts): %s",
                     channel_id, phone, len(parts), full_reply[:80])
 
@@ -781,6 +783,14 @@ class MessagingService:
             # plano 36: stamp conversation_id + channel onto the execution (best-effort)
             # now that the contact/inbox is materialised. Cheap read; failure → NULL.
             await astamp_execution_channel(contact, channel_id)
+            # Nexus plan: expose the contact of this turn on the contextvar so a deep
+            # call (e.g. the vendas_ia plugin recording embedding usage) can attribute
+            # cost to it without threading the id through every layer.
+            try:
+                if contact is not None and getattr(contact, "id", None):
+                    set_current_contact_id(contact.id)
+            except Exception:
+                pass
 
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
@@ -798,11 +808,18 @@ class MessagingService:
                     if item.get("reply_to_msg_id"):
                         text_reply_to = item["reply_to_msg_id"]
 
+            combined_preview = "\n".join(t for t in text_parts if t)
             await atrack_step("batch_accumulated", {
                 "text_count": len(text_parts),
                 "media_count": len(media_items),
-                "combined_preview": "\n".join(t for t in text_parts if t)[:200],
+                "combined_preview": combined_preview[:200],
             })
+            # Nexus plan: denormalize the client message + origin msg_id onto the
+            # execution row so the list can search/filter without scanning steps.
+            await aset_execution_texts(
+                input_text=combined_preview[:2000] or None,
+                msg_id=(text_msg_ids[-1] if text_msg_ids else None),
+            )
 
             # plano 25 Fase 1: only the AI auto-marking-read (+ real read-receipt) when
             # it is actually TAKING OVER this conversation. The gate needs all three AI
