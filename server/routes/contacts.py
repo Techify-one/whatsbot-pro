@@ -1077,7 +1077,7 @@ def register_routes(app, deps):
             try:
                 await deps.broadcast_tool_calls(
                     phone, result.tool_calls, result.contact_info,
-                    channel_id=run_channel)
+                    channel_id=run_channel, agent_key=result.agent_key)
             except Exception as e:
                 logger.warning("[PrivateAI] broadcast_tool_calls failed for %s: %s",
                                phone, e)
@@ -1158,7 +1158,7 @@ def register_routes(app, deps):
                     agent_handler.save_assistant_message, phone, part,
                     msg_id=msg_id,
                     status="failed" if send_failed else "sent",
-                    channel_id=run_channel,
+                    channel_id=run_channel, agent_key=result.agent_key,
                 )
             except Exception as e:
                 logger.error("[PrivateAI] failed to save assistant message: %s", e)

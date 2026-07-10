@@ -339,6 +339,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
+                showAgentName=${config ? (config.show_agent_name !== false) : true}
               />`
           }
           ${openPanel === 'contact' && selected && canReadContact ? html`

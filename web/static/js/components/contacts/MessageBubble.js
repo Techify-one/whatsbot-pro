@@ -22,6 +22,7 @@ export function MessageBubble({
   message: m, index: i, isFirst,
   isGroup, sandbox, displayName, fmt,
   findQuoted, quotedInfo, focusMessage, openMsgMenu, myReaction, handleRetry,
+  showAgentName = true,
 }) {
   const isUser = m.role === 'user';
   const isFailed = m._status === 'failed' || m.status === 'failed';
@@ -41,9 +42,12 @@ export function MessageBubble({
   // so your 'user' messages go right and the IA's replies go left —
   // the opposite of the contact chat (viewed by the operator).
   const isFromMe = sandbox ? isUser : !isUser;
+  // Rótulo da IA: "IA - <nome do agente>" quando o toggle está ligado e a mensagem
+  // carrega o agente que a produziu; senão apenas "IA".
+  const aiLabel = (showAgentName && m.agent_name) ? `IA - ${m.agent_name}` : 'IA';
   const senderLabel = sandbox
-    ? (isUser ? 'Você' : 'IA')
-    : (isUser ? (groupSender || displayName) : (isOperator ? (m.sent_by_name || 'Manual') : 'IA'));
+    ? (isUser ? 'Você' : aiLabel)
+    : (isUser ? (groupSender || displayName) : (isOperator ? (m.sent_by_name || 'Manual') : aiLabel));
   const sColor = senderColor(isUser, isOperator);
 
   return html`

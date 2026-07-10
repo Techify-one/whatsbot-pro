@@ -90,7 +90,9 @@ export function isSystemCardRole(role) {
  * @returns {string}
  */
 export function senderColor(isUser, isOperator) {
-  return isUser ? '#1f7aec' : (isOperator ? '#b45309' : '#047857');
+  // IA usa uma variável CSS (--wa-ai-label) que fica CLARA no modo escuro e escura
+  // no claro — a cor inline não responderia ao tema sozinha. user→azul, operator→âmbar.
+  return isUser ? '#1f7aec' : (isOperator ? '#b45309' : 'rgb(var(--wa-ai-label))');
 }
 
 /**

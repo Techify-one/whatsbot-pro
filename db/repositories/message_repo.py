@@ -19,11 +19,14 @@ def add(contact_id: int, role: str, content: str, *,
         conversation_id: int | None = None,
         sent_by_user_id: int | None = None,
         sent_by_name: str | None = None,
+        agent_key: str | None = None,
         ts: float | None = None) -> dict:
     """Insert a message and return it as a dict.
 
     conversation_id (plano 01 Fase 2) liga a mensagem à thread de atendimento;
     aditivo e nullable — contact_id permanece a chave de pertencimento.
+    ``agent_key`` atribui a mensagem ao agente de IA que a produziu (resposta ou
+    tool_call); NULL para mensagens não-IA.
     """
     ts = ts or time.time()
     with get_engine().begin() as conn:
@@ -40,6 +43,7 @@ def add(contact_id: int, role: str, content: str, *,
             conversation_id=conversation_id,
             sent_by_user_id=sent_by_user_id,
             sent_by_name=sent_by_name,
+            agent_key=agent_key,
         ))
         new_id = result.inserted_primary_key[0]
     return {
@@ -54,6 +58,7 @@ def add(contact_id: int, role: str, content: str, *,
         "reply_to_msg_id": reply_to_msg_id,
         "conversation_id": conversation_id,
         "sent_by_name": sent_by_name,
+        "agent_key": agent_key,
     }
 
 
@@ -475,6 +480,11 @@ def _row_to_dict(row) -> dict:
     # sent_by_user_id é interno e não vai ao cliente).
     if row.get("sent_by_name"):
         d["sent_by_name"] = row["sent_by_name"]
+    # Agente de IA que produziu a mensagem (resposta/tool_call). Ausente em linhas
+    # legadas / mensagens não-IA. O nome exibível é resolvido acima (rota/broadcast);
+    # aqui expõe a chave crua para quem quiser resolver por conta própria.
+    if row.get("agent_key"):
+        d["agent_key"] = row["agent_key"]
     d["_id"] = row["id"]
     # conversa-cêntrico (plano 11): expõe a thread de pertencimento ao frontend,
     # para montar permalink de mensagem (/conversations/<id>?message=<_id>) mesmo
