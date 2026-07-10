@@ -79,10 +79,6 @@ def register_routes(app, deps):
             out[ck.key] = settings.get(ck.key, ck.effective_get_default)
         out["has_password"] = bool(settings.get("web_password_hash", ""))
         out["public_base_url"] = settings.get("public_base_url", "")
-        # Expose the code default so the UI can prefill/reset the editable
-        # improvement prompt without duplicating the text in the frontend.
-        from app.services.improvement_service import DEFAULT_IMPROVEMENT_PROMPT
-        out["improvement_prompt_default"] = DEFAULT_IMPROVEMENT_PROMPT
         return _ok(out)
 
     @app.put("/api/config")
@@ -127,8 +123,6 @@ def register_routes(app, deps):
             audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),
             image_model=settings.get("image_model", "google/gemini-2.5-flash"),
             document_model=settings.get("document_model", "google/gemini-2.5-flash"),
-            improvement_model=settings.get("improvement_model", ""),
-            improvement_prompt=settings.get("improvement_prompt", ""),
             max_context_messages=settings.get("max_context_messages", 10),
             split_messages=settings.get("split_messages", True),
             default_ai_enabled=settings.get("default_ai_enabled", True),

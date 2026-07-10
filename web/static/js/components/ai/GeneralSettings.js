@@ -11,8 +11,7 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
-import { ModelSelect } from '../ModelSelect.js';
-import { MarkdownEditor } from '../MarkdownEditor.js';
+import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
 
@@ -29,11 +28,8 @@ export default function GeneralSettings() {
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
   // Exibir o nome do agente de IA nas mensagens ("IA - <NOME>") e nos cards de tool.
   const [showAgentName, setShowAgentName] = useState(true);
-  // Modelo da análise de melhoria ('' = usar o mesmo do chat).
-  const [improvementModel, setImprovementModel] = useState('');
-  // Prompt da análise de melhoria (editável). Vazio → usa o padrão do sistema.
-  const [improvementPrompt, setImprovementPrompt] = useState('');
-  const [improvementPromptDefault, setImprovementPromptDefault] = useState('');
+  // A "sugestão de melhoria" (modelo/prompt + análises geradas) migrou para o
+  // plugin "melhorias", renderizado no slot `ai.settings.sections` abaixo.
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -46,12 +42,6 @@ export default function GeneralSettings() {
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
     setShowAgentName(cfg.show_agent_name ?? true);
-    setImprovementModel(cfg.improvement_model ?? '');
-    const dflt = cfg.improvement_prompt_default ?? '';
-    setImprovementPromptDefault(dflt);
-    // Prefill with the custom prompt if set, otherwise the code default so the
-    // operator sees/edits the real text in use.
-    setImprovementPrompt((cfg.improvement_prompt || dflt));
   }
 
   async function load() {
@@ -100,13 +90,6 @@ export default function GeneralSettings() {
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
       show_agent_name: showAgentName,
-      improvement_model: improvementModel || '',
-      // Store '' when unchanged from the default, so the live code default keeps
-      // flowing; persist the edited text otherwise.
-      improvement_prompt:
-        improvementPrompt.trim() === improvementPromptDefault.trim()
-          ? ''
-          : improvementPrompt,
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -246,46 +229,10 @@ export default function GeneralSettings() {
         <span class="text-[12px] text-wa-secondary">Exibe "IA - &lt;nome do agente&gt;" nas respostas e "Ferramenta IA - &lt;nome do agente&gt;" nos cards de tool. Desligado, mostra apenas "IA".</span>
       </div>
 
-      <!-- Modelo da sugestão de melhoria -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="text-[14px] font-semibold text-wa-text">Modelo de IA (sugestão de melhoria)</label>
-        <span class="text-[12px] text-wa-secondary">
-          Modelo usado ao gerar a análise de uma resposta marcada como incorreta
-          (botão direito numa resposta da IA → "Gerar melhoria"). Deixe em branco para
-          usar o mesmo modelo do chat.
-        </span>
-        <${ModelSelect}
-          value=${improvementModel}
-          onChange=${(v) => setImprovementModel(v || '')}
-          allowEmpty=${true}
-          emptyLabel="— Usar o mesmo do chat —"
-          placeholder="Usar o mesmo do chat"
-        />
-      </div>
-
-      <!-- Prompt da sugestão de melhoria -->
-      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <div class="flex items-center justify-between gap-2">
-          <label class="text-[14px] font-semibold text-wa-text">Prompt da sugestão de melhoria</label>
-          <button
-            type="button"
-            onClick=${() => setImprovementPrompt(improvementPromptDefault)}
-            disabled=${improvementPrompt.trim() === improvementPromptDefault.trim()}
-            class="text-[12px] px-2 py-1 rounded-md border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-40 disabled:cursor-default transition-colors"
-          >
-            Restaurar padrão
-          </button>
-        </div>
-        <span class="text-[12px] text-wa-secondary">
-          Instruções enviadas ao modelo ao gerar a análise de uma resposta marcada como
-          incorreta (botão direito numa resposta da IA → "Gerar melhoria"). Deixe igual
-          ao padrão para acompanhar melhorias futuras do sistema.
-        </span>
-        <${MarkdownEditor}
-          value=${improvementPrompt}
-          onChange=${setImprovementPrompt}
-          placeholder="Instruções enviadas ao modelo ao gerar a análise de uma resposta marcada como incorreta." />
-      </div>
+      <!-- Seção "Sugestão de melhoria" (config de modelo/prompt + análises geradas):
+           preenchida pelo plugin "melhorias" via o slot. Some quando o plugin está
+           desativado. -->
+      <${Slot} name="ai.settings.sections" ctx=${{}} />
 
       <!-- Save -->
       <div class="flex justify-end">

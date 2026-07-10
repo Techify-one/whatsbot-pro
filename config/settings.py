@@ -40,8 +40,6 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "WHATSBOT_AUDIO_MODEL": ("audio_model", str),
     "WHATSBOT_IMAGE_MODEL": ("image_model", str),
     "WHATSBOT_DOCUMENT_MODEL": ("document_model", str),
-    "WHATSBOT_IMPROVEMENT_MODEL": ("improvement_model", str),
-    "WHATSBOT_IMPROVEMENT_PROMPT": ("improvement_prompt", str),
     "WHATSBOT_WEB_PORT": ("web_port", int),
     "WHATSBOT_GOWA_PORT": ("gowa_port", int),
     "WHATSBOT_AUTO_REPLY": ("auto_reply", lambda v: v.lower() in ("1", "true", "yes")),
@@ -109,13 +107,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("audio_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
     ConfigKey("image_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
     ConfigKey("document_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
-    # Model for the one-shot "improvement analysis" of a flagged AI reply.
-    # Empty → falls back to the chat ``model``. Override env WHATSBOT_IMPROVEMENT_MODEL.
-    ConfigKey("improvement_model", default="", exposed=True, writable=True),
-    # System prompt for the one-shot "improvement analysis" of a flagged AI
-    # reply. Empty → falls back to app.services.improvement_service
-    # .DEFAULT_IMPROVEMENT_PROMPT. Override env WHATSBOT_IMPROVEMENT_PROMPT.
-    ConfigKey("improvement_prompt", default="", exposed=True, writable=True),
+    # (A config da "sugestão de melhoria" — improvement_model/improvement_prompt —
+    # migrou para o plugin "melhorias", namespace plugin.melhorias.*.)
     ConfigKey("group_reply_mode", default="mention_only", exposed=True, writable=True),
     # Historical GET fallback was True (inert — the key is always seeded False).
     ConfigKey("auto_reply", default=False, exposed=True, get_default=True, writable=True),
