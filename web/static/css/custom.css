@@ -25,6 +25,9 @@
   --wa-badge: 37 211 102;
   --wa-icon: 84 101 111;
   --wa-iconActive: 0 128 105;
+  /* Cor do rótulo do remetente IA ("IA - <agente>"). Verde escuro no tema claro
+     (bom contraste no bubble branco/cinza). Ver override claro em html.dark. */
+  --wa-ai-label: 4 120 87;
 }
 
 html.dark {
@@ -47,6 +50,9 @@ html.dark {
   --wa-badge: 37 211 102;
   --wa-icon: 142 158 168;
   --wa-iconActive: 0 168 132;
+  /* Rótulo da IA mais CLARO no modo escuro (emerald-400) — o verde escuro do tema
+     claro somia no bubble escuro. Legível sobre bg-wa-outgoing/incoming escuros. */
+  --wa-ai-label: 52 211 153;
 }
 
 /* Smooth transitions for status indicators */

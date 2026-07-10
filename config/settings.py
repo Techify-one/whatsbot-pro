@@ -180,6 +180,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("account_url", default="", exposed=True),
     ConfigKey("low_balance_enabled", default=True, exposed=True, writable=True),
     ConfigKey("low_balance_threshold", default=0.50, exposed=True, writable=True),
+    # Exibir o nome do agente de IA nas mensagens/cards de tool do painel
+    # ("IA - <NOME>" / "Ferramenta IA - <NOME>"). Puro display; default ligado.
+    ConfigKey("show_agent_name", default=True, exposed=True, writable=True),
     # Avisos de sistema no chat (plano 12) — gate GLOBAL por grupo de evento.
     # Grupo desligado ⇒ o aviso não é gerado (nada grava/emite) para ninguém.
     ConfigKey("system_notice_assignment", default=True, exposed=True, writable=True),

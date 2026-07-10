@@ -27,6 +27,8 @@ export default function GeneralSettings() {
   // Saldo
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
+  // Exibir o nome do agente de IA nas mensagens ("IA - <NOME>") e nos cards de tool.
+  const [showAgentName, setShowAgentName] = useState(true);
   // Modelo da análise de melhoria ('' = usar o mesmo do chat).
   const [improvementModel, setImprovementModel] = useState('');
   // Prompt da análise de melhoria (editável). Vazio → usa o padrão do sistema.
@@ -43,6 +45,7 @@ export default function GeneralSettings() {
     setAutoReply(cfg.auto_reply ?? true);
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
+    setShowAgentName(cfg.show_agent_name ?? true);
     setImprovementModel(cfg.improvement_model ?? '');
     const dflt = cfg.improvement_prompt_default ?? '';
     setImprovementPromptDefault(dflt);
@@ -96,6 +99,7 @@ export default function GeneralSettings() {
       auto_reply: autoReply,
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
+      show_agent_name: showAgentName,
       improvement_model: improvementModel || '',
       // Store '' when unchanged from the default, so the live code default keeps
       // flowing; persist the edited text otherwise.
@@ -226,6 +230,20 @@ export default function GeneralSettings() {
             <span class="text-[12px] text-wa-secondary block mt-1">Padrão: 0.50 (50 centavos de dólar)</span>
           </div>
         ` : null}
+      </div>
+
+      <!-- Nome do agente nas mensagens -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
+          <input
+            type="checkbox"
+            checked=${showAgentName}
+            onChange=${(e) => setShowAgentName(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Mostrar o nome do agente de IA nas mensagens
+        </label>
+        <span class="text-[12px] text-wa-secondary">Exibe "IA - &lt;nome do agente&gt;" nas respostas e "Ferramenta IA - &lt;nome do agente&gt;" nos cards de tool. Desligado, mostra apenas "IA".</span>
       </div>
 
       <!-- Modelo da sugestão de melhoria -->

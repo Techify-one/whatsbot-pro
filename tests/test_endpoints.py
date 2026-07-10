@@ -2274,6 +2274,18 @@ check("_is_orphan_protocolo -> True após conversa excluída",
 _alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
 check("send_protocol_on_close(órfão) não levanta", True)
 
+# ── Religar IA ao fechar: setting (default ON) + helper best-effort ──
+check("get_reactivate_ai_on_close_setting -> default True",
+      _alogic.get_reactivate_ai_on_close_setting() is True)
+config_repo.set("plugin.protocolos.reactivate_ai_on_close", False)
+check("get_reactivate_ai_on_close_setting -> respeita override False",
+      _alogic.get_reactivate_ai_on_close_setting() is False)
+config_repo.set("plugin.protocolos.reactivate_ai_on_close", True)
+# Órfão: reactivate_ai_after_close pula (via _is_orphan_protocolo) e não levanta. No harness
+# get_deps()=None, então o caminho de religar propriamente é coberto pelo teste de core set_ai.
+_asyncio.run(_alogic.reactivate_ai_after_close(_alogic.get_protocolo(_orf_proto["id"])))
+check("reactivate_ai_after_close(órfão) não levanta", True)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
 # ═══════════════════════════════════════════════════════════════════
@@ -2605,6 +2617,123 @@ _conv_repo.set_assignee(_p17b["id"], _mgr["id"])
 r = client.post(f"/api/conversations/{_p17b['id']}/ai", json={"active": False})
 _db17 = r.json()["data"]["conversation"]
 check("P17 ai off (sem auth) -> Não atribuídas", _db17["assignee_user_id"] is None)
+
+# ── set_ai(clear_transfer_tag): religar a IA mantendo a tag (usado pelo fechar-
+#    protocolo). Default=True remove a tag; False preserva o rótulo. ──
+from app.services import conversation_service as _csvc
+from agent.tools.transfer_to_human import TRANSFER_TAG as _TT
+try:
+    tag_repo.create(_TT, "#ef4444")
+except Exception:  # noqa: BLE001 — tag pode já existir
+    pass
+# (a) clear_transfer_tag=False -> IA religa (agente default, assignee limpo) e a tag FICA.
+_conv_repo.set_status(_p17b["id"], "closed")  # 1 aberta por (contato, inbox)
+_ctk = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_ctk["id"], _mgr["id"])  # humano assume
+_conv_repo.set_ai_active(_ctk["id"], 0)
+tag_repo.add_contact_tag(_cid, _TT)
+_ktag = _asyncio.run(_csvc.set_ai(
+    app.state.deps, _conv_repo.get(_ctk["id"]), 1, clear_transfer_tag=False))
+check("clear_transfer_tag=False -> ai_active=1", bool(_ktag) and _ktag["ai_active"] == 1)
+check("clear_transfer_tag=False -> agente default religado", _ktag["active_agent_key"] == "default")
+check("clear_transfer_tag=False -> assignee humano limpo", _ktag["assignee_user_id"] is None)
+check("clear_transfer_tag=False -> tag transferido_atendente PRESERVADA",
+      _TT in tag_repo.get_contact_tags(_cid))
+# (b) default (clear_transfer_tag=True) -> religa E remove a tag (regressão do plano 29 A5).
+_conv_repo.set_status(_ctk["id"], "closed")
+_ctk2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_ctk2["id"], _mgr["id"])
+_conv_repo.set_ai_active(_ctk2["id"], 0)
+tag_repo.add_contact_tag(_cid, _TT)
+_asyncio.run(_csvc.set_ai(app.state.deps, _conv_repo.get(_ctk2["id"]), 1))
+check("clear_transfer_tag default=True -> tag removida",
+      _TT not in tag_repo.get_contact_tags(_cid))
+
+# ── A IA se auto-desligando (transfer_to_human) emite o card "SISTEMA pausou a IA" ──
+from server import system_notices as _sysn
+_txf_cm = _CM("5500011177777")
+_txf_conv = _txf_cm.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500011177777",
+    [{"tool": "transfer_to_human", "args": {"reason": "cliente pediu humano"}}],
+    channel_id="default"))
+check("transfer_to_human -> card ai_off emitido no fio",
+      _sysn.has_event(_txf_conv, "ai_off") is True)
+# Tool comum (sem transfer) NÃO cria card ai_off (guarda contra falso positivo).
+_txf_cm2 = _CM("5500011188888")
+_txf_conv2 = _txf_cm2.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500011188888", [{"tool": "save_contact_info", "args": {}}], channel_id="default"))
+check("tool comum (sem transfer) -> nenhum card ai_off",
+      _sysn.has_event(_txf_conv2, "ai_off") is False)
+# Autor do card: ação MANUAL (usuário) usa o nome; ação AUTOMÁTICA (sem actor) usa "SISTEMA".
+check("ai_on manual -> nome do usuário",
+      _sysn.FORMATTERS["ai_on"](actor="Fulano") == "🤖 Fulano reativou a IA.")
+check("ai_on automático -> SISTEMA",
+      _sysn.FORMATTERS["ai_on"](actor=None) == "🤖 SISTEMA reativou a IA.")
+check("ai_off manual -> nome do usuário",
+      _sysn.FORMATTERS["ai_off"](actor="Fulano") == "🤖 Fulano pausou a IA.")
+check("ai_off automático -> SISTEMA",
+      _sysn.FORMATTERS["ai_off"](actor=None) == "🤖 SISTEMA pausou a IA.")
+
+# ═══════════════════════════════════════════════════════════════════
+#  Atribuição de agente por mensagem ("IA - <NOME>" / "Ferramenta IA - <NOME>")
+# ═══════════════════════════════════════════════════════════════════
+section("Atribuição de agente nas mensagens")
+from db.repositories import agent_repo as _ar
+# (0) resolver agent_key -> display_name (com fallbacks)
+_ar.ensure("attr_ag", display_name="Agente Atributo")
+_ar.ensure("attr_ag_vazio", display_name="")
+check("display_name_for -> nome do agente",
+      _ar.display_name_for("attr_ag") == "Agente Atributo")
+check("display_name_for(display_name vazio) -> fallback para a chave",
+      _ar.display_name_for("attr_ag_vazio") == "attr_ag_vazio")
+check("display_name_for(inexistente) -> None",
+      _ar.display_name_for("nao_existe_xyz") is None)
+check("display_name_for(None) -> None", _ar.display_name_for(None) is None)
+
+# (1) message_repo.add persiste agent_key e _row_to_dict o expõe
+_attr_cm = _CM("5500019200001")
+_attr_conv = _attr_cm.ensure_conversation_live("user", None)
+_attr_msg = message_repo.add(_attr_cm.id, "assistant", "resposta da IA",
+                             conversation_id=_attr_conv, agent_key="attr_ag")
+check("message_repo.add -> retorna agent_key", _attr_msg.get("agent_key") == "attr_ag")
+_attr_rows = message_repo.get_by_conversation(_attr_conv)
+_attr_ai = [m for m in _attr_rows if m.get("role") == "assistant"]
+check("_row_to_dict expõe agent_key na mensagem persistida",
+      bool(_attr_ai) and _attr_ai[-1].get("agent_key") == "attr_ag")
+
+# (2) GET /messages enriquece com agent_name (display_name resolvido)
+r = client.get(f"/api/atendimentos/{_attr_conv}/messages")
+check("GET /messages -> 200", r.status_code == 200)
+_gm = [m for m in r.json()["data"]["messages"]
+       if m.get("role") == "assistant" and m.get("agent_key") == "attr_ag"]
+check("GET /messages -> assistant carrega agent_name resolvido",
+      bool(_gm) and _gm[-1].get("agent_name") == "Agente Atributo")
+
+# (3) broadcast_tool_calls carimba o agent_key no card de tool
+_attr_cm2 = _CM("5500019200002")
+_attr_conv2 = _attr_cm2.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500019200002", [{"tool": "save_contact_info", "args": {}}],
+    channel_id="default", agent_key="attr_ag"))
+_tc_rows = [m for m in message_repo.get_by_conversation(_attr_conv2)
+            if m.get("role") == "tool_call"]
+check("broadcast_tool_calls -> card tool_call carimbado com agent_key",
+      bool(_tc_rows) and _tc_rows[-1].get("agent_key") == "attr_ag")
+r = client.get(f"/api/atendimentos/{_attr_conv2}/messages")
+_gtc = [m for m in r.json()["data"]["messages"] if m.get("role") == "tool_call"]
+check("GET /messages -> tool_call carrega agent_name",
+      bool(_gtc) and _gtc[-1].get("agent_name") == "Agente Atributo")
+
+# (4) config show_agent_name: default True, exposto e gravável
+_cfg = client.get("/api/config").json()["data"]
+check("config expõe show_agent_name default True", _cfg.get("show_agent_name") is True)
+r = client.put("/api/config", json={"show_agent_name": False})
+check("PUT /config show_agent_name=False -> 200", r.status_code == 200)
+check("config show_agent_name persiste False",
+      client.get("/api/config").json()["data"].get("show_agent_name") is False)
+client.put("/api/config", json={"show_agent_name": True})  # restaura o default
 
 # ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
 _cmdel = _CM("5500077766655")
