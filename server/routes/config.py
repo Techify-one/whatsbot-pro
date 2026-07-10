@@ -122,6 +122,12 @@ def register_routes(app, deps):
         if "bot_phone" in keys_changed:
             group_mentions.set_bot_identity(state.bot_phone, state.bot_name)
 
+        # plano 43 — the history blacklist compiles from config with a 30s TTL cache;
+        # invalidate it on save so an edit applies immediately (not after ≤30s).
+        if "ai_history_exclude_patterns" in keys_changed:
+            from agent import history_filter
+            history_filter.reset_cache()
+
         agent_handler.update_config(
             api_key=settings.get("openrouter_api_key", ""),
             audio_model=settings.get("audio_model", "google/gemini-2.5-flash"),

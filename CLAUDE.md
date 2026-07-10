@@ -218,6 +218,13 @@ Cada contato é armazenado na tabela `contacts` com campos normalizados:
 
 Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
 
+### Filtro de histórico por regex (lista-negra — plano 43)
+
+Além da lista-negra de ROLES fixa do repo (`transcription`, `tool_call`, `system_notice`, `conversation_event`, `system`, `error` + `status='failed'`), há um **filtro genérico por regex** que corta linhas do histórico ANTES de virarem contexto do LLM. É uma **lista GLOBAL** de padrões na config key `ai_history_exclude_patterns` (default `[]` = nada cortado, retrocompatível), editável em **Configurações → IA** (textarea, uma regex por linha). Cada mensagem é testada como `f"{role}\t{content}"` com `re.search` — ancora por tipo (`^private_note\t`), por conteúdo (`Protocolo aberto`, `PROT-\d{8}`) ou ambos. Uso típico: cortar notas de automação (ex.: `🔖 Protocolo aberto · PROT-…` gravadas por plugins como `protocolos`) que senão entram no contexto e duplicam com o bloco `tool_memory`.
+
+- **Módulo**: [agent/history_filter.py](agent/history_filter.py) — `load_compiled()` (lê a config, compila, cache TTL 30s), `matches()`, `filter_rows()`. **Fail-open** em todo nível (config ruim, regex inválida, erro no filtro ⇒ histórico passa intacto; regex inválida individual é ignorada + logada). O PUT `/api/config` reseta o cache ao salvar a chave (edição vale na hora).
+- **Hook no repo**: `message_repo.get_context(..., *, exclude=None)` e `get_context_by_conversation(..., *, exclude=None)`. Com `exclude` setado, faz **over-fetch** (até `HISTORY_FETCH_CAP=200` linhas), filtra em Python e devolve as N mais recentes sobreviventes — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`. `exclude=None`/`[]` ⇒ caminho byte-idêntico ao antigo (SQL `LIMIT N`). O motor de IA passa `exclude` via `memory.get_context_messages`; a análise "Gerar melhoria" ([improvement_service.py](app/services/improvement_service.py)) aplica o mesmo corte **preservando a resposta-alvo marcada** (nunca cortada, mesmo se casar um padrão).
+
 ## Avisos de sistema no chat (plano 12)
 
 Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** como um card centralizado painel-only — role **`conversation_event`** — igual aos `tool_call`/`system_notice`. Cobre: atribuir/assumir/remover atribuição, adicionar/remover tag, resolver/reabrir/arquivar, ligar/desligar IA (conversa **e** contato), trocar agente ativo, definir atributo — e as transições **automáticas** (cliente reabre conversa fechada ao mandar mensagem → `status_reopened_auto`; conversa nova → `created`; 1ª resposta da IA numa conversa → `ai_takeover`, 1×/conversa via dedupe).

@@ -7,6 +7,8 @@ from pathlib import Path
 
 from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
 
+from agent import history_filter
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHANNEL_ID = "default"
@@ -462,7 +464,11 @@ class ContactMemory:
         URI so the vision model can see it.  Older images are replaced with a
         placeholder to keep token usage reasonable.
         """
-        recent = message_repo.get_context(self.id, limit)
+        # plano 43 — the global regex blacklist cuts history rows (e.g. automation
+        # ``private_note``s) BEFORE the private_note→"[Nota privada]" wrap below, over
+        # the raw role+content. Empty config ⇒ byte-identical to the old path.
+        compiled = history_filter.load_compiled()
+        recent = message_repo.get_context(self.id, limit, exclude=compiled)
 
         # Find the index of the last user image message that still needs the
         # binary inlined.  If the content already has a textual description

@@ -84,13 +84,50 @@ def get_by_conversation(conversation_id: int) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
-def get_context(contact_id: int, limit: int) -> list[dict]:
-    """Return the last N eligible messages for LLM context."""
+def _fetch_limit(limit: int, exclude) -> int:
+    """Rows to read from SQL: ``limit`` normally, an over-fetch window when a regex
+    blacklist is active (plano 43 D4) so the Python cut can't shrink below ``limit``.
+
+    Imported lazily to keep the db layer free of a load-time dependency on ``agent``.
+    """
+    if not exclude:
+        return limit
+    from agent.history_filter import HISTORY_FETCH_CAP
+    return max(limit, HISTORY_FETCH_CAP)
+
+
+def _apply_exclude(rows, limit: int, exclude) -> list[dict]:
+    """Turn newest-first DB rows into the chronological LLM-context list.
+
+    ``exclude`` empty ⇒ the historical path (``reversed`` of exactly ``limit`` rows),
+    byte-for-byte identical. Otherwise: apply the regex blacklist to the over-fetched
+    newest-first rows, keep the newest ``limit`` survivors, return oldest→newest.
+    """
+    if not exclude:
+        return [_row_to_dict(r) for r in reversed(rows)]
+    from agent import history_filter
+    dicts_newest_first = [_row_to_dict(r) for r in rows]
+    survivors = history_filter.filter_rows(dicts_newest_first, exclude)[:limit]
+    return list(reversed(survivors))
+
+
+def get_context(contact_id: int, limit: int, *, exclude=None) -> list[dict]:
+    """Return the last N eligible messages for LLM context.
+
+    ``exclude`` (plano 43): a list of compiled regex patterns from
+    ``agent.history_filter.load_compiled()``. When set (non-empty), a row whose
+    ``role<TAB>content`` matches one is cut from the LLM history. Because the regex
+    can't run in SQL, the query OVER-FETCHES up to ``HISTORY_FETCH_CAP`` rows, filters
+    in Python, then keeps the newest ``limit`` survivors — so cutting rows never shrinks
+    the window below ``limit``. ``None``/empty ⇒ the historical path (SQL ``LIMIT
+    limit``), byte-for-byte identical.
+    """
     # "error" incluído (plano 31 review): cards painel-only de erro persistidos
     # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
     # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
     excluded = ("transcription", "tool_call", "system_notice",
                 "conversation_event", "system", "error")
+    fetch_limit = _fetch_limit(limit, exclude)
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
@@ -100,24 +137,29 @@ def get_context(contact_id: int, limit: int) -> list[dict]:
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
             .order_by(messages.c.ts.desc())
-            .limit(limit)
+            .limit(fetch_limit)
         ).mappings().all()
-    return [_row_to_dict(r) for r in reversed(rows)]
+    return _apply_exclude(rows, limit, exclude)
 
 
-def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
+def get_context_by_conversation(conversation_id: int, limit: int, *,
+                                exclude=None) -> list[dict]:
     """Last N eligible messages of ONE conversation, LLM-context style.
 
     Mesmo filtro de elegibilidade de :func:`get_context` (roles painel-only e
     envios failed excluídos), mas escopado por ``conversation_id`` — multi-canal
     não mistura threads de outros canais (plano 31 F3; ``get_by_conversation``
     não filtra nem limita, por isso a variante dedicada).
+
+    ``exclude`` (plano 43): idêntico ao de :func:`get_context` — over-fetch +
+    lista-negra por regex + tail N. ``None``/vazio ⇒ caminho histórico byte-idêntico.
     """
     # "error" incluído (plano 31 review): cards painel-only de erro persistidos
     # (reply vazio F4, falha de resolução de agente) não podem chegar ao LLM —
     # OpenAI/AGNO só aceitam system/user/assistant/tool e o turno crasharia.
     excluded = ("transcription", "tool_call", "system_notice",
                 "conversation_event", "system", "error")
+    fetch_limit = _fetch_limit(limit, exclude)
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(messages)
@@ -127,9 +169,9 @@ def get_context_by_conversation(conversation_id: int, limit: int) -> list[dict]:
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
             .order_by(messages.c.ts.desc())
-            .limit(limit)
+            .limit(fetch_limit)
         ).mappings().all()
-    return [_row_to_dict(r) for r in reversed(rows)]
+    return _apply_exclude(rows, limit, exclude)
 
 
 def get_tool_calls_by_conversation(conversation_id: int, limit: int = 50) -> list[dict]:

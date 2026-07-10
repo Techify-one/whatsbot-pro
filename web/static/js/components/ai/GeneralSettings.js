@@ -32,6 +32,8 @@ export default function GeneralSettings() {
   // Prompt da análise de melhoria (editável). Vazio → usa o padrão do sistema.
   const [improvementPrompt, setImprovementPrompt] = useState('');
   const [improvementPromptDefault, setImprovementPromptDefault] = useState('');
+  // plano 43 — lista-negra por regex do histórico da IA (uma regex por linha).
+  const [historyExcludePatterns, setHistoryExcludePatterns] = useState('');
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -49,6 +51,7 @@ export default function GeneralSettings() {
     // Prefill with the custom prompt if set, otherwise the code default so the
     // operator sees/edits the real text in use.
     setImprovementPrompt((cfg.improvement_prompt || dflt));
+    setHistoryExcludePatterns((cfg.ai_history_exclude_patterns || []).join('\n'));
   }
 
   async function load() {
@@ -103,6 +106,10 @@ export default function GeneralSettings() {
         improvementPrompt.trim() === improvementPromptDefault.trim()
           ? ''
           : improvementPrompt,
+      // plano 43 — uma regex por linha; descarta linhas vazias. O backend também
+      // ignora regex inválida (fail-open), então não bloqueamos o save.
+      ai_history_exclude_patterns: historyExcludePatterns
+        .split('\n').map((s) => s.trim()).filter(Boolean),
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -134,6 +141,15 @@ export default function GeneralSettings() {
       </div>
     `;
   }
+
+  // plano 43 — sinaliza (sem bloquear) as linhas de regex inválidas. O backend
+  // também as ignora (fail-open), então isto é só um aviso visual.
+  const invalidPatternLines = [];
+  historyExcludePatterns.split('\n').forEach((line, i) => {
+    const t = line.trim();
+    if (!t) return;
+    try { new RegExp(t); } catch { invalidPatternLines.push(i + 1); }
+  });
 
   return html`
     <div class="flex flex-col gap-4">
@@ -267,6 +283,36 @@ export default function GeneralSettings() {
           value=${improvementPrompt}
           onChange=${setImprovementPrompt}
           placeholder="Instruções enviadas ao modelo ao gerar a análise de uma resposta marcada como incorreta." />
+      </div>
+
+      <!-- Filtro de histórico por regex (lista-negra) -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="text-[14px] font-semibold text-wa-text">Filtro de histórico (regex)</label>
+        <span class="text-[12px] text-wa-secondary">
+          Uma expressão regular por linha. Uma mensagem do histórico é
+          <span class="font-medium">cortada do contexto enviado à IA</span> quando
+          <span class="font-medium">role⇥conteúdo</span> casa algum padrão (busca parcial).
+          Útil para não mandar à IA notas de automação (ex.: protocolos). Deixe vazio para
+          não cortar nada.
+        </span>
+        <textarea
+          value=${historyExcludePatterns}
+          onInput=${(e) => setHistoryExcludePatterns(e.target.value)}
+          rows="4"
+          spellcheck="false"
+          placeholder=${'^private_note\\t\nProtocolo aberto\nPROT-\\d{8}'}
+          class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono"
+        ></textarea>
+        ${invalidPatternLines.length ? html`
+          <span class="text-[12px] text-red-500">
+            Regex inválida na(s) linha(s) ${invalidPatternLines.join(', ')} — será ignorada ao salvar.
+          </span>
+        ` : null}
+        <span class="text-[12px] text-wa-secondary">
+          Exemplos: <code>${'^private_note\\t'}</code> corta todas as notas privadas ·
+          <code>Protocolo aberto</code> corta por conteúdo ·
+          <code>${'PROT-\\d{8}'}</code> por padrão de protocolo.
+        </span>
       </div>
 
       <!-- Save -->
