@@ -161,6 +161,21 @@ class Channel(ABC):
             "form_component": None,
         }
 
+    # ── source_id form (dedup key — plano 42) ────────────────────────
+    @classmethod
+    def source_id_for(cls, phone: str, is_group: bool) -> str:
+        """The channel-native ``source_id`` for a contact's conversation (plano 42).
+
+        This is the stable per-inbox resolution key stored in
+        ``contact_inboxes.source_id``/``source_jid`` (the dedup key on
+        ``(inbox_id, source_id)``). The core stores and compares it opaquely — each
+        provider OWNS its own form, so ``ContactMemory`` never appends a WhatsApp
+        suffix by hand (no ``if provider ==`` in the core). Must be pure (no
+        network/DB). Default: the bare identifier, undecorated — a provider whose
+        ids need no suffix (Telegram ``chat_id``, WhatsApp Cloud ``wa_id``) uses it
+        as-is. GOWA overrides it to append the WhatsApp JID suffix."""
+        return phone
+
     # ── Account identity contract (dedup — plano 32) ─────────────────
     # A provider declares HOW to identify the account a channel is bound to; the
     # core does the rest generically (compare, store, unique index, 409 on create,
