@@ -15,6 +15,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert as sa_insert
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.tables import custom_attribute_definitions as cad
@@ -68,23 +69,48 @@ def create_definition(*, attribute_key: str, display_name: str, type: str = "tex
                        description: str = "", regex_pattern=None, regex_cue=None,
                        position: int = 0, filterable: int = 0, is_system: int = 0,
                        created_by=None) -> dict | None:
-    """Create a definition. Returns the row, or None on (key, applies_to) collision.
+    """Create a definition. Returns the row, or None on ACTIVE (key, applies_to)
+    collision.
+
+    A *soft-deleted* row with the same (key, applies_to) is REVIVED in place (its
+    ``deleted_at`` cleared and every field overwritten with the new values) instead
+    of inserting a fresh row — a fresh INSERT would violate ``uq_attr_key_scope``,
+    which is not delete-aware, and raise a 500. Reviving also re-validates any
+    values still stored on entities under that key (P49 keeps them on delete).
 
     ``is_system`` marks a built-in (plano 19) — only the boot seeder sets it; the
     public create route always passes 0.
     """
-    if definition_exists(attribute_key, applies_to):
-        return None
     now = time.time()
-    with get_engine().begin() as conn:
-        result = conn.execute(sa_insert(cad).values(
-            attribute_key=attribute_key, display_name=display_name, type=type,
-            applies_to=applies_to, options=options, required=required,
-            description=description, regex_pattern=regex_pattern, regex_cue=regex_cue,
-            position=position, filterable=filterable, is_system=is_system,
-            created_by=created_by, created_at=now, deleted_at=None,
-        ))
-        new_id = result.inserted_primary_key[0]
+    values = dict(
+        attribute_key=attribute_key, display_name=display_name, type=type,
+        applies_to=applies_to, options=options, required=required,
+        description=description, regex_pattern=regex_pattern, regex_cue=regex_cue,
+        position=position, filterable=filterable, is_system=is_system,
+        created_by=created_by, created_at=now, deleted_at=None,
+    )
+    try:
+        with get_engine().begin() as conn:
+            existing = conn.execute(
+                select(cad.c.id, cad.c.deleted_at).where(
+                    cad.c.attribute_key == attribute_key,
+                    cad.c.applies_to == applies_to,
+                )
+            ).mappings().first()
+            if existing is not None:
+                if existing["deleted_at"] is None:
+                    return None  # active dup → friendly "já existe" upstream
+                # Soft-deleted slot → revive it (avoids the uq_attr_key_scope 500).
+                conn.execute(
+                    sa_update(cad).where(cad.c.id == existing["id"]).values(**values)
+                )
+                new_id = existing["id"]
+            else:
+                result = conn.execute(sa_insert(cad).values(**values))
+                new_id = result.inserted_primary_key[0]
+    except IntegrityError:
+        # Concurrent create raced us to the same (key, applies_to) → treat as dup.
+        return None
     return get_definition(new_id)
 
 
