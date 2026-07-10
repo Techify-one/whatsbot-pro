@@ -1,7 +1,10 @@
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { getExecutions, getExecution, getConfig, saveConfig } from '../services/api.js';
+import {
+  getExecutions, getExecution, getConfig, saveConfig,
+  getExecutionStats, getExecutionModels,
+} from '../services/api.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, enumStr, int } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
@@ -23,6 +26,13 @@ const LIST_URL_SCHEMA = [
   str('conv', ''),         // conversation_id (string; '' = sem filtro)
   str('from', ''),         // date_from YYYY-MM-DD
   str('to', ''),           // date_to YYYY-MM-DD
+  // Nexus: busca por mensagem gerada / recebida, ID da mensagem, só-IA e agente.
+  str('si', ''),           // search_input  (Msg do Cliente)
+  str('so', ''),           // search_output (Msg da IA)
+  str('mid', ''),          // msg_id (ID da Mensagem)
+  int('ai', 0),            // only_ai (0|1)
+  str('agent', ''),        // agent_key
+  str('ch', ''),           // channel_id
   int('page', 1),          // 1-based na URL; default 1 é omitido
 ];
 
@@ -41,10 +51,141 @@ const STEP_COLORS = {
 };
 
 const STATUS_BADGES = {
-  running: { bg: 'bg-yellow-100', text: 'text-yellow-800', label: 'Em execução' },
-  completed: { bg: 'bg-green-100', text: 'text-green-800', label: 'Concluída' },
-  failed: { bg: 'bg-red-100', text: 'text-red-800', label: 'Falhou' },
+  running: { bg: 'bg-amber-100', text: 'text-amber-800', dot: 'bg-amber-500', label: 'Em execução' },
+  completed: { bg: 'bg-green-100', text: 'text-green-800', dot: 'bg-green-500', label: 'Concluída' },
+  failed: { bg: 'bg-red-100', text: 'text-red-800', dot: 'bg-red-500', label: 'Falhou' },
 };
+
+// Pills coloridos por agente (estilo Nexus). Fallback cinza para nomes fora da
+// paleta. A cor do pill segue o PRIMEIRO segmento de agent_key (antes de "->").
+const AGENT_COLORS = [
+  { bg: 'bg-blue-100', text: 'text-blue-800' },
+  { bg: 'bg-purple-100', text: 'text-purple-800' },
+  { bg: 'bg-teal-100', text: 'text-teal-800' },
+  { bg: 'bg-orange-100', text: 'text-orange-800' },
+  { bg: 'bg-pink-100', text: 'text-pink-800' },
+  { bg: 'bg-indigo-100', text: 'text-indigo-800' },
+];
+const AGENT_GRAY = { bg: 'bg-wa-panel', text: 'text-wa-secondary' };
+
+// Hash estável nome→cor (determinístico entre renders/execuções).
+function agentColor(key) {
+  if (!key) return AGENT_GRAY;
+  const base = String(key).split('->')[0].trim();
+  let hash = 0;
+  for (let i = 0; i < base.length; i++) hash = (hash * 31 + base.charCodeAt(i)) >>> 0;
+  return AGENT_COLORS[hash % AGENT_COLORS.length];
+}
+
+function AgentBadge({ agentKey, title }) {
+  if (!agentKey) return null;
+  const c = agentColor(agentKey);
+  return html`<span
+    class="inline-block px-1.5 py-0.5 text-xs font-medium rounded ${c.bg} ${c.text}"
+    title=${title || agentKey}
+  >${agentKey}</span>`;
+}
+
+// Campo rotulado (label em caixa alta acima do controle) — layout estilo Nexus.
+function FilterField({ label, children, className }) {
+  return html`
+    <label class="flex flex-col gap-1 ${className || ''}">
+      <span class="text-[11px] uppercase tracking-wide text-wa-secondary font-medium">${label}</span>
+      ${children}
+    </label>
+  `;
+}
+
+// Multi-seleção de canais: dropdown com checkboxes + busca (suporta muitos canais).
+// `selected` é uma lista de channel_id; `onChange` recebe a nova lista.
+function ChannelMultiSelect({ channels, selected, onChange, inputCls }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef(null);
+
+  // Fecha ao clicar fora.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const selSet = new Set(selected);
+  const toggle = (id) => {
+    const next = new Set(selSet);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    onChange([...next]);
+  };
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? channels.filter(c => (c.channel_label || '').toLowerCase().includes(q)
+        || (c.channel_id || '').toLowerCase().includes(q))
+    : channels;
+
+  const labelText = selected.length === 0
+    ? 'Todos os canais'
+    : selected.length === 1
+      ? (channels.find(c => c.channel_id === selected[0])?.channel_label || selected[0])
+      : `${selected.length} canais selecionados`;
+
+  return html`
+    <div class="relative" ref=${ref}>
+      <button
+        type="button"
+        onClick=${() => setOpen(o => !o)}
+        class="${inputCls} w-full flex items-center justify-between gap-2 text-left ${selected.length ? 'text-wa-text' : 'text-wa-secondary'}"
+      >
+        <span class="truncate">${labelText}</span>
+        <span class="flex items-center gap-1.5 shrink-0">
+          ${selected.length ? html`<span class="text-xs px-1.5 py-0.5 rounded-full bg-wa-teal text-white">${selected.length}</span>` : null}
+          <span class="text-wa-secondary text-xs">▾</span>
+        </span>
+      </button>
+      ${open ? html`
+        <div class="absolute z-20 mt-1 w-full min-w-[16rem] bg-wa-panel border border-wa-border rounded-lg shadow-lg overflow-hidden">
+          ${channels.length > 6 ? html`
+            <div class="p-2 border-b border-wa-border">
+              <input
+                type="text" placeholder="Buscar canal..."
+                value=${query}
+                onInput=${(e) => setQuery(e.target.value)}
+                class="${inputCls} w-full py-1"
+                autofocus
+              />
+            </div>
+          ` : null}
+          ${selected.length ? html`
+            <button
+              type="button"
+              onClick=${() => onChange([])}
+              class="w-full text-left px-3 py-1.5 text-xs text-wa-secondary hover:text-wa-teal hover:bg-wa-hover border-b border-wa-border"
+            >Limpar seleção (${selected.length})</button>
+          ` : null}
+          <div class="max-h-60 overflow-y-auto py-1">
+            ${filtered.length === 0 ? html`
+              <div class="px-3 py-2 text-xs text-wa-secondary italic">Nenhum canal encontrado.</div>
+            ` : filtered.map(c => html`
+              <label
+                key=${c.channel_id}
+                class="flex items-center gap-2 px-3 py-1.5 hover:bg-wa-hover cursor-pointer text-sm text-wa-text"
+              >
+                <input
+                  type="checkbox"
+                  checked=${selSet.has(c.channel_id)}
+                  onChange=${() => toggle(c.channel_id)}
+                  class="accent-wa-teal"
+                />
+                <span class="truncate" title=${c.channel_id}>${c.channel_label}</span>
+              </label>
+            `)}
+          </div>
+        </div>
+      ` : null}
+    </div>
+  `;
+}
 
 function formatTime(ts) {
   if (!ts) return '-';
@@ -73,7 +214,35 @@ function StepBadge({ type }) {
 
 function StatusBadge({ status }) {
   const badge = STATUS_BADGES[status] || STATUS_BADGES.failed;
-  return html`<span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${badge.bg} ${badge.text}">${badge.label}</span>`;
+  return html`<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded ${badge.bg} ${badge.text}">
+    <span class="w-1.5 h-1.5 rounded-full ${badge.dot}"></span>${badge.label}
+  </span>`;
+}
+
+// ── Stat cards (B1) + Cost panel (B2) ────────────────────────────────
+
+function StatCard({ label, value, icon, accent }) {
+  return html`
+    <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex flex-col gap-1">
+      <div class="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-wa-secondary font-medium">
+        ${icon ? html`<span aria-hidden="true">${icon}</span>` : null}
+        <span>${label}</span>
+      </div>
+      <div class="text-2xl font-bold ${accent || 'text-wa-text'}">${value}</div>
+    </div>
+  `;
+}
+
+function StatCards({ stats }) {
+  const s = stats || {};
+  return html`
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+      <${StatCard} label="Total 24h" icon="📊" value=${(s.total_count ?? 0).toLocaleString('pt-BR')} />
+      <${StatCard} label="Sucesso" icon="✓" accent="text-green-600" value=${(s.success_count ?? 0).toLocaleString('pt-BR')} />
+      <${StatCard} label="Erros" icon="✕" accent="text-red-600" value=${(s.error_count ?? 0).toLocaleString('pt-BR')} />
+      <${StatCard} label="Tokens 24h" icon="⚡" value=${(s.total_tokens ?? 0).toLocaleString('pt-BR')} />
+    </div>
+  `;
 }
 
 // ── Step-body building blocks (plano 36 F5) ──────────────────────────
@@ -114,16 +283,18 @@ function JsonBlock({ data, expandSignal }) {
 }
 
 // tool_executed → nome da tool sempre visível; args e result colapsáveis (F2).
-function ToolStepCard({ data, expandSignal }) {
+// B5: badge do sub-agente que chamou a tool (qual hop do roteamento a invocou).
+function ToolStepCard({ data, expandSignal, agentKey }) {
   if (!data) return null;
   const args = data.args;
   const hasArgs = args != null && (typeof args !== 'object' || Object.keys(args).length > 0);
   const hasResult = data.result != null && data.result !== '';
   return html`
     <div class="mt-1 space-y-1">
-      <div class="text-xs">
+      <div class="text-xs flex items-center gap-1.5 flex-wrap">
         <span class="text-wa-secondary">tool:</span>
         <span class="font-mono font-medium text-wa-text">${data.tool || '—'}</span>
+        ${agentKey ? html`<${AgentBadge} agentKey=${agentKey} title=${`Chamada pelo agente ${agentKey}`} />` : null}
       </div>
       ${hasArgs ? html`
         <${Collapsible} title="Argumentos" expandSignal=${expandSignal}>
@@ -179,17 +350,18 @@ function ContextStepCard({ data, expandSignal }) {
 }
 
 // Registro por step_type (sem if/elif gigante): cai no JsonBlock cru por padrão.
+// Cada renderer recebe (step, expandSignal) — o step carrega data + agent_key.
 const STEP_BODY = {
-  tool_executed: (d, ex) => html`<${ToolStepCard} data=${d} expandSignal=${ex} />`,
-  llm_request: (d) => html`<${LlmStepCard} data=${d} type="llm_request" />`,
-  llm_response: (d) => html`<${LlmStepCard} data=${d} type="llm_response" />`,
-  llm_context: (d, ex) => html`<${ContextStepCard} data=${d} expandSignal=${ex} />`,
+  tool_executed: (s, ex) => html`<${ToolStepCard} data=${s.data} expandSignal=${ex} agentKey=${s.agent_key} />`,
+  llm_request: (s) => html`<${LlmStepCard} data=${s.data} type="llm_request" />`,
+  llm_response: (s) => html`<${LlmStepCard} data=${s.data} type="llm_response" />`,
+  llm_context: (s, ex) => html`<${ContextStepCard} data=${s.data} expandSignal=${ex} />`,
 };
 
 function StepBody({ step, expandSignal }) {
   const render = STEP_BODY[step.step_type]
-    || ((d, ex) => html`<${JsonBlock} data=${d} expandSignal=${ex} />`);
-  return render(step.data, expandSignal);
+    || ((s, ex) => html`<${JsonBlock} data=${s.data} expandSignal=${ex} />`);
+  return render(step, expandSignal);
 }
 
 // ── Detail helpers ───────────────────────────────────────────────────
@@ -279,7 +451,7 @@ function ExecutionDetail({ execution, onBack, focusStep, onFocusStep, onOpenConv
               >Conversa #${execution.conversation_id}</button>
             ` : null}
             ${execution.channel_label ? html`<span>Canal: <span class="text-wa-text">${execution.channel_label}</span></span>` : null}
-            ${execution.agent_key ? html`<span>Agente: <span class="text-wa-text">${execution.agent_key}</span></span>` : null}
+            ${execution.agent_key ? html`<span class="flex items-center gap-1">Agente: <${AgentBadge} agentKey=${execution.agent_key} /></span>` : null}
             ${model ? html`<span>Modelo: <span class="font-mono text-wa-text">${model}</span></span>` : null}
             ${tokens ? html`<span>${tokens} tokens</span>` : null}
           </div>
@@ -381,10 +553,22 @@ export function Executions() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
   const [filterPhone, setFilterPhone] = useState('');
-  const [filterStatus, setFilterStatus] = useState('');
+  const [filterStatus, setFilterStatus] = useState([]);  // status selecionados (multi)
   const [filterConversation, setFilterConversation] = useState('');
   const [filterFrom, setFilterFrom] = useState('');
   const [filterTo, setFilterTo] = useState('');
+  // Nexus: busca por mensagem gerada/recebida, ID da mensagem, só-IA e agente.
+  const [filterSearchInput, setFilterSearchInput] = useState('');
+  const [filterSearchOutput, setFilterSearchOutput] = useState('');
+  const [filterMsgId, setFilterMsgId] = useState('');
+  const [filterOnlyAi, setFilterOnlyAi] = useState(false);
+  const [filterAgent, setFilterAgent] = useState([]);  // agent_keys selecionados (multi)
+  const [filterChannels, setFilterChannels] = useState([]);  // channel_ids selecionados
+  // Cards de estatística + pills por agente.
+  const [stats, setStats] = useState(null);
+  const [agentKeys, setAgentKeys] = useState([]);
+  const [channels, setChannels] = useState([]);  // [{channel_id, channel_label}]
+  const [filtersOpen, setFiltersOpen] = useState(false);  // barra de filtros colapsável
   const [selected, setSelected] = useState(null);
   const [selectedData, setSelectedData] = useState(null);
   const [focusStep, setFocusStep] = useState(stepFromUrl());  // ?step do detalhe
@@ -412,19 +596,47 @@ export function Executions() {
     setLoading(true);
     const params = { limit: PAGE_SIZE, offset: page * PAGE_SIZE };
     if (filterPhone) params.phone = filterPhone;
-    if (filterStatus) params.status = filterStatus;
+    if (filterStatus.length) params.status = filterStatus.join(',');
     if (filterConversation) params.conversation_id = filterConversation;
     if (filterFrom) params.date_from = filterFrom;
     if (filterTo) params.date_to = filterTo;
+    if (filterSearchInput) params.search_input = filterSearchInput;
+    if (filterSearchOutput) params.search_output = filterSearchOutput;
+    if (filterMsgId) params.msg_id = filterMsgId;
+    if (filterOnlyAi) params.only_ai = 1;
+    if (filterAgent.length) params.agent_key = filterAgent.join(',');
+    if (filterChannels.length) params.channel_id = filterChannels.join(',');
     const res = await getExecutions(params);
     if (res.ok) {
       setExecutions(res.data.items || []);
       setTotal(res.data.total || 0);
     }
     setLoading(false);
-  }, [page, filterPhone, filterStatus, filterConversation, filterFrom, filterTo]);
+  }, [page, filterPhone, filterStatus, filterConversation, filterFrom, filterTo,
+      filterSearchInput, filterSearchOutput, filterMsgId, filterOnlyAi, filterAgent,
+      filterChannels]);
 
   useEffect(() => { fetchList(); }, [fetchList]);
+
+  // Cards de estatística (janela padrão 24h no backend).
+  const fetchStats = useCallback(async () => {
+    const res = await getExecutionStats();
+    if (res.ok) setStats(res.data);
+  }, []);
+
+  useEffect(() => { fetchStats(); }, [fetchStats]);
+
+  // Pills por agente (a partir dos agent_key conhecidos).
+  useEffect(() => {
+    let alive = true;
+    getExecutionModels().then(res => {
+      if (alive && res.ok) {
+        setAgentKeys(res.data.agent_keys || []);
+        setChannels(res.data.channels || []);
+      }
+    });
+    return () => { alive = false; };
+  }, []);
 
   // Deep-link da LISTA → query (Plano 24). Só a query: o pathname (/executions
   // vs /executions/{id}) segue governado pelo pushState/popstate próprio abaixo.
@@ -434,21 +646,35 @@ export function Executions() {
     read: () => readParams(window.location.search, LIST_URL_SCHEMA),
     apply: (s) => {
       setFilterPhone(s.phone);
-      setFilterStatus(s.status);
+      setFilterStatus(s.status ? s.status.split(',').filter(Boolean) : []);
       setFilterConversation(s.conv || '');
       setFilterFrom(s.from || '');
       setFilterTo(s.to || '');
+      setFilterSearchInput(s.si || '');
+      setFilterSearchOutput(s.so || '');
+      setFilterMsgId(s.mid || '');
+      setFilterOnlyAi(!!s.ai);
+      setFilterAgent(s.agent ? s.agent.split(',').filter(Boolean) : []);
+      setFilterChannels(s.ch ? s.ch.split(',').filter(Boolean) : []);
       setPage(Math.max(0, (s.page || 1) - 1));
     },
     serialize: () => writeParams({
       phone: filterPhone,
-      status: filterStatus,
+      status: filterStatus.join(','),
       conv: filterConversation,
       from: filterFrom,
       to: filterTo,
+      si: filterSearchInput,
+      so: filterSearchOutput,
+      mid: filterMsgId,
+      ai: filterOnlyAi ? 1 : 0,
+      agent: filterAgent.join(','),
+      ch: filterChannels.join(','),
       page: page + 1,
     }, LIST_URL_SCHEMA),
-    deps: [filterPhone, filterStatus, filterConversation, filterFrom, filterTo, page],
+    deps: [filterPhone, filterStatus, filterConversation, filterFrom, filterTo,
+           filterSearchInput, filterSearchOutput, filterMsgId, filterOnlyAi, filterAgent,
+           filterChannels, page],
   });
 
   // Auto-refresh every 5s
@@ -478,13 +704,21 @@ export function Executions() {
 
   const listQuery = useCallback((overrides = {}) => writeParams({
     phone: filterPhone,
-    status: filterStatus,
+    status: filterStatus.join(','),
     conv: filterConversation,
     from: filterFrom,
     to: filterTo,
+    si: filterSearchInput,
+    so: filterSearchOutput,
+    mid: filterMsgId,
+    ai: filterOnlyAi ? 1 : 0,
+    agent: filterAgent.join(','),
+    ch: filterChannels.join(','),
     page: page + 1,
     ...overrides,
-  }, LIST_URL_SCHEMA), [filterPhone, filterStatus, filterConversation, filterFrom, filterTo, page]);
+  }, LIST_URL_SCHEMA), [filterPhone, filterStatus, filterConversation, filterFrom, filterTo,
+    filterSearchInput, filterSearchOutput, filterMsgId, filterOnlyAi, filterAgent,
+    filterChannels, page]);
 
   const handleBack = useCallback(() => {
     setSelected(null);
@@ -508,12 +742,16 @@ export function Executions() {
     setSelectedData(null);
     setFocusStep(null);
     const qs = writeParams({
-      phone: filterPhone, status: filterStatus, conv, from: filterFrom, to: filterTo, page: 1,
+      phone: filterPhone, status: filterStatus.join(','), conv, from: filterFrom, to: filterTo,
+      si: filterSearchInput, so: filterSearchOutput, mid: filterMsgId,
+      ai: filterOnlyAi ? 1 : 0, agent: filterAgent.join(','), ch: filterChannels.join(','), page: 1,
     }, LIST_URL_SCHEMA);
     const target = `/executions${qs ? `?${qs}` : ''}`;
     history.pushState(null, '', target);
     // O refetch dispara pelo useEffect([fetchList]) quando filterConversation muda.
-  }, [filterPhone, filterStatus, filterFrom, filterTo]);
+  }, [filterPhone, filterStatus, filterFrom, filterTo,
+      filterSearchInput, filterSearchOutput, filterMsgId, filterOnlyAi, filterAgent,
+      filterChannels]);
 
   // Open from URL on mount, and sync with browser back/forward via popstate.
   const selectedRef = useRef(selected);
@@ -567,82 +805,205 @@ export function Executions() {
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const inputCls = 'bg-wa-panel text-wa-text px-3 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none';
+  const activeFilterCount = [
+    filterPhone, filterConversation, filterFrom, filterTo,
+    filterSearchInput, filterSearchOutput, filterMsgId, filterOnlyAi,
+    filterStatus.length > 0, filterAgent.length > 0, filterChannels.length > 0,
+  ].filter(Boolean).length;
 
   // List view
   return html`
-    <div class="bg-wa-bg rounded-xl border border-wa-border shadow-sm flex flex-col h-full">
+    <div class="bg-wa-bg rounded-xl border border-wa-border shadow-sm flex flex-col">
       <!-- Header -->
-      <div class="px-4 py-3 border-b border-wa-border">
-        <div class="flex items-center justify-between mb-2 gap-2 flex-wrap">
-          <h2 class="text-base font-bold text-wa-text">Execuções</h2>
-          <label
-            class="flex items-center gap-2 text-xs text-wa-secondary cursor-pointer select-none"
-            title="Salva o system prompt + histórico enviado à IA em cada execução (para depurar). Aumenta o tamanho do banco — desligue quando não precisar."
-          >
-            <input
-              type="checkbox"
-              checked=${captureContext}
-              onChange=${toggleCapture}
-              class="accent-wa-teal"
-            />
-            Capturar contexto enviado à IA
-          </label>
-        </div>
-        <div class="flex gap-2 flex-wrap items-center">
-          <input
-            type="text"
-            placeholder="Filtrar por telefone..."
-            value=${filterPhone}
-            onInput=${(e) => { setFilterPhone(e.target.value); setPage(0); }}
-            class="${inputCls} w-40"
-          />
-          <input
-            type="number"
-            placeholder="ID conversa"
-            value=${filterConversation}
-            onInput=${(e) => { setFilterConversation(e.target.value); setPage(0); }}
-            class="${inputCls} w-32"
-          />
-          <select
-            value=${filterStatus}
-            onChange=${(e) => { setFilterStatus(e.target.value); setPage(0); }}
-            class=${inputCls}
-          >
-            <option value="">Todos os status</option>
-            <option value="completed">Concluída</option>
-            <option value="failed">Falhou</option>
-            <option value="running">Em execução</option>
-          </select>
-          <label class="text-xs text-wa-secondary flex items-center gap-1">
-            De
-            <input
-              type="date"
-              value=${filterFrom}
-              onInput=${(e) => { setFilterFrom(e.target.value); setPage(0); }}
-              class="${inputCls} py-1"
-            />
-          </label>
-          <label class="text-xs text-wa-secondary flex items-center gap-1">
-            Até
-            <input
-              type="date"
-              value=${filterTo}
-              onInput=${(e) => { setFilterTo(e.target.value); setPage(0); }}
-              class="${inputCls} py-1"
-            />
-          </label>
-          ${(filterPhone || filterStatus || filterConversation || filterFrom || filterTo) ? html`
+      <div class="px-4 py-3 border-b border-wa-border space-y-3">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <div class="flex items-center gap-2">
+            <span class="w-9 h-9 rounded-lg bg-wa-teal/10 text-wa-teal flex items-center justify-center text-lg" aria-hidden="true">📈</span>
+            <div>
+              <h2 class="text-base font-bold text-wa-text leading-tight">Execuções</h2>
+              <p class="text-xs text-wa-secondary leading-tight">Histórico de webhooks e turnos de IA</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 flex-wrap">
+            <label
+              class="flex items-center gap-2 text-xs text-wa-secondary cursor-pointer select-none"
+              title="Salva o system prompt + histórico enviado à IA em cada execução (para depurar). Aumenta o tamanho do banco — desligue quando não precisar."
+            >
+              <input type="checkbox" checked=${captureContext} onChange=${toggleCapture} class="accent-wa-teal" />
+              Capturar contexto enviado à IA
+            </label>
             <button
-              onClick=${() => { setFilterPhone(''); setFilterStatus(''); setFilterConversation(''); setFilterFrom(''); setFilterTo(''); setPage(0); }}
-              class="text-xs text-wa-secondary hover:text-wa-teal px-2 py-1 rounded border border-wa-border hover:bg-wa-hover transition-colors"
-            >Limpar</button>
+              onClick=${() => { fetchList(); fetchStats(); }}
+              class="text-xs text-wa-secondary hover:text-wa-teal px-2 py-1 rounded border border-wa-border hover:bg-wa-hover transition-colors flex items-center gap-1"
+              title="Atualizar agora"
+            >↻ Atualizar</button>
+          </div>
+        </div>
+
+        <!-- Cards de estatística (B1) -->
+        <${StatCards} stats=${stats} />
+
+        <!-- Filtros (colapsável, estilo Nexus) -->
+        <div class="border border-wa-border rounded-lg overflow-hidden">
+          <button
+            onClick=${() => setFiltersOpen(o => !o)}
+            class="w-full flex items-center justify-between px-3 py-2 bg-wa-panel hover:bg-wa-hover transition-colors select-none"
+          >
+            <span class="flex items-center gap-2 text-sm font-medium text-wa-text">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" class="text-wa-secondary"><path d="M3 4h18v2l-7 8v6l-4-2v-4L3 6V4z"/></svg>
+              Filtros
+              ${activeFilterCount ? html`<span class="text-xs px-1.5 py-0.5 rounded-full bg-wa-teal text-white">${activeFilterCount}</span>` : null}
+            </span>
+            <span class="flex items-center gap-2">
+              <span class="text-xs text-wa-secondary">${total} execução(ões)</span>
+              <span class="text-wa-secondary text-sm">${filtersOpen ? '▾' : '▸'}</span>
+            </span>
+          </button>
+          ${filtersOpen ? html`
+          <div class="p-4 space-y-4 border-t border-wa-border">
+        <!-- STATUS (pills) -->
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-wa-secondary font-medium mb-1.5">Status</div>
+          <div class="flex gap-1.5 flex-wrap items-center">
+            ${[['', 'Todos'], ['completed', 'Sucesso'], ['failed', 'Erro'], ['running', 'Em execução']].map(([val, lbl]) => {
+              // "Todos" (val vazio) limpa a seleção; os demais alternam (multi).
+              const active = val === '' ? filterStatus.length === 0 : filterStatus.includes(val);
+              return html`
+              <button
+                key=${val}
+                onClick=${() => {
+                  if (val === '') setFilterStatus([]);
+                  else setFilterStatus(active
+                    ? filterStatus.filter((s) => s !== val)
+                    : [...filterStatus, val]);
+                  setPage(0);
+                }}
+                class="text-xs px-2.5 py-1 rounded-full border transition-colors ${active
+                  ? 'bg-wa-teal text-white border-wa-teal'
+                  : 'bg-wa-hover text-wa-secondary border-wa-border hover:bg-wa-border'}"
+              >${lbl}</button>
+            `;
+            })}
+            <span class="w-px h-4 bg-wa-border mx-1"></span>
+            <button
+              onClick=${() => { setFilterOnlyAi(v => !v); setPage(0); }}
+              class="text-xs px-2.5 py-1 rounded-full border transition-colors ${filterOnlyAi
+                ? 'bg-wa-teal text-white border-wa-teal'
+                : 'bg-wa-hover text-wa-secondary border-wa-border hover:bg-wa-border'}"
+              title="Só execuções que realmente invocaram o modelo"
+            >⚡ Só IA</button>
+          </div>
+        </div>
+
+        <!-- AGENTE (pills) -->
+        ${agentKeys.length ? html`
+          <div>
+            <div class="text-[11px] uppercase tracking-wide text-wa-secondary font-medium mb-1.5">Agente</div>
+            <div class="flex gap-1.5 flex-wrap items-center">
+              ${agentKeys.map((ak) => {
+                const active = filterAgent.includes(ak);
+                return html`
+                  <button
+                    key=${ak}
+                    onClick=${() => {
+                      setFilterAgent(active
+                        ? filterAgent.filter((k) => k !== ak)
+                        : [...filterAgent, ak]);
+                      setPage(0);
+                    }}
+                    class="text-xs px-2.5 py-1 rounded-full border transition-colors ${active
+                      ? 'bg-wa-teal text-white border-wa-teal'
+                      : 'bg-wa-hover text-wa-secondary border-wa-border hover:bg-wa-border'}"
+                  >${ak}</button>
+                `;
+              })}
+            </div>
+          </div>
+        ` : null}
+
+        <!-- Campos de texto / data / canais (grid rotulado) -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <${FilterField} label="Canais">
+            <${ChannelMultiSelect}
+              channels=${channels}
+              selected=${filterChannels}
+              onChange=${(v) => { setFilterChannels(v); setPage(0); }}
+              inputCls=${inputCls}
+            />
+          <//>
+          <${FilterField} label="Telefone">
+            <input
+              type="text" placeholder="Ex: 5564..."
+              value=${filterPhone}
+              onInput=${(e) => { setFilterPhone(e.target.value); setPage(0); }}
+              class="${inputCls} w-full"
+            />
+          <//>
+          <${FilterField} label="ID Conversa">
+            <input
+              type="number" placeholder="Ex: 12345"
+              value=${filterConversation}
+              onInput=${(e) => { setFilterConversation(e.target.value); setPage(0); }}
+              class="${inputCls} w-full"
+            />
+          <//>
+          <${FilterField} label="ID da Mensagem">
+            <input
+              type="text" placeholder="Ex: 3EB0..."
+              value=${filterMsgId}
+              onInput=${(e) => { setFilterMsgId(e.target.value); setPage(0); }}
+              class="${inputCls} w-full"
+            />
+          <//>
+          <${FilterField} label="Data de">
+            <input type="date" value=${filterFrom}
+              onInput=${(e) => { setFilterFrom(e.target.value); setPage(0); }}
+              class="${inputCls} w-full" />
+          <//>
+          <${FilterField} label="Data até">
+            <input type="date" value=${filterTo}
+              onInput=${(e) => { setFilterTo(e.target.value); setPage(0); }}
+              class="${inputCls} w-full" />
+          <//>
+          <${FilterField} label="Msg do Cliente">
+            <input
+              type="text" placeholder="Buscar no input..."
+              value=${filterSearchInput}
+              onInput=${(e) => { setFilterSearchInput(e.target.value); setPage(0); }}
+              class="${inputCls} w-full"
+            />
+          <//>
+          <${FilterField} label="Msg da IA">
+            <input
+              type="text" placeholder="Buscar no output..."
+              value=${filterSearchOutput}
+              onInput=${(e) => { setFilterSearchOutput(e.target.value); setPage(0); }}
+              class="${inputCls} w-full"
+            />
+          <//>
+        </div>
+
+        <!-- Ações -->
+        ${activeFilterCount ? html`
+          <div class="flex justify-end">
+            <button
+              onClick=${() => {
+                setFilterPhone(''); setFilterStatus([]); setFilterConversation('');
+                setFilterFrom(''); setFilterTo(''); setFilterSearchInput('');
+                setFilterSearchOutput(''); setFilterMsgId(''); setFilterOnlyAi(false);
+                setFilterAgent([]); setFilterChannels([]); setPage(0);
+              }}
+              class="text-xs text-wa-secondary hover:text-wa-teal px-3 py-1.5 rounded border border-wa-border hover:bg-wa-hover transition-colors"
+            >Limpar filtros</button>
+          </div>
+        ` : null}
+          </div>
           ` : null}
-          <span class="text-xs text-wa-secondary self-center ml-auto">${total} execução(ões)</span>
         </div>
       </div>
 
-      <!-- Table -->
-      <div class="flex-1 overflow-auto">
+      <!-- Table (sem scroll interno; a página rola e a paginação limita o tamanho) -->
+      <div>
         ${loading && executions.length === 0 ? html`
           <div class="p-8 text-center text-wa-secondary text-sm">Carregando...</div>
         ` : executions.length === 0 ? html`
@@ -675,7 +1036,7 @@ export function Executions() {
                   <td class="px-4 py-2.5 text-wa-text font-mono text-xs">${ex.conversation_id != null ? `#${ex.conversation_id}` : '—'}</td>
                   <td class="px-4 py-2.5 text-wa-secondary text-xs">${ex.channel_label || '—'}</td>
                   <td class="px-4 py-2.5 text-wa-text">${ex.phone}</td>
-                  <td class="px-4 py-2.5 text-wa-secondary text-xs">${ex.agent_key || '—'}</td>
+                  <td class="px-4 py-2.5 text-xs">${ex.agent_key ? html`<${AgentBadge} agentKey=${ex.agent_key} />` : html`<span class="text-wa-secondary">—</span>`}</td>
                   <td class="px-4 py-2.5">
                     <span class="text-xs px-1.5 py-0.5 rounded bg-wa-panel text-wa-secondary">${ex.trigger_type}</span>
                   </td>

@@ -26,6 +26,12 @@ _current_execution: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 _current_step_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_step_agent", default=None
 )
+# Contact of the current turn — set in the async cycle and inherited by
+# to_thread so a deep call (e.g. a plugin recording embedding usage) can attribute
+# it to the right contact without threading the id through every layer.
+_current_contact_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "current_contact_id", default=None
+)
 
 
 def set_current_execution(exec_id: int | None) -> None:
@@ -36,6 +42,16 @@ def set_current_execution(exec_id: int | None) -> None:
 def set_current_step_agent(agent_key: str | None) -> None:
     """Set the agent attributed to subsequent steps (within-turn routing)."""
     _current_step_agent.set(agent_key)
+
+
+def set_current_contact_id(contact_id: int | None) -> None:
+    """Set the contact of the current turn (call from async context)."""
+    _current_contact_id.set(contact_id)
+
+
+def get_current_contact_id() -> int | None:
+    """Get the contact of the current turn (or None if not tracking)."""
+    return _current_contact_id.get()
 
 
 def create_execution(phone: str, trigger_type: str = "webhook", *,
@@ -111,6 +127,37 @@ def add_execution_usage(total_tokens: int = 0, cost_usd: float = 0.0) -> None:
         execution_repo.add_usage(exec_id, total_tokens, cost_usd)
     except Exception as e:
         logger.warning("Failed to record execution usage: %s", e)
+
+
+def set_execution_texts(*, input_text: str | None = None,
+                        output_text: str | None = None,
+                        msg_id: str | None = None) -> None:
+    """Stamp the denormalized search columns onto the current execution.
+
+    Reads execution_id from the contextvar (inherited inside asyncio.to_thread).
+    Best-effort: only non-None fields are written; never raises into the turn.
+    """
+    exec_id = _current_execution.get()
+    if exec_id is None:
+        return
+    if input_text is None and output_text is None and msg_id is None:
+        return
+    try:
+        execution_repo.set_texts(exec_id, input_text=input_text,
+                                 output_text=output_text, msg_id=msg_id)
+    except Exception as e:
+        logger.warning("Failed to set execution texts: %s", e)
+
+
+def mark_execution_has_ai() -> None:
+    """Flag the current execution as having invoked the model (has_ai=1)."""
+    exec_id = _current_execution.get()
+    if exec_id is None:
+        return
+    try:
+        execution_repo.mark_has_ai(exec_id)
+    except Exception as e:
+        logger.warning("Failed to mark execution has_ai: %s", e)
 
 
 def set_execution_agent_key(agent_key: str) -> None:

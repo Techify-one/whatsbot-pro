@@ -795,6 +795,29 @@ export async function getExecution(id) {
   return request('GET', `/api/executions/${id}`);
 }
 
+// Nexus-style stat cards / cost panel / filter pills.
+export async function getExecutionStats(params = {}) {
+  const clean = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') clean[k] = v;
+  }
+  const qs = new URLSearchParams(clean).toString();
+  return request('GET', `/api/executions/stats${qs ? '?' + qs : ''}`);
+}
+
+export async function getExecutionCost(params = {}) {
+  const clean = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') clean[k] = v;
+  }
+  const qs = new URLSearchParams(clean).toString();
+  return request('GET', `/api/executions/cost${qs ? '?' + qs : ''}`);
+}
+
+export async function getExecutionModels() {
+  return request('GET', '/api/executions/models');
+}
+
 // ── Usage / Costs ─────────────────────────────────────────────────
 
 export async function getUsageSummary(params = {}) {
