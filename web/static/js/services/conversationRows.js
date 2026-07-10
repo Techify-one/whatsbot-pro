@@ -137,6 +137,12 @@ export function clauseMatches(c, cl, now) {
     const st = c.conv_status || 'open';              // 'open' | 'closed'
     return op === 'ne' ? st !== value : st === value;
   }
+  if (dim === 'ai') {
+    // IA ligada/desligada por conversa (mesmo sinal do badge "IA OFF"). value ∈ 'on'|'off'.
+    const isOn = c.conv_ai_active !== 0 && c.conv_ai_active !== false;
+    const hit = value === 'on' ? isOn : !isOn;
+    return op === 'ne' ? !hit : hit;
+  }
   if (dim === 'activity') {
     const n = parseFloat(value);
     if (!Number.isFinite(n)) return true;

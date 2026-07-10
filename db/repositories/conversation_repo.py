@@ -80,6 +80,21 @@ def _default_ai_enabled() -> bool:
         return True
 
 
+def _global_ai_enabled() -> bool:
+    """The panel-wide ``auto_reply`` master switch — the SAME gate the webhook
+    checks first (``_channel_ai_enabled``). When it is OFF the AI never replies on
+    any channel, so a brand-new conversation must NOT be stamped as AI-active nor
+    bound to an agent — otherwise the sidebar shows the "IA" badge + an assigned
+    agent for a conversation the AI will never touch. Best-effort → defaults to True
+    so a config read failure never silences the AI.
+    """
+    from db.repositories import config_repo
+    try:
+        return bool(config_repo.get("auto_reply", True))
+    except Exception:
+        return True
+
+
 def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_id: int,
                          opened_at: float | None, ai_active: int | None,
                          is_archived: int, active_agent_key: str | None,
@@ -96,6 +111,15 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
         ai_active = 1 if _default_ai_enabled() else 0
     if active_agent_key is None:
         active_agent_key = default_agent_key_for_inbox(inbox_id)
+    # Global master gate: with the panel-wide ``auto_reply`` switch OFF, no channel
+    # ever replies (webhook checks it first), so a fresh conversation must start with
+    # the AI off and NO agent bound — the UI must not advertise "IA"/an agent for a
+    # thread the AI won't handle. This overrides the per-channel/default seeds above;
+    # it applies ONLY at CREATE (this function is create-only). An explicit human
+    # transfer to an agent goes through ``conversation_repo.update``, not here.
+    if not _global_ai_enabled():
+        ai_active = 0
+        active_agent_key = None
     display_id = _next_display_id(conn)
     result = conn.execute(conversations.insert().values(
         display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
