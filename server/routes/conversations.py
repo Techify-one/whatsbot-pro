@@ -489,14 +489,20 @@ def register_routes(app, deps):
         if attrs is not None:
             if not isinstance(attrs, dict):
                 return _err("custom_attributes deve ser um objeto.", status=400)
-            defs = await asyncio.to_thread(
-                custom_attribute_repo.get_definitions_map, "conversation")
+            all_defs = await asyncio.to_thread(
+                custom_attribute_repo.list_definitions, "conversation", True)
+            defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
+            known_keys = {d["attribute_key"] for d in all_defs}
             # Validate keys (P50: unknown → error) AND values (type/regex parity
-            # with the contact PUT /info), returning a clean 400 before writing.
+            # with the contact PUT /info), returning a clean 400 before writing. A
+            # value orphaned by a deleted attribute (P49 keeps it) is tolerated —
+            # left untouched — instead of blocking the save.
             valid: dict = {}
             for key, value in attrs.items():
                 definition = defs.get(key)
                 if definition is None:
+                    if key in known_keys:
+                        continue
                     return _err(f"Atributo '{key}' não existe.", status=400)
                 norm, err = validate_value(definition, value)
                 if err:

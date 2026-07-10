@@ -1950,10 +1950,19 @@ def register_routes(app, deps):
         if custom_attrs is not None:
             if not isinstance(custom_attrs, dict):
                 return _err("custom_attributes deve ser um objeto.")
-            defs = await asyncio.to_thread(ca_repo.get_definitions_map, "contact")
+            all_defs = await asyncio.to_thread(
+                ca_repo.list_definitions, "contact", True)  # include soft-deleted
+            defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
+            known_keys = {d["attribute_key"] for d in all_defs}
             for key, value in custom_attrs.items():
                 definition = defs.get(key)
                 if definition is None:
+                    # A value left behind by a DELETED attribute (soft-delete keeps
+                    # stored values, P49) is tolerated — the frontend re-sends it from
+                    # the stored JSON. Leave it untouched instead of 500-blocking the
+                    # save. Only a key that NEVER existed is a genuine typo → 400 (P50).
+                    if key in known_keys:
+                        continue
                     return _err(f"Atributo '{key}' não existe.", 400)  # P50
                 if value is None:
                     valid_partial[key] = None  # explicit clear → set_values pops it
