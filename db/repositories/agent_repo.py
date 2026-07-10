@@ -80,6 +80,19 @@ def get_default() -> dict | None:
     return get(DEFAULT_AGENT_KEY)
 
 
+def display_name_for(agent_key: str | None) -> str | None:
+    """Nome exibível de um agente a partir do ``agent_key`` (para o painel montar
+    "IA - <NOME>" / "Ferramenta IA - <NOME>"). Fallback para o próprio ``agent_key``
+    quando o ``display_name`` está vazio; ``None`` quando a chave é vazia ou o agente
+    não existe mais (ex.: agente removido) — o frontend cai no rótulo "IA"."""
+    if not agent_key:
+        return None
+    row = get(agent_key)
+    if not row:
+        return None
+    return (row.get("display_name") or "").strip() or agent_key
+
+
 def list_all() -> list[dict]:
     with get_engine().connect() as conn:
         rows = conn.execute(

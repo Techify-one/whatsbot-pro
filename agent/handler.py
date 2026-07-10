@@ -27,6 +27,10 @@ class ProcessResult:
     tool_calls: list[dict] = dataclasses.field(default_factory=list)
     contact_info: dict | None = None
     aborted: bool = False
+    # Agente de IA que efetivamente respondeu este turno (após routing hub-and-spoke).
+    # Carimbado nas mensagens salvas (resposta + cards de tool) para o painel exibir
+    # "IA - <NOME>" / "Ferramenta IA - <NOME>". None quando o turno abortou/errou.
+    agent_key: str | None = None
 
 
 class AgentHandler:
@@ -388,10 +392,15 @@ class AgentHandler:
     def save_assistant_message(self, phone: str, text: str, *,
                                msg_id: str | None = None,
                                status: str = "sent",
-                               channel_id: str = "default") -> dict:
-        """Save an assistant (bot) message to contact memory after successful send."""
+                               channel_id: str = "default",
+                               agent_key: str | None = None) -> dict:
+        """Save an assistant (bot) message to contact memory after successful send.
+
+        ``agent_key`` atribui a mensagem ao agente que a produziu (do ProcessResult
+        do turno), para o painel exibir "IA - <NOME>"."""
         contact = self._get_contact(phone, channel_id=channel_id)
-        contact.add_message("assistant", text, msg_id=msg_id, status=status)
+        contact.add_message("assistant", text, msg_id=msg_id, status=status,
+                            agent_key=agent_key)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def save_operator_message(self, phone: str, text: str, *,

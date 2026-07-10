@@ -282,7 +282,7 @@ async def _clear_transfer_tag(deps, contact_id) -> None:
 
 async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
                     ai_active, mirror_contact_ai: bool | None,
-                    contact_id=None) -> dict | None:
+                    contact_id=None, clear_transfer_tag: bool = True) -> dict | None:
     """UNIFY the ownership transition that ``set_ai`` / ``assign_agent`` /
     ``toggle_contact_ai`` each used to do divergently.
 
@@ -292,6 +292,10 @@ async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
     AI gate column untouched (the repo skips it). ``mirror_contact_ai`` is the
     contact-level ``ai_enabled`` to write (True/False) or ``None`` to leave the
     contact gate alone. ``contact_id`` defaults to the conversation's contact.
+    ``clear_transfer_tag`` (default True) controls whether re-enabling the AI
+    (``ai_active=1``) also removes the ``transferido_atendente`` tag — callers that
+    want to KEEP the tag as a visual label (o fechar-protocolo religa a IA mas
+    preserva a tag) pass ``False``.
 
     Returns the updated conversation, or ``None`` if it vanished. Does NOT emit the
     ``conversation.assigned``/``ai_toggled`` events itself — each public caller
@@ -305,7 +309,8 @@ async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
     if not updated:
         return None
     # Plano 29 A5: a IA reassumindo a conversa limpa a trava de transferência.
-    if ai_active == 1:
+    # ``clear_transfer_tag=False`` preserva a tag (o fechar-protocolo mantém o rótulo).
+    if ai_active == 1 and clear_transfer_tag:
         await _clear_transfer_tag(
             deps, contact_id if contact_id is not None else updated.get("contact_id"))
     if mirror_contact_ai is not None:
@@ -444,7 +449,8 @@ async def set_agent(deps, conv: dict, agent_key: str | None, *,
 
 
 async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
-                 actor_name: str | None = None) -> dict | None:
+                 actor_name: str | None = None,
+                 clear_transfer_tag: bool = True) -> dict | None:
     """Toggle the AI for ONE conversation AND (re)assign it (plano 17), via
     :func:`_transfer` (the unified ownership policy, moved out of
     ``conversation_repo.set_conversation_ai``):
@@ -453,6 +459,9 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
         off (``actor_id``); when no operator identity (legacy/open mode) it lands
         UNASSIGNED, mirroring a close.
       * ON  → AI on, the inbox's default AI agent re-bound, human assignee cleared.
+
+    ``clear_transfer_tag=False`` religa a IA (ON) sem remover a tag
+    ``transferido_atendente`` — usado pelo fechar-protocolo, que mantém o rótulo.
 
     Emits, EXACTLY once each: ``conversation.assigned`` (the row repositions) AND
     ``conversation.ai_toggled`` (the badge) — both over WS too. Plus the
@@ -465,7 +474,8 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
             conversation_repo.default_agent_key_for_inbox, conv.get("inbox_id"))
         updated = await _transfer(
             deps, conv, assignee_user_id=None, active_agent_key=agent_key,
-            ai_active=1, mirror_contact_ai=None)
+            ai_active=1, mirror_contact_ai=None,
+            clear_transfer_tag=clear_transfer_tag)
     else:
         updated = await _transfer(
             deps, conv, assignee_user_id=new_assignee, active_agent_key=None,

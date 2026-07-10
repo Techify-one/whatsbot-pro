@@ -128,6 +128,11 @@ messages = Table(
     # NULL = remetente desconhecido → o painel cai no rótulo "Manual".
     Column("sent_by_user_id", Integer),
     Column("sent_by_name", Text),
+    # Qual agente de IA produziu esta mensagem: role='assistant' (resposta) ou
+    # 'tool_call' (execução de tool). Aditivo e nullable — o painel resolve o
+    # display_name e exibe "IA - <NOME>" / "Ferramenta IA - <NOME>". NULL em
+    # mensagens não-IA (user/operator/private_note) e em linhas legadas.
+    Column("agent_key", Text),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
