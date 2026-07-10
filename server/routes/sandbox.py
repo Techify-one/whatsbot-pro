@@ -69,7 +69,8 @@ def register_routes(app, deps):
 
         if result.tool_calls:
             try:
-                await deps.broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                await deps.broadcast_tool_calls(phone, result.tool_calls, result.contact_info,
+                                                agent_key=result.agent_key)
             except Exception as e:
                 logger.error("[Sandbox] broadcast_tool_calls failed for %s: %s", phone, e)
 
@@ -98,6 +99,7 @@ def register_routes(app, deps):
                 continue
             await asyncio.to_thread(
                 agent_handler.save_assistant_message, phone, part, status="sent",
+                agent_key=result.agent_key,
             )
             await ws_manager.broadcast("new_message", {
                 "phone": phone,

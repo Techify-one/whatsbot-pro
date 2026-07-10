@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # do contexto do LLM / preview da sidebar / contagem de não-lidas.
 ROLE = "conversation_event"
 
+# Autor exibido quando a ação foi AUTOMÁTICA (não um operador): reabertura já com a
+# IA ativa, religar ao fechar protocolo, auto-transferência da IA. Os call sites
+# automáticos passam ``actor=None``; os manuais passam o nome real do usuário.
+SYSTEM_ACTOR = "SISTEMA"
+
 
 # ── Registry de grupos + tipos (gate de config global) ───────────────────────
 # Estes três dicts são as STORES do registry. Eram literais; agora são populados
@@ -175,10 +180,11 @@ def _f_created(display_id=None, **_) -> str:
 
 
 def _f_ai_on(actor=None, **_) -> str:
+    # Ação automática (sem operador) ⇒ atribuída ao SISTEMA, nunca a um nome de usuário.
     return _with_actor(
         actor,
         f"🤖 {actor} reativou a IA.",
-        "🤖 IA reativada.",
+        f"🤖 {SYSTEM_ACTOR} reativou a IA.",
     )
 
 
@@ -186,7 +192,7 @@ def _f_ai_off(actor=None, **_) -> str:
     return _with_actor(
         actor,
         f"🤖 {actor} pausou a IA.",
-        "🤖 IA pausada.",
+        f"🤖 {SYSTEM_ACTOR} pausou a IA.",
     )
 
 
