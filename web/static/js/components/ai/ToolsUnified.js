@@ -145,6 +145,8 @@ export default function ToolsUnified({ initialEntity }) {
         label: (reg && reg.current_label) || name,
         enabled: reg ? !!reg.enabled : !!(code && code.enabled),
         customized: reg ? !!(reg.has_override || reg.has_label_override) : false,
+        // plano 47 — reaproveitar o resultado desta tool no contexto da IA.
+        reuse_result: reg ? !!reg.reuse_result : false,
         version: code ? (code.version || 1) : null,
         install_status: code ? code.install_status : null,
         install_error: code ? code.install_error : null,
@@ -248,6 +250,29 @@ export default function ToolsUnified({ initialEntity }) {
     }
   }
 
+  // ---- Reuse-result toggle (plano 47, D8) ----------------------------------
+  // Inline toggle for code-in-DB tools: their "Editar" opens the Python editor
+  // (not the override EditModal that hosts the reuse toggle for core/plugin), so
+  // without this the control would be unreachable for them. Same PUT /api/tools.
+  async function toggleReuse(row) {
+    setBusy(row.name);
+    try {
+      const r = await fetch(`/api/tools/${encodeURIComponent(row.name)}`, {
+        method: 'PUT',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ reuse_result: !row.reuse_result }),
+      });
+      if (r.status === 401) { handleUnauthorized(); throw new Error('Não autenticado.'); }
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || 'failed');
+      setRegTools((prev) => prev.map((t) => (t.name === row.name ? { ...t, ...data.data } : t)));
+    } catch (e) {
+      alert('Erro ao salvar: ' + (e.message || e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   // ---- Edit: override modal (core/plugin) ----------------------------------
   async function saveOverride(name, body) {
     setBusy(name);
@@ -261,7 +286,7 @@ export default function ToolsUnified({ initialEntity }) {
       const data = await r.json();
       if (!data.ok) throw new Error(data.error || 'failed');
       setRegTools((prev) => prev.map((t) => (t.name === name ? { ...t, ...data.data } : t)));
-      if ('description' in body || 'display_label' in body) setEditingOverride(null);
+      if ('description' in body || 'display_label' in body || 'reuse_result' in body) setEditingOverride(null);
     } catch (e) {
       alert('Erro ao salvar: ' + (e.message || e));
     } finally {
@@ -381,6 +406,7 @@ export default function ToolsUnified({ initialEntity }) {
                         ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Habilitada</span>`
                         : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Desabilitada</span>`}
                       ${r.customized ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-500/10 text-blue-700">customizada</span>` : null}
+                      ${r.reuse_result ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-purple-500/10 text-purple-700 dark:text-purple-400" title="A IA reaproveita o resultado desta tool nas próximas mensagens">lembra resposta</span>` : null}
                     </div>
                     ${r.name !== r.label ? html`<div class="text-[12px] text-wa-secondary mt-0.5 font-mono">${r.name}</div>` : null}
                     ${desc ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${desc}</div>` : null}
@@ -398,6 +424,19 @@ export default function ToolsUnified({ initialEntity }) {
                       />
                       <div class="relative w-9 h-5 bg-wa-border rounded-full peer peer-checked:bg-green-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-4"></div>
                     </label>
+                    ${(r.isCode && r.registered) ? html`
+                      <label class="inline-flex items-center gap-1 cursor-pointer text-[12px] text-wa-secondary"
+                        title="A IA reaproveita o resultado desta tool nas próximas mensagens em vez de consultar de novo. Deixe desligado para dados que mudam e para tools que executam ações.">
+                        <input
+                          type="checkbox"
+                          class="w-3.5 h-3.5 rounded border-wa-border accent-wa-teal"
+                          checked=${r.reuse_result}
+                          disabled=${busy === r.name}
+                          onChange=${() => toggleReuse(r)}
+                        />
+                        Reaproveitar resposta
+                      </label>
+                    ` : null}
                     <button
                       onClick=${() => (r.isCode ? openCodeEdit(r) : setEditingOverride(r.name))}
                       class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"

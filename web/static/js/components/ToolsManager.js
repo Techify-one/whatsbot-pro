@@ -10,10 +10,13 @@ const html = htm.bind(h);
 export function EditModal({ tool, onClose, onSave, busy }) {
   const [description, setDescription] = useState(tool.current_description || '');
   const [label, setLabel] = useState(tool.current_label || '');
+  // plano 47 — reaproveitar o RESULTADO desta tool para a IA entre turnos.
+  const [reuseResult, setReuseResult] = useState(!!tool.reuse_result);
 
   const dirty =
     description.trim() !== (tool.current_description || '').trim() ||
-    label.trim() !== (tool.current_label || '').trim();
+    label.trim() !== (tool.current_label || '').trim() ||
+    reuseResult !== !!tool.reuse_result;
 
   function save() {
     const body = {};
@@ -32,6 +35,7 @@ export function EditModal({ tool, onClose, onSave, busy }) {
         body.display_label = label.trim();
       }
     }
+    if (reuseResult !== !!tool.reuse_result) body.reuse_result = reuseResult;
     onSave(tool.name, body);
   }
 
@@ -88,6 +92,26 @@ export function EditModal({ tool, onClose, onSave, busy }) {
                 Padrão: <span class="italic">${tool.default_description}</span>
               </div>
             ` : null}
+          </div>
+
+          <!-- plano 47 — reaproveitar a resposta desta tool para a IA (uniforme, D8) -->
+          <div class="rounded-lg border border-wa-border bg-wa-panel p-3">
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked=${reuseResult}
+                onChange=${(e) => setReuseResult(e.target.checked)}
+                class="mt-0.5 w-4 h-4 rounded border-wa-border accent-wa-teal"
+              />
+              <span class="flex flex-col">
+                <span class="text-[13px] font-medium text-wa-text">Reaproveitar a resposta desta tool para a IA</span>
+                <span class="text-[12px] text-wa-secondary mt-0.5">
+                  A IA lembra o resultado nas próximas mensagens em vez de consultar de novo.
+                  Deixe <span class="font-medium">DESLIGADO</span> para dados que mudam (ex.: preços)
+                  e para tools que executam ações (salvar, transferir…).
+                </span>
+              </span>
+            </label>
           </div>
         </div>
         <div class="border-t border-wa-border px-4 py-3 flex items-center justify-between">

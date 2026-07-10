@@ -48,6 +48,19 @@ def list_all() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def reuse_enabled_names() -> set[str]:
+    """Names of tools with ``reuse_result`` ON (plano 47). Fail-safe → empty set.
+
+    Read on every turn by ``agent.tool_memory.build_block`` to decide which tools
+    keep their ``→ resultado`` in the compact block. Any read error degrades to an
+    empty set (no reuse) so a turn is never broken.
+    """
+    try:
+        return {row["name"] for row in list_all() if row.get("reuse_result")}
+    except Exception:
+        return set()
+
+
 def ensure(name: str, plugin_id: str | None, *,
            default_enabled: bool = True) -> None:
     """Insert a default row on the first time a tool is registered.
@@ -70,6 +83,9 @@ def ensure(name: str, plugin_id: str | None, *,
                 "enabled": 1 if default_enabled else 0,
                 "description": None,
                 "display_label": None,
+                # plano 47 — default 0: só na 1ª criação; ``update_cols=['plugin_id']``
+                # garante que o re-registro NUNCA regride a escolha do usuário.
+                "reuse_result": 0,
                 "updated_at": now,
             },
             conflict_cols=["name"],
@@ -83,12 +99,14 @@ def upsert_override(
     enabled=_UNSET,
     description=_UNSET,
     display_label=_UNSET,
+    reuse_result=_UNSET,
 ) -> dict | None:
     """Apply a partial update. Sentinel ``_UNSET`` keeps the existing value.
 
     Pass ``description=None`` (or ``display_label=None``) to clear the field
-    (reset to default). Returns the updated row, or ``None`` if the tool is
-    unknown.
+    (reset to default). ``reuse_result`` (plano 47) toggles reaproveitar o
+    resultado da tool no ``tool_memory``. Returns the updated row, or ``None`` if
+    the tool is unknown.
     """
     existing = get(name)
     if existing is None:
@@ -96,11 +114,14 @@ def upsert_override(
     new_enabled = existing["enabled"] if enabled is _UNSET else (1 if enabled else 0)
     new_description = existing["description"] if description is _UNSET else description
     new_label = existing["display_label"] if display_label is _UNSET else display_label
+    new_reuse = (existing.get("reuse_result", 0) if reuse_result is _UNSET
+                 else (1 if reuse_result else 0))
     with get_engine().begin() as conn:
         conn.execute(sa_update(tool_overrides).where(tool_overrides.c.name == name).values(
             enabled=new_enabled,
             description=new_description,
             display_label=new_label,
+            reuse_result=new_reuse,
             updated_at=time.time(),
         ))
     return get(name)

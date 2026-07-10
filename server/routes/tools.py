@@ -42,6 +42,10 @@ def register_routes(app, deps):
         update_kwargs: dict = {}
         if "enabled" in body:
             update_kwargs["enabled"] = bool(body["enabled"])
+        # plano 47 — toggle uniforme (D8): sem guarda por nome. Aplica a QUALQUER
+        # tool; o operador decide (o aviso é só no texto de ajuda da UI).
+        if "reuse_result" in body:
+            update_kwargs["reuse_result"] = bool(body["reuse_result"])
         if "description" in body:
             raw = body["description"]
             if raw is None:

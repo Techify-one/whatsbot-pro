@@ -36,6 +36,8 @@ export default function GeneralSettings() {
   const [improvementPromptDefault, setImprovementPromptDefault] = useState('');
   // plano 43 — lista-negra por regex do histórico da IA (uma regex por linha).
   const [historyExcludePatterns, setHistoryExcludePatterns] = useState('');
+  // plano 47 (D9) — tamanho máx. (chars) do resultado de tool reaproveitado.
+  const [toolReuseMaxChars, setToolReuseMaxChars] = useState(800);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -55,6 +57,7 @@ export default function GeneralSettings() {
     // operator sees/edits the real text in use.
     setImprovementPrompt((cfg.improvement_prompt || dflt));
     setHistoryExcludePatterns((cfg.ai_history_exclude_patterns || []).join('\n'));
+    setToolReuseMaxChars(cfg.ai_tool_reuse_result_max_chars ?? 800);
   }
 
   async function load() {
@@ -114,6 +117,8 @@ export default function GeneralSettings() {
       // ignora regex inválida (fail-open), então não bloqueamos o save.
       ai_history_exclude_patterns: historyExcludePatterns
         .split('\n').map((s) => s.trim()).filter(Boolean),
+      // plano 47 (D9) — cap por-resultado do reaproveitamento; fallback 800.
+      ai_tool_reuse_result_max_chars: parseInt(toolReuseMaxChars, 10) || 800,
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -331,6 +336,27 @@ export default function GeneralSettings() {
           <code>Protocolo aberto</code> corta por conteúdo ·
           <code>${'PROT-\\d{8}'}</code> por padrão de protocolo.
         </span>
+      </div>
+
+      <!-- plano 47 — tamanho máx. do resultado de tool reaproveitado (D9) -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="text-[14px] font-semibold text-wa-text">Tamanho máx. do resultado reaproveitado (caracteres)</label>
+        <span class="text-[12px] text-wa-secondary">
+          Quando uma tool está marcada com <span class="font-medium">"Reaproveitar a resposta"</span>
+          (na tela <span class="font-medium">IA → Tools</span>), a IA passa a lembrar o resultado dela nas
+          próximas mensagens em vez de consultar de novo. Este é o limite de caracteres por resultado
+          reaproveitado — vale para todas as tools marcadas. Resultados maiores são truncados.
+        </span>
+        <input
+          type="number"
+          min="50"
+          max="8000"
+          step="50"
+          value=${toolReuseMaxChars}
+          onInput=${(e) => setToolReuseMaxChars(e.target.value)}
+          class="wa-field w-40 px-3 py-1.5 rounded-md text-[14px]"
+        />
+        <span class="text-[12px] text-wa-secondary">Padrão: 800. Mínimo efetivo: 50.</span>
       </div>
 
       <!-- Save -->

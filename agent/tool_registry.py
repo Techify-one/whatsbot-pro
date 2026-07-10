@@ -284,6 +284,8 @@ class ToolRegistry:
                 "display_label": ov.get("display_label"),
                 "current_label": current_label,
                 "enabled": bool(ov.get("enabled", 1)),
+                # plano 47 — reaproveitar o resultado desta tool no tool_memory.
+                "reuse_result": bool(ov.get("reuse_result", 0)),
                 "has_override": bool(ov.get("description")),
                 "has_label_override": bool(ov.get("display_label")),
                 "parameters_schema": fn.get("parameters", {}),

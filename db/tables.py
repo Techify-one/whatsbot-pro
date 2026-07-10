@@ -602,6 +602,10 @@ tool_overrides = Table(
     Column("enabled", Integer, nullable=False, server_default="1"),
     Column("description", Text),
     Column("display_label", Text),
+    # plano 47 — reaproveitar o RESULTADO desta tool para a IA entre turnos: o
+    # tool_memory reinjeta o "→ resultado" (não só nome+args) no bloco compacto.
+    # Default 0 (byte-idêntico ao legado); toggle uniforme na tela AI Engine → Tools.
+    Column("reuse_result", Integer, nullable=False, server_default="0"),
     Column("updated_at", Float, nullable=False),
 )
 Index("idx_tool_overrides_plugin", tool_overrides.c.plugin_id)
