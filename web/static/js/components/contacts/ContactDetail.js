@@ -36,7 +36,7 @@ const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 // reply-quote lookup and the dialogs (delete / improve / template / context menu)
 // stay here; everything composer-related lives in the hooks/components.
 
-export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -307,14 +307,16 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 // private_note keyed by _localId||i, all other cards by i.
                 const cardKey = m.role === 'private_note' ? (m._localId || i) : i;
                 return [dateSeparator, html`<${SystemMessageCard}
-                  key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${actions.openMsgMenu} />`];
+                  key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${actions.openMsgMenu}
+                  showAgentName=${showAgentName} />`];
               }
 
               return [dateSeparator, html`<${MessageBubble}
                 key=${m._localId || i} message=${m} index=${i} isFirst=${isFirst}
                 isGroup=${isGroup} sandbox=${sandbox} displayName=${displayName} fmt=${fmt}
                 findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${focusMessage}
-                openMsgMenu=${actions.openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null} />`];
+                openMsgMenu=${actions.openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null}
+                showAgentName=${showAgentName} />`];
             })
         }
       </div>

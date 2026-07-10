@@ -38,10 +38,11 @@ test('SYSTEM_CARD_VARIANTS: private_note/transcription/tool_call keep theme acce
   assert.match(SYSTEM_CARD_VARIANTS.tool_call.style, /#2d1b0e/);
 });
 
-test('senderColor: user blue, operator amber, AI green', () => {
+test('senderColor: user blue, operator amber, AI theme-aware var', () => {
   assert.equal(senderColor(true, false), '#1f7aec');
   assert.equal(senderColor(false, true), '#b45309');
-  assert.equal(senderColor(false, false), '#047857');
+  // IA usa a variável CSS --wa-ai-label (clara no dark, escura no light).
+  assert.equal(senderColor(false, false), 'rgb(var(--wa-ai-label))');
 });
 
 test('quotedMediaText: per media type', () => {

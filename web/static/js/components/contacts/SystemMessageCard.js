@@ -24,7 +24,7 @@ const html = htm.bind(h);
 //
 // `fmt` is the parent's WhatsApp-formatting fn (knows group member names).
 // `openMsgMenu(e, message, isFromMe)` opens the private-note context menu.
-export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu }) {
+export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, showAgentName = true }) {
   const role = m.role;
 
   if (role === 'private_note') {
@@ -107,7 +107,7 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu }) {
              style="background: #2d1b0e; color: #fbbf24; border: 1px solid #78350f;">
           <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
-            Ferramenta IA
+            ${(showAgentName && m.agent_name) ? `Ferramenta IA - ${m.agent_name}` : 'Ferramenta IA'}
           </span>
           <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
           <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
