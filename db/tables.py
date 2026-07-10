@@ -550,9 +550,19 @@ executions = Table(
     Column("conversation_id", Integer),
     Column("channel_id", Text),
     Column("channel_label", Text),
+    # plano "Execuções estilo Nexus": colunas desnormalizadas para busca rápida na
+    # listagem sem precisar varrer execution_steps. input_text = mensagem do cliente
+    # que disparou o turno; output_text = resposta final da IA; msg_id = id da
+    # mensagem WhatsApp de origem; has_ai = o turno realmente invocou o modelo
+    # (tem passo llm_* / agent_key) — alimenta o filtro "só execuções com IA".
+    Column("input_text", Text),
+    Column("output_text", Text),
+    Column("msg_id", Text),
+    Column("has_ai", Integer, nullable=False, server_default="0"),
 )
 Index("idx_exec_started", executions.c.started_at)
 Index("idx_exec_conversation", executions.c.conversation_id)
+Index("idx_executions_msg_id", executions.c.msg_id)
 
 
 execution_steps = Table(

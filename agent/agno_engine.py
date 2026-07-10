@@ -37,7 +37,7 @@ from agno.tools.function import Function
 
 from config.settings import LLM_API_BASE_URL
 from ai_engine.hooks import check_hooks as _hooks_check
-from agent.execution import track_step
+from agent.execution import track_step, mark_execution_has_ai
 from plugins.events import (
     apply_filter,
     apply_filter_sync,
@@ -566,6 +566,7 @@ async def run_async(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
     _capture_llm_context(system_prompt, convo, model_id)
     run_output = await runner.arun(input=convo)
 
@@ -626,6 +627,7 @@ def run_sync(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
     _capture_llm_context(system_prompt, convo, model_id)
     run_output = runner.run(input=convo)
 
