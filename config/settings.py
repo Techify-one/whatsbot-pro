@@ -120,6 +120,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # Historical GET fallback was True (inert — the key is always seeded False).
     ConfigKey("auto_reply", default=False, exposed=True, get_default=True, writable=True),
     ConfigKey("max_context_messages", default=10, exposed=True, writable=True),
+    # plano 43 — filtro de lista-negra por regex do histórico que vai à IA. Lista
+    # GLOBAL de padrões; cada linha do histórico é testada como ``role<TAB>content``
+    # e cortada do contexto do LLM se algum padrão casar (``agent/history_filter.py``).
+    # Default ``[]`` = nada cortado (retrocompatível). Editável em Configurações → IA.
+    ConfigKey("ai_history_exclude_patterns", default=[], exposed=True, writable=True),
     ConfigKey("message_batch_delay", default=3.0, exposed=True, writable=True),
     ConfigKey("split_messages", default=True, exposed=True, writable=True),
     ConfigKey("split_message_delay", default=2.0, exposed=True, writable=True),

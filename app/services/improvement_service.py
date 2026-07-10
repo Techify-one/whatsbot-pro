@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 
-from agent import agent_factory
+from agent import agent_factory, history_filter
 from ai_engine import dynamic_registry
 from db.repositories import agent_repo, conversation_repo, execution_repo, message_repo
 
@@ -251,6 +251,19 @@ def generate_improvement(handler, phone: str, target_message: dict,
             int(conversation_id), handler.max_context_messages)
     else:
         history = message_repo.get_context(contact.id, handler.max_context_messages)
+    # plano 43 (P2=a): the analysis sees the SAME history the attendance AI saw —
+    # apply the same regex blacklist. Fetched raw (no repo-level ``exclude``) and
+    # filtered here so the flagged target reply is NEVER cut (the analysis anchors on
+    # it, even if it happened to match a pattern).
+    compiled = history_filter.load_compiled()
+    if compiled:
+        history = [
+            m for m in history
+            if (m.get("role") == "assistant"
+                and (m.get("content") or "").strip() == target_content)
+            or not history_filter.matches(
+                m.get("role") or "", m.get("content") or "", compiled)
+        ]
     lines: list[str] = []
     marked = False
     for m in history:
