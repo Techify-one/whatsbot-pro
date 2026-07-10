@@ -225,6 +225,26 @@ r = client.get("/api/config")
 check("PUT /api/config -> setup_completed persisted", r.json()["data"]["setup_completed"] is True)
 client.put("/api/config", json={"setup_completed": False})  # restore
 
+# plano 47 (D9) — tamanho global do resultado de tool reaproveitado
+r = client.get("/api/config")
+check("GET /api/config -> has ai_tool_reuse_result_max_chars",
+      "ai_tool_reuse_result_max_chars" in r.json()["data"])
+r = client.put("/api/config", json={"ai_tool_reuse_result_max_chars": 350})
+check("PUT /api/config (ai_tool_reuse_result_max_chars) -> 200", r.status_code == 200)
+check("PUT /api/config -> ai_tool_reuse_result_max_chars persisted",
+      client.get("/api/config").json()["data"]["ai_tool_reuse_result_max_chars"] == 350)
+client.put("/api/config", json={"ai_tool_reuse_result_max_chars": 800})  # restore
+
+# plano 47 (D8) — toggle reuse_result por-tool (uniforme, sem guarda por nome)
+_tools = client.get("/api/tools").json()["data"]["tools"]
+check("GET /api/tools -> item traz reuse_result", bool(_tools) and "reuse_result" in _tools[0])
+if _tools:
+    _tname = _tools[0]["name"]
+    r = client.put(f"/api/tools/{_tname}", json={"reuse_result": True})
+    check("PUT /api/tools {reuse_result:true} -> 200", r.status_code == 200)
+    check("PUT /api/tools -> reuse_result persisted", r.json()["data"]["reuse_result"] is True)
+    client.put(f"/api/tools/{_tname}", json={"reuse_result": False})  # restore
+
 # Test key (will fail since no real API)
 r = client.post("/api/config/test-key", json={"api_key": ""})
 check("POST /api/config/test-key (empty) -> error", r.json()["ok"] is False)

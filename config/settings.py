@@ -157,6 +157,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # contexto do LLM, então sem isso o modelo não "lembra" o que já rodou). Default
     # ON (é o fix pedido; OFF ⇒ comportamento legado, sem o bloco).
     ConfigKey("ai_tool_memory_enabled", default=True, exposed=True, writable=True),
+    # plano 47 (D9) — tamanho MÁX. (chars) do resultado de tool reaproveitado no
+    # bloco ``tool_memory``, por-resultado, GLOBAL (vale para todas as tools
+    # marcadas com ``reuse_result``). Editável em Configurações → IA. Guardado por
+    # ``max(50, int(...))`` no motor; fallback 800 se ausente/inválido.
+    ConfigKey("ai_tool_reuse_result_max_chars", default=800, exposed=True, writable=True),
     # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
     # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —
     # P62/P67). Seeded ON so user tools register automatically; set env
