@@ -5,11 +5,11 @@ import { sendMessage, sendImage, sendAudio, sendDocument } from '../../services/
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, ImproveIcon } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon } from './MessageContextMenu.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { Slot } from '../../plugins/Slot.js';
-import { emit as emitClientEvent } from '../../plugins/registry.js';
+import { emit as emitClientEvent, applyFilter } from '../../plugins/registry.js';
 import { MessageBubble } from './MessageBubble.js';
 import { SystemMessageCard, isSystemCardRole } from './SystemMessageCard.js';
 import { Composer } from './Composer.js';
@@ -226,6 +226,48 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     `;
   }
 
+  // Base context-menu items for a message (Responder/Copiar/Copiar link/Apagar).
+  // Plugins append their own items via the `filter.message.contextMenu.items`
+  // seam (e.g. the "melhorias" plugin adds "Gerar melhoria"). Kept as a builder so
+  // the filter runs on the CURRENT message each time the menu opens.
+  function buildBaseItems(message, isFromMe) {
+    return [
+      ...((canReply && !message.revoked && composer.mode !== 'private'
+           && message.role !== 'private_note') ? [
+        { label: 'Responder', icon: ReplyIcon,
+          onClick: () => { composer.setMode('reply'); composer.setReplyingTo(message);
+                           setTimeout(() => composer.inputRef.current?.focus(), 0); } },
+      ] : []),
+      { label: 'Copiar', icon: CopyIcon, onClick: () => actions.copyMessageText(message) },
+      { label: 'Copiar link da mensagem', icon: LinkIcon,
+        disabled: !actions.messagePermalink(message),
+        onClick: () => actions.copyMessageLink(message) },
+      ...((canReply && !message.revoked) ? [
+        { label: 'Apagar', icon: TrashIcon, danger: true,
+          onClick: () => actions.setDeleteDialog({ message, isFromMe }) },
+      ] : []),
+    ];
+  }
+
+  // Open the per-message context menu. Async: builds the base items, lets plugins
+  // extend the array via the client filter, then stores the resolved items on the
+  // menu state so the (sync) render just reads them. Returning `null` from a
+  // filter aborts — we fall back to the base items so the menu still opens.
+  async function openMsgMenu(e, message, isFromMe) {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
+    const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
+    const base = buildBaseItems(message, isFromMe);
+    let items = base;
+    try {
+      const out = await applyFilter('filter.message.contextMenu.items', base,
+        { message, isFromMe, phone, conversationId, sandbox });
+      if (Array.isArray(out)) items = out;
+    } catch (_) { /* keep base items */ }
+    actions.setMsgMenu({ x, y, message, isFromMe, items });
+  }
+
   return html`
     <div class="flex flex-col h-full">
       <!-- Header -->
@@ -307,7 +349,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 // private_note keyed by _localId||i, all other cards by i.
                 const cardKey = m.role === 'private_note' ? (m._localId || i) : i;
                 return [dateSeparator, html`<${SystemMessageCard}
-                  key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${actions.openMsgMenu}
+                  key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${openMsgMenu}
                   showAgentName=${showAgentName} />`];
               }
 
@@ -315,7 +357,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 key=${m._localId || i} message=${m} index=${i} isFirst=${isFirst}
                 isGroup=${isGroup} sandbox=${sandbox} displayName=${displayName} fmt=${fmt}
                 findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${focusMessage}
-                openMsgMenu=${actions.openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null}
+                openMsgMenu=${openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null}
                 showAgentName=${showAgentName} />`];
             })
         }
@@ -352,28 +394,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             current: myReaction(actions.msgMenu.message),
             onReact: (em) => actions.performReact(actions.msgMenu.message, em),
           } : null}
-          items=${[
-            ...((canReply && !actions.msgMenu.message.revoked && composer.mode !== 'private'
-                 && actions.msgMenu.message.role !== 'private_note') ? [
-              { label: 'Responder', icon: ReplyIcon,
-                onClick: () => { composer.setMode('reply'); composer.setReplyingTo(actions.msgMenu.message);
-                                 setTimeout(() => composer.inputRef.current?.focus(), 0); } },
-            ] : []),
-            { label: 'Copiar', icon: CopyIcon, onClick: () => actions.copyMessageText(actions.msgMenu.message) },
-            { label: 'Copiar link da mensagem', icon: LinkIcon,
-              disabled: !actions.messagePermalink(actions.msgMenu.message),
-              onClick: () => actions.copyMessageLink(actions.msgMenu.message) },
-            ...((canReply && !actions.msgMenu.message.revoked) ? [
-              { label: 'Apagar', icon: TrashIcon, danger: true,
-                onClick: () => actions.setDeleteDialog({ message: actions.msgMenu.message, isFromMe: actions.msgMenu.isFromMe }) },
-            ] : []),
-            ...((!actions.msgMenu.message.revoked && !sandbox
-                 && actions.msgMenu.message.role === 'assistant'
-                 && actions.msgMenu.message.status !== 'operator') ? [
-              { label: 'Gerar melhoria', icon: ImproveIcon,
-                onClick: () => actions.openImprove(actions.msgMenu.message) },
-            ] : []),
-          ]}
+          items=${actions.msgMenu.items || []}
           onClose=${() => actions.setMsgMenu(null)}
         />
       ` : ''}
@@ -402,62 +423,6 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 onClick=${() => actions.setDeleteDialog(null)}
                 class="px-[20px] py-[8px] rounded-full text-wa-teal text-[14px] font-medium hover:bg-wa-teal/10 transition-colors"
               >Cancelar</button>
-            </div>
-          </div>
-        </div>
-      ` : ''}
-      ${actions.improveDialog ? html`
-        <div
-          class="fixed inset-0 z-[130] bg-black/40 flex items-center justify-center p-4"
-          onClick=${() => { if (!actions.improveLoading) actions.setImproveDialog(null); }}
-        >
-          <div
-            class="bg-wa-panel rounded-lg shadow-xl w-[440px] max-w-[92vw] p-[22px] flex flex-col gap-3"
-            onClick=${(e) => e.stopPropagation()}
-          >
-            <div class="flex items-center gap-2 text-[15px] font-semibold text-wa-text">
-              <span class="text-wa-teal">${ImproveIcon}</span>
-              Gerar melhoria
-            </div>
-            <p class="text-[13px] text-wa-secondary -mt-1">
-              A IA vai analisar o prompt, as ferramentas e o histórico para sugerir
-              ajustes. O resultado aparece como uma mensagem de Sistema no chat
-              (visível só no painel).
-            </p>
-            <div>
-              <span class="block text-[12px] font-medium text-wa-secondary mb-1">Resposta marcada como incorreta</span>
-              <div class="max-h-[120px] overflow-y-auto rounded-md border border-wa-border bg-wa-bg px-3 py-2 text-[13px] text-wa-text whitespace-pre-wrap">
-                ${(actions.improveDialog.message.content || '').trim() || '(sem conteúdo)'}
-              </div>
-            </div>
-            <div>
-              <label class="block text-[12px] font-medium text-wa-secondary mb-1">O que saiu errado? (opcional)</label>
-              <textarea
-                value=${actions.improveText}
-                onInput=${(e) => actions.setImproveText(e.target.value)}
-                disabled=${actions.improveLoading}
-                rows="3"
-                placeholder="Ex.: respondeu o valor errado, não usou a ferramenta de agenda, tom inadequado…"
-                class="wa-field w-full px-3 py-2 rounded-md text-[13px] resize-none"
-              ></textarea>
-            </div>
-            ${actions.improveError ? html`<div class="text-[12px] text-red-500">${actions.improveError}</div>` : ''}
-            <div class="flex justify-end gap-2 mt-1">
-              <button
-                onClick=${() => actions.setImproveDialog(null)}
-                disabled=${actions.improveLoading}
-                class="px-4 py-2 rounded-lg text-[14px] font-medium text-wa-text bg-wa-bg hover:bg-wa-hover border border-wa-border transition-colors disabled:opacity-50"
-              >Cancelar</button>
-              <button
-                onClick=${actions.submitImprovement}
-                disabled=${actions.improveLoading}
-                class="px-4 py-2 rounded-lg text-[14px] font-medium text-white bg-wa-teal hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-2"
-              >
-                ${actions.improveLoading ? html`
-                  <span class="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>
-                  Analisando…
-                ` : 'Gerar análise'}
-              </button>
             </div>
           </div>
         </div>

@@ -29,6 +29,16 @@
 //                                   channelId, contact}           below the header)
 //     • conversation.header.actions, conversation.info.panel,
 //       attendances.toolbar, gear.menu.items                     (pre-existing)
+//     • ai.settings.sections — ctx {}                            (AI settings tab,
+//                                   at the bottom of "Configurações")
+//
+//   FILTERS (applyFilter/addFilter) — priority-ordered; null aborts the chain.
+//     • filter.message.contextMenu.items — value: the per-message context-menu
+//       item array (each {label, icon, onClick, disabled?, danger?}); ctx
+//       {message, isFromMe, phone, conversationId, sandbox}. Applied by
+//       ContactDetail WHEN THE MENU OPENS (async), so a plugin can append/remove
+//       items. Return the (modified) array; returning `null` aborts (the caller
+//       falls back to the base items so the menu still opens).
 //
 //   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
 //   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep
