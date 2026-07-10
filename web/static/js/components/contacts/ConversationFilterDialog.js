@@ -30,6 +30,7 @@ const CORE_DIMENSIONS = [
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
   { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
+  { key: 'ai',         label: 'IA',                  ops: ['eq', 'ne'],                valueType: 'ai_state' },
   { key: 'activity',   label: 'Última atividade',    ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
@@ -184,6 +185,13 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
   if (t === 'conv_label') {
     const options = (convLabelNames || []).map(n => ({ value: n, label: n }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'ai_state') {
+    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
+      <option value="">+ Selecione uma opção...</option>
+      <option value="on">Ligada</option>
+      <option value="off">Desligada</option>
+    </select>`;
   }
   // ── Atributos personalizados ──
   if (t === 'attr_list') {
