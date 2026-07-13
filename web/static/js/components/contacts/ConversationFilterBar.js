@@ -20,6 +20,7 @@ import { useState, useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { ConversationFilterDialog } from './ConversationFilterDialog.js';
 import { getCustomAttributes, getConversationLabels } from '../../services/api.js';
+import { splitSort, combineSort } from '../../services/conversationRows.js';
 
 const html = htm.bind(h);
 
@@ -29,10 +30,18 @@ const STATUS_OPTIONS = [
   { value: 'closed', label: 'Resolvidas' },
   { value: 'all', label: 'Todas' },
 ];
-const SORT_OPTIONS = [
-  { value: 'activity', label: 'Última atividade' },
-  { value: 'oldest', label: 'Mais antigas' },
-  { value: 'unread', label: 'Não lidas primeiro' },
+// Ordenação em DUAS dimensões independentes que se combinam (leitura × recência).
+// Ambas persistem no único token `sortBy` via splitSort/combineSort — a leitura é a
+// chave primária e a recência o desempate. O popover "Ordenar conversas" do cabeçalho
+// e o dropdown do dialog avançado usam as mesmas listas.
+const READ_SORT_CHOICES = [
+  { value: 'none', label: 'Todas' },
+  { value: 'unread', label: 'Não lidas' },
+  { value: 'read', label: 'Lidas' },
+];
+const TIME_SORT_CHOICES = [
+  { value: 'recent', label: 'Recentes primeiro' },
+  { value: 'oldest', label: 'Antigos primeiro' },
 ];
 
 // ── Removable per-dimension filter chips (plano 10 FF6) ─────────────────────────
@@ -98,6 +107,11 @@ function TuneIcon() {
 }
 function ChevronDown() {
   return html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>`;
+}
+// Sort (swap-vert) arrows — trigger do popover "Ordenar por leitura".
+function SortReadIcon() {
+  return html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/></svg>`;
 }
 // Disk / "save" icon (matches the Chatwoot save-filter affordance).
 function SaveIcon() {
@@ -229,6 +243,7 @@ export function ConversationFilterBar({
   onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
 }) {
   const [statusOpen, setStatusOpen] = useState(false);
+  const [readSortOpen, setReadSortOpen] = useState(false); // popover "Ordenar conversas" (leitura + ordem)
   const [advOpen, setAdvOpen] = useState(false);         // modal avançado (direita)
   const [savedOpen, setSavedOpen] = useState(false);     // popover de filtros salvos
   const [saveDialog, setSaveDialog] = useState(null);    // { mode: 'create'|'rename', id?, name? } | null
@@ -264,6 +279,8 @@ export function ConversationFilterBar({
   const tagNames = Object.keys(globalTags || {});
   const advCount = (advFilters || []).length;
   const advActive = advCount > 0;
+  const { read: readSort, time: timeSort } = splitSort(sortBy);  // duas dimensões atuais
+  const sortActive = sortBy !== 'activity';                      // qualquer ordenação != padrão
   const presets = savedFilters || [];
 
   // One removable chip per active filter dimension. Each ✕ drops only that filter,
@@ -349,6 +366,48 @@ export function ConversationFilterBar({
               title="Filtros salvos"
             ><${BookmarkIcon} />${presets.length ? html`<span class="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-wa-secondary text-white text-[10px] font-semibold flex items-center justify-center">${presets.length}</span>` : null}</button>
           </div>
+
+          <!-- Ordenar conversas (↑↓) — 2 filtros que se combinam: Leitura + Ordem -->
+          ${onSortChange ? html`
+            <div class="relative">
+              <button
+                onClick=${() => { setReadSortOpen(o => !o); setStatusOpen(false); setSavedOpen(false); }}
+                class="w-[32px] h-[32px] rounded-md flex items-center justify-center transition-colors ${sortActive ? 'bg-wa-teal/15 text-wa-teal' : 'text-wa-secondary hover:bg-wa-hover'}"
+                title="Ordenar conversas (leitura + recência)"
+              ><${SortReadIcon} /></button>
+              <${Popover} open=${readSortOpen} onClose=${() => setReadSortOpen(false)} align="right" width="min-w-[280px]">
+                <!-- 2 filtros como inputs de seleção (label + dropdown), estilo Chatwoot -->
+                <div class="flex flex-col gap-2.5">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-[13px] text-wa-text shrink-0">Leitura</span>
+                    <select
+                      value=${readSort}
+                      onChange=${(e) => onSortChange(combineSort(e.target.value, timeSort))}
+                      class="wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-border min-w-[160px]"
+                    >
+                      ${READ_SORT_CHOICES.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+                    </select>
+                  </div>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-[13px] text-wa-text shrink-0">Ordem</span>
+                    <select
+                      value=${timeSort}
+                      onChange=${(e) => onSortChange(combineSort(readSort, e.target.value))}
+                      class="wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-border min-w-[160px]"
+                    >
+                      ${TIME_SORT_CHOICES.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+                    </select>
+                  </div>
+                </div>
+                ${sortActive ? html`
+                  <button
+                    onClick=${() => { onSortChange('activity'); setReadSortOpen(false); }}
+                    class="w-full mt-3 pt-2.5 border-t border-wa-border text-left px-1 py-1 text-[13px] text-wa-secondary hover:text-wa-text transition-colors"
+                  >Limpar ordenação</button>
+                ` : null}
+              </${Popover}>
+            </div>
+          ` : null}
 
           <!-- Salvar filtro atual (disk) — só quando há filtro ativo -->
           ${anyFilterActive ? html`
@@ -484,7 +543,8 @@ export function ConversationFilterBar({
               convAttrDefs=${convAttrDefs}
               sortBy=${sortBy}
               onSortChange=${onSortChange}
-              sortOptions=${SORT_OPTIONS}
+              readSortOptions=${READ_SORT_CHOICES}
+              timeSortOptions=${TIME_SORT_CHOICES}
               onApply=${onAdvFiltersChange}
               onClose=${() => setAdvOpen(false)}
             />

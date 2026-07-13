@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   buildRows, shapeConvData,
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
-  isUnassigned, sortContactsBy, sortContacts,
+  isUnassigned, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow,
 } from './conversationRows.js';
@@ -272,14 +272,56 @@ test('sortContactsBy: activity pins first then recent', () => {
   assert.deepEqual(list.map(c => c.id), [1, 2, 3]);
 });
 
-test('sortContactsBy: oldest ascending; unread by total desc', () => {
+test('sortContactsBy: oldest ascending; unread by total desc; read by total asc', () => {
   const list = [{ id: 1, last_message_ts: 10 }, { id: 2, last_message_ts: 50 }];
   assert.deepEqual(sortContactsBy(list, 'oldest').map(c => c.id), [1, 2]);
   const ul = [
     { id: 1, unread_count: 1, unread_ai_count: 0, last_message_ts: 100 },
     { id: 2, unread_count: 3, unread_ai_count: 1, last_message_ts: 10 },
   ];
+  // 'unread' (decrescente): mais não lidas primeiro → 2, 1
   assert.deepEqual(sortContactsBy(ul, 'unread').map(c => c.id), [2, 1]);
+  // 'read' (crescente): lidas/menos não lidas primeiro → 1, 2
+  assert.deepEqual(sortContactsBy(ul, 'read').map(c => c.id), [1, 2]);
+  // desempate por atividade quando o total de não lidas é igual
+  const tie = [
+    { id: 1, unread_count: 0, unread_ai_count: 0, last_message_ts: 10 },
+    { id: 2, unread_count: 0, unread_ai_count: 0, last_message_ts: 50 },
+  ];
+  assert.deepEqual(sortContactsBy(tie, 'read').map(c => c.id), [2, 1]);
+});
+
+test('splitSort / combineSort: round-trip das duas dimensões', () => {
+  const cases = [
+    ['activity', 'none', 'recent'],
+    ['oldest', 'none', 'oldest'],
+    ['unread', 'unread', 'recent'],
+    ['read', 'read', 'recent'],
+    ['unread_oldest', 'unread', 'oldest'],
+    ['read_oldest', 'read', 'oldest'],
+  ];
+  for (const [token, read, time] of cases) {
+    assert.deepEqual(splitSort(token), { read, time });
+    assert.equal(combineSort(read, time), token);
+  }
+  // token desconhecido → default
+  assert.deepEqual(splitSort('lixo'), { read: 'none', time: 'recent' });
+});
+
+test('sortContactsBy: leitura é primária, recência é o desempate (combinações)', () => {
+  const rows = [
+    { id: 1, unread_count: 2, unread_ai_count: 0, last_message_ts: 10 },  // não lida, antiga
+    { id: 2, unread_count: 2, unread_ai_count: 0, last_message_ts: 90 },  // não lida, nova
+    { id: 3, unread_count: 0, unread_ai_count: 0, last_message_ts: 50 },  // lida, meio
+  ];
+  // não lidas primeiro + recentes primeiro → 2 (nova, não lida), 1 (antiga, não lida), 3 (lida)
+  assert.deepEqual(sortContactsBy(rows, 'unread').map(c => c.id), [2, 1, 3]);
+  // não lidas primeiro + antigos primeiro → 1 (antiga, não lida), 2, 3
+  assert.deepEqual(sortContactsBy(rows, 'unread_oldest').map(c => c.id), [1, 2, 3]);
+  // lidas primeiro + recentes primeiro → 3 (lida), 2, 1
+  assert.deepEqual(sortContactsBy(rows, 'read').map(c => c.id), [3, 2, 1]);
+  // lidas primeiro + antigos primeiro → 3 (lida), 1, 2
+  assert.deepEqual(sortContactsBy(rows, 'read_oldest').map(c => c.id), [3, 1, 2]);
 });
 
 test('sortContacts === activity ordering (pinned first, recent desc)', () => {
