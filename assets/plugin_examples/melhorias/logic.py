@@ -241,6 +241,45 @@ def decide_suggestion(sid: int, status: str, *, handler=None,
     return get_suggestion(sid), None
 
 
+def refresh_contact_snapshot(phone: str) -> int:
+    """Contato renomeado → atualiza o snapshot (contact_name/contact_phone) de TODAS
+    as sugestões daquele contato, para que exibição E busca reflitam o nome atual.
+
+    Lê o nome vigente direto do banco (não confia no payload do evento) e casa por
+    ``contact_id`` (estável). Só escreve nas linhas que de fato mudaram. Best-effort:
+    nunca levanta — uma falha aqui não pode quebrar a atualização do contato no core.
+    Retorna o nº de sugestões atualizadas."""
+    phone = (phone or "").strip()
+    if not phone:
+        return 0
+    try:
+        row = contact_repo.get_by_phone(phone)
+        if not row:
+            return 0
+        contact_id = row["id"]
+        cur_phone = row.get("phone") or phone
+        # Mesmo fallback do create_suggestion: sem nome, exibe o telefone.
+        display = (row.get("name") or "").strip() or cur_phone
+        with make_plugin_db() as conn:
+            res = conn.execute(text(
+                f"UPDATE {_TABLE} SET contact_name = :name, contact_phone = :phone, "
+                "updated_at = :ts WHERE contact_id = :cid "
+                "AND (contact_name <> :name OR contact_phone <> :phone)"), {
+                    "name": display, "phone": cur_phone, "ts": now(), "cid": contact_id,
+                })
+        changed = res.rowcount or 0
+    except Exception as e:  # noqa: BLE001
+        logger.debug("melhorias: refresh_contact_snapshot falhou: %s", e)
+        return 0
+    if changed:
+        try:
+            broadcast("plugin_melhorias_changed",
+                      {"action": "contact_renamed", "contact_id": contact_id})
+        except Exception as e:  # noqa: BLE001
+            logger.debug("melhorias: broadcast pós-rename falhou: %s", e)
+    return changed
+
+
 # ── Leitura ──────────────────────────────────────────────────────────────────
 
 def get_suggestion(sid: int) -> dict | None:
