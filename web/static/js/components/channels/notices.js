@@ -5,6 +5,7 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
+import { buildEmbedSnippet } from './constants.js';
 
 const html = htm.bind(h);
 
@@ -124,6 +125,51 @@ export function AutoconfigureNotice({ result, onDismiss }) {
           <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
             onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
         </div>` : null}
+      <div class="flex justify-end mt-3">
+        <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+          onClick=${onDismiss}>Fechar</button>
+      </div>
+    </div>
+  `;
+}
+
+// ── Embed-snippet block (reusable, persistent) — plano 46 ──
+// The <script> install snippet built from the channel's public `widget_token` + the
+// panel base URL, with a copy button. Shown BOTH in the post-create notice and in
+// the channel edit form (so the operator can always copy it again). No dismiss —
+// this is the always-available block. `widgetToken` comes from the channel config.
+export function EmbedSnippetBlock({ widgetToken, baseUrl, help }) {
+  const [copied, setCopied] = useState(false);
+  const b = (baseUrl || window.location.origin || '').replace(/\/+$/, '');
+  const snippet = buildEmbedSnippet(b, widgetToken);
+  function flagCopied() { setCopied(true); setTimeout(() => setCopied(false), 2000); }
+  function copy() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(snippet).then(flagCopied).catch(() => fallbackCopyText(snippet, flagCopied));
+    } else fallbackCopyText(snippet, flagCopied);
+  }
+  return html`
+    <div>
+      ${help ? html`<p class="text-[13px] text-wa-text mb-2">${help}</p>` : null}
+      <div class="flex gap-2 items-start flex-wrap">
+        <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[12px] bg-wa-bg border border-wa-border text-wa-text">${snippet}</code>
+        <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+          onClick=${copy}>${copied ? 'Copiado!' : 'Copiar'}</button>
+      </div>
+    </div>
+  `;
+}
+
+// ── Embed-snippet post-create notice (post-create `embed_snippet`, plano 46) ──
+// Shown right after creating a widget channel. Wraps the reusable block + a dismiss.
+export function EmbedSnippetNotice({ widgetToken, baseUrl, onDismiss }) {
+  return html`
+    <div class="bg-wa-teal/10 border border-wa-teal/30 rounded-lg p-4 mb-4">
+      <div class="text-[14px] font-medium text-wa-teal mb-1">✓ Widget criado</div>
+      <${EmbedSnippetBlock} widgetToken=${widgetToken} baseUrl=${baseUrl}
+        help=${html`Cole este trecho antes de <code>&lt;/body&gt;</code> no seu site. Você pode
+          copiá-lo de novo depois em <span class="font-medium">Canais → Editar</span> ou em
+          <span class="font-medium">Plugins → Widget de site → Configurar</span>.`} />
       <div class="flex justify-end mt-3">
         <button class="px-3 py-1.5 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
           onClick=${onDismiss}>Fechar</button>

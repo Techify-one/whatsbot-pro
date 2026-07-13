@@ -39,12 +39,12 @@ import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, bool } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
-import { aiDefaultsFrom, providerMeta } from './channels/constants.js';
+import { aiDefaultsFrom, providerMeta, parseChannelConfig } from './channels/constants.js';
 import { ChannelForm } from './channels/ChannelForm.js';
 import { ChannelEditForm } from './channels/ChannelEditForm.js';
 import { ChannelCard } from './channels/ChannelCard.js';
 import { QRConnect } from './channels/QRConnect.js';
-import { WebhookNotice, AutoconfigureNotice, PurgeChannelModal } from './channels/notices.js';
+import { WebhookNotice, AutoconfigureNotice, EmbedSnippetNotice, PurgeChannelModal } from './channels/notices.js';
 
 const html = htm.bind(h);
 
@@ -80,6 +80,7 @@ export default function ChannelsManager({ initialEntity }) {
   // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
   const [webhookFor, setWebhookFor] = useState(null);
   const [telegramNotice, setTelegramNotice] = useState(null);
+  const [embedFor, setEmbedFor] = useState(null);
   // {id, display_name} of the GOWA channel whose QR-connect panel is open.
   const [connectFor, setConnectFor] = useState(null);
   // The channel object being edited (display info + inbox agents), or null.
@@ -277,6 +278,11 @@ export default function ChannelsManager({ initialEntity }) {
               ? `${window.location.origin}${subPath(pc.webhook_path, newId)}` : '',
           });
         }
+      } else if (pc && pc.kind === 'embed_snippet' && newId) {
+        // Widget de site (plano 46): mostra o snippet de instalação montado a
+        // partir do widget_token público do canal recém-criado.
+        const token = parseChannelConfig(created.config).widget_token || '';
+        setEmbedFor({ id: newId, widgetToken: token });
       }
       load();
     } else {
@@ -398,6 +404,7 @@ export default function ChannelsManager({ initialEntity }) {
           onDismiss=${() => setWebhookFor(null)} />`;
       })() : null}
       ${telegramNotice ? html`<${AutoconfigureNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
+      ${embedFor ? html`<${EmbedSnippetNotice} widgetToken=${embedFor.widgetToken} baseUrl=${window.location.origin} onDismiss=${() => setEmbedFor(null)} />` : null}
 
       ${connectFor ? html`<${QRConnect}
         channelId=${connectFor.id}

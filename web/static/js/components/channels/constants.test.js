@@ -11,7 +11,16 @@ import assert from 'node:assert/strict';
 import {
   providerMeta, credLabel, tintForColor, parseChannelConfig, aiDefaultsFrom,
   missingCredsFor, initialConfigValues, buildCreatePayload, buildEditPayload,
+  buildEmbedSnippet,
 } from './constants.js';
+
+test('buildEmbedSnippet: trims trailing slash and embeds token + base', () => {
+  const s = buildEmbedSnippet('https://x.example/', 'wgt_abc123');
+  assert.ok(s.includes("widgetToken:'wgt_abc123'"));
+  assert.ok(s.includes("baseUrl:'https://x.example'"));
+  assert.ok(s.includes('https://x.example/plugins/website/static/sdk.js'));
+  assert.ok(s.startsWith('<script>') && s.trimEnd().endsWith('</script>'));
+});
 
 // ── Descriptor fixtures (mirror the real gowa/telegram/whatsapp_cloud) ──────
 const GOWA = {

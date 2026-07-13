@@ -100,6 +100,19 @@ export function serializeAudioModes(set) {
   return ordered.length ? ordered.join(',') : 'off';
 }
 
+// Build the <script> embed snippet for a widget channel (plano 46). PURE.
+// Shared by the post-create notice AND the channel edit form's "copy again" block,
+// so the snippet is byte-identical wherever it is shown. The core doesn't know the
+// provider — it renders this only when the descriptor's post_create.kind is
+// 'embed_snippet'. `\/script` keeps the literal from closing this module's script.
+export function buildEmbedSnippet(baseUrl, widgetToken) {
+  const b = (baseUrl || '').replace(/\/+$/, '');
+  return `<script>(function(d,t){var g=d.createElement(t);` +
+    `g.src="${b}/plugins/website/static/sdk.js";g.async=true;d.body.appendChild(g);` +
+    `g.onload=function(){window.WhatsBotChat.run({widgetToken:'${widgetToken}',baseUrl:'${b}'})}` +
+    `})(document,'script')<\/script>`;
+}
+
 // Random URL-safe token, used for the "sugerir" verify-token button and for
 // generated config fields (e.g. GOWA device id).
 export function randomToken(len = 32) {
