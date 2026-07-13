@@ -144,6 +144,13 @@ export function clauseMatches(c, cl, now) {
     const hit = value === 'on' ? isOn : !isOn;
     return op === 'ne' ? !hit : hit;
   }
+  if (dim === 'starter') {
+    // Quem iniciou a conversa (plano 28: coluna `origin`). value ∈ 'customer'|'operator'.
+    // 'inbound' = cliente mandou a 1ª mensagem; outbound/manual/imported/NULL = atendente.
+    const byCustomer = c.origin === 'inbound';
+    const hit = value === 'customer' ? byCustomer : !byCustomer;
+    return op === 'ne' ? !hit : hit;
+  }
   if (dim === 'activity') {
     const n = parseFloat(value);
     if (!Number.isFinite(n)) return true;

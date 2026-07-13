@@ -126,6 +126,18 @@ test('clauseMatches: status eq/ne and "all"', () => {
   assert.equal(clauseMatches({ conv_status: 'closed' }, { dim: 'status', op: 'ne', value: 'open' }, NOW), true);
 });
 
+test('clauseMatches: starter (quem iniciou a conversa via origin)', () => {
+  // Cliente = origin 'inbound'; atendente = qualquer outra origem (outbound/manual/imported/NULL).
+  assert.equal(clauseMatches({ origin: 'inbound' }, { dim: 'starter', op: 'eq', value: 'customer' }, NOW), true);
+  assert.equal(clauseMatches({ origin: 'inbound' }, { dim: 'starter', op: 'eq', value: 'operator' }, NOW), false);
+  assert.equal(clauseMatches({ origin: 'outbound' }, { dim: 'starter', op: 'eq', value: 'operator' }, NOW), true);
+  assert.equal(clauseMatches({ origin: 'manual' }, { dim: 'starter', op: 'eq', value: 'operator' }, NOW), true);
+  assert.equal(clauseMatches({}, { dim: 'starter', op: 'eq', value: 'operator' }, NOW), true); // origin ausente → atendente
+  // ne inverte o casamento
+  assert.equal(clauseMatches({ origin: 'inbound' }, { dim: 'starter', op: 'ne', value: 'customer' }, NOW), false);
+  assert.equal(clauseMatches({ origin: 'outbound' }, { dim: 'starter', op: 'ne', value: 'customer' }, NOW), true);
+});
+
 test('clauseMatches: tag eq/ne', () => {
   assert.equal(clauseMatches({ tags: ['vip'] }, { dim: 'tag', op: 'eq', value: 'vip' }, NOW), true);
   assert.equal(clauseMatches({ tags: ['vip'] }, { dim: 'tag', op: 'ne', value: 'vip' }, NOW), false);
