@@ -10,6 +10,7 @@ import htm from 'htm';
 import { updateChannel, getChannelMembers, setChannelMembers } from '../../services/api.js';
 import { parseChannelConfig, aiDefaultsFrom, buildEditPayload } from './constants.js';
 import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
+import { EmbedSnippetBlock } from './notices.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
 import { AgentPicker } from './AgentPicker.js';
 
@@ -101,6 +102,13 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   const hasConfig = descriptor && (descriptor.config_fields || [])
     .some((f) => f.type !== 'generated');
   const hasCreds = descriptor && (descriptor.credential_fields || []).length;
+  // Widget (plano 46): if the provider declares the `embed_snippet` post-create
+  // kind, show the always-available copy-again block, built from the channel's
+  // public widget_token (a generated config field, immutable → read from config).
+  const embedToken = (descriptor && descriptor.post_create
+    && descriptor.post_create.kind === 'embed_snippet')
+    ? (parseChannelConfig(channel.config).widget_token || '')
+    : '';
 
   return html`
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onCancel}>
@@ -115,6 +123,13 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
             <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
               type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
           </div>
+
+          ${embedToken ? html`
+            <div class="border-t border-wa-border pt-3">
+              <label class="block text-[12px] text-wa-secondary mb-2">Snippet de instalação</label>
+              <${EmbedSnippetBlock} widgetToken=${embedToken} baseUrl=${window.location.origin} />
+            </div>
+          ` : null}
 
           ${hasConfig ? html`
             <div class="border-t border-wa-border pt-3 flex flex-col gap-3">

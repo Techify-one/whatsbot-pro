@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -40,6 +41,15 @@ from server import balance_monitor
 from server.balance_monitor import set_runtime as _set_balance_runtime
 
 logger = logging.getLogger(__name__)
+
+
+# A plugin exposes PUBLIC (auth-exempt) endpoints under ``/api/plugins/<id>/
+# public/…`` and authenticates them ITSELF (plano 46 · 01-D — e.g. the website
+# widget validates a per-visitor session token + allowed-domains, never the
+# operator bearer). Generic convention: the core never names a plugin; a plugin
+# opts in simply by mounting its public routes under ``/public/``. Module-level so
+# it compiles once and is unit-testable.
+PLUGIN_PUBLIC_PATH_RE = re.compile(r"^/api/plugins/[a-z][a-z0-9_]{0,31}/public/")
 
 
 # ── Static files with mandatory revalidation ─────────────────────────────
@@ -472,6 +482,15 @@ def create_app(
     async def auth_middleware(request: Request, call_next):
         path = request.url.path
 
+        # Plugin-owned PUBLIC endpoints (generic convention, plano 46 · 01-D): any
+        # route under ``/api/plugins/<id>/public/`` is auth-exempt — the plugin
+        # authenticates the request ITSELF (e.g. the website widget validates a
+        # per-visitor session token + allowed-domains, never the operator bearer).
+        # This is provider-agnostic: the core never names a plugin; a plugin opts in
+        # simply by mounting its public routes under ``/public/``.
+        if PLUGIN_PUBLIC_PATH_RE.match(path):
+            return await call_next(request)
+
         # SPA pages, static assets, webhook, and auth endpoints are always open.
         # The prefixes serve the SPA on hard reload of an entity deep-link
         # (e.g. /channels/<id>, /ai/agents/<key>) — same as /contacts/<id>.
@@ -540,18 +559,25 @@ def create_app(
         resp = await call_next(request)
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        resp.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
-            "worker-src 'self' blob:; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
-            "media-src 'self' data: blob:; "
-            "connect-src 'self' ws: wss:; "
-            "frame-ancestors 'none'"
-        )
+        # A route may set its OWN Content-Security-Policy to opt out of the default
+        # frame lock — e.g. an embeddable page (the website-widget iframe) that must
+        # allow ``frame-ancestors <allowed_domains>`` instead of ``'none'``. When it
+        # did, respect it and DON'T also send ``X-Frame-Options: DENY`` (which would
+        # override the allow-list and block every embed). Otherwise apply the strict
+        # app-wide default. Generic: the middleware never names a route/plugin.
+        if "content-security-policy" not in resp.headers:
+            resp.headers["X-Frame-Options"] = "DENY"
+            resp.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+                "worker-src 'self' blob:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "media-src 'self' data: blob:; "
+                "connect-src 'self' ws: wss:; "
+                "frame-ancestors 'none'"
+            )
         return resp
 
     @app.middleware("http")
