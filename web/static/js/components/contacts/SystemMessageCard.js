@@ -2,6 +2,7 @@ import { h } from 'preact';
 import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
 import { isSystemCardRole } from '../../services/messageView.js';
+import { parseCta } from '../../services/systemCta.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { MediaContent } from './MediaContent.js';
 
@@ -136,6 +137,13 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
     // Painel-only "Sistema" card (ex.: análise de melhoria da IA).
     // COLOR FIX: was bg-gray-100 / border-gray-300 / text-gray-800 / text-gray-600
     // (relied on html.dark overrides) → durable semantic wa-*.
+    //
+    // Botão de ação opcional: o produtor da mensagem (core OU plugin) pode anexar
+    // um call-to-action codificado no conteúdo como ``[[cta:RÓTULO|URL]]``. O card
+    // remove o token do texto e renderiza um botão no lugar de um link inline
+    // (ex.: o plugin melhorias → "Ir para sugestão"). Genérico: o rótulo vem do
+    // produtor; só http(s)/caminho-interno é aceito como destino (guarda de XSS).
+    const cta = parseCta(m.content || '');
     return html`
       <div key=${i} data-mid=${m._id} class="flex justify-center mt-[4px]">
         <div class="max-w-[80%] rounded-[10px] px-[12px] pt-[7px] pb-[8px] bg-wa-bg border border-wa-border text-wa-text text-[13px] leading-[19px] whitespace-pre-wrap relative shadow-sm">
@@ -143,7 +151,16 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
             Sistema
           </span>
-          <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
+          <span dangerouslySetInnerHTML=${{ __html: fmt(cta.text)}}></span>
+          ${cta.action ? html`
+            <div class="mt-[7px]">
+              <a href=${cta.action.url} target="_blank" rel="noopener noreferrer"
+                 class="inline-flex items-center gap-[6px] px-[12px] py-[6px] rounded-lg bg-wa-teal text-white text-[12.5px] font-semibold no-underline hover:opacity-90 transition-opacity">
+                ${cta.action.label}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+              </a>
+            </div>
+          ` : null}
           <span class="block text-right mt-[3px] text-[10.5px] leading-[14px] whitespace-nowrap text-wa-secondary opacity-70">
             ${formatBubbleTime(m.ts)}
           </span>

@@ -33,6 +33,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [notifyPrivateMessages, setNotifyPrivateMessages] = useState(false);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
+  // URL pública base do painel (domínio real) — usada por links externos (ex.: link
+  // do painel de melhorias). Auto-detectada; editável aqui para correção manual.
+  const [publicBaseUrl, setPublicBaseUrl] = useState('');
   const [webPassword, setWebPassword] = useState('');
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
   const [removePassword, setRemovePassword] = useState(false);
@@ -66,6 +69,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       setNotifyPrivateMessages(config.notify_private_messages ?? false);
       setMaxExecutions(config.max_executions ?? 200);
       setAuditRetentionDays(config.audit_retention_days ?? 365);
+      setPublicBaseUrl(config.public_base_url ?? '');
     }
   }, [config]);
 
@@ -79,6 +83,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       notify_private_messages: notifyPrivateMessages,
       max_executions: parseInt(maxExecutions, 10) || 200,
       audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
+      public_base_url: (publicBaseUrl || '').trim().replace(/\/+$/, ''),
     };
     // Handle password change/removal
     if (removePassword) {
@@ -194,6 +199,19 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
 
       <!-- Section: Avancado -->
       <${Section} id="avancado" title="Avançado">
+        <!-- Domínio público (URL base) -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Domínio público (URL base)</label>
+          <input
+            type="url"
+            value=${publicBaseUrl}
+            onInput=${(e) => setPublicBaseUrl(e.target.value)}
+            placeholder="https://seu-dominio.com"
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+          />
+          <span class="text-xs text-wa-secondary">URL usada em links externos gerados pelo painel (ex.: o link do painel de melhorias). Detectada automaticamente ao acessar pelo domínio; ajuste aqui se sair com um IP local. A variável de ambiente WHATSBOT_PUBLIC_URL, se definida, tem prioridade sobre este campo.</span>
+        </div>
+
         <!-- Max Executions -->
         <div>
           <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
