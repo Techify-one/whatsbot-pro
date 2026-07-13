@@ -171,6 +171,13 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
     ConfigKey("account_url", default="", exposed=True),
+    # URL pública base do painel (domínio real). Capturada automaticamente no 1º
+    # acesso ao GET /api/config (``_capture_public_base_url`` em
+    # server/routes/config.py, com self-heal de IP local→domínio) e editável à mão
+    # na tela Configurações → Avançado. Consumida por features que montam links
+    # externos (ex.: alerta de reconexão do gowa, link do painel de melhorias).
+    # O env ``WHATSBOT_PUBLIC_URL`` tem prioridade sobre a edição manual.
+    ConfigKey("public_base_url", default="", exposed=True, writable=True),
     ConfigKey("low_balance_enabled", default=True, exposed=True, writable=True),
     ConfigKey("low_balance_threshold", default=0.50, exposed=True, writable=True),
     # Exibir o nome do agente de IA nas mensagens/cards de tool do painel

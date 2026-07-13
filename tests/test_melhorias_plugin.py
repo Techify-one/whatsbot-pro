@@ -46,13 +46,16 @@ def test_create_lists_pendente_and_posts_notice(plugin_app):
     assert data["conversation_url"] and f"message={saved['id']}" in data["conversation_url"]
     assert data["panel_url"] and f"detail={data['id']}" in data["panel_url"]
 
-    # Aviso painel-only role=system na conversa, com a URL do painel.
+    # Aviso painel-only role=system na conversa, com um botão (token CTA) ao painel.
     from db.repositories import message_repo
     msgs = message_repo.get_all(contact.id)
     notices = [m for m in msgs if m.get("role") == "system"
                and "painel de aprovação" in (m.get("content") or "")]
-    assert notices, "esperava um aviso de sistema com link ao painel"
-    assert f"/melhorias?detail={data['id']}" in notices[-1]["content"]
+    assert notices, "esperava um aviso de sistema com botão ao painel"
+    content = notices[-1]["content"]
+    # O link vai dentro do token [[cta:RÓTULO|URL]] (renderizado como botão no front).
+    assert f"[[cta:Ir para sugestão|" in content
+    assert f"/melhorias?detail={data['id']}]]" in content
 
 
 def test_list_filters(plugin_app):
@@ -140,6 +143,36 @@ def test_contact_rename_refreshes_snapshot(plugin_app):
     assert any(s["id"] == sid for s in found)
     # Idempotente: sem mudança real, não reescreve nada.
     assert logic.refresh_contact_snapshot(phone) == 0
+
+
+def test_base_url_fallback_chain(plugin_app, monkeypatch):
+    """_base_url(): config public_base_url → env → http://localhost:{web_port}.
+    Espelha o alerta de reconexão do gowa; garante link ABSOLUTO no aviso."""
+    plugin_app("melhorias", settings_overrides=_STUB)
+    logic = importlib.import_module("whatsbot_plugins.melhorias.logic")
+    from db.repositories import config_repo
+
+    monkeypatch.delenv("WHATSBOT_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    orig_port = config_repo.get("web_port", 8090)
+    try:
+        # 1. Config global vence tudo; deep link fica absoluto e normalizado.
+        config_repo.set("public_base_url", "https://cfg.example.com/")
+        assert logic._base_url() == "https://cfg.example.com"
+        assert logic._panel_deep_link(7) == "https://cfg.example.com/melhorias?detail=7"
+
+        # 2. Sem config → cai no env (proxy sem x-forwarded-*).
+        config_repo.set("public_base_url", "")
+        monkeypatch.setenv("WHATSBOT_PUBLIC_URL", "https://env.example.com")
+        assert logic._base_url() == "https://env.example.com"
+
+        # 3. Sem config e sem env → http://localhost:{web_port} (nunca relativo).
+        monkeypatch.delenv("WHATSBOT_PUBLIC_URL", raising=False)
+        config_repo.set("web_port", 12345)
+        assert logic._base_url() == "http://localhost:12345"
+    finally:
+        config_repo.set("public_base_url", "")
+        config_repo.set("web_port", orig_port)
 
 
 def test_config_get_put(plugin_app):

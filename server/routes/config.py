@@ -1,10 +1,12 @@
 """Configuration endpoints (config, test-key, models, status)."""
 
 import asyncio
+import ipaddress
 import logging
-import re
+import os
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Request
@@ -38,7 +40,27 @@ def get_models_cache() -> dict[str, Any]:
 # link from it). Honors reverse-proxy headers so a Coolify deploy records the
 # real public domain.
 
-_LOCAL_URL_RE = re.compile(r"//(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])", re.I)
+
+def _is_public_host(hostname: str) -> bool:
+    """True para um host que um cliente externo alcançaria (domínio ou IP público).
+    False para loopback, IP privado/LAN, link-local, localhost e ``*.local`` — ou
+    seja, hosts que só valem dentro da própria máquina/rede."""
+    h = (hostname or "").split(":")[0].strip().lower()
+    if not h or h == "localhost" or h.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(h)
+        return not (ip.is_private or ip.is_loopback
+                    or ip.is_link_local or ip.is_unspecified)
+    except ValueError:
+        return True  # nome de domínio, não IP literal → assume público
+
+
+def _is_public_url(url: str) -> bool:
+    try:
+        return _is_public_host(urlsplit(url).hostname or "")
+    except ValueError:
+        return False
 
 
 def _request_origin(request: Request) -> str:
@@ -51,13 +73,25 @@ def _request_origin(request: Request) -> str:
 
 
 def _capture_public_base_url(settings, request: Request) -> None:
-    """Persist ``public_base_url`` on first use; self-heal a saved localhost URL
-    once a real domain shows up (so a dev localhost visit never clobbers it)."""
+    """Mantém ``public_base_url`` (a URL que o operador usa pra acessar o painel).
+
+    Prioridade: (1) override explícito por env ``WHATSBOT_PUBLIC_URL`` /
+    ``PUBLIC_BASE_URL`` — autoritativo, para proxies que não repassam os headers
+    ``x-forwarded-*``; (2) primeiro uso sem valor salvo → grava a origem atual;
+    (3) self-heal — um valor salvo NÃO-público (loopback OU IP de LAN OU ``*.local``)
+    é substituído assim que uma origem pública (domínio real) aparece. Um valor
+    público já salvo (inclusive editado à mão na UI) nunca é sobrescrito."""
+    env = (os.environ.get("WHATSBOT_PUBLIC_URL")
+           or os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if env:
+        if (settings.get("public_base_url", "") or "").strip() != env:
+            settings["public_base_url"] = env
+        return
     origin = _request_origin(request)
     if not origin:
         return
     saved = (settings.get("public_base_url", "") or "").strip()
-    if not saved or (_LOCAL_URL_RE.search(saved) and not _LOCAL_URL_RE.search(origin)):
+    if not saved or (not _is_public_url(saved) and _is_public_url(origin)):
         settings["public_base_url"] = origin.rstrip("/")
 
 
@@ -78,7 +112,6 @@ def register_routes(app, deps):
         for ck in exposed_config_keys():
             out[ck.key] = settings.get(ck.key, ck.effective_get_default)
         out["has_password"] = bool(settings.get("web_password_hash", ""))
-        out["public_base_url"] = settings.get("public_base_url", "")
         return _ok(out)
 
     @app.put("/api/config")
@@ -93,6 +126,10 @@ def register_routes(app, deps):
         audit_after = {}    # {key: new_value} for the audit trail
         for key, value in body.items():
             if key in allowed_keys:
+                # Canoniza a URL base (sem espaços/barra final) para os consumidores
+                # não dependerem de normalizar por conta própria.
+                if key == "public_base_url" and isinstance(value, str):
+                    value = value.strip().rstrip("/")
                 audit_before[key] = settings.get(key)
                 settings[key] = value
                 audit_after[key] = value

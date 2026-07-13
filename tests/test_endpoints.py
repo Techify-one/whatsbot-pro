@@ -225,6 +225,54 @@ r = client.get("/api/config")
 check("PUT /api/config -> setup_completed persisted", r.json()["data"]["setup_completed"] is True)
 client.put("/api/config", json={"setup_completed": False})  # restore
 
+# ── public_base_url: captura + self-heal + override por env ──────────────────
+# Garante um estado limpo de env (sem override) para os testes de captura/self-heal.
+_saved_pbu_env = {k: os.environ.pop(k, None)
+                  for k in ("WHATSBOT_PUBLIC_URL", "PUBLIC_BASE_URL")}
+try:
+    # public_base_url é exposto e writable (editável na UI Configurações → Avançado)
+    check("GET /api/config -> has public_base_url", "public_base_url" in data)
+
+    # Semeia um IP de LAN (cenário do bug: 1º acesso foi direto pelo IP:porta local)
+    client.put("/api/config", json={"public_base_url": "http://203.0.113.40:8090"})
+
+    # Self-heal: acessando pelo domínio (headers de proxy reverso), um IP de LAN
+    # salvo é substituído pelo domínio real — regressão do link com IP local.
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "whatsbot-dev.teste.techify.run",
+        "x-forwarded-proto": "https"})
+    check("public_base_url self-heal: IP de LAN -> domínio",
+          r.json()["data"]["public_base_url"] == "https://whatsbot-dev.teste.techify.run")
+
+    # Um domínio já salvo NÃO é sobrescrito por um acesso via loopback (visita dev).
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "localhost:8090", "x-forwarded-proto": "http"})
+    check("public_base_url: loopback não sobrescreve domínio salvo",
+          r.json()["data"]["public_base_url"] == "https://whatsbot-dev.teste.techify.run")
+
+    # Edição manual via PUT (campo writable) persiste, normalizada (sem barra final).
+    r = client.put("/api/config", json={"public_base_url": "https://manual.example.com/"})
+    check("PUT public_base_url -> 200", r.status_code == 200)
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "manual.example.com", "x-forwarded-proto": "https"})
+    check("public_base_url: edição manual persiste sem barra final",
+          r.json()["data"]["public_base_url"] == "https://manual.example.com")
+
+    # Override por env é autoritativo (proxies que não repassam x-forwarded-*).
+    os.environ["WHATSBOT_PUBLIC_URL"] = "https://env-forced.example.com"
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "outro.example.com", "x-forwarded-proto": "https"})
+    check("public_base_url: env WHATSBOT_PUBLIC_URL tem prioridade",
+          r.json()["data"]["public_base_url"] == "https://env-forced.example.com")
+finally:
+    # Restaura env e limpa o valor semeado para não vazar pros próximos testes.
+    os.environ.pop("WHATSBOT_PUBLIC_URL", None)
+    os.environ.pop("PUBLIC_BASE_URL", None)
+    for _k, _v in _saved_pbu_env.items():
+        if _v is not None:
+            os.environ[_k] = _v
+    config_repo.set("public_base_url", "")
+
 # Test key (will fail since no real API)
 r = client.post("/api/config/test-key", json={"api_key": ""})
 check("POST /api/config/test-key (empty) -> error", r.json()["ok"] is False)

@@ -16,6 +16,7 @@ Fluxo (decisão do produto — geração NA APROVAÇÃO):
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from sqlalchemy import bindparam, text
@@ -64,7 +65,21 @@ def _setting(name: str, default: str = "") -> str:
 
 
 def _base_url() -> str:
-    return str(config_repo.get("public_base_url", "") or "").rstrip("/")
+    """URL base do painel para os links do plugin.
+
+    Mesma cadeia do alerta de reconexão do gowa: config global ``public_base_url``
+    (capturada/auto-corrigida no core) → env (``WHATSBOT_PUBLIC_URL`` /
+    ``PUBLIC_BASE_URL``) → ``http://localhost:{web_port}``. Sempre absoluta, pra o
+    link no aviso de sistema funcionar quando aberto fora do painel."""
+    base = str(config_repo.get("public_base_url", "") or "").strip().rstrip("/")
+    if base:
+        return base
+    env = (os.environ.get("WHATSBOT_PUBLIC_URL")
+           or os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if env:
+        return env
+    port = config_repo.get("web_port", 8080) or 8080
+    return f"http://localhost:{port}"
 
 
 def _panel_deep_link(sid: int) -> str:
@@ -168,8 +183,11 @@ def _post_system_notice(contact_id: int, phone: str, conversation_id, sid: int) 
     """Aviso painel-only ``role="system"`` na conversa marcada, com link ao painel.
     Best-effort: falha aqui nunca quebra a criação do pedido."""
     try:
+        # O link vira um BOTÃO no card de sistema do painel: o frontend
+        # (SystemMessageCard) reconhece o token ``[[cta:RÓTULO|URL]]`` e o
+        # renderiza como botão de ação em vez de um link inline.
         text_p = ("🔧 Sugestão de melhoria enviada ao painel de aprovação.\n"
-                  + _panel_deep_link(sid))
+                  + f"[[cta:Ir para sugestão|{_panel_deep_link(sid)}]]")
         channel_id = _channel_for_conversation(conversation_id)
         if conversation_id is not None:
             saved = message_repo.add(contact_id, "system", text_p,
