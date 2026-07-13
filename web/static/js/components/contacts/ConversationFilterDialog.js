@@ -34,6 +34,7 @@ const CORE_DIMENSIONS = [
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
   { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
   { key: 'ai',         label: 'IA',                  ops: ['eq', 'ne'],                valueType: 'ai_state' },
+  { key: 'starter',    label: 'Início de conversa',  ops: ['eq', 'ne'],                valueType: 'starter' },
   { key: 'activity',   label: 'Última atividade',    ops: ['gt', 'lt', 'days_before'], valueType: 'days' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
@@ -199,6 +200,15 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
       <option value="">+ Selecione uma opção...</option>
       <option value="on">Ligada</option>
       <option value="off">Desligada</option>
+    </select>`;
+  }
+  if (t === 'starter') {
+    // Quem iniciou a conversa (plano 28: coluna `origin`). Cliente = conversa
+    // 'inbound' (o cliente mandou a 1ª mensagem); Atendente = qualquer outra origem.
+    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
+      <option value="">+ Selecione uma opção...</option>
+      <option value="customer">Cliente</option>
+      <option value="operator">Atendente</option>
     </select>`;
   }
   // ── Atributos personalizados ──
