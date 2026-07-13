@@ -22,6 +22,7 @@ import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { OptionListSelect } from '../OptionListSelect.js';
 import { CONTACT_TYPE_ORDER, contactTypeMeta } from '../../services/contactTypes.js';
+import { splitSort, combineSort } from '../../services/conversationRows.js';
 
 const html = htm.bind(h);
 
@@ -235,7 +236,7 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
 
 export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
   convLabelNames = [], contactAttrDefs = [], convAttrDefs = [],
-  sortBy, onSortChange, sortOptions, onApply, onClose }) {
+  sortBy, onSortChange, readSortOptions = [], timeSortOptions = [], onApply, onClose }) {
   // Dimensões = core + atributos personalizados (contato e atendimento), dinâmicas.
   const dimensions = useMemo(() => [
     ...CORE_DIMENSIONS,
@@ -267,11 +268,24 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
     <div>
       <div class="text-[15px] font-semibold text-wa-text mb-3">Filtrar conversas</div>
       ${onSortChange ? html`
-        <label class="block text-[12px] text-wa-secondary mb-1">Ordenar por</label>
-        <select value=${sortBy} onChange=${(e) => onSortChange(e.target.value)}
-          class="${FIELD} w-full mb-4">
-          ${(sortOptions || []).map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
-        </select>
+        <div class="flex gap-3 mb-4">
+          <div class="flex-1 min-w-0">
+            <label class="block text-[12px] text-wa-secondary mb-1">Ordenar por leitura</label>
+            <select value=${splitSort(sortBy).read}
+              onChange=${(e) => onSortChange(combineSort(e.target.value, splitSort(sortBy).time))}
+              class="${FIELD} w-full">
+              ${readSortOptions.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+            </select>
+          </div>
+          <div class="flex-1 min-w-0">
+            <label class="block text-[12px] text-wa-secondary mb-1">Ordem</label>
+            <select value=${splitSort(sortBy).time}
+              onChange=${(e) => onSortChange(combineSort(splitSort(sortBy).read, e.target.value))}
+              class="${FIELD} w-full">
+              ${timeSortOptions.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+            </select>
+          </div>
+        </div>
         <div class="text-[12px] text-wa-secondary mb-1">Filtros</div>
       ` : null}
       <div class="flex flex-col gap-2 mb-3">

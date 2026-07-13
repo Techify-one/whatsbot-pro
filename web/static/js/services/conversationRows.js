@@ -231,33 +231,77 @@ export function specsEqual(a, b) {
  */
 export function isDefaultSpec(spec) { return specsEqual(spec, DEFAULT_SPEC); }
 
+// ── Ordenação em duas dimensões (leitura × recência) ────────────────────────────
+// A sidebar combina DOIS filtros independentes de ordenação, mas persiste um único
+// token `sortBy` (compat com filtros salvos + deep-link de URL — que sempre foram um
+// só campo). `splitSort` decodifica o token nas duas dimensões e `combineSort` volta:
+//   • leitura  (`read`): 'none' (não ordena por leitura) | 'unread' (não lidas
+//     primeiro / decrescente) | 'read' (lidas primeiro / crescente)
+//   • recência (`time`): 'recent' (recentes primeiro) | 'oldest' (antigos primeiro)
+// Combinadas, a leitura é a chave PRIMÁRIA e a recência é o desempate. Os 4 tokens
+// legados ('activity'/'oldest'/'unread'/'read') continuam válidos; os combinados
+// 'unread_oldest'/'read_oldest' cobrem as combinações novas.
+const _SORT_SPLIT = {
+  activity: { read: 'none', time: 'recent' },
+  oldest: { read: 'none', time: 'oldest' },
+  unread: { read: 'unread', time: 'recent' },
+  read: { read: 'read', time: 'recent' },
+  unread_oldest: { read: 'unread', time: 'oldest' },
+  read_oldest: { read: 'read', time: 'oldest' },
+};
+
 /**
- * Sort a row list by the chosen key. 'activity' pins-first then most-recent
- * (matches the backend); 'oldest' ascending; 'unread' by total unread desc.
- * Returns a NEW array (never mutates the input).
+ * Decodifica o token `sortBy` nas duas dimensões {read, time}. Token desconhecido
+ * cai no default ('activity' → não ordena por leitura, recentes primeiro).
+ * @param {string} sortBy
+ * @returns {{ read: 'none'|'unread'|'read', time: 'recent'|'oldest' }}
+ */
+export function splitSort(sortBy) {
+  return _SORT_SPLIT[sortBy] || _SORT_SPLIT.activity;
+}
+
+/**
+ * Recompõe o token `sortBy` a partir das duas dimensões.
+ * @param {'none'|'unread'|'read'} read
+ * @param {'recent'|'oldest'} time
+ * @returns {string}
+ */
+export function combineSort(read, time) {
+  const oldest = time === 'oldest';
+  if (read === 'unread') return oldest ? 'unread_oldest' : 'unread';
+  if (read === 'read') return oldest ? 'read_oldest' : 'read';
+  return oldest ? 'oldest' : 'activity';   // read === 'none'
+}
+
+/**
+ * Sort a row list by the chosen key (leitura × recência combinadas). A leitura é a
+ * chave primária (unread = mais não lidas no topo; read = lidas no topo) e a
+ * recência é o desempate (recent = mais novas primeiro; oldest = mais antigas).
+ * Fixadas (`is_pinned`) só vão ao topo no default puro ('activity') — qualquer
+ * reordenação explícita por leitura/antiguidade ignora o pin (senão o pin
+ * "vazaria" pra uma ordem onde não faz sentido). Returns a NEW array.
  * @param {Record<string, any>[]} list
- * @param {string} sortBy - 'activity' | 'oldest' | 'unread'
+ * @param {string} sortBy - 'activity'|'oldest'|'unread'|'read'|'unread_oldest'|'read_oldest'
  * @returns {Record<string, any>[]}
  */
 export function sortContactsBy(list, sortBy) {
   const arr = [...list];
   const ts = (c) => c.last_message_ts || c.updated_at || 0;
-  if (sortBy === 'oldest') {
-    arr.sort((a, b) => ts(a) - ts(b));
-  } else if (sortBy === 'unread') {
-    arr.sort((a, b) => {
-      const au = (a.unread_count || 0) + (a.unread_ai_count || 0);
-      const bu = (b.unread_count || 0) + (b.unread_ai_count || 0);
-      if (au !== bu) return bu - au;
-      return ts(b) - ts(a);
-    });
-  } else {  // 'activity' — pinned first, then most recent (matches the backend)
-    arr.sort((a, b) => {
+  const unread = (c) => (c.unread_count || 0) + (c.unread_ai_count || 0);
+  const { read, time } = splitSort(sortBy);
+  const timeCmp = (a, b) => (time === 'oldest' ? ts(a) - ts(b) : ts(b) - ts(a));
+  const pristine = read === 'none' && time === 'recent';   // == 'activity'
+  arr.sort((a, b) => {
+    if (pristine) {   // pinned first, then most recent (matches the backend default)
       const ap = a.is_pinned ? 1 : 0, bp = b.is_pinned ? 1 : 0;
       if (ap !== bp) return bp - ap;
-      return ts(b) - ts(a);
-    });
-  }
+    }
+    if (read !== 'none') {   // primary key: read status
+      const au = unread(a), bu = unread(b);
+      if (au !== bu) return read === 'unread' ? bu - au : au - bu;
+    }
+    return timeCmp(a, b);   // tiebreak / sole key: recency
+  });
   return arr;
 }
 
