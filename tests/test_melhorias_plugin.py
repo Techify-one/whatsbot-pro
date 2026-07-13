@@ -113,6 +113,35 @@ def test_approve_generates_analysis_reject_does_not(plugin_app):
     assert d3["decided_at"] is not None
 
 
+def test_contact_rename_refreshes_snapshot(plugin_app):
+    """Renomear o contato re-sincroniza o snapshot contact_name de TODAS as suas
+    sugestões (exibição + busca passam a refletir o nome atual). Idempotente."""
+    built = plugin_app("melhorias", settings_overrides=_STUB)
+    logic = importlib.import_module("whatsbot_plugins.melhorias.logic")
+    handler = built.agent_handler
+    phone = "5511960000007"
+    contact, saved = _seed_ai_reply(handler, phone)
+    contact.set_info_fields({"name": "Nome Antigo"})
+
+    sid = built.client.post("/api/plugins/melhorias/suggestions", json={
+        "phone": phone,
+        "message": {"content": "resposta marcada", "ts": saved["ts"], "_id": saved["id"]},
+        "feedback": "", "conversation_id": saved["conversation_id"]}).json()["data"]["id"]
+    got = built.client.get(f"/api/plugins/melhorias/suggestions/{sid}").json()["data"]
+    assert got["contact_name"] == "Nome Antigo"
+
+    # Renomeia o contato e re-sincroniza (simula o handler de contact.updated).
+    contact.set_info_fields({"name": "Nome Novo"})
+    assert logic.refresh_contact_snapshot(phone) == 1
+    got2 = built.client.get(f"/api/plugins/melhorias/suggestions/{sid}").json()["data"]
+    assert got2["contact_name"] == "Nome Novo"
+    # A busca também passa a achar pelo nome novo.
+    found = built.client.get("/api/plugins/melhorias/suggestions?q=Nome Novo").json()["data"]
+    assert any(s["id"] == sid for s in found)
+    # Idempotente: sem mudança real, não reescreve nada.
+    assert logic.refresh_contact_snapshot(phone) == 0
+
+
 def test_config_get_put(plugin_app):
     """GET/PUT /config lê e grava plugin.melhorias.model/prompt."""
     built = plugin_app("melhorias", settings_overrides=_STUB)
