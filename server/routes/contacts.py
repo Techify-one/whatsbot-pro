@@ -18,6 +18,7 @@ from db.repositories import inbox_repo
 from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
+from channels.contact_type import resolve_contact_type
 from agent import group_mentions
 from server import system_notices
 from server.authz import (current_user, permission_denied, can_access_inbox,
@@ -315,8 +316,10 @@ def register_routes(app, deps):
         # If registered, pre-create contact with WhatsApp name and AI setting
         if registered and should_create:
             ai_default = settings.get("default_ai_enabled", True)
+            ctype = resolve_contact_type(channel_id)
             def _save():
-                contact_repo.get_or_create(canonical, default_ai_enabled=ai_default)
+                contact_repo.get_or_create(canonical, default_ai_enabled=ai_default,
+                                           contact_type=ctype)
                 if name:
                     c = contact_repo.get_by_phone(canonical)
                     if c and not c["name"]:
@@ -362,13 +365,15 @@ def register_routes(app, deps):
         # as fixed CSV columns (sourced from the JSON) for a stable, familiar
         # format — so they're excluded from the dynamic-attribute columns to avoid
         # duplicate headers.
-        _CORE_ATTR_KEYS = {"email", "profession", "company", "address"}
+        # "type" is a fixed column too (o tipo do contato) — exclude any custom
+        # attribute with that key so the export never emits a duplicate header.
+        _CORE_ATTR_KEYS = {"email", "profession", "company", "address", "type"}
         extra_defs = [d for d in attr_defs if d["attribute_key"] not in _CORE_ATTR_KEYS]
 
         output = io.StringIO()
         writer = csv.writer(output)
         header = ["phone", "name", "email", "profession", "company",
-                  "address", "ai_enabled", "tags"]
+                  "address", "ai_enabled", "tags", "type"]
         header.extend(d["attribute_key"] for d in extra_defs)
         writer.writerow(header)
         for r in rows:
@@ -381,6 +386,8 @@ def register_routes(app, deps):
                 _format_attr_cell(custom.get("address")),
                 "1" if r["ai_enabled"] else "0",
                 ", ".join(r["tags"]),
+                # Tipo do contato herdado do canal de origem (whatsapp/telegram/outros).
+                r.get("contact_type") or "outros",
             ]
             for d in extra_defs:
                 row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
@@ -438,6 +445,9 @@ def register_routes(app, deps):
             return _err("CSV precisa de uma coluna de telefone (phone/telefone).")
 
         ai_default = settings.get("default_ai_enabled", True)
+        # Import CSV é por telefone (WhatsApp) — sem canal explícito, herda o tipo
+        # do canal `default` (GOWA). Resolvido uma vez (não por linha).
+        import_ctype = resolve_contact_type(None)
 
         def _cell(row, field):
             src = col.get(field)
@@ -476,7 +486,7 @@ def register_routes(app, deps):
 
                 existed = contact_repo.get_by_phone(phone) is not None
                 contact = contact_repo.get_or_create(
-                    phone, default_ai_enabled=ai_default)
+                    phone, default_ai_enabled=ai_default, contact_type=import_ctype)
                 cid = contact["id"]
 
                 # Name + ai_enabled stay as real contact columns.
@@ -570,7 +580,8 @@ def register_routes(app, deps):
             if data is None:
                 # Auto-create contact for verified phone numbers
                 ai_default = settings.get("default_ai_enabled", True)
-                contact_repo.get_or_create(phone, default_ai_enabled=ai_default)
+                contact_repo.get_or_create(phone, default_ai_enabled=ai_default,
+                                           contact_type=resolve_contact_type(channel))
                 data = contact_repo.get_full_contact(phone)
             if data is None:
                 return None, []

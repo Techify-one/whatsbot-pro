@@ -157,9 +157,24 @@ class Channel(ABC):
             "config_fields": [],
             "capabilities": {"needs_qr": False, "templates": False},
             "ai_sequential_default": False,
+            "contact_type": cls.contact_type(),
             "post_create": None,
             "form_component": None,
         }
+
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    @classmethod
+    def contact_type(cls) -> str:
+        """The kind of contact this provider materializes on inbound.
+
+        Stored on ``contacts.contact_type`` when the core first creates a contact
+        for an inbound message, and used by the UI as a badge + a list filter
+        dimension. WhatsApp providers (GOWA + Cloud) return ``"whatsapp"``,
+        Telegram returns ``"telegram"``. Default ``"outros"`` — a provider that
+        doesn't override still gets a valid, non-empty tag. Must be pure (no
+        network/DB): the core calls it in the inbound path.
+        """
+        return "outros"
 
     # ── source_id form (dedup key — plano 42) ────────────────────────
     @classmethod

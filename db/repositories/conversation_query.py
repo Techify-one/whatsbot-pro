@@ -75,6 +75,10 @@ def enriched_columns(include_private_note: bool = False,
         contacts.c.name.label("contact_name"),
         contacts.c.phone.label("contact_phone"),
         contacts.c.is_group.label("contact_is_group"),
+        # Tipo do contato (plano tipos-de-contato): carregado no row enriquecido para
+        # o conversation_upsert (WS) já nascer filtrável por tipo, sem esperar o
+        # reconcile — igual a is_pinned/unread_ai_count (nível-contato).
+        contacts.c.contact_type.label("contact_type"),
         contacts.c.is_pinned.label("is_pinned"),
         contacts.c.has_unread_mention.label("has_unread_mention"),
         # Contact-level AI-unread count (plano 28): carried so a conversation_upsert

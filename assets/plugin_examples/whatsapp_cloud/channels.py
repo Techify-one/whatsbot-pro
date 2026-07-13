@@ -46,6 +46,12 @@ HTTP_TIMEOUT = 20.0
 class WhatsAppCloudChannel(Channel):
     provider = "whatsapp_cloud"
 
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    @classmethod
+    def contact_type(cls) -> str:
+        """WhatsApp Cloud é WhatsApp — mesmo tipo que o GOWA."""
+        return "whatsapp"
+
     def __init__(self, channel_id: str, registry=None, credentials: Optional[dict] = None):
         super().__init__(
             channel_id,

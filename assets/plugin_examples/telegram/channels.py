@@ -53,6 +53,13 @@ def api_base() -> str:
 class TelegramChannel(Channel):
     provider = "telegram"
 
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    # Telegram não é WhatsApp: não guarda telefone (o identificador é o chat_id
+    # numérico do Telegram, gravado na coluna `phone`), então tem tipo próprio.
+    @classmethod
+    def contact_type(cls) -> str:
+        return "telegram"
+
     def __init__(self, channel_id: str, registry=None,
                  credentials: Optional[dict] = None):
         super().__init__(

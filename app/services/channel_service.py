@@ -304,6 +304,16 @@ def provider_descriptor(deps, provider: str) -> dict:
     desc.setdefault("config_fields", [])
     desc.setdefault("capabilities", {"needs_qr": False, "templates": False})
     desc.setdefault("ai_sequential_default", False)
+    # Tipo de contato do provider (plano tipos-de-contato): garantido centralmente
+    # para TODO provider (os 3 shipped sobrescrevem provider_descriptor sem re-adicionar
+    # a chave), então o contrato "o descriptor expõe contact_type" vale sempre.
+    if cls is not None:
+        try:
+            desc.setdefault("contact_type", cls.contact_type())
+        except Exception:  # noqa: BLE001
+            desc.setdefault("contact_type", "outros")
+    else:
+        desc.setdefault("contact_type", "outros")
     desc.setdefault("post_create", None)
     desc.setdefault("form_component", None)
     fields = list(desc.get("credential_fields") or [])

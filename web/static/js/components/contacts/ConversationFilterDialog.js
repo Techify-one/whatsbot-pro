@@ -21,12 +21,14 @@ import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { OptionListSelect } from '../OptionListSelect.js';
+import { CONTACT_TYPE_ORDER, contactTypeMeta } from '../../services/contactTypes.js';
 
 const html = htm.bind(h);
 
 const CORE_DIMENSIONS = [
-  { key: 'status',     label: 'Status',              ops: ['eq', 'ne'],                valueType: 'status' },
-  { key: 'channel',    label: 'Canais',              ops: ['eq', 'ne'],                valueType: 'channel' },
+  { key: 'status',       label: 'Status',           ops: ['eq', 'ne'],                valueType: 'status' },
+  { key: 'channel',      label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
+  { key: 'contact_type', label: 'Tipo de contato',  ops: ['eq', 'ne'],                valueType: 'contact_type' },
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
   { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
@@ -52,7 +54,7 @@ const ATTR_TYPE_MAP = {
 };
 
 // Valores cujo input é multi-select (lista). As demais são escalares.
-const MULTI_TYPES = new Set(['channel', 'agent', 'tag', 'conv_label', 'attr_list']);
+const MULTI_TYPES = new Set(['channel', 'contact_type', 'agent', 'tag', 'conv_label', 'attr_list']);
 const isMultiType = (valueType) => MULTI_TYPES.has(valueType);
 const emptyValueFor = (dimDesc) => (dimDesc && isMultiType(dimDesc.valueType) ? [] : '');
 const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
@@ -168,6 +170,11 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
   }
   if (t === 'channel') {
     const options = channels.map(c => ({ value: c.id, label: c.label }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'contact_type') {
+    // Conjunto fixo de tipos conhecidos (whatsapp/telegram/outros). Rótulos via catálogo.
+    const options = CONTACT_TYPE_ORDER.map(v => ({ value: v, label: contactTypeMeta(v).label }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'agent') {

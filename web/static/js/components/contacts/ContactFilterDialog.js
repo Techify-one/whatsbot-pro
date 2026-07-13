@@ -14,14 +14,16 @@ import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { OptionListSelect } from '../OptionListSelect.js';
+import { CONTACT_TYPE_ORDER, contactTypeMeta } from '../../services/contactTypes.js';
 
 const html = htm.bind(h);
 
-// Apenas Etiqueta é dimensão core. Email/Profissão/Empresa/Endereço NÃO são
-// hardcoded — vêm dinamicamente como atributos personalizados do contato (são
-// seeds padrão), via `contactAttrDefs`.
+// Etiqueta + Tipo de contato são as dimensões core. Email/Profissão/Empresa/
+// Endereço NÃO são hardcoded — vêm dinamicamente como atributos personalizados
+// do contato (são seeds padrão), via `contactAttrDefs`.
 const CORE_DIMENSIONS = [
-  { key: 'tag', label: 'Etiqueta do contato', ops: ['eq', 'ne'], valueType: 'tag' },
+  { key: 'tag',          label: 'Etiqueta do contato', ops: ['eq', 'ne'], valueType: 'tag' },
+  { key: 'contact_type', label: 'Tipo de contato',     ops: ['eq', 'ne'], valueType: 'contact_type' },
 ];
 const CORE_BY_KEY = Object.fromEntries(CORE_DIMENSIONS.map(d => [d.key, d]));
 
@@ -41,7 +43,7 @@ const ATTR_TYPE_MAP = {
   link:     { valueType: 'attr_text',   ops: ['contains', 'not_contains', 'eq', 'ne'] },
 };
 
-const MULTI_TYPES = new Set(['tag', 'attr_list']);
+const MULTI_TYPES = new Set(['tag', 'contact_type', 'attr_list']);
 const isMultiType = (valueType) => MULTI_TYPES.has(valueType);
 const emptyValueFor = (dimDesc) => (dimDesc && isMultiType(dimDesc.valueType) ? [] : '');
 const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
@@ -140,6 +142,10 @@ function ValueInput({ clause, dimDesc, tagNames, onChange }) {
   const cls = `${FIELD} flex-1 min-w-0`;
   if (t === 'tag') {
     const options = tagNames.map(n => ({ value: n, label: n }));
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'contact_type') {
+    const options = CONTACT_TYPE_ORDER.map(v => ({ value: v, label: contactTypeMeta(v).label }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'attr_list') {

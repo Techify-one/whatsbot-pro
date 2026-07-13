@@ -29,7 +29,7 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS` e confirmar com *
 
 Antes de gerar, **leia**:
 
-- [channels/base.py](channels/base.py) — o contrato `Channel` (métodos abstratos `status`/`send_text`/`send_media`/`parse_inbound`), `ChannelCapabilities`, `AccountIdentity`, e os docstrings de `identity_from_credentials`/`account_identity`/`reject_duplicate`/**`provider_descriptor`** (fonte da verdade da forma do descriptor).
+- [channels/base.py](channels/base.py) — o contrato `Channel` (métodos abstratos `status`/`send_text`/`send_media`/`parse_inbound`), `ChannelCapabilities`, `AccountIdentity`, e os docstrings de `identity_from_credentials`/`account_identity`/`reject_duplicate`/**`provider_descriptor`** (fonte da verdade da forma do descriptor)/**`contact_type`** (o tipo de contato que o canal marca).
 - [channels/events.py](channels/events.py) — `InboundEvent` (o que `parse_inbound` devolve).
 - [assets/plugin_examples/telegram/channels.py](assets/plugin_examples/telegram/channels.py) — melhor referência de provider credential-only por long-poll (`bot_id` derivado do token nos DOIS hooks de identidade; descriptor com `post_create.autoconfigure`).
 - [assets/plugin_examples/whatsapp_cloud/channels.py](assets/plugin_examples/whatsapp_cloud/channels.py) — referência de provider por webhook + templates (identidade no create via `phone_number_id`; descriptor com `post_create.webhook_url`; janela de 24h).
@@ -87,6 +87,15 @@ logger = logging.getLogger(__name__)
 
 class <ClassName>Channel(Channel):
     provider = "<id>"
+
+    # ── Tipo de contato (marca por canal — plano tipos-de-contato) ──
+    # Todo contato materializado por este canal grava este tipo em
+    # contacts.contact_type (vira marca no painel + dimensão de filtro na tela de
+    # contatos). WhatsApp (GOWA/Cloud) → "whatsapp"; Telegram → "telegram". Sem
+    # override herda "outros" da base. SEMPRE defina um valor coerente com o canal.
+    @classmethod
+    def contact_type(cls) -> str:
+        return "<whatsapp|telegram|outros>"
 
     def __init__(self, channel_id: str, registry=None, credentials: Optional[dict] = None):
         super().__init__(channel_id, ChannelCapabilities(
@@ -171,6 +180,7 @@ CHANNEL_PROVIDERS = [<ClassName>Channel]
 - Se `post_create` for `autoconfigure`, gere `routes.py` com o endpoint declarado (POST recebe `{channel_id}`) devolvendo `{ok, data:{mode, webhook_url, registered, reason}}`.
 - Se `post_create` for `webhook_url`, o core já mostra a URL — nada a gerar além do descriptor.
 - `required_credentials` (capabilities) e os campos `required` do descriptor DEVEM bater.
+- **Sempre** implemente `contact_type()` retornando um tipo coerente com o canal (`"whatsapp"` para providers de WhatsApp, `"telegram"`, ou um tipo próprio). É o que marca cada contato criado pelo canal (`contacts.contact_type`) e alimenta o filtro por tipo. Sem override, os contatos herdam `"outros"`.
 - Modo escuro: se gerar `static/<id>.js`, use classes `wa-*`/`.wa-field` (ver regra em CLAUDE.md).
 
 ## Passo 4 — Instalar + verificar

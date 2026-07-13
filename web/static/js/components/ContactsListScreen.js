@@ -21,6 +21,7 @@ import {
   getCustomAttributes,
 } from '../services/api.js';
 import { matchesAdvFilters } from '../services/conversationRows.js';
+import { contactTypeMeta, contactTypeBadge } from '../services/contactTypes.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 import { hasPermission } from '../utils/permissions.js';
 
@@ -53,9 +54,11 @@ function clauseChipLabel(cl, contactAttrDefs) {
     return `${name}${sep}${list.join(', ')}`;
   }
   // Email/Profissão/Empresa/Endereço chegam como cattr:contact:* (atributos),
-  // tratados acima. Só o core 'tag' resta aqui.
-  const CORE_LABELS = { tag: 'Etiqueta' };
-  return `${CORE_LABELS[cl.dim] || cl.dim}${sep}${list.join(', ')}`;
+  // tratados acima. Só os cores 'tag'/'contact_type' restam aqui.
+  const CORE_LABELS = { tag: 'Etiqueta', contact_type: 'Tipo' };
+  // Tipo de contato exibe o rótulo amigável do catálogo (WhatsApp/Telegram/…).
+  const vals = cl.dim === 'contact_type' ? list.map(v => contactTypeMeta(v).label) : list;
+  return `${CORE_LABELS[cl.dim] || cl.dim}${sep}${vals.join(', ')}`;
 }
 
 
@@ -597,8 +600,18 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
 
               <!-- Nome + contato + Ver detalhes -->
               <div class="min-w-0 flex-1">
-                <div class="text-[16px] font-semibold text-wa-text truncate">
-                  ${c.name || formatPhoneDisplay(c.phone) || 'Sem nome'}
+                <div class="flex items-center gap-2 min-w-0">
+                  <div class="text-[16px] font-semibold text-wa-text truncate">
+                    ${c.name || formatPhoneDisplay(c.phone) || 'Sem nome'}
+                  </div>
+                  ${(() => {
+                    const b = contactTypeBadge(c.contact_type);
+                    return html`<span
+                      class="shrink-0 text-[10px] font-semibold rounded-full px-[6px] py-[1px] leading-[15px] ${b.className}"
+                      style=${b.style}
+                      title="Tipo do contato (canal de origem)"
+                    >${b.label}</span>`;
+                  })()}
                 </div>
                 <div class="flex items-center flex-wrap gap-x-2 gap-y-[2px] text-[13px] mt-[2px]">
                   <span class="text-wa-secondary truncate max-w-full">

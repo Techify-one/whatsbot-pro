@@ -24,6 +24,19 @@ from db.tables import (contact_tags, contacts, conversations, observations,
 
 # ── Row shaping ────────────────────────────────────────────────────────────
 
+def _get(row, key, default=None):
+    """Read ``key`` from a SQLAlchemy mapping row, tolerating its absence.
+
+    Not every contacts query selects every column; a plain ``row[key]`` raises
+    ``KeyError`` when the column wasn't in the SELECT, so callers that shape a
+    partial row use this to fall back to a default instead of blowing up.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def coerce_attrs(row) -> dict:
     """Return the custom_attributes dict for a row, tolerating missing/serialized."""
     try:
@@ -53,6 +66,9 @@ def row_to_dict(row) -> dict:
         "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
         "unread_count": row["unread_count"],
         "unread_ai_count": row["unread_ai_count"],
+        # Tipo do contato herdado do canal (plano tipos-de-contato). Defensivo:
+        # nem toda query seleciona a coluna → default 'outros'.
+        "contact_type": _get(row, "contact_type") or "outros",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         # Custom attributes (plano 05). Defensive: not every contacts query
@@ -168,6 +184,8 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
                 "company": row["company"] or "",
                 "address": row["address"] or "",
                 "ai_enabled": bool(row["ai_enabled"]),
+                # Tipo do contato (plano tipos-de-contato) — vira a coluna `type` no CSV.
+                "contact_type": _get(row, "contact_type") or "outros",
                 "tags": [t.name for t in tag_rows],
                 "custom_attributes": custom if isinstance(custom, dict) else {},
             })
@@ -208,6 +226,9 @@ def get_full_contact(variants: list[str]) -> dict | None:
         # Custom attributes (plano 05): also surface them under `info` so the
         # contact panel and the resolve guard read a single, reliable source.
         "custom_attributes": data["custom_attributes"],
+        # Tipo do contato (plano tipos-de-contato) — o painel do contato lê daqui
+        # para renderizar a marca abaixo do nome/telefone.
+        "contact_type": data["contact_type"],
     }
     data["tags"] = [t.name for t in tag_rows]
     return data
