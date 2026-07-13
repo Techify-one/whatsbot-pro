@@ -32,8 +32,14 @@ _row_to_dict = contact_query.row_to_dict
 _coerce_attrs = contact_query.coerce_attrs
 
 
-def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
-    """Get a contact by phone, creating it if it doesn't exist."""
+def get_or_create(phone: str, default_ai_enabled: bool = True,
+                  contact_type: str = "outros") -> dict:
+    """Get a contact by phone, creating it if it doesn't exist.
+
+    ``contact_type`` (plano tipos-de-contato) is the channel-declared kind
+    (``whatsapp``/``telegram``/``outros``); it is only applied on INSERT, so an
+    already-existing contact keeps whatever type it was first created with.
+    """
     variants = _br_phone_variants(phone)
     with get_engine().begin() as conn:
         row = conn.execute(
@@ -45,6 +51,7 @@ def get_or_create(phone: str, default_ai_enabled: bool = True) -> dict:
         result = conn.execute(sa_insert(contacts).values(
             phone=phone,
             ai_enabled=1 if default_ai_enabled else 0,
+            contact_type=contact_type or "outros",
             created_at=now,
             updated_at=now,
         ))
@@ -280,6 +287,9 @@ def list_contacts(q: str = "", archived: bool = False,
                 "unread_count": row["unread_count"],
                 "unread_ai_count": row["unread_ai_count"],
                 "has_unread_mention": bool(row["has_unread_mention"]),
+                # Tipo do contato (plano tipos-de-contato) — alimenta o filtro por
+                # tipo na sidebar (client-side) e a marca no painel do contato.
+                "contact_type": row["contact_type"] or "outros",
                 "ai_enabled": bool(row["ai_enabled"]),
                 "is_group": is_group,
                 "group_name": group_name,

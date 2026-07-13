@@ -6,6 +6,7 @@ import { hasPermission } from '../../utils/permissions.js';
 import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
+import { contactTypeBadge } from '../../services/contactTypes.js';
 
 const html = htm.bind(h);
 
@@ -234,6 +235,16 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
               : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
             <!-- Conversa (o todo): rótulo do nível topo da hierarquia — o histórico completo com este contato. -->
             <div class="text-wa-secondary/80 text-[11px] mt-2 uppercase tracking-wide">Conversa · histórico completo</div>
+            <!-- Marca do tipo de contato (plano tipos-de-contato): herdada do canal
+                 de origem, persistida em contacts.contact_type. -->
+            ${(() => {
+              const b = contactTypeBadge(info && info.contact_type);
+              return html`<span
+                class="mt-2 inline-flex items-center text-[11px] font-semibold rounded-full px-2 py-[2px] leading-[16px] ${b.className}"
+                style=${b.style}
+                title="Tipo do contato (canal de origem)"
+              >${b.label}</span>`;
+            })()}
           </div>
 
           <!-- Fields -->

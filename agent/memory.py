@@ -151,8 +151,26 @@ class ContactMemory:
         self.updated_at: float = time.time()
         self._load()
 
+    def _resolve_contact_type(self) -> str:
+        """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
+
+        Resolve a CLASSE do provider que dona o canal e lê ``contact_type()`` dela
+        (GOWA/Cloud → ``whatsapp``, Telegram → ``telegram``). Fail-open para
+        ``outros`` sempre que o provider não puder ser resolvido (registry não
+        cabeado em testes/legado, canal sem provider) — o mesmo fallback que
+        ``_resolve_provider_class`` já usa para o source_id."""
+        try:
+            provider_cls = _resolve_provider_class(self.channel_id)
+            if provider_cls is not None:
+                return provider_cls.contact_type() or "outros"
+        except Exception:
+            logger.exception("Falha ao resolver contact_type do canal %s", self.channel_id)
+        return "outros"
+
     def _load(self):
-        data = contact_repo.get_or_create(self.phone, default_ai_enabled=self._default_ai_enabled)
+        data = contact_repo.get_or_create(
+            self.phone, default_ai_enabled=self._default_ai_enabled,
+            contact_type=self._resolve_contact_type())
         self.id = data["id"]
         self.ai_enabled = data["ai_enabled"]
         self.is_group = data["is_group"]

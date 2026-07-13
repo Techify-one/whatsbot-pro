@@ -63,6 +63,7 @@ export const DAY_SECONDS = 86400;
  */
 function matchOne(c, dim, value) {
   if (dim === 'channel') return (c.channel_id || 'default') === value;
+  if (dim === 'contact_type') return (c.contact_type || 'outros') === value; // tipo do CONTATO (canal de origem)
   if (dim === 'tag') return (c.tags || []).includes(value);           // etiqueta do CONTATO
   if (dim === 'conv_label') return (c.conv_labels || []).includes(value); // etiqueta do ATENDIMENTO
   // agent
@@ -126,7 +127,7 @@ export function clauseMatches(c, cl, now) {
   if (cattr) return attrMatches(c, cattr[1], cattr[2], op, value);
   // channel / tag / conv_label / agent — valor pode ser lista (multi-select). eq = "é
   // uma de" (OR); ne = "não é nenhuma de". Escalar legado é tratado como lista de 1.
-  if (dim === 'channel' || dim === 'tag' || dim === 'conv_label' || dim === 'agent') {
+  if (dim === 'channel' || dim === 'contact_type' || dim === 'tag' || dim === 'conv_label' || dim === 'agent') {
     const list = Array.isArray(value) ? value : [value];
     if (list.length === 0) return true;             // cláusula incompleta → ignorada
     const hit = list.some(v => matchOne(c, dim, v));
@@ -394,6 +395,10 @@ export function convRowToSidebarRow(p) {
     name: p.contact_name,
     phone: p.contact_phone,
     is_group: p.contact_is_group,
+    // Tipo do contato (plano tipos-de-contato) — vem no row enriquecido, então a
+    // linha empurrada por WS já é filtrável por tipo (não fica como 'outros' até o
+    // reconcile). Fallback 'outros' se um payload antigo não trouxer.
+    contact_type: p.contact_type || 'outros',
     channel_id: p.channel_id || 'default',
     channel_provider: p.channel_provider || null,
     channel_name: p.channel_name || null,

@@ -66,6 +66,12 @@ class GOWAChannel(Channel):
         self._client = gowa_client
         self._manager = gowa_manager
 
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    @classmethod
+    def contact_type(cls) -> str:
+        """GOWA é WhatsApp — mesmo tipo que o WhatsApp Cloud."""
+        return "whatsapp"
+
     # ── source_id form (dedup key — plano 42) ────────────────────────
     @classmethod
     def source_id_for(cls, phone: str, is_group: bool) -> str:

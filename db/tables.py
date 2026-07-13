@@ -77,6 +77,10 @@ contacts = Table(
     Column("unread_count", Integer, nullable=False, server_default="0"),
     Column("unread_ai_count", Integer, nullable=False, server_default="0"),
     Column("has_unread_mention", Integer, nullable=False, server_default="0"),
+    # Tipo do contato herdado do canal de origem (plano tipos-de-contato): o
+    # provider declara via Channel.contact_type() — 'whatsapp' (GOWA + Cloud),
+    # 'telegram', ou 'outros' (default universal, provider sem override).
+    Column("contact_type", Text, nullable=False, server_default="outros"),
     # Custom attributes (plano 05) — native JSON/JSONB, owned by this plan for
     # the contact scope. conversations.custom_attributes is owned by plano 01.
     Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
