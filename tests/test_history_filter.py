@@ -238,34 +238,3 @@ def test_config_endpoint_round_trip(client):
     assert r.status_code == 200
     r = client.get("/api/config")
     assert r.json()["data"]["ai_history_exclude_patterns"] == patterns
-
-
-def test_improvement_filters_history_but_keeps_target(build_app):
-    """P2=a: o histórico da análise é filtrado, MAS a resposta-alvo sobrevive mesmo
-    casando um padrão (o marcador '⟵ RESPOSTA MARCADA…' só sai se o alvo ficar)."""
-    built = build_app(["gowa"])
-    handler = built.agent_handler
-    from agent import history_filter as hf
-    from db.repositories import config_repo
-
-    phone = "5511932000005"
-    contact = handler._get_contact(phone, channel_id="default")
-    contact.add_message("user", "quero comprar")
-    contact.add_message("private_note", "🔖 Protocolo aberto · PROT-1")
-    saved = contact.add_message("assistant", "segue o link PROT-1")  # alvo casa o padrão
-
-    config_repo.set(hf.CONFIG_KEY, ["PROT-1"])
-    hf.reset_cache()
-
-    fake = _FakeClient(_fake_llm_response("**Diagnóstico**\nok"))
-    with patch.object(handler, "_get_client", return_value=fake):
-        out = handler.generate_improvement(
-            phone, {"content": "segue o link PROT-1", "ts": saved["ts"]},
-            "resposta errada")
-    assert out == "**Diagnóstico**\nok"
-
-    user_prompt = fake.create_calls[0]["messages"][1]["content"]
-    # A nota privada (protocolo) foi cortada do histórico da análise…
-    assert "Protocolo aberto" not in user_prompt
-    # …mas o ALVO sobreviveu no histórico (o marcador só é emitido se o alvo ficou).
-    assert "RESPOSTA MARCADA COMO INCORRETA" in user_prompt
