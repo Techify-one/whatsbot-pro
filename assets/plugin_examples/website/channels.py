@@ -31,6 +31,14 @@ PROVIDER = "website"
 class WebsiteChannel(Channel):
     provider = PROVIDER
 
+    # ── Não é endereçável a frio (plano tipos-de-contato) ────────────
+    # A sessão `wsess_…` é criada no navegador do visitante quando ELE abre o
+    # widget — não há id que o operador conheça de antemão para começar uma
+    # conversa. Então o core esconde o website do seletor "Nova conversa".
+    @classmethod
+    def can_initiate_conversation(cls) -> bool:
+        return False
+
     def __init__(self, channel_id: str, registry=None,
                  credentials: Optional[dict] = None):
         super().__init__(

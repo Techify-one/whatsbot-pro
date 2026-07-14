@@ -176,6 +176,22 @@ class Channel(ABC):
         """
         return "outros"
 
+    @classmethod
+    def can_initiate_conversation(cls) -> bool:
+        """Whether an operator can START a NEW conversation on this provider.
+
+        Default ``True``: providers addressable by a stable, operator-known id
+        (WhatsApp phone, Telegram chat_id) let the "Nova conversa" picker begin a
+        proactive outbound. Return ``False`` for providers whose recipient id only
+        exists AFTER the customer reaches out — e.g. the website widget, whose
+        ``wsess_…`` session is minted in the visitor's browser and can't be
+        addressed cold. The core hides such providers from the start-conversation
+        inbox picker (``GET /api/channels/connected``). Pure static provider trait
+        (no network/DB), resolved by the core via the provider class — never by
+        ``if provider ==``.
+        """
+        return True
+
     # ── source_id form (dedup key — plano 42) ────────────────────────
     @classmethod
     def source_id_for(cls, phone: str, is_group: bool) -> str:

@@ -251,11 +251,34 @@ async def list_connected(deps) -> list[dict]:
                 pass
         if not logged_in:
             continue
+        cls = registry.get_provider(row.get("provider")) if registry is not None else None
+        # Só canais em que o operador PODE iniciar uma conversa a frio (plano
+        # tipos-de-contato): o provider declara via Channel.can_initiate_conversation().
+        # O widget de site (sessão `wsess_…` nasce no navegador do visitante) devolve
+        # False e é escondido do seletor "Nova conversa". Resolvido pela classe (puro,
+        # sem rede), fail-open (True) — nunca por `if provider ==`.
+        if cls is not None:
+            try:
+                if not cls.can_initiate_conversation():
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        # Tipo de contato do canal (plano tipos-de-contato): o provider declara via
+        # Channel.contact_type() — fail-open para "outros". Usado pela UI de "Nova
+        # conversa" pra filtrar as sugestões do campo "Para" pelo tipo do canal
+        # escolhido (canal Telegram → só contatos telegram).
+        contact_type = "outros"
+        if cls is not None:
+            try:
+                contact_type = cls.contact_type()
+            except Exception:  # noqa: BLE001
+                contact_type = "outros"
         out.append({
             "id": row["id"],
             "provider": row.get("provider"),
             "display_name": row.get("display_name") or "",
             "own_phone": row.get("own_phone"),
+            "contact_type": contact_type,
         })
     return out
 

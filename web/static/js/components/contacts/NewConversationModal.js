@@ -1,12 +1,39 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState } from '../../services/api.js';
+import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState, getContacts } from '../../services/api.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
+import { avatarUrl } from './utils.js';
+import { DefaultAvatar } from './icons.js';
 
 const html = htm.bind(h);
+
+// Casefold + strip accents — espelha o `_fold` do backend pra busca/realce baterem.
+function foldStr(s) {
+  return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}
+
+// Quebra `text` em segmentos {s, hit} ao redor das ocorrências de `query`
+// (case/acento-insensível), pra destacar o trecho casado no autocomplete.
+function highlightParts(text, query) {
+  const t = text || '';
+  const q = foldStr(query);
+  if (!q) return [{ s: t, hit: false }];
+  const f = foldStr(t);
+  if (f.length !== t.length) return [{ s: t, hit: false }];  // fold mudou o tamanho → sem realce
+  const parts = [];
+  let i = 0;
+  while (i <= t.length) {
+    const idx = f.indexOf(q, i);
+    if (idx === -1) { if (i < t.length) parts.push({ s: t.slice(i), hit: false }); break; }
+    if (idx > i) parts.push({ s: t.slice(i, idx), hit: false });
+    parts.push({ s: t.slice(idx, idx + q.length), hit: true });
+    i = idx + q.length;
+  }
+  return parts;
+}
 
 // Rótulo/cor por provider — espelha o ChannelPickerModal (paleta dark-mode-safe).
 const PROVIDER_META = {
@@ -59,6 +86,14 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   const { quickReplies, getCandidates } = useQuickReplies();
   const [quickReplyMenu, setQuickReplyMenu] = useState(null);  // {query, start, index} | null
   const inputRef = useRef(null);
+  // Autocomplete do campo "Para": busca contatos por NOME ou número (server-side,
+  // cobre todos os contatos independente do filtro da sidebar). Escolher um item
+  // preenche o número e dispara a verificação de WhatsApp já existente.
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [sugIndex, setSugIndex] = useState(0);
+  const sugSeq = useRef(0);
+  const paraRef = useRef(null);
 
   // Carrega as caixas de entrada conectadas (já filtradas pelo backend).
   useEffect(() => {
@@ -73,12 +108,30 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     return () => { alive = false; };
   }, []);
 
+  // Canal escolhido + seu tipo de contato (plano tipos-de-contato). Canais "de
+  // telefone" (WhatsApp) normalizam BR (+55) e verificam registro no WhatsApp; os
+  // demais usam um identificador OPACO — Telegram = chat_id, website = session id —
+  // que NÃO pode ser normalizado nem verificado (o "+55" quebra o destino e a
+  // verificação não faz sentido). Vai pro envio exatamente como digitado/escolhido.
+  const selectedChannel = channels.find((ch) => String(ch.id) === String(channelId)) || null;
+  const channelType = selectedChannel && selectedChannel.contact_type;
+  const isPhoneChannel = !channelType || channelType === 'whatsapp';
+
   // Verifica o número (debounce) sempre que o input OU o canal muda e parece um
   // telefone. O canal importa: só o GOWA consulta o WhatsApp; Cloud API/Telegram
   // assumem válido (não dá pra verificar antes de enviar).
   useEffect(() => {
     setCheckResult(null);
     setCheckError(null);
+    // Canal de identificador opaco (Telegram/website/…): sem normalização BR e sem
+    // verificação — o texto digitado (ou o id do contato escolhido no autocomplete)
+    // JÁ é o destinatário. `opaque` sinaliza pro render mostrar o id cru (sem "+55").
+    if (!isPhoneChannel) {
+      const id = phoneInput.trim();
+      setChecking(false);
+      if (id) setCheckResult({ phone: id, displayPhone: id, registered: true, name: '', opaque: true });
+      return;
+    }
     if (!looksLikePhone(phoneInput)) { setChecking(false); return; }
     const normalized = normalizePhone(phoneInput);
     if (!normalized) { setChecking(false); return; }
@@ -102,7 +155,69 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [phoneInput, channelId]);
+  }, [phoneInput, channelId, isPhoneChannel]);
+
+  // Busca de contatos (debounce) enquanto o operador digita no campo "Para".
+  // Bate no mesmo endpoint da lista (`/api/contacts?q=`), que casa nome, número e
+  // nome de grupo no backend. Só busca com o dropdown aberto (evita requisição
+  // depois de escolher um contato, quando o campo já virou o número).
+  useEffect(() => {
+    const q = phoneInput.trim();
+    if (!showSuggestions || q.length < 2) { setSuggestions([]); return; }
+    // Tipo de contato do canal escolhido (plano tipos-de-contato): o dropdown "Para"
+    // sugere só contatos daquele tipo (canal Telegram → só contatos telegram). Se o
+    // canal não expõe o tipo (payload antigo), não filtra (mostra todos).
+    const wantType = channelType;
+    const seq = ++sugSeq.current;
+    const t = setTimeout(async () => {
+      try {
+        const res = await getContacts(q);
+        if (seq !== sugSeq.current) return;  // resposta obsoleta
+        const list = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+        // Só pessoas (grupos não são um "novo atendimento" por número) e com número,
+        // e do mesmo tipo de contato que o canal escolhido.
+        const people = list
+          .filter((c) => c && !c.is_group && c.phone)
+          .filter((c) => !wantType || (c.contact_type || 'outros') === wantType)
+          .slice(0, 8);
+        setSuggestions(people);
+        setSugIndex(0);
+      } catch (e) {
+        if (seq === sugSeq.current) setSuggestions([]);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [phoneInput, showSuggestions, channelId, channels]);
+
+  function pickContact(c) {
+    if (!c || !c.phone) return;
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setPhoneInput(c.phone);  // dispara a verificação de WhatsApp já existente
+    setTimeout(() => { if (paraRef.current) paraRef.current.focus(); }, 0);
+  }
+
+  function onParaInput(e) {
+    setPhoneInput(e.target.value);
+    setShowSuggestions(true);
+  }
+
+  function onParaKeyDown(e) {
+    if (!showSuggestions || suggestions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSugIndex((i) => Math.min(i + 1, suggestions.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSugIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      pickContact(suggestions[Math.min(sugIndex, suggestions.length - 1)]);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setShowSuggestions(false);
+    }
+  }
 
   // Nome a exibir ao lado do número: contato salvo (sem o ~ de "veio do WhatsApp")
   // tem prioridade; senão o pushName retornado pelo check.
@@ -249,30 +364,6 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
 
         <!-- Body -->
         <div class="px-5 py-4 flex flex-col gap-4 overflow-y-auto wa-scrollbar">
-          <!-- Para: número -->
-          <div class="flex flex-col gap-1.5">
-            <label class="text-[13px] font-medium text-wa-secondary">Para</label>
-            <input
-              type="tel"
-              autofocus
-              value=${phoneInput}
-              onInput=${(e) => setPhoneInput(e.target.value)}
-              placeholder="DDD + número (ex: 64 90000-0000)"
-              class="wa-field w-full rounded-lg px-3 py-2 text-[14px] outline-none border border-wa-border focus:border-wa-teal"
-            />
-            <div class="min-h-[18px] text-[12px]">
-              ${checking ? html`<span class="text-wa-secondary animate-pulse-slow">Verificando se o número possui WhatsApp...</span>`
-                : checkError ? html`<span class="text-red-400">${checkError}</span>`
-                : checkResult ? html`
-                    <span class="flex items-center gap-1.5 text-wa-secondary">
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="#00a884"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                      <span class="text-wa-text font-medium">${formatPhoneDisplay(checkResult.displayPhone || checkResult.phone)}</span>
-                      ${resolvedName ? html`<span class="text-wa-secondary">· ${resolvedName}</span>` : ''}
-                    </span>`
-                : ''}
-            </div>
-          </div>
-
           <!-- Via: caixa de entrada -->
           <div class="flex flex-col gap-1.5">
             <label class="text-[13px] font-medium text-wa-secondary">Via</label>
@@ -295,6 +386,74 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
                 })}
               </select>
             `}
+          </div>
+
+          <!-- Para: nome do contato ou número -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[13px] font-medium text-wa-secondary">Para</label>
+            <div class="relative">
+              <input
+                ref=${paraRef}
+                type="text"
+                autofocus
+                value=${phoneInput}
+                onInput=${onParaInput}
+                onKeyDown=${onParaKeyDown}
+                onFocus=${() => { if (phoneInput.trim().length >= 2) setShowSuggestions(true); }}
+                onBlur=${() => setTimeout(() => setShowSuggestions(false), 150)}
+                placeholder=${isPhoneChannel ? 'Nome ou número (ex: João ou 64 90000-0000)' : 'Nome ou ID do chat (ex: 8192089640)'}
+                autocomplete="off"
+                class="wa-field w-full rounded-lg px-3 py-2 text-[14px] outline-none border border-wa-border focus:border-wa-teal"
+              />
+              ${showSuggestions && suggestions.length > 0 ? html`
+                <div class="absolute left-0 right-0 top-[calc(100%+4px)] max-h-[240px] overflow-y-auto bg-wa-panel border border-wa-border rounded-lg shadow-lg py-1 z-30 wa-scrollbar">
+                  ${suggestions.map((c, i) => {
+                    const nm = (c.name || '').replace(/^~/, '');
+                    // Canal opaco (Telegram/website): o "phone" é um id (chat_id), não
+                    // formata como telefone BR (senão vira um "+55 (…)" enganoso).
+                    const phoneStr = isPhoneChannel ? formatPhoneDisplay(c.phone) : c.phone;
+                    const primary = nm || phoneStr;
+                    const secondary = nm ? phoneStr : '';
+                    const sel = i === Math.min(sugIndex, suggestions.length - 1);
+                    return html`
+                      <button
+                        type="button"
+                        key=${c.phone}
+                        onMouseDown=${(ev) => { ev.preventDefault(); pickContact(c); }}
+                        class="w-full flex items-center gap-2.5 px-3 py-2 text-left ${sel ? 'bg-wa-hover' : ''} hover:bg-wa-hover"
+                      >
+                        <div class="w-8 h-8 rounded-full overflow-hidden shrink-0">
+                          <${DefaultAvatar} size=${32} avatarUrl=${avatarUrl(c.phone, c.avatar_v)} />
+                        </div>
+                        <div class="min-w-0 flex-1">
+                          <div class="text-[14px] text-wa-text truncate">
+                            ${highlightParts(primary, phoneInput).map((p) => p.hit
+                              ? html`<mark class="bg-wa-teal/30 text-wa-text rounded px-0.5">${p.s}</mark>`
+                              : p.s)}
+                          </div>
+                          ${secondary ? html`<div class="text-[12px] text-wa-secondary truncate">${secondary}</div>` : ''}
+                        </div>
+                      </button>
+                    `;
+                  })}
+                </div>
+              ` : ''}
+            </div>
+            <div class="min-h-[18px] text-[12px]">
+              ${checking ? html`<span class="text-wa-secondary animate-pulse-slow">Verificando se o número possui WhatsApp...</span>`
+                : checkError ? html`<span class="text-red-400">${checkError}</span>`
+                : checkResult ? html`
+                    <span class="flex items-center gap-1.5 text-wa-secondary">
+                      ${checkResult.opaque
+                        ? html`<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
+                        : html`<svg viewBox="0 0 24 24" width="14" height="14" fill="#00a884"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>`}
+                      <span class="text-wa-text font-medium">${checkResult.opaque
+                        ? checkResult.displayPhone
+                        : formatPhoneDisplay(checkResult.displayPhone || checkResult.phone)}</span>
+                      ${resolvedName ? html`<span class="text-wa-secondary">· ${resolvedName}</span>` : ''}
+                    </span>`
+                : ''}
+            </div>
           </div>
 
           <!-- Status da janela de 24h (inline, sem modal) -->
