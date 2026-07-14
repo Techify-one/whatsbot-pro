@@ -11,15 +11,15 @@ Registro dos defeitos encontrados durante o roteiro de [testaria.md](testaria.md
 - **Bloco do teste:** Multiusuário / canais (visibilidade + atribuição)
 
 **Sintoma observado:**
-Mesmo tendo mandado mensagem **só pelo Telegram**, o contato "Ezequiel"
-(phone `7687698423`) aparece **duplicado** na sidebar — uma entrada no canal
+Mesmo tendo mandado mensagem **só pelo Telegram**, o contato "Contato Teste"
+(phone `<id_telegram>`) aparece **duplicado** na sidebar — uma entrada no canal
 **Telegram** e outra no canal **WhatsApp** — como se tivesse recebido mensagem
 nos dois. A IA respondeu na conversa do WhatsApp (que estava com IA ligada) ao
 mesmo tempo em que a atividade acontecia no Telegram.
 
 **Causa-raiz (confirmada no banco):**
 O provider Telegram gravou o `contact_inbox.source_id` como
-**`7687698423@s.whatsapp.net`** — um JID no formato **WhatsApp** — em vez de uma
+**`<id_telegram>@s.whatsapp.net`** — um JID no formato **WhatsApp** — em vez de uma
 identidade nativa do Telegram. Como a identidade "parece" um contato WhatsApp, o
 caminho compartilhado de mensagem/memória (que assume WhatsApp — ver
 `agent/memory.py:167`, `suffix = "s.whatsapp.net"`, e `DEFAULT_CHANNEL_ID =
@@ -30,9 +30,9 @@ respondeu ali**.
 
 Evidência (banco):
 ```
-contact_id=3 phone='7687698423' name='~Ezequiel'
-  contact_inbox=3 inbox='Telegram'  source_id='7687698423@s.whatsapp.net'  (16:48)
-  contact_inbox=5 inbox='WhatsApp'  source_id='7687698423@s.whatsapp.net'  (18:56) ← FANTASMA
+contact_id=3 phone='<id_telegram>' name='~Teste'
+  contact_inbox=3 inbox='Telegram'  source_id='<id_telegram>@s.whatsapp.net'  (16:48)
+  contact_inbox=5 inbox='WhatsApp'  source_id='<id_telegram>@s.whatsapp.net'  (18:56) ← FANTASMA
   atendimento=3 inbox='Telegram'  ai_active=0
   atendimento=5 inbox='WhatsApp'  ai_active=1  ← IA respondeu aqui indevidamente
 ```
@@ -88,14 +88,14 @@ atividade do Telegram (18:57:24) — confirma o leak cross-channel.
 
 ## PROVA DEFINITIVA do Defeito #1 (smoking gun)
 
-Ao tentar responder na conversa fantasma #12 (logado como `wa1@teste.com`,
-atendente SÓ do WhatsApp), o envio falhou com:
+Ao tentar responder na conversa fantasma #12 (logado como um atendente de
+teste, membro SÓ do WhatsApp), o envio falhou com:
 
 > **Falha ao enviar mensagem: Erro da API do WhatsApp (HTTP 400):
-> Phone `7687698423@s.whatsapp.net` is not on whatsapp**
+> Phone `<id_telegram>@s.whatsapp.net` is not on whatsapp**
 
-Ou seja: o **id do Telegram** `7687698423` foi convertido em **JID de WhatsApp**
-`7687698423@s.whatsapp.net` e o sistema tentou **entregar pelo GOWA/WhatsApp**.
+Ou seja: o **id do Telegram** `<id_telegram>` foi convertido em **JID de WhatsApp**
+`<id_telegram>@s.whatsapp.net` e o sistema tentou **entregar pelo GOWA/WhatsApp**.
 O WhatsApp rejeitou porque o número não existe lá (é id de Telegram). Confirma
 que a identidade do Telegram vazou para o pipeline WhatsApp.
 
@@ -119,7 +119,7 @@ materializou o gêmeo WhatsApp.
 
 **Sintoma observado:**
 Um usuário membro **apenas do canal WhatsApp** (role `atendente`, sem
-`conversation.read_all`) consegue **ver/abrir** a conversa do contato "Ezequiel"
+`conversation.read_all`) consegue **ver/abrir** a conversa do contato "Contato Teste"
 que é do **Telegram** (`/conversations/3`). Ao tentar responder, aparece
 **"Permissão negada"** (o gate de ESCRITA funciona), mas a **leitura vazou**.
 
@@ -158,7 +158,7 @@ não negação total).
 
 ---
 
-## Observações de console (registro — 08/07, sessão como `wa1@teste.com` atendente)
+## Observações de console (registro — 08/07, sessão de um atendente de teste do WhatsApp)
 
 Erros vistos no DevTools durante o teste (para histórico):
 
@@ -166,7 +166,7 @@ Erros vistos no DevTools durante o teste (para histórico):
 |----------|--------|---------------|------|
 | `/api/users` | **403** (várias) | **Esperado** — `atendente` não tem permissão de gerenciar usuários; o RBAC está barrando certo. O ruído é a UI CHAMAR o endpoint mesmo sem permissão. | Cosmético. Ideal: frontend não chamar `/api/users` quando o usuário não tem a permissão (esconder a chamada, não só a tela). Baixa prioridade. |
 | `/api/balance` | **502** (várias) | Gateway error ao consultar saldo (proxy Techify `/credits`). Pode ser transitório (proxy fora) OU erro real do balance_monitor. | ✅ Resolvido (plano 42 WS C). Diagnóstico C0: o proxy Techify está **UP e rápido** (~250ms) — era hiccup transitório / cache frio no boot (nenhuma LLM call ainda populou o cache). O endpoint agora **degrada p/ 200 `available:false`** em vez de 502 quando o proxy está fora e sem cache ([server/routes/config.py](../server/routes/config.py)); o cache é primado no boot (fire-and-forget, [server/balance_monitor.py](../server/balance_monitor.py) `prime_cache` + [server/app.py](../server/app.py)); o frontend tolera `available:false` sem abrir modal ([App.js](../web/static/js/components/shell/App.js)). O 400 de "sem api_key" permanece. Testes: [tests/test_balance_degradation.py](../tests/test_balance_degradation.py). |
-| `/api/contacts/7687698423/send` | **500** | Envio na conversa FANTASMA do WhatsApp (Defeito #1). O backend estoura 500 ao tentar mandar pro `7687698423@s.whatsapp.net` (não existe no WhatsApp). | Parte do **Defeito #1**. Bônus: o erro deveria virar um 4xx tratado, não 500 cru. |
+| `/api/contacts/<id_telegram>/send` | **500** | Envio na conversa FANTASMA do WhatsApp (Defeito #1). O backend estoura 500 ao tentar mandar pro `<id_telegram>@s.whatsapp.net` (não existe no WhatsApp). | Parte do **Defeito #1**. Bônus: o erro deveria virar um 4xx tratado, não 500 cru. |
 
 > Nota: o **500** e o **403** são consequências esperadas do cenário de teste
 > (contato fantasma + atendente sem permissão de users). O **502 do /api/balance**
