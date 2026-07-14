@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { PlusIcon } from './icons.js';
 
@@ -19,11 +19,17 @@ export const TAG_COLORS = [
 //  - onToggle(name): apply/remove the tag.
 //  - onCreateTag(name, color): create a NEW global tag; returns a truthy promise on
 //                    success. The freshly created tag is then applied via onToggle.
-export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClearAll = null }) {
+export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClearAll = null, onCreatingChange = null }) {
   const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newColor, setNewColor] = useState(TAG_COLORS[0]);
+
+  // Let the host know when the inline "create tag" form is open. In the context-menu
+  // flyout the form pops up away from the pointer, so the host pins the flyout open
+  // (no hover-close) while the user fills it in. Optional — callers that inline the
+  // picker (bulk menu) just don't pass it.
+  useEffect(() => { if (onCreatingChange) onCreatingChange(creating); }, [creating]);
 
   const term = search.trim();
   const entries = Object.entries(globalTags || {})

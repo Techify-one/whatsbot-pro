@@ -44,8 +44,6 @@ class AgentHandler:
         audio_model: str = "google/gemini-2.5-flash",
         image_model: str = "google/gemini-2.5-flash",
         document_model: str = "google/gemini-2.5-flash",
-        improvement_model: str = "",
-        improvement_prompt: str = "",
         pricing_fn=None,
         default_ai_enabled: bool = True,
     ):
@@ -58,12 +56,6 @@ class AgentHandler:
         self.audio_model = audio_model
         self.image_model = image_model
         self.document_model = document_model
-        # Model used for the one-shot "improvement analysis" of a flagged AI
-        # reply. Empty → fall back to ``self.model`` (the chat model).
-        self.improvement_model = improvement_model
-        # System prompt of that same analysis. Empty → the code default in
-        # app.services.improvement_service.DEFAULT_IMPROVEMENT_PROMPT.
-        self.improvement_prompt = improvement_prompt
         self.default_ai_enabled = default_ai_enabled
         # Keyed by (channel_id, phone) — plano 11 D3.
         self._contacts: dict[tuple[str, str], ContactMemory] = {}
@@ -196,8 +188,6 @@ class AgentHandler:
         audio_model: str | None = None,
         image_model: str | None = None,
         document_model: str | None = None,
-        improvement_model: str | None = None,
-        improvement_prompt: str | None = None,
         split_messages: bool | None = None,
         default_ai_enabled: bool | None = None,
     ):
@@ -215,10 +205,6 @@ class AgentHandler:
             self.image_model = image_model
         if document_model is not None:
             self.document_model = document_model
-        if improvement_model is not None:
-            self.improvement_model = improvement_model
-        if improvement_prompt is not None:
-            self.improvement_prompt = improvement_prompt
         if split_messages is not None:
             self.split_messages = split_messages
         if default_ai_enabled is not None:
@@ -346,20 +332,6 @@ class AgentHandler:
         except Exception:
             logger.exception(
                 "Falha ao gravar card de erro de resolução para %s", sender)
-
-    def generate_improvement(self, phone: str, target_message: dict,
-                             feedback: str, *,
-                             conversation_id: int | None = None) -> str:
-        """One-shot quality analysis of an AI reply flagged as incorrect.
-
-        Delegates to ``app.services.improvement_service`` (Fase B5). DIRECT,
-        non-agentic LLM call via the ISOLATED SYNC client (``_get_client``).
-        ``conversation_id`` (plano 31 F3) escopa a análise à conversa da
-        resposta marcada (canal + histórico); ``None`` = comportamento legado."""
-        from app.services import improvement_service
-        return improvement_service.generate_improvement(
-            self, phone, target_message, feedback,
-            conversation_id=conversation_id)
 
     def _ensure_conversation_agent(self, contact, agent_spec) -> None:
         """Attribute the active conversation to the AI agent that is answering so

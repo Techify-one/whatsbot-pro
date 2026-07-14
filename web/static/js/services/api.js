@@ -254,13 +254,6 @@ export async function reactToMessage(phone, msgId, emoji, conversationId = null)
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/react`, body);
 }
 
-// Generate an AI-quality improvement analysis for a flagged AI reply.
-export async function generateImprovement(phone, { message, feedback = '', conversationId = null }) {
-  const body = { message, feedback };
-  if (conversationId != null) body.conversation_id = conversationId;
-  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/improve`, body);
-}
-
 export async function sendPrivateMessage(phone, text, opts = {}) {
   const body = { text };
   if (opts.aiRead !== undefined) body.ai_read = !!opts.aiRead;

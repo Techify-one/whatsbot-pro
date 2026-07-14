@@ -1,39 +1,28 @@
-"""Golden-master characterization of the two CURRENT SYNC-LLM callers that block
-the Plano 23 · Fase A2b C-1 sync-caller migration (BLOCKING).
+"""Golden-master characterization of the sandbox-SEND sync→async migration.
 
-Two callers reach the SYNCHRONOUS LLM path today and both must keep their exact
-observable behavior when Wave-2 step B5 migrates them to ``async``:
+(Historically this file also covered ``generate_improvement`` — the "Gerar
+melhoria" one-shot analysis. That feature was moved out of core into the
+``melhorias`` plugin (``storages/plugins/melhorias/generation.py``); its tests
+live in the plugin's own ``tests/test_melhorias.py``. Only the sandbox-send
+cases remain here.)
 
-  1. ``server/routes/sandbox.py`` ``/api/sandbox/send`` → ``_sandbox_reply`` →
-     ``agent_handler.process_message(phone, "", save_user_message=False,
-     save_response=False)`` (sync). The endpoint splits/persists/broadcasts the
-     reply and returns ``{reply, replies, phone}``.
+The remaining caller reached the SYNCHRONOUS LLM path and must keep its exact
+observable behavior across the Wave-2 step B5 migration to ``async``:
 
-  2. ``agent/handler.py`` ``generate_improvement(phone, target, feedback)`` →
-     a DIRECT, non-agentic ``self._get_client().chat.completions.create(...)``
-     (sync OpenAI client). Exposed via ``POST /api/contacts/{phone}/improve``,
-     which saves the analysis as a panel-only ``system`` message.
+  ``server/routes/sandbox.py`` ``/api/sandbox/send`` → ``_sandbox_reply`` →
+  ``agent_handler.aprocess_message(...)``. The endpoint splits/persists/broadcasts
+  the reply and returns ``{reply, replies, phone}``.
 
-We characterize each with the LLM stubbed at a CLEAN, deterministic seam:
-  * sandbox → patch ``process_message`` to return a canned ``ProcessResult``
-    (the suite's sync seam, same as ``fake_agent_reply`` / test_endpoints.py);
-  * generate_improvement → patch the handler's ``_get_client`` to return a fake
-    OpenAI client whose ``chat.completions.create`` returns a canned response
-    object (``choices[0].message.content`` + ``usage``). No network, no AGNO.
+We characterize it with the LLM stubbed at a CLEAN, deterministic seam:
+  * sandbox → patch ``aprocess_message`` to return a canned ``ProcessResult``
+    (the suite's seam, same as ``fake_agent_reply`` / test_endpoints.py).
 
-Each golden snapshots the NORMALIZED outcome:
-  (a) ``response`` — the endpoint JSON body (or the ``generate_improvement``
-      return string), and
-  (b) ``messages`` — the rows persisted for that contact (role / content /
-      media_type / status; ts/msg_id normalized away).
+Each golden snapshots the NORMALIZED outcome: the endpoint JSON body + the rows
+persisted for that contact (role / content / media_type / status; ts/msg_id
+normalized away).
 
-These goldens prove behavior is preserved across the B5 sync→async migration.
-
-Discipline: ADDITIVE only. We do NOT change app/source and do NOT "fix" behavior;
-likely bugs are CAPTURED with ``# CHARACTERIZED BUG:`` comments.
-
-Distinct phone numbers per test (the suite shares one process DB). All goldens +
-this file are prefixed ``sandbox_improve`` to avoid sibling collisions.
+Distinct phone numbers per test (the suite shares one process DB). Goldens are
+prefixed ``sandbox_improve`` (historical name) to avoid sibling collisions.
 """
 
 from __future__ import annotations
@@ -246,134 +235,6 @@ def test_sandbox_send_no_message(build_app):
     assert r.status_code == 400
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GENERATE_IMPROVEMENT  ·  handler.generate_improvement (DIRECT sync client)
-# ═══════════════════════════════════════════════════════════════════════════
-
-_IMPROVE_ANALYSIS = (
-    "**Diagnóstico**\nA IA respondeu fora do escopo.\n\n"
-    "**Recomendações**\n- Ajustar o prompt para focar no produto."
-)
-
-
-def test_improve_happy_unit(build_app):
-    """``generate_improvement`` happy path at the UNIT seam: ``_get_client``
-    stubbed → ``chat.completions.create`` returns a canned analysis; the method
-    returns the trimmed content. We also assert the create() call carried the
-    expected static params (temperature/max_tokens) so B5's async rewrite keeps
-    the same request shape.
-
-    Golden captures the returned analysis string."""
-    phone = "5511975100001"
-    handler = build_app(["gowa"]).agent_handler
-    # Seed a tiny history so the prompt assembly has something to mark.
-    contact = handler._get_contact(phone)
-    contact.add_message("user", "qual o preço?")
-    contact.add_message("assistant", "não sei dizer")
-
-    fake_client = _FakeOpenAIClient(response=_fake_llm_response(_IMPROVE_ANALYSIS))
-    target = {"content": "não sei dizer", "ts": 0}
-    with patch.object(handler, "_get_client", return_value=fake_client):
-        out = handler.generate_improvement(phone, target, "saiu errado")
-
-    # Request shape the async migration must preserve.
-    assert len(fake_client.create_calls) == 1
-    call = fake_client.create_calls[0]
-    assert call.get("temperature") == 0.4
-    assert call.get("max_tokens") == 8000  # bumped from 1600 (reasoning tokens truncavam a análise)
-    assert [m["role"] for m in call["messages"]] == ["system", "user"]
-
-    golden_assert("sandbox_improve_generate_happy",
-                  normalize({"analysis": out}))
-
-
-def test_improve_no_api_key(build_app):
-    """No API key → early return ``[WhatsBot] API key não configurada.`` BEFORE
-    any client/network. The sync client is never constructed."""
-    phone = "5511975100002"
-    handler = build_app(["gowa"]).agent_handler
-    saved_key = handler.api_key
-    handler.api_key = ""
-    try:
-        # Guard: if the early-return regressed, this would explode (no real net).
-        with patch.object(handler, "_get_client",
-                          side_effect=AssertionError("client must not be used")):
-            out = handler.generate_improvement(
-                phone, {"content": "x", "ts": 0}, "")
-    finally:
-        handler.api_key = saved_key
-    golden_assert("sandbox_improve_generate_no_api_key",
-                  normalize({"analysis": out}))
-
-
-def test_improve_llm_error(build_app):
-    """LLM raises → ``generate_improvement`` swallows it and returns the
-    ``[WhatsBot] Falha ao gerar a análise de melhoria: <e>`` fallback string.
-
-    The error text is the stringified exception; we use a fixed message so the
-    golden is stable."""
-    phone = "5511975100003"
-    handler = build_app(["gowa"]).agent_handler
-    contact = handler._get_contact(phone)
-    contact.add_message("user", "oi")
-    contact.add_message("assistant", "resposta ruim")
-
-    fake_client = _FakeOpenAIClient(raise_exc=RuntimeError("boom-determinístico"))
-    with patch.object(handler, "_get_client", return_value=fake_client):
-        out = handler.generate_improvement(
-            phone, {"content": "resposta ruim", "ts": 0}, "feedback")
-    golden_assert("sandbox_improve_generate_llm_error",
-                  normalize({"analysis": out}))
-
-
-def test_improve_endpoint_happy(build_app):
-    """END-TO-END through ``POST /api/contacts/{phone}/improve``: the analysis is
-    saved as a panel-only ``system`` message ``"🔧 Análise de melhoria\\n\\n<a>"``
-    and returned in ``data``. Default-allow auth (single-password suite).
-
-    Golden captures the response + the persisted ``system`` row."""
-    phone = "5511975100004"
-    built = build_app(["gowa"])
-    handler = built.agent_handler
-    contact = handler._get_contact(phone)
-    contact.add_message("user", "preciso de ajuda")
-    contact.add_message("assistant", "resposta marcada")
-
-    fake_client = _FakeOpenAIClient(response=_fake_llm_response(_IMPROVE_ANALYSIS))
-    with patch.object(handler, "_get_client", return_value=fake_client):
-        r = built.client.post(
-            f"/api/contacts/{phone}/improve",
-            json={"message": {"content": "resposta marcada", "ts": 0},
-                  "feedback": "saiu errado"})
-    assert r.status_code == 200, r.text
-    # The saved-note row is echoed in ``data`` with autoincrement ``_id`` /
-    # ``conversation_id`` (shared-DB ordinals — not behavior). Project to the
-    # load-bearing fields so the golden is stable across suite order.
-    data = r.json().get("data") or {}
-    note = {k: data.get(k) for k in ("role", "content", "status", "msg_id", "ts")}
-    golden_assert("sandbox_improve_endpoint_happy", normalize({
-        "status_code": r.status_code,
-        "ok": r.json().get("ok"),
-        "note": note,
-        "messages": _project_messages(phone),
-    }))
-
-
-def test_improve_endpoint_invalid_message(build_app):
-    """Endpoint validation: empty target content → 400 ``_err`` BEFORE the LLM.
-    ``generate_improvement`` is never called."""
-    phone = "5511975100005"
-    built = build_app(["gowa"])
-    with patch.object(built.agent_handler, "generate_improvement",
-                      side_effect=AssertionError("must not reach LLM")):
-        r = built.client.post(
-            f"/api/contacts/{phone}/improve",
-            json={"message": {"content": "   ", "ts": 0}, "feedback": ""})
-    golden_assert("sandbox_improve_endpoint_invalid_message", normalize({
-        "status_code": r.status_code, "response": r.json()}))
-    assert r.status_code == 400
-
-
 # ── B5/C-1 migration: the sandbox caller is now ASYNC ────────────────────────
 
 def test_sandbox_send_uses_async_aprocess_message(build_app):
@@ -402,15 +263,3 @@ def test_sandbox_send_uses_async_aprocess_message(build_app):
     assert len(fake.calls) == 1
     # Stubbed reply flows through unchanged.
     assert r.json()["data"]["reply"] == "ok async!"
-
-
-def test_improve_stays_sync_isolated():
-    """AFTER Fase B5 (DECISION Q1): ``generate_improvement`` deliberately KEEPS
-    the ISOLATED SYNC client — it was NOT migrated to async. It lives in
-    ``app.services.improvement_service`` and calls ``handler._get_client()`` (the
-    sync OpenAI client). The unit/endpoint goldens above already lock its behavior;
-    this cell records the decision so a future async move is a deliberate change."""
-    import inspect
-    from app.services import improvement_service
-    # The service entry point is a plain (sync) function, not a coroutine.
-    assert not inspect.iscoroutinefunction(improvement_service.generate_improvement)
