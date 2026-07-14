@@ -19,8 +19,9 @@ Every function takes the ``handler`` so it can read live config (``api_key`` /
 ``AgentHandler`` keeps thin delegates with the same method names so existing
 callers (webhook/sandbox/messaging_service/tests) are unchanged.
 
-DECISION (Plano 23 Q1): ``generate_improvement`` keeps an ISOLATED SYNC client —
-it reuses :func:`get_client` here rather than being forced async; less churn.
+The ISOLATED SYNC client (:func:`get_client`) is also reused by the ``melhorias``
+plugin's direct-API analysis generator via ``handler._get_client()`` — a generic
+seam that outlives the moved "Gerar melhoria" feature.
 
 Naming: user-visible "OpenRouter" wording is migrated to "Techify" in the
 messages this module owns (the provider is the Techify proxy).

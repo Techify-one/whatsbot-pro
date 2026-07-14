@@ -1282,8 +1282,6 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   // at.fields; o rótulo Atendente vem do assignee nativo). Editável enquanto aberto; serve
   // de fonte também p/ a visão read-only.
   const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
-  const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
-  const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of protoDefs) {
@@ -1402,10 +1400,6 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
-            ${showAssigneeSeedNotice ? html`
-              <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
-                Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?
-              </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {
                 const def = (d.type === 'atendente' && hasSavedAssignee)

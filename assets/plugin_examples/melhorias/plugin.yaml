@@ -1,0 +1,48 @@
+id: melhorias
+name: Sugestões de melhoria
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Move o antigo "Gerar melhoria" (análise de qualidade de uma resposta da IA) para um
+  FLUXO DE APROVAÇÃO. Com o plugin ativo, o botão-direito numa resposta da IA ganha "Gerar
+  melhoria": em vez de postar a análise inline na conversa, registra um PEDIDO pendente num
+  painel de aprovação e posta apenas um aviso de sistema com link. A análise da IA (chamada
+  DIRETA a um modelo, mesmo mecanismo de antes) só é gerada quando alguém com permissão
+  APROVA o pedido — atrás de um seam (generation.py) que permite, no futuro, trocar por um
+  agente com sub-agentes sem reescrever os call sites. O painel (modelo da aba Lista de
+  Protocolos) lista conteúdo da mensagem, solicitante, melhoria solicitada, link para a
+  conversa, horários de solicitação/aprovação, status e aprovador — todos filtráveis — e
+  mostra botões Aprovar/Recusar por linha só para quem tem permissão. O modelo/prompt da
+  análise e a lista de análises geradas ficam numa seção da aba "Configurações de IA"
+  (preenchida via slot). Desative o plugin e tudo some (opção do menu, painel, seção de IA
+  e endpoints); os dados ficam nas tabelas do plugin.
+short_description: >-
+  Fluxo de aprovação para sugestões de melhoria de respostas da IA (painel + permissões).
+author: WhatsBot
+entry:
+  routes: routes        # REST: /api/plugins/melhorias/... (inclui GET/PUT /config: modelo/prompt)
+  events: events        # app.startup: backfill one-time da config antiga do core
+migrations: migrations
+# Item do menu de contexto (via filter.message.contextMenu.items) + seção na aba de IA
+# (via slot ai.settings.sections) vivem no extends.js (registrado 1x no boot).
+frontend_extends: /plugins/melhorias/static/extends.js
+frontend_api_version: "1.0"
+screens:
+  # Painel de aprovação (config:false) — página full-page no menu da engrenagem,
+  # escondida sem a permissão `view`. Modelo da aba "Lista" de Protocolos.
+  - id: melhorias-panel
+    title: Sugestões de melhoria
+    path: /melhorias
+    config: false
+    component: /plugins/melhorias/static/panel.js
+    requires: view
+permissions:
+  - db.write
+rbac:
+  group: "Sugestões de melhoria"
+  permissions:
+    - { key: request,   label: "Solicitar sugestão de melhoria (opção no botão-direito)" }
+    - { key: view,      label: "Ver o painel de aprovação e as análises geradas" }
+    - { key: approve,   label: "Aprovar/recusar sugestões de melhoria" }
+    - { key: configure, label: "Configurar o modelo/prompt da análise" }
+dependencies: []
