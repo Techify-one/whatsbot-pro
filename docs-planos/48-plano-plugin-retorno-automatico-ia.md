@@ -1,9 +1,10 @@
 # Plano 48 — Plugin "retorno_automatico" (Retorno Automático — IA)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-11 · **Escopo:** médio (plugin novo, self-contained; sem mudança no core)
+> **Status:** ✅ IMPLEMENTADO (2026-07-13) — F0→F5 + F7 verdes; F6 fora do MVP (P3) · **Data:** 2026-07-11 · **Escopo:** médio (plugin novo, self-contained; sem mudança no core)
 > **Origem:** pedido do usuário — "plugin de retornos automáticos com IA". MVP: quando um cliente atendido por IA fica em silêncio, postar uma NOTA PRIVADA pedindo para reativar a IA.
 > **Método:** leitura do código real + 4 sub-agentes de exploração (modelo de atendimentos, papéis de mensagem, tarefas de fundo de plugin, plugin de horário). Todo ponto de mudança abaixo tem `arquivo:linha` verificado.
 > **Como usar este plano:** ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro.
+> **⚠️ Execução em PARALELO:** outra IA está implementando o **Plano 49** (plugin `utm_atendente`) neste mesmo repositório ao mesmo tempo. Toque **somente** em `storages/plugins/retorno_automatico/**`, `tests/test_retorno_automatico.py` e os blocos de status deste arquivo. **Zero** edição no core. Use um banco de teste próprio (`whatsbot_test_48`), rode testes por arquivo e, se subir o servidor, use a porta 8148.
 
 ---
 
@@ -134,7 +135,7 @@ Estrutura final do plugin (tudo novo, em `storages/plugins/retorno_automatico/`)
 
 ```
 enabled: bool = True                      # master do plugin
-silence_hours: float = 3.0    (ge=0.25)   # silêncio do cliente antes da nota
+silence_minutes: int = 180 (ge=1,le=10080) # silêncio do cliente antes da nota (MINUTOS; 30=meia hora, 1=teste rápido — ajuste pós-impl. a pedido do usuário)
 max_consecutive_notes: int = 3 (ge=1,le=20) # limite de notas consecutivas s/ resposta
 business_start: str = "08:00"             # "HH:MM"
 business_end:   str = "18:00"             # "HH:MM"
@@ -142,8 +143,9 @@ day_mon..day_fri: bool = True             # dias ativos (default seg–sex)
 day_sat, day_sun: bool = False
 tz_offset_hours: float = -3.0 (ge=-12,le=14)
 apply_to_groups: bool = False             # default: pula grupos (só cliente individual)
-note_template: str = "🔔 O cliente {cliente} está sem responder há {horas}h. "
+note_template: str = "🔔 O cliente {cliente} está sem responder há {tempo}. "
                      "Reative a IA para dar seguimento. (Tentativa {tentativa}/{max})"
+                     # placeholders: {cliente} {tempo}(ex.: 3h/30min) {minutos} {horas} {tentativa} {max}
 ```
 Lidas a **cada ciclo** via `config_repo.get(f"plugin.retorno_automatico.{campo}")` (mudança vale na hora, sem restart — igual `agendamento_retorno/logic.py:328-335`).
 
@@ -192,7 +194,7 @@ Dado `now`, `signals`, `cfg`:
    se NÃO cliente_em_silencio            → SKIP  (cliente respondeu — contador zera naturalmente)
 3. se notes_since_reply >= max_consecutive_notes → SKIP  (D3: standby até o cliente responder)
 4. anchor = max(last_outbound_ts, last_note_ts or 0)
-   se (now - anchor) < silence_hours*3600 → SKIP  (ainda não venceu)
+   se (now - anchor) < silence_minutes*60 → SKIP  (ainda não venceu)
 5. se NOT is_open_now(now, cfg)          → SKIP  (D1: defere; dispara no próximo tick útil)
 6. → FIRE  (tentativa = notes_since_reply + 1)
 ```
@@ -204,8 +206,8 @@ Idempotência: ao disparar, nasce uma nova `private_note` ⇒ no próximo tick `
 deps = get_deps(); ah = deps.agent_handler
 channel_id = conversation_repo.get_with_channel(conv_id)["channel_id"]  # canal autoritativo
 cm = ah._get_contact(phone, channel_id=channel_id)
-body = render(note_template, cliente=contact_name, horas=silence_hours,
-              tentativa=tentativa, max=max_consecutive_notes)
+body = render(note_template, cliente=contact_name, minutes=silence_minutes,
+              tentativa=tentativa, max=max_consecutive_notes)   # {tempo}/{minutos}/{horas} derivados
 saved = cm.add_message("private_note", body, sent_by_name=NOTE_AUTHOR)   # sent_by_user_id=None
 broadcast("new_message", { phone, channel_id, message: {role:"private_note",
           content:body, ts:saved["ts"], status:None,
@@ -267,11 +269,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** card do plugin verde em `/plugins`, `GET /api/plugins` sem erro de carga.
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** criados `storages/plugins/retorno_automatico/{__init__.py, plugin.yaml, lifecycle.py}`. Manifesto: `id: retorno_automatico`, `name: "Retorno Automático (IA)"`, `whatsbot_api_version: ">=1.0,<2.0"`, `entry: {lifecycle, settings}`, `permissions: [db.write]`, sem `migrations`. `lifecycle.setup/teardown` (na F0 só logavam; expandidos na F5).
+- **Como foi feito / decisões:** manifesto espelha `agendamento_retorno/plugin.yaml` (sem `routes`/`rbac`/`migrations` — MVP é loop + settings, P3=não-tela). Como o harness `build_test_app` copia plugins de `assets/plugin_examples/` (intocável no plano 48), o "carrega limpo" é verificado dirigindo o **loader real** (`discover_and_load`) contra um diretório temporário com só este plugin, e montando um app hermético real (`create_app`) cujo `storages/plugins` contém só ele.
+- **Problemas / pendências:** nenhuma. (Descoberta lateral: NÃO adicionar `storages/plugins` ao `sys.path` nos testes — o diretório do plugin `gowa` sombrearia o pacote CORE `gowa`; o import do plugin é feito por `importlib`.)
+- **Verificação:** `test_f0_plugin_loads_clean` (loader real: `registry.loaded["retorno_automatico"]`, `load_error` nulo, `settings_cls`/`setup_fn`/`teardown_fn` presentes) e `test_f0_card_no_load_error_via_app` (app real: `GET /api/plugins` lista o card sem `load_error`) — ambos verdes.
 
 ---
 
@@ -283,11 +285,12 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** editar `silence_hours`/`max_consecutive_notes`/expediente na UI e reabrir mostra os valores salvos.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** `settings.py` com `class Settings(BaseModel)` de §4.1 — `enabled`, `silence_minutes` (ge=1,le=10080; ver ajuste abaixo), `max_consecutive_notes` (ge=1,le=20), `business_start/end`, 7 toggles `day_mon..day_sun` (seg–sex default `True`, sáb/dom `False`), `tz_offset_hours` (ge=−12,le=14), `apply_to_groups` (default `False`), `note_template`. Todos com `title`/`description` PT-BR.
+- **Como foi feito / decisões:** valores default refletem as decisões travadas (D1–D4). `logic.load_settings()` lê `plugin.retorno_automatico.*` a cada ciclo (só as chaves salvas sobrescrevem os defaults; config inválida cai para os defaults — fail-safe). A rota core `server/routes/plugins.py:284-326` não foi tocada.
+- **Ajuste pós-impl. (2026-07-13, a pedido do usuário):** o campo de silêncio virou **`silence_minutes` (int, minutos, default 180 = 3h)** no lugar de `silence_hours` (float, horas) — permite testar sem esperar horas e configurar valores tipo 30 min. `decide` usa `silence_minutes*60`; o template ganhou `{tempo}` (duração amigável, ex.: "3h"/"30min"/"1min") — o default agora usa `{tempo}`, e `{minutos}`/`{horas}` continuam disponíveis. Plugin ainda não distribuído, sem migração de config.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `test_f1_settings_get_schema_and_values` (schema com os 10 campos + defaults 180/3), `test_f1_settings_put_persists` (PUT `silence_minutes=45` persiste e reflete), `test_f1_load_settings_reflects_config`/`_bad_config_falls_back`, e `test_f4_human_duration_formats` (formatação `{tempo}`) — todos verdes.
 
 ---
 
@@ -299,11 +302,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** teste do módulo verde; nunca usa `datetime.now()` naïve.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** `schedule.py` puro — `parse_hhmm("HH:MM") -> minutos|None` e `is_open_now(now_epoch, cfg) -> bool` conforme §4.2 (offset fixo via `tz_offset_hours`, `datetime.fromtimestamp(now + tz*3600, timezone.utc)`, nunca `datetime.now()` naïve).
+- **Como foi feito / decisões:** `cfg` aceita tanto um `Mapping` (`Settings.model_dump()`) quanto o próprio `Settings` (helper `_cfg_get`) — mantém o módulo puro/testável sem importar pydantic. `start >= end` e HH:MM inválido ⇒ "fechado" + log (sem caso overnight, D4). Fail-defensivo: qualquer exceção ⇒ `False` (pior caso "não dispara agora").
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** testes puros com epoch FIXO (quarta 12:00 UTC) — `test_f2_parse_hhmm`, dia útil dentro, dia desligado (domingo), antes do início, `end` exclusivo (18:00 fechado / 17:59 aberto), fuso deslocando a janela, `start>=end` fechado, HH:MM inválido fechado — todos verdes.
 
 ---
 
@@ -316,11 +319,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** os sinais batem com os dados semeados (inclui casos: sem inbound, nota após inbound, envio `failed` ignorado na âncora).
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** em `logic.py`: `list_candidates(apply_to_groups)` (SELECT read-only de §4.3 via `get_engine().connect()`, parametrizado) e `conversation_signals(conv_id)` (consulta agregada única de §4.4 com `FILTER (WHERE ...)` + CTE `lc` para o `last_client_ts`).
+- **Como foi feito / decisões:** **P1 resolvido = (a)** — SELECT read-only parametrizado (O(1) por ciclo; a regra de prefixo `plugin_<id>_` vale só p/ CREATE/ALTER em migration, não p/ SELECT). Âncora de saída = `role='assistant' AND (status IS NULL OR status <> 'failed')` (IA + operador, exclui `failed`). `notes_since_reply` conta só notas com `sent_by_name = NOTE_AUTHOR` e `ts > COALESCE(last_client_ts, 0)`. **P2 = (a)** — marcador só por `sent_by_name` (sem `msg_id` prefixado).
+- **Problemas / pendências:** nenhuma. (Postgres-only ⇒ `FILTER`/CTE OK.)
+- **Verificação:** `test_f3_list_candidates_eligibility` (matriz: elegível ✓; excluídos: sem agente, humano atribuído, `ai_active=0`, fechada, arquivada, grupo; grupo entra só com `apply_to_groups=True`), `test_f3_conversation_signals` (4 sinais; `failed` NÃO vira âncora; nota de outro autor não conta), `test_f3_signals_note_before_reply_not_counted`, `test_f3_signals_empty_conversation` — todos verdes.
 
 ---
 
@@ -333,11 +336,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** com um contato IA em silêncio (ajustando `silence_hours` p/ segundos no teste), 1 tick posta **uma** nota; o tick seguinte **não** duplica; ao semear uma msg `user` posterior, o contador zera e um novo ciclo pode disparar; ao atingir `max_consecutive_notes`, para.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** em `logic.py`: `decide(now, signals, cfg) -> Decision(fire, reason, tentativa)` (pura, §4.5), `render_note(...)` (format seguro — placeholder desconhecido fica literal; `{horas}` via `%g`), `dispatch_note(candidate, tentativa, cfg)` (§4.6 — reresolve canal por `conversation_repo.get_with_channel`, `ah._get_contact(...).add_message("private_note", body, sent_by_name=NOTE_AUTHOR)`, `broadcast("new_message", ...)`) e `run_cycle()` (lê cfg; `enabled=False` retorna cedo; try/except por item; sumário `{checked, fired, skipped, failed, checked_at, enabled}`).
+- **Como foi feito / decisões:** **P4 = (a)** — `{horas}` usa `silence_hours` configurado. Idempotência garantida pela âncora `max(last_outbound_ts, last_note_ts)`: logo após disparar, `last_note_ts≈now` ⇒ passo 4 (`nao_venceu`) barra por ~N horas, sem contador em memória. Dispatch idêntico ao `agendamento_retorno` (mesmo cuidado de canal autoritativo p/ não escrever na inbox errada).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `decide` — 7 branches (`sem_saida`, `cliente_respondeu`, `limite_atingido`, `nao_venceu`, nota re-ancora, `fora_expediente`, `fire` com `tentativa` correto). `run_cycle`+dispatch (com `wired_deps` + expediente forçado por fuso p/ determinismo): dispara 1 nota e **2º tick não duplica**; operador conta como âncora (D2); envio `failed` não dispara; resposta do cliente reseta e novo ciclo dispara; limite ⇒ standby (D3); grupo excluído por padrão; fora do expediente defere e dispara no 1º tick útil (D1); `enabled=False` inerte; template renderizado com nome/horas/tentativa. Todos verdes.
 
 ---
 
@@ -349,11 +352,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** `GET /api/runtime/tasks` lista `retorno_automatico:scheduler` como `running`; ao desativar o plugin, a tarefa some (via `stop_owner`).
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** `lifecycle.setup(ctx)` define `async def _scheduler_loop(): while True: run_cycle (via asyncio.to_thread); tick opcional; sleep(60)` e registra com `ctx.spawn_task("scheduler", _scheduler_loop, policy=RestartPolicy.PERMANENT)`. `teardown` no-op (a tarefa é parada pelo `stop_owner`). Espelha `agendamento_retorno/lifecycle.py`.
+- **Como foi feito / decisões:** broadcast de `retorno_automatico_tick` opcional (observabilidade) — nunca derruba o laço. `run_cycle` roda em thread para não bloquear o loop async.
+- **Problemas / pendências:** nenhuma. (No harness padrão o lifespan é no-op, então o teste dirige o supervisor DIRETO: monta `TaskSupervisor`, chama `setup(ctx)` e valida registro/estado/parada — cobre o contrato sem subir o servidor inteiro.)
+- **Verificação:** `test_f5_scheduler_registers_and_stops` — após `setup(ctx)`, `retorno_automatico:scheduler` aparece com `state="running"`, `owner="retorno_automatico"`, `policy="permanent"`; após `stop_owner("retorno_automatico")` fica `stopped`. Verde.
 
 ---
 
@@ -364,11 +367,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** tela lista conversas com contador e "próximo disparo ~"; legível no dark. _(Pode ser cortada do MVP.)_
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ⏭️ Não implementada (decisão P3 — fora do MVP)
+- **O que foi feito:** nada, por decisão. P3 (§8) já decidiu em 2026-07-11: **não** incluir a tela no MVP — a nota no fio da conversa já é o feedback visível.
+- **Como foi feito / decisões:** o manifesto não declara `routes`/`screens`; nenhum `routes.py`/`static/` foi criado. O gancho está documentado em §7 para evolução futura.
+- **Problemas / pendências:** nenhuma — fase opcional, deliberadamente cortada.
+- **Verificação:** n/a.
 
 ---
 
@@ -380,11 +383,11 @@ WAVE 3 — Qualidade / opcional
 **Pronto quando:** teste do cenário verde; suíte core verde; `.zip` importável reproduz o plugin.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-13)
+- **O que foi feito:** `tests/test_retorno_automatico.py` com **36 testes** cobrindo F0→F5 + o cenário e2e (silêncio→nota→re-engajo→limite→standby; resposta do cliente ⇒ reset ⇒ novo ciclo) + idempotência de 2 ticks + `failed`-não-âncora + operador-conta (D2) + fora-do-expediente-defere (D1). Round-trip do `.zip`: `test_f7_export_zip_roundtrips` bate no `GET /api/plugins/retorno_automatico/export` real, confere o conteúdo e **reimporta pelo loader** (carrega limpo).
+- **Como foi feito / decisões:** testado no banco **`whatsbot_test_48`** (`ENCODING 'UTF8' TEMPLATE template0`), rodando por arquivo. Seeding via repos do core (padrão `test_human_gate`). Expediente forçado determinístico por fuso calculado (evita flakiness contra o relógio real). `.zip` distribuível gerado no scratchpad (`retorno_automatico-plugin.zip`, 6 arquivos, sem `__pycache__`).
+- **Problemas / pendências:** nenhuma. (2 achados menores durante a execução, já corrigidos: `sys.path` do plugins-root sombreava o core `gowa` ⇒ import por `importlib`; e dois testes de `decide` usavam saída de 2,78h < 3h ⇒ ajustados.)
+- **Verificação:** `pytest tests/test_retorno_automatico.py` ⇒ **36 passed**. Suíte core no `whatsbot_test_48` (`tests/test_endpoints.py`) ⇒ **1215 passed, 0 failed** (o plugin em `storages/plugins` não regride o core; app real sobe com o plugin carregado via a fixture `plugin_http`). Checklist §10 todo verde.
 
 ---
 
@@ -456,15 +459,15 @@ WAVE 3 — Qualidade / opcional
 
 ## 10. Checklist de verificação
 
-- [ ] Plugin ativa/desativa sem `load_error`; restart de plugin OK (supervisor relança).
-- [ ] `retorno_automatico:scheduler` aparece `running` em `GET /api/runtime/tasks` e some no disable.
-- [ ] Settings persistem em `plugin.retorno_automatico.*` e valem no ciclo seguinte (sem restart).
-- [ ] Teste puro de `is_open_now` + `decide` verde (`node --test` ou pytest do módulo).
-- [ ] Cenário e2e: silêncio→nota(1)→nota(2)→limite(3)→standby; resposta do cliente ⇒ reset ⇒ novo ciclo.
-- [ ] 2 ticks seguidos **não** duplicam nota (idempotência).
-- [ ] Envio `failed` **não** conta como âncora; resposta manual do operador conta (D2).
-- [ ] Fora do expediente/fim de semana **não** dispara; dispara no 1º tick útil (D1).
-- [ ] `private_note` não entra no contexto do LLM nem no preview da sidebar.
-- [ ] Suíte core verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`) com o plugin ativo.
-- [ ] (se F6) tela legível no modo escuro (`wa-*`/`.wa-field`).
-- [ ] `.zip` exportado (`GET /api/plugins/retorno_automatico/export`) reimporta e reproduz o plugin.
+- [x] Plugin ativa/desativa sem `load_error`; restart de plugin OK (supervisor relança). — `test_f0_plugin_loads_clean`, `test_f0_card_no_load_error_via_app`; supervisor `PERMANENT` (`test_f5_scheduler_registers_and_stops`).
+- [x] `retorno_automatico:scheduler` aparece `running` em `GET /api/runtime/tasks` e some no disable. — `test_f5_scheduler_registers_and_stops` (contrato do supervisor: registro `running` → `stop_owner` → `stopped`).
+- [x] Settings persistem em `plugin.retorno_automatico.*` e valem no ciclo seguinte (sem restart). — `test_f1_settings_put_persists` + `test_f1_load_settings_reflects_config`.
+- [x] Teste puro de `is_open_now` + `decide` verde (pytest do módulo). — 8 testes `test_f2_*` + 7 `test_f4_decide_*`.
+- [x] Cenário e2e: silêncio→nota(1)→nota(2)→limite(3)→standby; resposta do cliente ⇒ reset ⇒ novo ciclo. — `test_f4_client_reply_resets_then_new_cycle`, `test_f4_limit_standby`, `test_f4_run_cycle_fires_then_idempotent`.
+- [x] 2 ticks seguidos **não** duplicam nota (idempotência). — `test_f4_run_cycle_fires_then_idempotent`.
+- [x] Envio `failed` **não** conta como âncora; resposta manual do operador conta (D2). — `test_f4_failed_send_not_anchor`, `test_f4_operator_counts_as_anchor`, `test_f3_conversation_signals`.
+- [x] Fora do expediente/fim de semana **não** dispara; dispara no 1º tick útil (D1). — `test_f4_outside_hours_defers_then_fires`, `test_f2_is_open_day_toggle_off`.
+- [x] `private_note` não entra no contexto do LLM nem no preview da sidebar. — garantido pelo core (`_mapping.LIST_PANEL_ONLY_ROLES` inclui `private_note`); o plugin usa a role painel-only existente, sem código novo. Sem regressão (suíte core verde).
+- [x] Suíte core verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`) com o plugin ativo. — `tests/test_endpoints.py` no `whatsbot_test_48`: **1215 passed, 0 failed**; app real sobe com o plugin carregado (`plugin_http`).
+- [—] (se F6) tela legível no modo escuro (`wa-*`/`.wa-field`). — F6 fora do MVP (P3); n/a.
+- [x] `.zip` exportado (`GET /api/plugins/retorno_automatico/export`) reimporta e reproduz o plugin. — `test_f7_export_zip_roundtrips` (export real → reimport pelo loader).
