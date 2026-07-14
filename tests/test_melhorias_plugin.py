@@ -252,3 +252,40 @@ def test_direct_generator_no_api_key(plugin_app):
     finally:
         handler.api_key = saved_key
     assert "API key não configurada" in res.analysis
+
+
+def test_direct_generator_filters_history_but_keeps_target(plugin_app):
+    """plano 43 (portado do core): o histórico da análise é filtrado pela lista-negra
+    de regex (``ai_history_exclude_patterns``), MAS a resposta-alvo sobrevive mesmo
+    casando um padrão (o marcador '⟵ RESPOSTA MARCADA…' só sai se o alvo ficar)."""
+    built = plugin_app("melhorias", settings_overrides=_STUB)
+    gen = importlib.import_module("whatsbot_plugins.melhorias.generation")
+    handler = built.agent_handler
+    from agent import history_filter as hf
+    from db.repositories import config_repo
+
+    phone = "5511960000008"
+    contact = handler._get_contact(phone)
+    contact.add_message("user", "quero comprar")
+    contact.add_message("private_note", "🔖 Protocolo aberto · PROT-1")
+    saved = contact.add_message("assistant", "segue o link PROT-1")  # alvo casa o padrão
+
+    config_repo.set(hf.CONFIG_KEY, ["PROT-1"])
+    hf.reset_cache()
+    try:
+        fake = _FakeClient(_fake_llm_response("**Diagnóstico**\nok"))
+        with patch.object(handler, "_get_client", return_value=fake):
+            res = gen.DirectApiGenerator().generate(gen.GenContext(
+                handler=handler, phone=phone,
+                target_message={"content": "segue o link PROT-1", "ts": saved["ts"]},
+                feedback="resposta errada"))
+    finally:
+        config_repo.set(hf.CONFIG_KEY, [])
+        hf.reset_cache()
+    assert res.analysis == "**Diagnóstico**\nok"
+
+    user_prompt = fake.create_calls[0]["messages"][1]["content"]
+    # A nota privada (protocolo) foi cortada do histórico da análise…
+    assert "Protocolo aberto" not in user_prompt
+    # …mas o ALVO sobreviveu no histórico (o marcador só é emitido se o alvo ficou).
+    assert "RESPOSTA MARCADA COMO INCORRETA" in user_prompt
