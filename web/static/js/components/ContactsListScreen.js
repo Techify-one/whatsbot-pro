@@ -12,6 +12,7 @@ import { DefaultAvatar, GroupAvatar, SearchIcon, PlusIcon } from './contacts/ico
 import { avatarUrl } from './contacts/utils.js';
 import { ContactInfoPanel } from './contacts/ContactInfoPanel.js';
 import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
+import { useContactSubtitle } from './contacts/hooks/useContactSubtitle.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, json } from '../services/urlState.js';
@@ -213,6 +214,72 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
           </button>
         ` : null}
       </div>
+    </div>
+  `;
+}
+
+// ── Linha da lista ────────────────────────────────────────────────────────
+// Extraída em componente próprio para poder chamar o hook `useContactSubtitle`
+// por linha: o subtítulo sob o nome é o telefone formatado por padrão, mas um
+// plugin pode reescrevê-lo pelo seam genérico `filter.contact.headerSubtitle`
+// (o widget de site mapeia o token opaco `wsess_…` → um código curto WEB-XXXXXX).
+// Só exibição — o telefone segue sendo a identidade de roteamento.
+function ContactRow({ c, onOpenDetail, onStartConversation }) {
+  const resolved = useContactSubtitle(c.phone, { channelId: c.channel_id, contact: c });
+  // `resolved !== c.phone` ⇒ um plugin sobrescreveu (mostra o código curto);
+  // senão cai no telefone formatado (contatos normais mantêm +55 (AA) …).
+  const phoneLabel = resolved !== c.phone ? resolved : formatPhoneDisplay(c.phone);
+  const badge = contactTypeBadge(c.contact_type);
+  return html`
+    <div
+      class="flex items-center gap-4 bg-wa-bg border border-wa-border rounded-2xl px-5 py-4 shadow-sm hover:shadow transition-shadow"
+    >
+      <!-- Avatar (circle, fixed size) -->
+      <div class="w-[52px] h-[52px] rounded-full overflow-hidden shrink-0">
+        ${c.is_group
+          ? html`<${GroupAvatar} size=${52} avatarUrl=${avatarUrl(c.phone, c.avatar_v)} />`
+          : html`<${DefaultAvatar} size=${52} avatarUrl=${avatarUrl(c.phone, c.avatar_v)} />`}
+      </div>
+
+      <!-- Nome + contato + Ver detalhes -->
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="text-[16px] font-semibold text-wa-text truncate">
+            ${c.name || phoneLabel || 'Sem nome'}
+          </div>
+          <span
+            class="shrink-0 text-[10px] font-semibold rounded-full px-[6px] py-[1px] leading-[15px] ${badge.className}"
+            style=${badge.style}
+            title="Tipo do contato (canal de origem)"
+          >${badge.label}</span>
+        </div>
+        <div class="flex items-center flex-wrap gap-x-2 gap-y-[2px] text-[13px] mt-[2px]">
+          <span class="text-wa-secondary truncate max-w-full">
+            ${c.email
+              ? c.email
+              : (c.is_group ? 'Grupo' : phoneLabel)}
+          </span>
+          <span class="text-wa-border">|</span>
+          <button
+            onClick=${() => onOpenDetail(c)}
+            class="text-wa-teal font-medium hover:underline shrink-0"
+          >Ver detalhes</button>
+        </div>
+        ${c.email && !c.is_group ? html`
+          <div class="text-[13px] text-wa-secondary truncate mt-[1px]">
+            ${phoneLabel}
+          </div>
+        ` : null}
+      </div>
+
+      <!-- Iniciar atendimento -->
+      <button
+        onClick=${() => onStartConversation(c)}
+        title="Iniciar conversa"
+        class="w-[38px] h-[38px] rounded-full flex items-center justify-center text-wa-teal hover:bg-wa-teal/10 transition-colors shrink-0"
+      >
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+      </button>
     </div>
   `;
 }
@@ -587,60 +654,12 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
         <!-- Lista -->
         <div class="flex flex-col gap-3">
           ${pageItems.map((c) => html`
-            <div
+            <${ContactRow}
               key=${c.id}
-              class="flex items-center gap-4 bg-wa-bg border border-wa-border rounded-2xl px-5 py-4 shadow-sm hover:shadow transition-shadow"
-            >
-              <!-- Avatar (circle, fixed size) -->
-              <div class="w-[52px] h-[52px] rounded-full overflow-hidden shrink-0">
-                ${c.is_group
-                  ? html`<${GroupAvatar} size=${52} avatarUrl=${avatarUrl(c.phone, c.avatar_v)} />`
-                  : html`<${DefaultAvatar} size=${52} avatarUrl=${avatarUrl(c.phone, c.avatar_v)} />`}
-              </div>
-
-              <!-- Nome + contato + Ver detalhes -->
-              <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2 min-w-0">
-                  <div class="text-[16px] font-semibold text-wa-text truncate">
-                    ${c.name || formatPhoneDisplay(c.phone) || 'Sem nome'}
-                  </div>
-                  ${(() => {
-                    const b = contactTypeBadge(c.contact_type);
-                    return html`<span
-                      class="shrink-0 text-[10px] font-semibold rounded-full px-[6px] py-[1px] leading-[15px] ${b.className}"
-                      style=${b.style}
-                      title="Tipo do contato (canal de origem)"
-                    >${b.label}</span>`;
-                  })()}
-                </div>
-                <div class="flex items-center flex-wrap gap-x-2 gap-y-[2px] text-[13px] mt-[2px]">
-                  <span class="text-wa-secondary truncate max-w-full">
-                    ${c.email
-                      ? c.email
-                      : (c.is_group ? 'Grupo' : formatPhoneDisplay(c.phone))}
-                  </span>
-                  <span class="text-wa-border">|</span>
-                  <button
-                    onClick=${() => openDetail(c)}
-                    class="text-wa-teal font-medium hover:underline shrink-0"
-                  >Ver detalhes</button>
-                </div>
-                ${c.email && !c.is_group ? html`
-                  <div class="text-[13px] text-wa-secondary truncate mt-[1px]">
-                    ${formatPhoneDisplay(c.phone)}
-                  </div>
-                ` : null}
-              </div>
-
-              <!-- Iniciar atendimento -->
-              <button
-                onClick=${() => startConversation(c)}
-                title="Iniciar conversa"
-                class="w-[38px] h-[38px] rounded-full flex items-center justify-center text-wa-teal hover:bg-wa-teal/10 transition-colors shrink-0"
-              >
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-              </button>
-            </div>
+              c=${c}
+              onOpenDetail=${openDetail}
+              onStartConversation=${startConversation}
+            />
           `)}
         </div>
 
