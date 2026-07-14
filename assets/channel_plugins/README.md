@@ -11,6 +11,7 @@ This folder ships the ready-to-import zips:
 |---|---|---|
 | Telegram (Bot API) | `telegram-plugin.zip` | `telegram` |
 | WhatsApp Cloud API (Meta) | `whatsapp_cloud-plugin.zip` | `whatsapp_cloud` |
+| Site (Widget de chat) | `website-plugin.zip` | `website` |
 
 Once imported and enabled, the provider **registers itself** in the channel
 registry, its `provider_descriptor()` is served by `GET /api/channels/providers`,
@@ -26,7 +27,7 @@ provider, rebuild its zip (same structure the export endpoint produces —
 ```bash
 venv/bin/python - <<'PY'
 import zipfile, pathlib
-for pid in ("telegram", "whatsapp_cloud"):
+for pid in ("telegram", "whatsapp_cloud", "website"):
     src = pathlib.Path("assets/plugin_examples")/pid
     out = pathlib.Path("assets/channel_plugins")/f"{pid}-plugin.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
