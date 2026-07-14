@@ -396,6 +396,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           x=${ctxMenu.x}
           y=${ctxMenu.y}
           phone=${ctxMenu.phone}
+          conversationId=${ctxMenu.conversationId}
           aiEnabled=${ctxMenu.aiEnabled}
           contactTags=${ctxMenu.tags}
           globalTags=${globalTags}

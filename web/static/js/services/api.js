@@ -289,6 +289,18 @@ export async function markAsUnread(phone) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/unread`);
 }
 
+// Plano 49 — não-lida/lida POR CONVERSA (atendimento-cêntrico). Escopa a UMA conversa
+// (canal) do número, ao contrário dos wrappers por-phone acima que acendem/limpam
+// todas as conversas do contato. Usados pela sidebar quando a linha tem conversation_id;
+// as versões por-phone ficam como fallback para linhas legadas sem atendimento.
+export async function markConversationUnread(convId) {
+  return request('POST', `/api/atendimentos/${convId}/unread`);
+}
+
+export async function markConversationRead(convId) {
+  return request('POST', `/api/atendimentos/${convId}/read`);
+}
+
 export async function markAllUnread() {
   return request('POST', `/api/contacts/mark-all-unread`);
 }

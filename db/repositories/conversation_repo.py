@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 import time
 
-from sqlalchemy import select, update, func, delete as sa_delete, case, false as sa_false
+from sqlalchemy import (select, update, func, delete as sa_delete,
+                        insert as sa_insert, case, exists, false as sa_false)
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
@@ -513,6 +514,68 @@ def mark_conversation_read(conv_id: int) -> list[str]:
                 updated_at=time.time(),
             ))
     return msg_ids
+
+
+def mark_conversation_unread(conv_id: int) -> bool:
+    """Re-light the green badge for ONE conversation (plano 49 — per-conversa).
+
+    Simétrico a :func:`mark_conversation_read`: a não-lida por-conversa é derivada de
+    ``unread_msg_ids ⋈ messages`` filtrando por ``conversation_id`` (mesma subquery que
+    alimenta o badge da sidebar em ``conversation_query.enriched_columns``), então marcar
+    como não lida = inserir 1 linha ``unread_msg_ids`` de uma mensagem daquela conversa.
+
+    Idempotente: se a conversa já tem ``unread_msg_ids``, é no-op (``unread_msg_ids`` não
+    tem unique em ``(contact_id, msg_id)`` — evita inflar o contador em cliques repetidos).
+    Ancora na última mensagem *inbound* (``role='user'``) com ``msg_id``; caindo para a
+    última mensagem de qualquer role com ``msg_id`` (o join derivado só precisa de um
+    ``msg_id`` daquela conversa). Sempre incrementa ``contacts.unread_count`` (+1) para
+    manter o badge da aba do navegador (``unread_repo.unread_conversation_count``) coerente.
+
+    Retorna ``True`` se marcou, ``False`` no-op (conversa inexistente ou já não-lida).
+    """
+    with get_engine().begin() as conn:
+        conv = conn.execute(
+            select(conversations.c.contact_id).where(conversations.c.id == conv_id)
+        ).first()
+        if conv is None:
+            return False
+        contact_id = conv.contact_id
+        # Idempotência: já há alguma não-lida derivada nesta conversa?
+        already = conn.execute(
+            select(
+                exists().where(
+                    (unread_msg_ids.c.msg_id == messages.c.msg_id)
+                    & (messages.c.conversation_id == conv_id)
+                )
+            )
+        ).scalar()
+        if already:
+            return False
+        # Escolhe o msg_id-âncora: último inbound com msg_id; senão última msg com msg_id.
+        base = (
+            select(messages.c.msg_id)
+            .where(messages.c.conversation_id == conv_id)
+            .where(messages.c.msg_id.is_not(None))
+            .where(messages.c.msg_id != "")
+        )
+        target = conn.execute(
+            base.where(messages.c.role == "user").order_by(messages.c.ts.desc()).limit(1)
+        ).scalar()
+        if target is None:
+            target = conn.execute(
+                base.order_by(messages.c.ts.desc()).limit(1)
+            ).scalar()
+        if target is not None:
+            conn.execute(sa_insert(unread_msg_ids).values(
+                contact_id=contact_id, msg_id=target,
+            ))
+        # Sobe o contador denormalizado do contato (badge da aba) mesmo sem msg_id-âncora.
+        conn.execute(update(contacts).where(contacts.c.id == contact_id).values(
+            unread_count=case((contacts.c.unread_count < 1, 1),
+                              else_=contacts.c.unread_count + 1),
+            updated_at=time.time(),
+        ))
+    return True
 
 
 # NOTE (plano 23 Fase E2): the conversation-centric ``unread_conversation_count``

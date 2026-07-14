@@ -12,7 +12,8 @@
 // are passed in so an action that closes the open thread clears it.
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import {
-  markAsRead, markAsUnread, setConversationAi, deleteConversation, deleteContact,
+  markAsRead, markAsUnread, markConversationRead, markConversationUnread,
+  setConversationAi, deleteConversation, deleteContact,
   archiveContact, pinContact, createTag, updateContactTags,
   getMe, getAssignableAgents, getUsers, getTags,
   getContactConversation, getConversation, assignConversation, assignAgent,
@@ -67,23 +68,33 @@ export function useConversationActions({
     }
   }, [setContacts]);
 
-  const handleMarkUnread = useCallback(async (phone) => {
-    const res = await markAsUnread(phone);
+  // Plano 49: por CONVERSA quando a linha tem conversation_id (número em 2 canais =
+  // 2 linhas, badges independentes); fallback por phone só na linha legada sem
+  // atendimento (convId == null). O patch otimista mira a mesma dimensão da chamada.
+  const handleMarkUnread = useCallback(async (phone, convId = null) => {
+    const res = convId != null ? await markConversationUnread(convId) : await markAsUnread(phone);
     if (res.ok) {
-      setContacts(prev => prev.map(c =>
-        c.phone === phone
-          ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) }
-          : c
-      ));
+      setContacts(prev => prev.map(c => {
+        const hit = convId != null ? c.conversation_id === convId : c.phone === phone;
+        return hit ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) } : c;
+      }));
     }
   }, [setContacts]);
 
-  const handleMarkRead = useCallback(async (phone) => {
-    const res = await markAsRead(phone);
+  const handleMarkRead = useCallback(async (phone, convId = null) => {
+    const res = convId != null ? await markConversationRead(convId) : await markAsRead(phone);
     if (res.ok) {
-      setContacts(prev => prev.map(c =>
-        c.phone === phone ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
-      ));
+      setContacts(prev => prev.map(c => {
+        const hit = convId != null ? c.conversation_id === convId : c.phone === phone;
+        // unread_ai_count (badge "IA respondeu") é contato-nível (plano 28): no caminho
+        // por-conversa não o zeramos — coerente com abrir a conversa. Só o fallback
+        // por-phone (contato-nível) o limpa.
+        return hit
+          ? (convId != null
+              ? { ...c, unread_count: 0, has_unread_mention: false }
+              : { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false })
+          : c;
+      }));
     }
   }, [setContacts]);
 

@@ -436,6 +436,43 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
+    @app.post("/api/atendimentos/{conv_id}/unread")
+    async def conv_mark_unread(conv_id: int, request: Request):
+        """Mark ONE conversation as unread (plano 49 — per-conversa).
+
+        Diferente de ``POST /api/contacts/{phone}/unread`` (contato-nível, acende TODAS
+        as conversas do número): aqui a não-lida é escopada à conversa via
+        ``conversation_repo.mark_conversation_unread``."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
+        marked = await asyncio.to_thread(
+            conversation_repo.mark_conversation_unread, conv_id)
+        return _ok({"marked": marked, "message": "Marcado como não lida."})
+
+    @app.post("/api/atendimentos/{conv_id}/read")
+    async def conv_mark_read(conv_id: int, request: Request):
+        """Mark ONE conversation as read (plano 49 — per-conversa).
+
+        Espelha o mark-read de abrir a conversa (``mark_conversation_read`` +
+        recibos pelo canal da conversa), sem carregar as mensagens."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        if not conv or _inbox_hidden(request, conv.get("inbox_id")):
+            return _err("Conversa não encontrada.", status=404)
+        msg_ids = await asyncio.to_thread(
+            conversation_repo.mark_conversation_read, conv_id)
+        if msg_ids:
+            channel_id = conv.get("channel_id") or "default"
+            phone = conv.get("contact_phone") or ""
+            asyncio.create_task(_send_conv_read_receipts(channel_id, phone, msg_ids))
+        return _ok({"read": len(msg_ids), "message": "Marcado como lido."})
+
     @app.delete("/api/atendimentos/{conv_id}")
     async def delete_conversation(conv_id: int, request: Request):
         """Hard-delete a single conversation/thread (plano 16, ação A).

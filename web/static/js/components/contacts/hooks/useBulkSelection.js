@@ -12,7 +12,8 @@
 import { useState, useCallback } from 'preact/hooks';
 import {
   setConversationAi, archiveContact, pinContact,
-  markAsRead, markAsUnread, updateContactTags, assignAgent,
+  markAsRead, markAsUnread, markConversationRead, markConversationUnread,
+  updateContactTags, assignAgent,
 } from '../../../services/api.js';
 import { rowKeyFor } from '../ContactList.js';
 
@@ -173,22 +174,43 @@ export function useBulkSelection({
     )));
   }, [_selectedRows, sortContacts, setContacts]);
 
+  // Plano 49: por CONVERSA (itera as LINHAS selecionadas, não phones deduplicados),
+  // com fallback por phone só nas linhas legadas sem conversation_id. Selecionar 2
+  // canais do mesmo número marca só as conversas escolhidas.
   const handleBulkMarkRead = useCallback(async () => {
-    const phones = [...new Set(_selectedRows().map(c => c.phone))];
-    if (!phones.length) return;
-    await Promise.all(phones.map(p => markAsRead(p).catch(() => null)));
-    setContacts(prev => prev.map(c =>
-      phones.includes(c.phone) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
-    ));
+    const rows = _selectedRows();
+    if (!rows.length) return;
+    const convIds = new Set(rows.filter(c => c.conversation_id != null).map(c => c.conversation_id));
+    const phones = new Set(rows.filter(c => c.conversation_id == null).map(c => c.phone));
+    await Promise.all([
+      ...[...convIds].map(id => markConversationRead(id).catch(() => null)),
+      ...[...phones].map(p => markAsRead(p).catch(() => null)),
+    ]);
+    setContacts(prev => prev.map(c => {
+      if (c.conversation_id != null && convIds.has(c.conversation_id)) {
+        return { ...c, unread_count: 0, has_unread_mention: false };
+      }
+      if (c.conversation_id == null && phones.has(c.phone)) {
+        return { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false };
+      }
+      return c;
+    }));
   }, [_selectedRows, setContacts]);
 
   const handleBulkMarkUnread = useCallback(async () => {
-    const phones = [...new Set(_selectedRows().map(c => c.phone))];
-    if (!phones.length) return;
-    await Promise.all(phones.map(p => markAsUnread(p).catch(() => null)));
-    setContacts(prev => prev.map(c =>
-      phones.includes(c.phone) ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) } : c
-    ));
+    const rows = _selectedRows();
+    if (!rows.length) return;
+    const convIds = new Set(rows.filter(c => c.conversation_id != null).map(c => c.conversation_id));
+    const phones = new Set(rows.filter(c => c.conversation_id == null).map(c => c.phone));
+    await Promise.all([
+      ...[...convIds].map(id => markConversationUnread(id).catch(() => null)),
+      ...[...phones].map(p => markAsUnread(p).catch(() => null)),
+    ]);
+    setContacts(prev => prev.map(c => {
+      const hit = (c.conversation_id != null && convIds.has(c.conversation_id))
+        || (c.conversation_id == null && phones.has(c.phone));
+      return hit ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) } : c;
+    }));
   }, [_selectedRows, setContacts]);
 
   return {

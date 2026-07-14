@@ -4062,6 +4062,33 @@ check("mark_conversation_read: zera só a conversa lida",
 check("mark_conversation_read: NÃO zera a conversa do outro canal (D1)",
       (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
 
+# Plano 49 — "marcar como não lida" POR CONVERSA (simétrico ao read, isolado por canal).
+# _cd acabou de ser lido (unread_count==0); _cf segue não-lido. Marcar _cd como não lida
+# NÃO pode reacender/afetar _cf (o bug: os endpoints por-contato acendiam as duas).
+_run = client.post(f"/api/atendimentos/{_cd['id']}/unread")
+check("POST /api/atendimentos/{id}/unread -> 200", _run.status_code == 200)
+check("POST conv unread -> marked=True", (_run.json().get("data") or {}).get("marked") is True)
+check("mark_conversation_unread: reacende só a conversa marcada",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) >= 1)
+check("mark_conversation_unread: NÃO afeta a conversa do outro canal",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+# Idempotente: 2ª chamada é no-op (unread_msg_ids não tem unique — não pode inflar/duplicar)
+_before_cnt = (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0)
+_run2 = client.post(f"/api/atendimentos/{_cd['id']}/unread")
+check("POST conv unread idempotente -> marked=False",
+      (_run2.json().get("data") or {}).get("marked") is False)
+check("mark_conversation_unread idempotente: contador por conversa não muda",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == _before_cnt)
+# Endpoint de leitura por conversa (menu de contexto "marcar como lida")
+_rrd = client.post(f"/api/atendimentos/{_cd['id']}/read")
+check("POST /api/atendimentos/{id}/read -> 200", _rrd.status_code == 200)
+check("conv read endpoint: zera só a conversa lida",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == 0)
+check("conv read endpoint: NÃO zera o outro canal (D1)",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+check("POST conv unread -> 404 em conversa inexistente",
+      client.post("/api/atendimentos/99999/unread").status_code == 404)
+
 # Envio do operador é CHANNEL-AWARE (plano 11): conversation_id do canal → sai PELO
 # canal, não pelo GOWA — exatamente o 2º bug (responder numa conversa Cloud ia pelo GOWA).
 _fake.sent.clear()

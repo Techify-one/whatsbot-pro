@@ -13,7 +13,7 @@ const FLYOUT_WIDTH = 264;
 
 // ── Context Menu ─────────────────────────────────────────────────
 
-export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
+export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, contactTags, globalTags, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onTagsUpdate, onArchive, onPin, onDeleteConversation, onCreateTag, onClose }) {
   // P48 (hide, don't disable): each affordance is gated by the permission that
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
@@ -162,7 +162,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
       ` : null}
       ${can('conversation.reply') ? (isUnread ? html`
         <button
-          onClick=${() => { onMarkRead(phone); onClose(); }}
+          onClick=${() => { onMarkRead(phone, conversationId); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
@@ -172,7 +172,7 @@ export function ContextMenu({ x, y, phone, aiEnabled, contactTags, globalTags, i
         </button>
       ` : html`
         <button
-          onClick=${() => { onMarkUnread(phone); onClose(); }}
+          onClick=${() => { onMarkUnread(phone, conversationId); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884">
