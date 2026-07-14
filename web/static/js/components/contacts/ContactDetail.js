@@ -18,6 +18,7 @@ import { useAudioRecorder } from './hooks/useAudioRecorder.js';
 import { useMediaUpload } from './hooks/useMediaUpload.js';
 import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
 import { useMessageActions, myReaction } from './hooks/useMessageActions.js';
+import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
 import { senderColor, quotedMediaText } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -49,6 +50,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   };
 
   const chatRef = useRef(null);
+  // Header subtitle (line under the name): raw phone by default, but a plugin may
+  // rewrite it via `filter.contact.headerSubtitle` — e.g. the website widget maps
+  // the opaque session token (`wsess_…`) to a short visitor code (WEB-XXXXXX).
+  const headerSubtitle = useContactSubtitle(phone, { channelId, contact, info });
   // Template picker modal (Cloud API 24h window). Owned by the container.
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const openTemplatePicker = () => setShowTemplatePicker(true);
@@ -300,7 +305,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             : contactTyping
             ? html`<div class="text-wa-teal text-[13px] leading-tight">${contactTyping === 'audio' ? 'gravando áudio...' : 'digitando...'}</div>`
             : isGroup ? html`<div class="text-wa-secondary text-[13px] leading-tight">Grupo</div>`
-            : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${phone}</div>` : null
+            : info && info.name ? html`<div class="text-wa-secondary text-[13px] leading-tight">${headerSubtitle}</div>` : null
           }
         </div>
 

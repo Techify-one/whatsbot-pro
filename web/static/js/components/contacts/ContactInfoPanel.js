@@ -7,6 +7,7 @@ import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './ic
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { contactTypeBadge } from '../../services/contactTypes.js';
+import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 
 const html = htm.bind(h);
 
@@ -28,6 +29,9 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
   // Only Nome stays a fixed field — Email/Profissão/Empresa/Endereço are now
   // custom attributes (seeded defaults), rendered in the attributes section below.
   const [form, setForm] = useState({ name: '', observations: [] });
+  // Subtitle under the name: raw phone, unless a plugin rewrites it via
+  // `filter.contact.headerSubtitle` (website widget → short visitor code).
+  const subtitle = useContactSubtitle(phone, { info });
   const [tags, setTags] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -232,7 +236,7 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
             <div class="text-wa-text text-[22px] font-light">${isGroup ? (groupName || phone) : (form.name || phone)}</div>
             ${isGroup
               ? html`<div class="text-wa-secondary text-[14px] mt-0.5">Grupo</div>`
-              : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${phone}</div>` : null}
+              : form.name ? html`<div class="text-wa-secondary text-[14px] mt-0.5">${subtitle}</div>` : null}
             <!-- Conversa (o todo): rótulo do nível topo da hierarquia — o histórico completo com este contato. -->
             <div class="text-wa-secondary/80 text-[11px] mt-2 uppercase tracking-wide">Conversa · histórico completo</div>
             <!-- Marca do tipo de contato (plano tipos-de-contato): herdada do canal

@@ -39,6 +39,12 @@
 //       ContactDetail WHEN THE MENU OPENS (async), so a plugin can append/remove
 //       items. Return the (modified) array; returning `null` aborts (the caller
 //       falls back to the base items so the menu still opens).
+//     • filter.contact.headerSubtitle — value: the string shown under the contact
+//       name (the raw phone by default); ctx {phone, channelId?, contact?, info?}.
+//       Applied by the chat header + contact info panel (via useContactSubtitle)
+//       on contact change. Return a friendlier label (e.g. the website widget maps
+//       `wsess_…` → `WEB-XXXXXX`); returning the value unchanged / a non-string
+//       keeps the phone. Display only — the phone stays the routing identity.
 //
 //   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
 //   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep
