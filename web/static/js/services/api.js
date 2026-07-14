@@ -1068,8 +1068,11 @@ export async function checkAuth() {
 
 // ── Users & roles (RBAC — plano 03) ───────────────────────────────
 
-export async function getUsers() {
-  return request('GET', '/api/users');
+// `opts.silent` suprime o toast "Permissão negada." quando o chamador é um read
+// best-effort de fundo (ex.: tela de Conversas popular a lista de "Transferir"
+// para quem não tem `users.manage`). A tela de Usuários chama sem `silent`.
+export async function getUsers(opts) {
+  return request('GET', '/api/users', undefined, opts);
 }
 
 export async function getRoles() {

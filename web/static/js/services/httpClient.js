@@ -58,14 +58,19 @@ const UNAUTHORIZED_RESULT = { ok: false, error: 'Não autenticado.' };
  * Exported so the plugin transport (`api.http` in plugins/api.js) reuses the exact
  * same normalisation + 403-toast behaviour as the core path.
  *
+ * `silent` suprime APENAS o toast de 403 (o envelope de retorno é idêntico) — para
+ * reads best-effort de fundo que devem "degradar silenciosamente" quando o usuário
+ * não tem a permissão, sem virar um aviso "Permissão negada." na tela.
+ *
  * @param {Response} res - a fetch Response whose `res.ok` is false and status !== 401.
+ * @param {{silent?: boolean}} [opts]
  * @returns {Promise<{ok:false, error:string, status:number}>}
  */
-export async function handleErrorResponse(res) {
+export async function handleErrorResponse(res, { silent = false } = {}) {
   let body = null;
   try { body = await res.json(); } catch (_) { /* corpo vazio / não-JSON */ }
   const error = (body && (body.error || body.detail)) || `Erro ${res.status}`;
-  if (res.status === 403) notifyPermissionDenied(error);
+  if (res.status === 403 && !silent) notifyPermissionDenied(error);
   return { ok: false, error, status: res.status };
 }
 
@@ -77,9 +82,11 @@ export async function handleErrorResponse(res) {
  * @param {string} method - HTTP verb.
  * @param {string} path - Path beginning with `/` (relative to the app origin).
  * @param {unknown} [body] - JSON-serialisable body; omitted for GET/DELETE.
+ * @param {{silent?: boolean}} [reqOpts] - `silent` suprime o toast de 403 (para
+ *   reads best-effort de fundo). Não afeta o envelope retornado nem o caminho 401.
  * @returns {Promise<any>} The parsed JSON envelope, or the 401 fallback.
  */
-export async function request(method, path, body) {
+export async function request(method, path, body, { silent = false } = {}) {
   /** @type {RequestInit} */
   const opts = {
     method,
@@ -91,7 +98,7 @@ export async function request(method, path, body) {
     handleUnauthorized();
     return { ...UNAUTHORIZED_RESULT };
   }
-  if (!res.ok) return handleErrorResponse(res);
+  if (!res.ok) return handleErrorResponse(res, { silent });
   return res.json();
 }
 

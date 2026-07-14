@@ -254,7 +254,9 @@ export function useConversationActions({
         setAgentsAi(Array.isArray(res.data.ai_agents) ? res.data.ai_agents : []);
       }
     }).catch(() => {});
-    getUsers().then((res) => {
+    // silent: read best-effort — sem `users.manage` o backend responde 403 e a
+    // lista fica vazia (degradação silenciosa), sem toast "Permissão negada.".
+    getUsers({ silent: true }).then((res) => {
       if (res && res.ok && res.data && Array.isArray(res.data.users)) setUsers(res.data.users);
     }).catch(() => {});
   }, []);

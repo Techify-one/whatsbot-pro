@@ -40,7 +40,7 @@ function patchFromEvent(data) {
 export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false, onOpenConversationInfo = null, onOpenContactInfo = null, contactInfo = null }) {
   const [conv, setConv] = useState(null);
   const [user, setUser] = useState(null);
-  const [users, setUsers] = useState([]);   // for "Transferir" — degrades on 403
+  const [users, setUsers] = useState([]);   // for "Transferir" — vazio (silent) sem users.manage
   const [busy, setBusy] = useState(false);
   const [convDefs, setConvDefs] = useState([]);   // conversation-scoped attribute defs
   const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
@@ -55,10 +55,12 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     return () => { alive = false; };
   }, []);
 
-  // Assignable users for "Transferir" (requires users.manage; a 403 just hides it).
+  // Assignable users for "Transferir" (requires users.manage). silent: sem essa
+  // permissão o 403 apenas esvazia a lista, sem toast "Permissão negada." — este
+  // é um read best-effort de fundo, não uma ação do usuário.
   useEffect(() => {
     let alive = true;
-    getUsers()
+    getUsers({ silent: true })
       .then(r => { if (alive && r && r.ok && r.data && Array.isArray(r.data.users)) setUsers(r.data.users); })
       .catch(() => {});
     return () => { alive = false; };
