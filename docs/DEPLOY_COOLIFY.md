@@ -23,20 +23,31 @@ histórico de migrations e as linhas de `plugins`. O que **se perde** (está no 
 do container): o **código** dos plugins em `storages/plugins/<id>/`, a **sessão do
 WhatsApp/GOWA** em `storages/` e a **mídia enviada** em `statics/senditems/`.
 
-## O que fazer (uma vez, na UI do Coolify)
+## Antes de tudo: qual é o **build pack** no Coolify?
 
-No recurso do WhatsBot → **Storages / Persistent Storage**, adicione dois mounts
-para volume/host-path persistente:
+A forma de persistir **depende do build pack** do recurso no Coolify. São dois casos:
+
+### Caso A — build pack **Docker Compose** (recomendado)
+O Coolify usa o [`docker-compose.yaml`](../docker-compose.yaml) do repo. A
+persistência vem dos **named volumes** declarados lá (`whatsbot_storages`,
+`whatsbot_statics`, `whatsbot_logs`) — o Docker os preserva entre redeploys.
+**Não** configure Persistent Storage na UI para esses caminhos; quem manda é o
+compose. ⚠️ **Não** use bind mount de caminho relativo (`./data/...`) com o Coolify:
+ele não preserva esses diretórios entre redeploys (foi o que apagou os plugins).
+Nada a fazer na UI além de garantir o `DATABASE_URL` nas envs — só re-importe os
+plugins **uma vez** (ver seção final) e a partir daí persiste.
+
+### Caso B — build pack **Dockerfile / Nixpacks**
+Aí o compose é ignorado e você configura na UI: recurso do WhatsBot → **Storages /
+Persistent Storage**, adicione dois mounts persistentes:
 
 | Mount no container | Cobre |
 |---|---|
 | `/app/storages` | código dos plugins (`storages/plugins/`) **+** sessão do WhatsApp/GOWA |
 | `/app/statics` (ou ao menos `/app/statics/senditems`) | mídia enviada pelo operador |
 
-Isso replica o que o [`docker-compose.yaml`](../docker-compose.yaml) já faz por
-bind mount (`./data/storages`, `./data/statics`). Feito isso, um redeploy passa a
-preservar tudo — o bootstrap deixa de reinicializar a pasta porque ela não está
-mais vazia.
+Em qualquer dos casos, feito isso um redeploy passa a preservar tudo — o bootstrap
+deixa de reinicializar a pasta porque ela não está mais vazia.
 
 ## Salvaguarda automática no boot
 
