@@ -23,6 +23,7 @@ from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, bootstrap_gowa_upgrade, discover_and_load, PluginRegistry
+from server.persistence_check import ensure_storage_persistence
 from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services, set_channel_runtime as _set_channel_runtime, set_deps as _set_deps
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
@@ -137,6 +138,10 @@ def create_app(
     # plugin routes/tools/prompts are wired into the app before the first request.
     plugins_dir = settings.data_dir / "storages" / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
+    # Deploy safeguard: detect a wiped storages/ (Coolify redeploy without a
+    # Persistent Storage volume) BEFORE bootstrap re-seeds, so a silent data-loss
+    # failure becomes a loud, actionable log. Fail-open / WHATSBOT_TEST no-op.
+    ensure_storage_persistence(settings.data_dir / "storages")
     _plugin_examples_dir = settings.data_dir / "assets" / "plugin_examples"
     bootstrap_initial_plugins(plugins_dir, _plugin_examples_dir)
     # plano 13: existing installs (storages/plugins already populated, so the

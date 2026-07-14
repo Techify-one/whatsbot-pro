@@ -199,6 +199,11 @@ Em qualquer opção, **você não precisa criar conta de IA nem copiar chave** �
 - **Conexão com internet**
 - **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
 
+> **Deploy em servidor (Coolify):** configure **Persistent Storage** mapeando
+> `/app/storages` e `/app/statics`, senão cada redeploy zera o disco e os plugins
+> instalados + a sessão do WhatsApp somem. Passo a passo em
+> [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md).
+
 ---
 
 ## Perguntas frequentes

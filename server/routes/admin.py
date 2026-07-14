@@ -17,6 +17,7 @@ from db import engine as engine_module
 from db.pg_maintenance import repair_postgres_sequences
 from server.deps import require_permission, install_exception_handlers
 from server.helpers import _err, _ok
+from server.persistence_check import is_persistent, last_status
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,16 @@ def register_routes(app, deps):
     @app.get("/api/admin/database",
              dependencies=[Depends(require_permission("database.manage"))])
     async def database_info():
-        """Return the current DB URL (redacted) plus dialect."""
+        """Return the current DB URL (redacted) plus dialect + storage persistence."""
         url = engine_module.get_database_url()
         return _ok({
             "dialect": engine_module.get_engine().dialect.name,
             "url_redacted": _redact(url),
+            # Deploy safeguard verdict (server/persistence_check): True = storages/
+            # persistiu entre boots; False = disco foi zerado (falta Persistent
+            # Storage no Coolify); None = indeterminado/não checado.
+            "storage_persistent": is_persistent(),
+            "storage_persistence_status": last_status(),
         })
 
     @app.post("/api/admin/repair-sequences",
