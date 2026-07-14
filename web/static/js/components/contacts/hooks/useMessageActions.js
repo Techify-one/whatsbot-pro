@@ -10,7 +10,7 @@
 // Behavior-preserving: same optimistic update shapes, same best-effort error
 // handling (WS reconciles), same permalink format, same group-prefix stripping.
 import { useState } from 'preact/hooks';
-import { deleteMessage, reactToMessage, generateImprovement } from '../../../services/api.js';
+import { deleteMessage, reactToMessage } from '../../../services/api.js';
 import { copyToClipboard } from '../MessageContextMenu.js';
 import { deepLinkUrl } from '../../../utils/copyDeepLink.js';
 
@@ -31,15 +31,12 @@ export function myReaction(message) {
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  */
 export function useMessageActions({ phone, conversationId, setContactData }) {
-  // Per-message context menu: { x, y, message, isFromMe } | null
+  // Per-message context menu: { x, y, message, isFromMe, items } | null.
+  // `items` is resolved by the caller (ContactDetail) when the menu opens — base
+  // items + the `filter.message.contextMenu.items` plugin chain.
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
   const [deleteDialog, setDeleteDialog] = useState(null);
-  // Improvement-analysis dialog for a flagged AI reply: { message } | null
-  const [improveDialog, setImproveDialog] = useState(null);
-  const [improveText, setImproveText] = useState('');
-  const [improveLoading, setImproveLoading] = useState(false);
-  const [improveError, setImproveError] = useState('');
 
   // Helper to find and update a message by its local ID
   function updateMsgByLocalId(localId, updater) {
@@ -52,14 +49,9 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     });
   }
 
-  // Open the per-message context menu at the given screen coords.
-  function openMsgMenu(e, message, isFromMe) {
-    e.preventDefault();
-    e.stopPropagation();
-    const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
-    const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
-    setMsgMenu({ x, y, message, isFromMe });
-  }
+  // (The context menu is opened by ContactDetail, which resolves the item list
+  // through the `filter.message.contextMenu.items` plugin seam and calls
+  // `setMsgMenu`. This hook only owns the menu STATE + the item operations.)
 
   // Copy the (display) text of a message to the clipboard, stripping the
   // "[Sender]: " group prefix the backend adds for LLM context.
@@ -86,46 +78,6 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
   function copyMessageLink(message) {
     const url = messagePermalink(message);
     if (url) copyToClipboard(url);
-  }
-
-  // Open the "Gerar melhoria" dialog for a flagged AI reply.
-  function openImprove(message) {
-    setImproveDialog({ message });
-    setImproveText('');
-    setImproveError('');
-  }
-
-  // Ask the backend for an improvement analysis. The result arrives as a
-  // panel-only "system" message via the WS "new_message" event (no manual
-  // insertion needed), so we just close the dialog on success.
-  async function submitImprovement() {
-    if (!improveDialog || improveLoading) return;
-    setImproveLoading(true);
-    setImproveError('');
-    try {
-      // Anchor the analysis card to the flagged reply's own conversation
-      // (multi-canal); mirrors the messagePermalink convId resolution above.
-      const msg = improveDialog.message;
-      const convId = msg.conversation_id != null ? msg.conversation_id : conversationId;
-      const res = await generateImprovement(phone, {
-        message: {
-          content: msg.content,
-          ts: msg.ts,
-          _id: msg._id,
-        },
-        feedback: improveText.trim(),
-        conversationId: convId,
-      });
-      if (res && res.ok) {
-        setImproveDialog(null);
-        setImproveText('');
-      } else {
-        setImproveError((res && res.error) || 'Falha ao gerar a análise.');
-      }
-    } catch {
-      setImproveError('Erro de conexão.');
-    }
-    setImproveLoading(false);
   }
 
   // Perform a message deletion. scope: 'me' | 'all'. Optimistically updates the
@@ -180,9 +132,7 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
 
   return {
     msgMenu, setMsgMenu, deleteDialog, setDeleteDialog,
-    improveDialog, setImproveDialog, improveText, setImproveText,
-    improveLoading, improveError,
-    updateMsgByLocalId, openMsgMenu, copyMessageText, messagePermalink, copyMessageLink,
-    openImprove, submitImprovement, performDelete, performReact,
+    updateMsgByLocalId, copyMessageText, messagePermalink, copyMessageLink,
+    performDelete, performReact,
   };
 }

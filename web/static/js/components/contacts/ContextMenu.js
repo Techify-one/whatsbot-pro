@@ -5,6 +5,7 @@ import { updateContactTags } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
+import { clampFlyoutOffset } from './menuLayout.js';
 
 const html = htm.bind(h);
 
@@ -26,9 +27,23 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
   // flyout (and back) without it flickering shut.
   const [openSub, setOpenSub] = useState(null);
   const [flyoutSide, setFlyoutSide] = useState('right');
+  // Vertical offset (px) applied to the open flyout relative to its trigger row. A
+  // submenu near the bottom edge shifts up so it stays fully inside the viewport; its
+  // height is capped separately (max-h below), so long lists just scroll in place.
+  const flyoutRef = useRef(null);
+  const [flyoutTop, setFlyoutTop] = useState(0);
+  // While the Tags flyout's inline "create tag" form is open, pin the flyout so it
+  // doesn't close on mouse-leave — the form pops up away from the pointer and the
+  // user needs to reach it without it vanishing.
+  const [flyoutPinned, setFlyoutPinned] = useState(false);
+  // Ref mirror of the pin, read INSIDE the close timer. When the create-tag form opens
+  // the flyout reflows and can fire a mouse-leave a beat BEFORE the pin state lands
+  // (the pin is set from a child effect). Checking the live ref at fire time means such
+  // an already-scheduled close still aborts once the pin is up — no race, no vanish.
+  const flyoutPinnedRef = useRef(false);
   const closeTimer = useRef(null);
   const openSubmenu = (name) => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } setOpenSub(name); };
-  const scheduleClose = () => { if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => setOpenSub(null), 180); };
+  const scheduleClose = () => { if (flyoutPinnedRef.current) return; if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => { if (!flyoutPinnedRef.current) setOpenSub(null); }, 180); };
   const [confirmDeleteConv, setConfirmDeleteConv] = useState(false);
   // Start at the raw click point; `useLayoutEffect` below measures the rendered
   // menu and clamps it inside the viewport.
@@ -71,7 +86,19 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
   // different contact row. Keyed on `phone` alone (NOT conv.id): toggling a tag
   // refetches the conversation, briefly flipping conv → null → conv, and keying on
   // conv.id here would close the Tags flyout on every tag click.
-  useEffect(() => { setConfirmDeleteConv(false); setOpenSub(null); }, [phone]);
+  useEffect(() => { setConfirmDeleteConv(false); setOpenSub(null); setFlyoutPinned(false); }, [phone]);
+
+  // The pin only makes sense while the Tags flyout is open; drop it whenever the open
+  // submenu is anything else so a stale pin can't keep the assign flyout from closing.
+  useEffect(() => { if (openSub !== 'tags') setFlyoutPinned(false); }, [openSub]);
+
+  // Mirror the pin into its ref and, the instant we pin, cancel any close already
+  // scheduled by a stray mouse-leave — this is what stops the create-tag form from
+  // disappearing before the pointer can reach it.
+  useEffect(() => {
+    flyoutPinnedRef.current = flyoutPinned;
+    if (flyoutPinned && closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+  }, [flyoutPinned]);
 
   // Clear the pending close timer on unmount.
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
@@ -98,12 +125,26 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
     setFlyoutSide(left + rect.width + FLYOUT_WIDTH + margin > window.innerWidth ? 'left' : 'right');
   }, [x, y, confirmDeleteConv, conv && conv.id]);
 
+  // Keep the open flyout inside the viewport vertically. Default: align its top with
+  // the trigger row. If that would overflow the bottom edge, shift it up so its bottom
+  // sits at the edge (never above the top margin). The flyout's max-height caps it
+  // below the viewport height, so clamping always fits it whole — tall lists scroll.
+  useLayoutEffect(() => {
+    if (!openSub) { setFlyoutTop(0); return; }
+    const el = flyoutRef.current;
+    const rowEl = el && el.offsetParent; // the `relative` trigger row
+    if (!el || !rowEl) return;
+    const flyH = el.getBoundingClientRect().height;
+    const rowTop = rowEl.getBoundingClientRect().top;
+    setFlyoutTop(clampFlyoutOffset(rowTop, flyH, window.innerHeight));
+  }, [openSub, pos, flyoutSide, convLoading, conv && conv.id, globalTags, humanAgents.length, aiAgents.length]);
+
   const { left, top } = pos;
 
   // Flyout panel positioned beside the menu (cascading submenu). The parent row is
   // `relative`; the flyout anchors to its top edge and opens right (default) or left
   // (near the right viewport edge). The base menu is `overflow-visible` so it isn't clipped.
-  const flyoutCls = `absolute top-0 z-[110] w-64 bg-wa-panel border border-wa-border rounded-lg shadow-lg ${flyoutSide === 'left' ? 'right-full' : 'left-full'}`;
+  const flyoutCls = `absolute z-[110] w-64 bg-wa-panel border border-wa-border rounded-lg shadow-lg ${flyoutSide === 'left' ? 'right-full' : 'left-full'}`;
   // Chevron pointing toward where the flyout opens.
   const SubArrow = () => html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0">
     ${flyoutSide === 'left'
@@ -209,7 +250,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
           <${SubArrow} />
         </button>
         ${openSub === 'tags' ? html`
-          <div class=${flyoutCls}>
+          <div ref=${flyoutRef} class=${flyoutCls} style="top:${flyoutTop}px">
             <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
               <${TagPicker}
                 globalTags=${globalTags}
@@ -217,6 +258,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
                 onToggle=${toggleTag}
                 onCreateTag=${onCreateTag}
                 onClearAll=${clearAllTags}
+                onCreatingChange=${setFlyoutPinned}
               />
             </div>
           </div>
@@ -239,7 +281,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
             <${SubArrow} />
           </button>
           ${openSub === 'assign' ? html`
-            <div class=${flyoutCls}>
+            <div ref=${flyoutRef} class=${flyoutCls} style="top:${flyoutTop}px">
               ${convLoading ? html`
                 <div class="px-4 py-[10px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
               ` : !conv ? html`

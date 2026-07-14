@@ -11,6 +11,7 @@
   ``run_turn()`` (history → agent-spec resolve via ``filter.agent.resolve`` →
   AGNO run → usage off ``RunMetrics`` → within-turn routing → save). The
   ``AgentHandler`` facade delegates ``aprocess_message`` here.
-* :mod:`app.services.improvement_service` (Fase B5) — ``generate_improvement``,
-  the one-shot non-agentic reply-quality analysis (isolated SYNC client, Q1).
+
+(A antiga ``improvement_service`` — análise de "Gerar melhoria" — virou o plugin
+``melhorias`` (``storages/plugins/melhorias/generation.py``); o core não a expõe mais.)
 """
