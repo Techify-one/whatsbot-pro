@@ -1336,6 +1336,38 @@ r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
       r.json()["data"]["authenticated"] is True)
 
+# ── Self-service password change (plano 47) — POST /api/me/password ──
+_meh = {"Authorization": f"Bearer {_utok}"}
+r = client.post("/api/me/password",
+                json={"current_password": "wrongpw", "new_password": "newsecret123"}, headers=_meh)
+check("POST /me/password (wrong current) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "short"}, headers=_meh)
+check("POST /me/password (new too short) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "supersecret"}, headers=_meh)
+check("POST /me/password (same as current) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "newsecret123"}, headers=_meh)
+check("POST /me/password (valid) -> 200", r.status_code == 200)
+# Old password no longer authenticates; the new one does.
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "supersecret"})
+check("login old password after self-change -> 401", r.status_code == 401)
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "newsecret123"})
+check("login new password after self-change -> 200", r.status_code == 200)
+# No RBAC identity (no token) -> rejected, never handled as a change. 403 in open
+# mode today; becomes 401 once the middleware enforces sessions (plano 48 F0).
+r = client.post("/api/me/password",
+                json={"current_password": "newsecret123", "new_password": "another12345"})
+check("POST /me/password (no session) -> 401/403", r.status_code in (401, 403))
+# The session token stays valid across a password change (opaque, not derived).
+r = client.get("/api/auth/me", headers=_meh)
+check("session valid after self password change", r.status_code == 200)
+# Restore the admin password so downstream expectations hold.
+r = client.post("/api/me/password",
+                json={"current_password": "newsecret123", "new_password": "supersecret"}, headers=_meh)
+check("POST /me/password (restore) -> 200", r.status_code == 200)
+
 # Logout invalidates the session
 r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_utok}"})
 check("POST /auth/logout -> 200", r.status_code == 200)

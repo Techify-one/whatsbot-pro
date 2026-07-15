@@ -1091,6 +1091,16 @@ export async function resetUserPassword(id, password) {
   return request('POST', `/api/users/${id}/password`, { password });
 }
 
+// Self-service (plano 47): the logged-in RBAC user changes their OWN password.
+// Requires the current password; a wrong one returns 400 (not 401) so it doesn't
+// trigger the global logout branch.
+export async function changeMyPassword(currentPassword, newPassword) {
+  return request('POST', '/api/me/password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
 export async function deleteUser(id) {
   return request('DELETE', `/api/users/${id}`);
 }

@@ -43,6 +43,21 @@ def get_auth_row(email: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_auth_row_by_id(user_id: int) -> dict | None:
+    """Internal: same shape as :func:`get_auth_row` but keyed by id.
+
+    Used by the self-service password change (plano 47) to verify the current
+    password of the logged-in user (whose ``current_user`` dict has no hash).
+    Keeps the hash — never expose it to the API.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(users.c.id, users.c.password_hash, users.c.is_active)
+            .where(users.c.id == user_id)
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 def list_all() -> list[dict]:
     with get_engine().connect() as conn:
         rows = conn.execute(select(users).order_by(users.c.id)).mappings().all()

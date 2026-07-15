@@ -33,7 +33,7 @@ function MenuItem({ active, href, onClick, icon, children, gated = true }) {
   `;
 }
 
-export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl, currentUser }) {
+export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl, currentUser, onChangePassword }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -178,6 +178,13 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
                 <div class="text-[13px] text-wa-text font-medium truncate">${currentUser.name || currentUser.email}</div>
                 ${currentUser.name ? html`<div class="text-[11px] text-wa-secondary truncate">${currentUser.email}</div>` : null}
               </div>
+              <button
+                onClick=${() => { onChangePassword && onChangePassword(); close(); }}
+                class="w-full text-left px-4 py-2.5 text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-2 text-wa-text"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                Trocar minha senha
+              </button>
             ` : null}
             <button
               onClick=${() => { onLogout(); close(); }}

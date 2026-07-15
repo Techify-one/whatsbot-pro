@@ -14,6 +14,7 @@ import { buildPluginApi, isFrontendApiCompatible } from '../../plugins/api.js';
 import { reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory, getRouteOverride } from '../../plugins/registry.js';
 import { SetupWizard } from '../SetupWizard.js';
 import { LowBalanceModal } from '../LowBalanceModal.js';
+import { ChangePasswordModal } from '../ChangePasswordModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
@@ -88,6 +89,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // ScreenRouter so a hard reload doesn't bounce to the home page during the async
   // window before a route-override (e.g. protocolos) has registered.
   const [extensionsLoaded, setExtensionsLoaded] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);  // self-service password modal (plano 47)
   const [tab, setTabState] = useState(() => tabFromPath([]));
   const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
@@ -416,7 +418,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} onChangePassword=${() => setShowChangePassword(true)} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         <${ScreenRouter}
@@ -443,6 +445,12 @@ export function App({ onLogout, hasPassword, currentUser }) {
         accountUrl=${lowBalance.account_url || (config && config.account_url)}
         onClose=${() => setLowBalance(null)}
         onSnooze=${(ms) => snoozeLowBalance(ms)}
+      />` : null}
+
+      ${showChangePassword && currentUser ? html`<${ChangePasswordModal}
+        user=${currentUser}
+        onNotify=${handleNotify}
+        onClose=${() => setShowChangePassword(false)}
       />` : null}
 
       <!-- Host for plugin-opened modals (e.g. the "popup ao resolver" flow). -->
