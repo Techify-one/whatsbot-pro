@@ -75,6 +75,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const list = useConversationList({ onUnreadChange });
   const {
     contacts, setContacts, loading,
+    loadingMore, hasMore, loadMore,
     search, setSearch, handleSearchChange,
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
@@ -244,6 +245,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         <${ContactList}
           contacts=${displayedContacts}
           loading=${loading}
+          loadingMore=${loadingMore}
+          hasMore=${hasMore}
+          loadMore=${loadMore}
           search=${search}
           onSearchChange=${onSearchChange}
           statusFilter=${statusFilter}

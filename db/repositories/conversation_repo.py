@@ -388,6 +388,25 @@ def _attach_labels(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _attach_contact_tags(rows: list[dict]) -> list[dict]:
+    """Enrich rows com as TAGS DO CONTATO (nomes), em UMA query batch (plano 50 F8).
+
+    Distinto de :func:`_attach_labels` (etiquetas da CONVERSA). O sidebar conversa-first
+    filtra por `tag` (tags do contato) client-side, então cada row leva ``contact_tags``
+    — assim o `convRowToSidebarRow` não precisa de um fetch de contatos à parte."""
+    from db.repositories import contact_query
+    ids = [r["contact_id"] for r in rows if r.get("contact_id") is not None]
+    if not ids:
+        for r in rows:
+            r["contact_tags"] = []
+        return rows
+    with get_engine().connect() as conn:
+        by_contact = contact_query.tags_by_contact(conn, ids)
+    for r in rows:
+        r["contact_tags"] = list(by_contact.get(r.get("contact_id"), []))
+    return rows
+
+
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
                        assignee_user_id: int | None = None, is_archived: int | None = None,
                        inbox_ids: list[int] | None = None, current_user_id: int | None = None,
@@ -416,7 +435,7 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-    return _attach_labels([_finalize_conv(r) for r in rows])
+    return _attach_contact_tags(_attach_labels([_finalize_conv(r) for r in rows]))
 
 
 def list_filtered(where, *, inbox_ids: list[int] | None = None,
@@ -436,7 +455,7 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-    return _attach_labels([_finalize_conv(r) for r in rows])
+    return _attach_contact_tags(_attach_labels([_finalize_conv(r) for r in rows]))
 
 
 def get_with_channel(conv_id: int, current_user_id: int | None = None) -> dict | None:

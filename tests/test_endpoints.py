@@ -2557,6 +2557,14 @@ _convs = r.json()["data"]["conversations"]
 check("list -> includes created convs + contact_name join",
       len(_convs) >= 2 and "contact_name" in _convs[0])
 
+# plano 50 F8 — o row enriquecido carrega tags + atributos + avatar do CONTATO, para o
+# sidebar conversa-first filtrar/renderizar sem um fetch de contatos à parte + has_more.
+check("F8: row enriquecido traz contact_tags", "contact_tags" in _convs[0])
+check("F8: row enriquecido traz contact_custom_attributes (dict)",
+      isinstance(_convs[0].get("contact_custom_attributes"), dict))
+check("F8: row enriquecido traz avatar_v", "avatar_v" in _convs[0])
+check("F8: lista de atendimentos devolve has_more", "has_more" in r.json()["data"])
+
 r = client.get(f"/api/conversations/{_conv1['id']}")
 check("GET /api/conversations/{id} -> 200", r.status_code == 200)
 check("detail -> right conversation", r.json()["data"]["conversation"]["id"] == _conv1["id"])

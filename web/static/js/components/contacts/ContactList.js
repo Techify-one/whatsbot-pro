@@ -128,8 +128,23 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
-  savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
+  savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
+  loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
+  // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
+  // há próxima página (modo conversa-first, sem busca). Observer recriado quando muda.
+  const bottomSentinelRef = useRef(null);
+  const listScrollRef = useRef(null);
+  useEffect(() => {
+    const sentinel = bottomSentinelRef.current;
+    const root = listScrollRef.current;
+    if (!sentinel || !root || !hasMore || !loadMore) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries[0] && entries[0].isIntersecting && !loadingMore) loadMore();
+    }, { root, rootMargin: '0px 0px 200px 0px' });
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [hasMore, loadMore, loadingMore]);
   const selCount = (selectedKeys || []).length;
   // Selection is keyed per CONVERSATION row (rowKeyFor), not by phone — so the two
   // channels of the same number are selectable independently.
@@ -486,7 +501,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
       ` : null}
 
       <!-- Contact rows -->
-      <div class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg">
+      <div ref=${listScrollRef} class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg">
         ${loading && contacts.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 animate-pulse-slow text-[14px]">Carregando...</div>`
           : contacts.length === 0
@@ -634,6 +649,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 </div>
               `)
         }
+        <!-- Sentinela do scroll infinito (plano 50 F8): dispara loadMore ao aproximar
+             do fim quando há mais páginas (modo conversa-first, sem busca). -->
+        ${hasMore && !search ? html`
+          <div ref=${bottomSentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
+            ${loadingMore ? 'Carregando mais…' : ''}
+          </div>` : null}
       </div>
     </div>
   `;

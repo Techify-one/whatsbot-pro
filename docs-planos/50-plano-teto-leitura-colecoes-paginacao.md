@@ -1,6 +1,6 @@
 # Plano 50 — Teto em toda leitura de coleção (paginação + limites contra sobrecarga)
 
-> **Status:** EM EXECUÇÃO · **Data:** 2026-07-15 · **Escopo:** grande · **Branch:** `feature/paginacao-teto-colecoes`
+> **Status:** CONCLUÍDA (14/14 fases; frontends F4/F7/F8/F10 aguardam QA de navegador) · **Data:** 2026-07-15 · **Escopo:** grande · **Branch:** `feature/paginacao-teto-colecoes`
 > **Origem:** pergunta do usuário ("o sistema tem paginação pra não pesar? … qualquer parte que voltasse muitos dados tinha que ter proteção").
 > Política transversal: **toda leitura de coleção tem teto** — paginação real onde o dado cresce sem limite (mensagens, contatos, usage) e `clamp_limit(limit, default, cap)` onde já há `LIMIT` mas o parâmetro é livre.
 > **Como usar:** preencher o "Status de execução" de cada fase ANTES de avançar.
@@ -136,7 +136,12 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 8 — Sidebar com scroll infinito
 
 #### Status de execução — Fase 8
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída (modelo conversa-first; verificação de navegador manual pendente — ALTO RISCO)
+- **Decisão P3:** conversa-first (escolha do usuário) — o sidebar é dirigido por `/api/atendimentos` (que já pagina), não mais por `getContacts(TODOS)`.
+- **O que foi feito:** **Backend** — o row enriquecido de atendimento passou a carregar os campos do CONTATO que faltavam p/ o sidebar filtrar/renderizar sem fetch à parte: `contact_custom_attributes` (coluna nova em `_enriched_columns` + coerção em `finalize_conv`), `contact_tags` (batch novo `_attach_contact_tags` em `list_conversations`/`list_filtered`), e `avatar_v` (por row na rota `/api/atendimentos`, + `has_more`). **Frontend** — `convRowToSidebarRow` carrega `tags`/`custom_attributes`/`avatar_v` do payload (nasce completo); `useConversationList` em **modo duplo**: sem busca = conversa-first paginado (`listConversations` limit/offset + `loadMore` que anexa com dedup por `conversation_id` + guarda de concorrência), com busca = caminho legado `buildRows(getContacts(q) × conversas)`; `ContactList` ganhou sentinela `IntersectionObserver` no fim + indicador "Carregando mais…"; `Contacts.js` fia `loadMore/loadingMore/hasMore`.
+- **Como foi feito / decisões:** O row enriquecido é o MESMO shape do `conversation_upsert` (WS), então o sidebar REST e o WS convergem (mais consistente que o `buildRows` contato-first anterior). Busca preservada via modo legado (mesma semântica). **Mudanças de comportamento documentadas:** (1) contatos SEM atendimento não aparecem no sidebar no modo conversa-first (P3: tratados pela tela Contatos / ao iniciar atendimento); (2) filtros/abas client-side (status, atribuição, filtros avançados) operam sobre as **páginas carregadas** — filtrar exige rolar p/ carregar mais, ou migração server-side futura (limitação inerente ao scroll infinito, prevista no P3).
+- **Problemas / pendências:** **VERIFICAÇÃO DE NAVEGADOR OBRIGATÓRIA antes de merge** (tela mais crítica, sem QA visual aqui): abrir sidebar (1 página ~50), rolar ao fim (carrega +página, sem duplicar), WS `conversation_upsert` consistente, busca/arquivados refazem da página 1, filtros por tag/atributo de contato funcionam nas linhas carregadas, avatares aparecem. Reavaliar migrar status/atribuição p/ server-side se o "filtra só o carregado" incomodar.
+- **Verificação:** Testes F8 backend (row traz `contact_tags`/`contact_custom_attributes`/`avatar_v`; `has_more` na lista). `node --check` nos 4 arquivos; `node --test conversationRows` 47 pass. Suíte **1338 passed, 0 failed**.
 
 ---
 

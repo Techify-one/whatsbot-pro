@@ -475,11 +475,12 @@ export function convRowToSidebarRow(p) {
     // Sort key: a t=0 row has last_message_ts=0, so fall back to last_activity_at
     // (touched = now) via updated_at → the brand-new conversation sorts to the top.
     updated_at: p.last_activity_at,
-    // Contact-only fields the enriched row does NOT carry — seeded empty so the row
-    // renders (name/preview/channel); tags/avatar arrive on the next reconcile.
-    tags: [],
-    custom_attributes: {},
-    avatar_v: undefined,
+    // Contato (plano 50 F8): o row enriquecido agora carrega tags + atributos + avatar
+    // do contato, então a linha nasce COMPLETA (filtros por `tag`/`cattr:contact:*` +
+    // foto funcionam sem um fetch de contatos à parte). Fallbacks p/ payloads antigos.
+    tags: p.contact_tags || [],
+    custom_attributes: p.contact_custom_attributes || {},
+    avatar_v: p.avatar_v,
   };
 }
 

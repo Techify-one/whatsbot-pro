@@ -111,7 +111,11 @@ def register_routes(app, deps):
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
             limit=limit, offset=offset)
-        return _ok({"conversations": rows})
+        # avatar_v por row (plano 50 F8): o sidebar conversa-first monta a foto sem um
+        # fetch de contatos à parte. has_more = veio a página cheia (há próxima).
+        for r in rows:
+            r["avatar_v"] = avatar_version(settings, r.get("contact_phone") or "")
+        return _ok({"conversations": rows, "has_more": len(rows) >= limit})
 
     @app.get("/api/atendimentos/filter-schema")
     async def filter_schema(request: Request):
