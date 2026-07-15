@@ -185,6 +185,25 @@ check("GET /api/auth/check -> has_password=false", r.json()["data"]["has_passwor
 r = client.post("/api/auth/login", json={"password": "test"})
 check("POST /api/auth/login (no pw set) -> 400", r.status_code == 400)
 
+# ── plano 48 F1 — anti-lockout: numa instalação nova (0 usuários) o gate fica
+#    ABERTO para o 1º admin ser criável. /auth/check reporta has_users=false, o
+#    /api/* responde sem token e o /ws conecta — senão a instalação novinha
+#    ficaria trancada. O bootstrap em si (0→1 admin) é exercitado adiante, na
+#    seção RBAC; aqui ainda há 0 usuários.
+import json as _json_f1
+check("F1 fresh install: /auth/check -> has_users=false",
+      client.get("/api/auth/check").json()["data"]["has_users"] is False)
+check("F1 fresh install: /api/config aberto sem token (0 usuários)",
+      anon.get("/api/config").status_code == 200)
+check("F1 fresh install: /api/auth/bootstrap isento (sem token) — 400 sem body, não 401",
+      anon.post("/api/auth/bootstrap", json={}).status_code == 400)
+try:
+    with anon.websocket_connect("/ws") as _ws_f1:
+        _ev_f1 = _json_f1.loads(_ws_f1.receive_text())
+    check("F1 fresh install: /ws aberto sem token (0 usuários)", _ev_f1.get("event") == "status")
+except Exception:
+    check("F1 fresh install: /ws aberto sem token (0 usuários)", False)
+
 # ═══════════════════════════════════════════════════════════════════
 #  3. Config
 # ═══════════════════════════════════════════════════════════════════

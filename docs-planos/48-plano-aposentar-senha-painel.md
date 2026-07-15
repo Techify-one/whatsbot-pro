@@ -177,11 +177,11 @@ WAVE 2   F3 (storage + docs) 🟢  [depende de: F2]
 **Pronto quando:** partindo de 0 usuários, o painel obriga criar o admin, o bootstrap funciona sem token, e após criá-lo o gate da Fase 0 fecha a API — tudo coberto por teste.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(auto-migração sim/não — P2)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(fresh install força admin; bootstrap+login verde)_
+**Estado:** ✅ Concluída (2026-07-15)
+- **O que foi feito:** confirmado que o fluxo anti-lockout já é correto para o modelo `has_users` — [AuthGate.js](../web/static/js/components/shell/AuthGate.js) força bootstrap quando `has_users===false`; `/api/auth/bootstrap` é isento ([app.py](../server/app.py)) e só cria enquanto `count()==0`; [LoginScreen.js](../web/static/js/components/LoginScreen.js) já loga por email+senha. Adicionado bloco de teste **F1** na seção "Auth" ([test_endpoints.py](../tests/test_endpoints.py)) que fixa o invariante: com **0 usuários**, `/auth/check` → `has_users=false`, `/api/config` responde **sem token** (gate aberto), `/api/auth/bootstrap` é isento (400 sem body, não 401) e o `/ws` conecta. O ciclo completo bootstrap→login→gate-fecha já é coberto pela seção RBAC (bootstrap) + Seção 23 (enforcement).
+- **Como foi feito / decisões:** **P2 = (a)** — sem auto-migração `web_password`→admin no boot; o bootstrap forçado do AuthGate + a isenção de `/api/auth/*` já cobrem o lockout. (b) seria nicety opcional, dispensada.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `venv/bin/python tests/test_endpoints.py` → **1258 passed, 8 failed** (as 8 pré-existentes do protocolos). Os 4 checks F1 verdes.
 
 ---
 
