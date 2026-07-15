@@ -7,7 +7,7 @@ import { subscribe } from '../services/wsBus.js';
 // which owns one connection and fans every event out to every subscriber. The
 // handler map shape is unchanged, so every event each consumer reacted to still
 // reaches the same callback with the same payload.
-export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onAiTyping, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
+export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved, onNewMessage, onChatPresence, onAiTyping, onContactInfoUpdated, onTagsChanged, onContactTagsUpdated, onHumanTransferAlert, onAgentTransferAlert, onContactAiToggled, onMessagesRead, onMessageStatus, onMessageAction, onMessageReaction, onAvatarUpdated, onGroupParticipantsChanged, onLowBalance, onConversationChanged, onWsConnect, onWsDisconnect }) {
   useEffect(() => {
     // The 6 conversation lifecycle events (plano 10 FF2) all route to a single
     // onConversationChanged(eventName, data) so the consumer can patch/refetch.
@@ -28,6 +28,7 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       tags_changed: onTagsChanged,
       contact_tags_updated: onContactTagsUpdated,
       human_transfer_alert: onHumanTransferAlert,
+      agent_transfer_alert: onAgentTransferAlert,
       contact_ai_toggled: onContactAiToggled,
       messages_read: onMessagesRead,
       message_status: onMessageStatus,

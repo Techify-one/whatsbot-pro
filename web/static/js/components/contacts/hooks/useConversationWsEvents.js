@@ -21,6 +21,7 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
 import { showBrowserNotification, playNotificationSound, getNotifPref } from '../../../utils/notifications.js';
+import { playTransferAlert } from '../../../utils/alertSound.js';
 import { optimisticDupIndex } from '../../../services/messages.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
@@ -221,7 +222,18 @@ export function useConversationWsEvents(opts) {
       }
     }
   }, []);
-  useWebSocket({ onConversationChanged, onWsConnect });
+  // Alerta sonoro de transferência ENTRE atendentes — mesma sirene do IA→humano,
+  // mas direcionada: o backend só emite `agent_transfer_alert` numa reatribuição
+  // PARA OUTRO humano (nunca em "assumir para mim"), e aqui filtramos por usuário
+  // logado, então só o atendente que recebeu a conversa ouve o som. `enabled`/
+  // `duration` vêm resolvidos do backend (config global) no próprio payload.
+  const onAgentTransferAlert = useCallback((data) => {
+    const uid = currentUserIdRef.current;
+    if (uid == null || !data || data.assignee_user_id !== uid) return;
+    if (data.enabled === false) return;
+    playTransferAlert(data.duration || 5);
+  }, []);
+  useWebSocket({ onConversationChanged, onAgentTransferAlert, onWsConnect });
 
   // Handle chat presence events (typing/recording indicators). Atendimento-cêntrico:
   // a presença pertence a Um atendimento (o canal GOWA que reportou). Casamos por

@@ -18,7 +18,9 @@ int, clampa no intervalo e cai no default quando o valor não parseia.
 from __future__ import annotations
 
 # Defaults nomeados — mensagens (chat, keyset) e listas/relatórios (limit/offset).
-PAGE_MSGS, CAP_MSGS = 50, 200
+# ⚠️ TESTE TEMPORÁRIO (plano 50 QA): PAGE_MSGS baixado de 50→5 p/ disparar a paginação
+# do chat com poucas mensagens. REVERTER para 50 depois dos testes.
+PAGE_MSGS, CAP_MSGS = 5, 200
 PAGE_LIST, CAP_LIST = 50, 200
 
 # Teto de segurança do offset (evita ?offset=1e18 estourar a query).

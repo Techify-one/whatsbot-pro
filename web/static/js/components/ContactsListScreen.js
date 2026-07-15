@@ -28,7 +28,9 @@ import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
-const PAGE_SIZE = 15;
+// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 15→3 p/ testar Anterior/Próxima com
+// poucos contatos. REVERTER para 15 depois dos testes.
+const PAGE_SIZE = 3;
 
 // Casefold + strip accents (espelha o `_fold` do backend) para a busca casar
 // independente de acento/caixa.

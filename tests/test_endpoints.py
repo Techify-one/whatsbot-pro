@@ -4782,6 +4782,66 @@ check("assign-agent kind=user sem user_id -> 400", r.status_code == 400)
 r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "bogus"})
 check("assign-agent kind inválido -> 400", r.status_code == 400)
 
+# ── Alerta sonoro de transferência ENTRE atendentes (agent_transfer_alert) ──────
+# O backend emite `agent_transfer_alert` numa reatribuição PARA OUTRO humano; o
+# frontend filtra pelo usuário logado para tocar só na aba de quem recebeu. Config
+# global própria (agent_transfer_alert_enabled/_duration), independente do
+# alerta IA→humano.
+_deps_ata = app.state.deps
+_orig_ata_bcast = _deps_ata.ws_manager.broadcast
+_ata_events = []
+async def _capture_ata(event, data):
+    if event == "agent_transfer_alert":
+        _ata_events.append(data)
+    return await _orig_ata_bcast(event, data)
+
+# GET /api/config expõe as duas chaves novas com defaults.
+_cfg_ata = client.get("/api/config").json()["data"]
+check("config -> agent_transfer_alert_enabled default True",
+      _cfg_ata.get("agent_transfer_alert_enabled") is True)
+check("config -> agent_transfer_alert_duration default 5",
+      _cfg_ata.get("agent_transfer_alert_duration") == 5)
+
+# Transferência para OUTRO atendente (via assign) → dispara o alerta direcionado.
+config_repo.set("agent_transfer_alert_enabled", True)
+config_repo.set("agent_transfer_alert_duration", 7)
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    r = client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+check("assign p/ outro atendente -> 200", r.status_code == 200)
+check("assign p/ outro atendente -> agent_transfer_alert emitido",
+      any(e.get("assignee_user_id") == _admin_id for e in _ata_events))
+check("agent_transfer_alert -> carrega duration da config global",
+      any(e.get("duration") == 7 for e in _ata_events))
+
+# Auto-atribuição NÃO dispara o alerta (não é "de um atendente para outro"). Testado
+# no serviço: (a) assign_me sempre é auto-atribuição; (b) assign com actor==assignee.
+from app.services import conversation_service as _conv_svc
+_ata_events.clear()
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    _conv_me = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign_me(_deps_ata, _conv_me, _admin_id))
+    check("assign_me -> sem agent_transfer_alert", len(_ata_events) == 0)
+    _conv_self = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign(_deps_ata, _conv_self, _admin_id, actor_id=_admin_id))
+    check("assign com actor==assignee -> sem agent_transfer_alert", len(_ata_events) == 0)
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+# Toggle desligado → nenhum alerta, mesmo transferindo para outro atendente.
+config_repo.set("agent_transfer_alert_enabled", False)
+_ata_events.clear()
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+check("agent_transfer_alert desligado -> sem broadcast", len(_ata_events) == 0)
+config_repo.set("agent_transfer_alert_enabled", True)
+
 # The enriched contact list now reflects Alice's open conversation.
 _alice_row = next((c for c in client.get("/api/contacts").json()["data"]
                    if c["phone"] == "5511999990001"), None)

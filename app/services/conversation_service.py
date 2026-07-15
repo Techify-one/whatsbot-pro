@@ -46,7 +46,7 @@ import logging
 import time
 
 from db.repositories import (conversation_repo, contact_repo, user_repo,
-                             agent_repo, tag_repo)
+                             agent_repo, tag_repo, config_repo)
 from server import system_notices
 from plugins.events import apply_filter, emit_with_filter
 from domain.events import (emit_domain, ConversationReopened,
@@ -93,6 +93,35 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
         "ts": time.time(),
     }
     await broadcast_and_emit(deps, ws_event, bus_event, payload)
+
+
+async def _maybe_agent_transfer_alert(deps, conv: dict, assignee_user_id,
+                                      actor_id) -> None:
+    """Toca o alerta sonoro de transferência ENTRE atendentes, apenas para o
+    atendente que recebeu a conversa.
+
+    Espelha o ``human_transfer_alert`` (IA→humano), mas com config GLOBAL própria
+    (``agent_transfer_alert_enabled``/``_duration``). Só dispara numa transferência
+    real PARA OUTRO humano: ``assignee_user_id`` presente e ``!= actor_id`` — assim
+    "assumir para mim" (auto-atribuição) nunca soa. O broadcast vai a todos os
+    clientes; o frontend filtra por ``assignee_user_id === currentUserId``.
+    Defensivo: uma falha aqui nunca quebra a atribuição."""
+    if not assignee_user_id or assignee_user_id == actor_id:
+        return
+    try:
+        enabled = await asyncio.to_thread(
+            config_repo.get, "agent_transfer_alert_enabled", True)
+        if not enabled:
+            return
+        duration = await asyncio.to_thread(
+            config_repo.get, "agent_transfer_alert_duration", 5)
+        await deps.ws_manager.broadcast("agent_transfer_alert", {
+            "assignee_user_id": assignee_user_id,
+            "enabled": True,
+            "duration": duration,
+        })
+    except Exception as e:
+        logger.debug("agent_transfer_alert broadcast failed: %s", e)
 
 
 async def _emit_notice(conv: dict, event_type: str, *, actor_name: str | None = None,
@@ -359,6 +388,7 @@ async def assign(deps, conv: dict, assignee_user_id, *, actor_id=None,
     bus_event = "conversation.assigned" if assignee_user_id else "conversation.unassigned"
     await _broadcast(deps, "conversation_assigned", bus_event, updated,
                      previous_assignee=previous_assignee)
+    await _maybe_agent_transfer_alert(deps, updated, assignee_user_id, actor_id)
     if assignee_user_id:
         target = await asyncio.to_thread(user_repo.get, assignee_user_id)
         await _emit_notice(updated, "assigned", actor_name=actor_name,
@@ -412,6 +442,8 @@ async def assign_unified(deps, conv: dict, *, kind: str, user_id=None,
     if not updated:
         return None
     await _broadcast(deps, "conversation_assigned", "conversation.assigned", updated)
+    if kind == "user":
+        await _maybe_agent_transfer_alert(deps, updated, user_id, actor_id)
     # Parity with the sidebar right-click (assign / assign-me / agent): surface a
     # lifecycle card in the thread. Defensive — a failed notice never fails the action.
     if kind == "user":

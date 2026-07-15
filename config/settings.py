@@ -128,6 +128,13 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("document_transcription_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_duration", default=5, exposed=True, writable=True),
+    # Alerta sonoro na transferência de um atendente humano para OUTRO atendente
+    # (reatribuição entre humanos). Independente do alerta IA→humano acima; toca a
+    # MESMA sirene (``playTransferAlert``), mas só para o atendente que recebeu a
+    # conversa. Config GLOBAL (é sobre o destinatário, não sobre o canal). Emitido
+    # por ``conversation_service`` como o evento WS ``agent_transfer_alert``.
+    ConfigKey("agent_transfer_alert_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("agent_transfer_alert_duration", default=5, exposed=True, writable=True),
     # max_executions is NOT seeded (no DEFAULT_CONFIG entry); GET falls back to 200.
     ConfigKey("max_executions", exposed=True, get_default=200, writable=True),
     # audit_retention_days: dias de retenção da trilha de auditoria (lido por
