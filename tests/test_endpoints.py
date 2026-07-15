@@ -398,6 +398,23 @@ r = client.get("/api/contacts?q=conteudoinexistente123")
 check("GET /api/contacts?q=conteudoinexistente123 -> empty",
       not any(c["phone"] == "5511999990010" for c in r.json()["data"]))
 
+# plano 50 F6 — o scan de conteúdo é bounded (só as N recentes) + guarda de >=2 chars.
+# Match por conteúdo com 2+ chars ainda funciona (regressão coberta acima); uma busca de
+# 1 caractere NÃO aciona o scan (não traz o contato que só casa por mensagem).
+_r1 = client.get("/api/contacts?q=ç").json()["data"]  # 1 char: só nome/telefone/tag
+check("F6: busca de 1 char não casa por conteúdo de mensagem",
+      not any(c["phone"] == "5511999990010" for c in _r1))
+from db.search.contact_search import (MESSAGE_SCAN_CAP as _SCAN_CAP,
+                                      MIN_SCAN_QUERY_LEN as _MINLEN,
+                                      contact_ids_matching_message as _cimm)
+from db.engine import get_engine as _f6_get_engine
+check("F6: guarda de comprimento mínimo do scan (>=2)", _MINLEN >= 2)
+check("F6: scan cap é um teto positivo", _SCAN_CAP > 0)
+# O scan de 1 char retorna vazio direto (nem toca no banco).
+with _f6_get_engine().connect() as _c6:
+    check("F6: contact_ids_matching_message('a') -> {} (abaixo do mínimo)",
+          _cimm(_c6, "a", False) == {})
+
 # Bot @mention flag: surfaces in the list and clears when the chat is read
 _mc = contact_repo.get_or_create("5511999990011")
 contact_repo.update(_mc["id"], is_group=1, group_name="Grupo Menção")

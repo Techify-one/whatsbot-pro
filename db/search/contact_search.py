@@ -69,6 +69,20 @@ def match_snippet(content: str, folded_q: str, radius: int = 40) -> str:
     return f"{prefix}{excerpt}{suffix}"
 
 
+# Teto de trabalho da busca por conteúdo (plano 50 F6): varre no máximo as N mensagens
+# MAIS RECENTES em vez da tabela `messages` inteira. Bound o custo por busca a algo
+# constante independente do total de mensagens. Trade-off: um match que só existe em
+# mensagens muito antigas (além das N recentes) pode escapar — aceitável p/ o caso de
+# uso "achar uma conversa por algo dito recentemente". Caminho futuro = FTS/tsvector
+# (plano P2). Nomes/telefone/tags NÃO usam este scan (casam sempre).
+MESSAGE_SCAN_CAP = 5000
+
+# Comprimento mínimo da query para ACIONAR o scan de conteúdo. Uma busca de 1 caractere
+# casaria quase tudo e forçaria a varredura inteira sem valor — nome/telefone/tag ainda
+# funcionam para 1 char (não dependem do scan).
+MIN_SCAN_QUERY_LEN = 2
+
+
 def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[int, dict]:
     """Map of contact id -> ``{"snippet": str, "id": int}`` for contacts (within the
     given archived scope) that have at least one message whose content matches
@@ -80,12 +94,16 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
     kept in the DB with their content, so they remain searchable too.
 
     Runs on the caller's ``conn`` (same connection used by ``list_contacts``).
+
+    Plano 50 F6: varre só as ``MESSAGE_SCAN_CAP`` mensagens mais recentes (teto de
+    custo) e exige ``len(folded_q) >= MIN_SCAN_QUERY_LEN`` (busca de 1 char não dispara
+    o scan — nome/telefone/tag já cobrem esse caso).
     """
-    if not folded_q:
+    if not folded_q or len(folded_q) < MIN_SCAN_QUERY_LEN:
         return {}
 
     # Most recent first, so the first match seen per contact is the freshest one.
-    # Core equivalent of the prior raw SQL — same join/filter/order.
+    # `.limit(MESSAGE_SCAN_CAP)` bound the scan às N recentes (F6).
     stmt = (
         select(messages.c.id, messages.c.contact_id, messages.c.content)
         .select_from(messages.join(contacts, contacts.c.id == messages.c.contact_id))
@@ -94,6 +112,7 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
         .where(messages.c.role.notin_(
             ("tool_call", "system_notice", "conversation_event", "system")))
         .order_by(messages.c.ts.desc())
+        .limit(MESSAGE_SCAN_CAP)
     )
     matched: dict[int, dict] = {}
     for row in conn.execute(stmt).mappings():

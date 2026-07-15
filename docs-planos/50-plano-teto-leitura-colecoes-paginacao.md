@@ -114,7 +114,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 6 — Cap do full-scan de busca
 
 #### Status de execução — Fase 6
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** `contact_ids_matching_message` (`contact_search.py`) — `.limit(MESSAGE_SCAN_CAP=5000)` sobre o `order_by(ts.desc())` (varre só as 5000 msgs mais recentes, não a tabela inteira) + guarda `len(folded_q) >= MIN_SCAN_QUERY_LEN(2)` (busca de 1 char não aciona o scan).
+- **Como foi feito / decisões:** Bound simples (plano P2 opção a), não FTS — trade-off documentado no código: um match que só exista em mensagens muito antigas (além das 5000 recentes) pode escapar; nome/telefone/tag **não** usam o scan (casam sempre, inclusive 1 char). FTS/tsvector fica como caminho futuro (P2 opção b).
+- **Problemas / pendências:** Nenhuma. (Observado ruído de teardown do harness contra o Postgres compartilhado — não afeta o resultado; `RESULTS` estável.)
+- **Verificação:** Testes F6 (1 char não casa por conteúdo; match 2+ chars segue funcionando — regressão coberta; `contact_ids_matching_message('a')=={}`). Suíte **1301 passed, 0 failed**.
 
 ---
 
