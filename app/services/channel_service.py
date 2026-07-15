@@ -206,6 +206,11 @@ def _invalidate_channel_caches(channel_id: str) -> None:
         ai_settings.reset_cache(channel_id)
     except Exception:
         pass
+    try:
+        from agent import memory
+        memory.invalidate_channel_caches(channel_id)
+    except Exception:
+        pass
 
 
 async def _emit_channel_event(deps, bus_event: str, payload: dict) -> None:
@@ -587,7 +592,9 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
     """Remove a channel: soft-delete (archive, default) or hard-delete (purge).
 
     Returns the result dict, or ``None`` if the channel vanished mid-purge (the
-    route maps it to a 404). The caller already guarded ``default`` and existence.
+    route maps it to a 404). The caller already guarded existence. Any channel is
+    removable now, including ``default`` (plano exclui-default) — the process caches
+    keyed on this channel_id are dropped so routing stops pointing at a dead inbox.
     """
     registry = getattr(deps, "channel_registry", None)
     # Best-effort: log the GOWA device out so the WhatsApp number is freed.
@@ -611,6 +618,7 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
                 registry.remove_channel(channel_id)
             except Exception:
                 pass
+        _invalidate_channel_caches(channel_id)
         logger.info("Canal %s removido (purge).", channel_id)
         return {"deleted": channel_id, "purged": True}
 
@@ -620,6 +628,7 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
             registry.remove_channel(channel_id)
         except Exception:
             pass
+    _invalidate_channel_caches(channel_id)
     logger.info("Canal %s arquivado (soft-delete).", channel_id)
     return {"deleted": channel_id, "archived": True}
 

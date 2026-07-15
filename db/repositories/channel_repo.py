@@ -68,6 +68,27 @@ def get(channel_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def primary_channel_id() -> str | None:
+    """The channel that absorbs ``default``-less fallbacks (plano exclui-default).
+
+    Historically every ``channel_id or "default"`` fallback assumed a channel with
+    id ``"default"`` always existed. Now that the default channel is deletable, this
+    resolves to the literal ``"default"`` while it lives, else the oldest live
+    (``enabled=1``, ``archived=0``) channel, else ``None`` (zero channels). Pure read.
+    """
+    row = get("default")
+    if row is not None and not row.get("archived"):
+        return "default"
+    with get_engine().connect() as conn:
+        cid = conn.execute(
+            select(channels.c.id)
+            .where(channels.c.archived == 0, channels.c.enabled == 1)
+            .order_by(channels.c.created_at, channels.c.id)
+            .limit(1)
+        ).scalar_one_or_none()
+    return cid
+
+
 def create(*, id: str, provider: str, display_name: str = "", enabled: int = 1,
            gowa_device_id: str | None = None, gowa_isolation: str = "shared",
            config: str | None = None) -> dict:

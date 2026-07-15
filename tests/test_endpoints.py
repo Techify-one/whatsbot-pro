@@ -1231,9 +1231,10 @@ check("POST webhook inbound -> 200 (nunca 500)", r.status_code == 200)
 r = client.post("/api/webhook/whatsapp_cloud/inexistente", json={})
 check("POST webhook canal desconhecido -> 200 ignored", r.status_code == 200)
 
-r = client.delete("/api/channels/default")
-check("DELETE /channels/default -> 400 (protegido)", r.status_code == 400)
-# Soft-delete (default): arquiva, preserva credenciais/histórico, some da lista.
+# O canal 'default' agora É removível (plano exclui-default) — o teste destrutivo
+# (arquivar/purgar o default + estado zero-canais + recriar) roda no FIM da suíte,
+# depois de todos os testes que ainda dependem do canal/inbox default.
+# Soft-delete: arquiva, preserva credenciais/histórico, some da lista.
 r = client.delete("/api/channels/cloud_teste")
 check("DELETE /channels -> 200 (soft-delete)", r.status_code == 200)
 check("DELETE -> arquivado (archived=True)", r.json()["data"].get("archived") is True)
@@ -5205,6 +5206,67 @@ r = client.post(f"/api/contacts/{_mn_phone}/private-document",
 check("POST /private-document -> 200", r.status_code == 200)
 check("private-document -> nota com media_type=document",
       (r.json().get("data") or {}).get("media_type") == "document")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Excluir o canal 'default' (plano exclui-default) — DESTRUTIVO, roda por ÚLTIMO:
+# arquiva/purga o default, zera a lista de canais e recria. Não deixar nada depois
+# que dependa do canal/inbox default.
+# ══════════════════════════════════════════════════════════════════════════════
+from db.repositories import channel_repo as _chrepo_x, inbox_repo as _ibxrepo_x
+from app.services.message_ingest_service import _read_gowa_allowed_jid_types as _read_jid_x
+from channels import jid as _jid_x
+from agent import memory as _mem_x
+
+# 1) Arquivar (soft-delete) o default: antes retornava 400 (protegido), agora 200.
+r = client.delete("/api/channels/default")
+check("DELETE /channels/default -> 200 (não mais protegido)", r.status_code == 200)
+check("DELETE /channels/default -> archived=True",
+      (r.json().get("data") or {}).get("archived") is True)
+_arch = client.get("/api/channels?archived=true").json()["data"]
+_arch_ids = {c["id"] for c in (_arch if isinstance(_arch, list) else _arch.get("channels", []))}
+check("default arquivado aparece em ?archived=true", "default" in _arch_ids)
+_live = client.get("/api/channels").json()["data"]
+_live_ids = {c["id"] for c in (_live if isinstance(_live, list) else _live.get("channels", []))}
+check("default arquivado some da lista viva", "default" not in _live_ids)
+r = client.post("/api/channels/default/restore")
+check("POST /channels/default/restore -> 200", r.status_code == 200)
+
+# 2) Purgar TODOS os canais restantes, incluindo o default → estado zero-canais.
+for _c in _chrepo_x.list_all(include_archived=True):
+    client.delete(f"/api/channels/{_c['id']}?purge=true")
+_live = client.get("/api/channels").json()["data"]
+_live_list = _live if isinstance(_live, list) else _live.get("channels", [])
+check("purge de todos -> GET /channels vazio", _live_list == [])
+check("purge do default -> sem inbox órfã 'default'",
+      _ibxrepo_x.get_by_channel("default") is None)
+
+# 3) Inbound com zero canais: degrada gracioso (200 ignored), sem inbox-fantasma.
+r = client.post("/api/webhook/gowa/default",
+                json={"from": "5511999990099@s.whatsapp.net", "message": {"text": "oi"}})
+check("webhook inbound zero-canais -> 200 (nunca 500)", r.status_code == 200)
+check("webhook inbound zero-canais -> status=ignored",
+      (r.json().get("data") or {}).get("status") == "ignored")
+check("webhook inbound zero-canais -> NÃO cria inbox 'default' (anti-fantasma)",
+      _ibxrepo_x.get_by_channel("default") is None)
+
+# 4) allowed_jid_types com o default removido -> default permissivo, sem crash.
+check("_read_gowa_allowed_jid_types cai no default permissivo",
+      _read_jid_x() == list(_jid_x.DEFAULT_ALLOWED_JID_TYPES))
+
+# 5) Recriar um canal após a exclusão: id gerado != 'default', inbox criada, resolve ok.
+# GOWA não exige credenciais (fluxo QR), então recria sem creds — como o default original.
+r = client.post("/api/channels",
+                json={"provider": "gowa", "display_name": "Novo Canal"})
+check("POST /channels após zero-canais -> 200", r.status_code == 200)
+_new_id = (r.json().get("data") or {}).get("id")
+check("canal recriado tem id gerado != 'default'", bool(_new_id) and _new_id != "default")
+_inbx = client.get("/api/inboxes").json()["data"]
+_inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
+check("canal recriado -> inbox existe", any(i["channel_id"] == _new_id for i in _inbx))
+_mem_x.invalidate_channel_caches(_new_id)
+check("resolve_inbox_id(novo canal) -> inbox do canal",
+      _mem_x.resolve_inbox_id(_new_id) is not None)
 
 
 print(f"\n{'='*60}")

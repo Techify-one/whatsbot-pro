@@ -5,7 +5,7 @@ import time
 import uuid
 from pathlib import Path
 
-from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
+from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo, channel_repo
 
 from agent import history_filter
 
@@ -19,21 +19,40 @@ DEFAULT_CHANNEL_ID = "default"
 _INBOX_BY_CHANNEL: dict[str, int] = {}
 
 
-def resolve_inbox_id(channel_id: str) -> int:
-    """Inbox id that owns ``channel_id`` (plano 11). Cached; falls back to the
-    default inbox (id=1) if resolution fails so a save never blows up."""
-    cid = channel_id or DEFAULT_CHANNEL_ID
+def resolve_inbox_id(channel_id: str) -> int | None:
+    """Inbox id that owns ``channel_id`` (plano 11). Cached process-lifetime.
+
+    Returns ``None`` when there is no inbox to resolve (plano exclui-default): the
+    default channel is now deletable, so a stale/absent ``channel_id`` must NOT
+    fabricate an orphan inbox nor fall back to the seeded inbox id=1 (which is
+    itself CASCADE-deleted when the default channel is purged — an FK violation
+    waiting to happen). ``None`` lets the caller save the message unlinked instead."""
+    cid = channel_id or channel_repo.primary_channel_id()
+    if not cid:
+        return None
     cached = _INBOX_BY_CHANNEL.get(cid)
     if cached is not None:
         return cached
     try:
         inbox = inbox_repo.get_or_create_for_channel(cid)
-        inbox_id = int(inbox["id"])
+        inbox_id = int(inbox["id"]) if inbox else None
     except Exception:
-        logger.exception("Falha ao resolver inbox do canal %s; usando default", cid)
-        inbox_id = conversation_repo.DEFAULT_INBOX_ID
-    _INBOX_BY_CHANNEL[cid] = inbox_id
+        logger.exception("Falha ao resolver inbox do canal %s", cid)
+        inbox_id = None
+    # Only cache a real hit — an absent channel (None) must re-resolve so the
+    # zero-channel state self-heals the moment a channel is (re)created, without
+    # waiting for a cache invalidation the create path doesn't issue.
+    if inbox_id is not None:
+        _INBOX_BY_CHANNEL[cid] = inbox_id
     return inbox_id
+
+
+def invalidate_channel_caches(channel_id: str) -> None:
+    """Drop the process-lifetime inbox/provider caches for ``channel_id`` (plano
+    exclui-default). Called when a channel is archived/purged so a stale
+    ``channel_id -> inbox_id`` entry stops routing to a deleted inbox until restart."""
+    _INBOX_BY_CHANNEL.pop(channel_id, None)
+    _PROVIDER_BY_CHANNEL.pop(channel_id, None)
 
 
 # channel_id -> provider name cache (plano 42). A channel's provider is immutable
@@ -52,12 +71,13 @@ def _resolve_provider_class(channel_id: str):
     from the agent layer. Returns ``None`` whenever unresolved (registry not wired
     — e.g. tests/legacy — channel row missing, or provider not registered) so the
     caller falls back byte-identically to the WhatsApp JID form."""
-    cid = channel_id or DEFAULT_CHANNEL_ID
+    cid = channel_id or channel_repo.primary_channel_id()
+    if not cid:
+        return None
     if cid in _PROVIDER_BY_CHANNEL:
         provider = _PROVIDER_BY_CHANNEL[cid]
     else:
         try:
-            from db.repositories import channel_repo
             row = channel_repo.get(cid)
             provider = (row or {}).get("provider")
         except Exception:

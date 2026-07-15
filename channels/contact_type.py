@@ -8,9 +8,10 @@ tipo" para os call sites do CORE que criam contatos FORA do fluxo inbound (que j
 Genérico (sem ``if provider ==``): resolve a CLASSE do provider do canal via o
 ChannelRegistry cabeado e lê ``contact_type()`` dela. Fail-open para ``"outros"``
 sempre que o canal/provider não resolve (registry não cabeado, canal inexistente).
-``channel_id`` vazio/None cai no canal ``default`` — que é o GOWA single-channel do
-inbound —, então um contato criado sem canal explícito herda o tipo do canal padrão
-em vez de um ``"outros"`` genérico.
+``channel_id`` vazio/None cai no canal primário (``channel_repo.primary_channel_id()``
+— ``default`` se vive, senão o canal vivo mais antigo, senão ``None``), então um
+contato criado sem canal explícito herda o tipo do canal padrão em vez de um
+``"outros"`` genérico; sem nenhum canal cai em ``"outros"``.
 """
 from __future__ import annotations
 
@@ -19,7 +20,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTACT_TYPE = "outros"
-DEFAULT_CHANNEL_ID = "default"
 
 
 def resolve_contact_type(channel_id: str | None) -> str:
@@ -28,13 +28,13 @@ def resolve_contact_type(channel_id: str | None) -> str:
     Retorna ``"outros"`` quando o provider não pode ser resolvido — o mesmo
     fallback do ``source_id``/``ContactMemory``.
     """
-    cid = (channel_id or "").strip() or DEFAULT_CHANNEL_ID
     try:
         from db.repositories import channel_repo
-        row = channel_repo.get(cid)
+        cid = (channel_id or "").strip() or channel_repo.primary_channel_id()
+        row = channel_repo.get(cid) if cid else None
         provider = (row or {}).get("provider")
     except Exception:
-        logger.exception("Falha ao resolver canal %s para contact_type", cid)
+        logger.exception("Falha ao resolver canal %s para contact_type", channel_id)
         provider = None
     if not provider:
         return DEFAULT_CONTACT_TYPE

@@ -344,8 +344,6 @@ def register_routes(app, deps):
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
-        if channel_id == "default":
-            return _err("O canal default não pode ser removido.", 400)
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
