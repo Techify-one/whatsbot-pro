@@ -1005,8 +1005,19 @@ def list_protocolos(*, status: str | None = None, assignee_user_id: int | None =
         where.append("contact_id = :cid")
         params["cid"] = contact_id
     if q:
-        where.append("(contact_name LIKE :q OR contact_phone LIKE :q)")
+        # Busca case- E acento-insensível sem a extensão `unaccent`: normaliza os dois
+        # lados com lower()+translate() (mapa pt-BR). Seed de bootstrap — a versão LIVE
+        # (storages/plugins/protocolos/logic.py) tem a mesma correção + os filtros Python.
+        _accf = "áàâãäçéèêëíìîïóòôõöúùûüñ"      # minúsculas
+        _acct = "aaaaaceeeeiiiiooooouuuun"       # MESMO tamanho de _accf
+        norm = "translate(lower({c}), :acc_from, :acc_to)"
+        term = "translate(lower(:q), :acc_from, :acc_to)"
+        where.append(
+            f"({norm.format(c='contact_name')} LIKE {term}"
+            f" OR {norm.format(c='contact_phone')} LIKE {term})")
         params["q"] = f"%{q}%"
+        params["acc_from"] = _accf
+        params["acc_to"] = _acct
     if opened_from is not None:
         where.append("opened_at >= :ofrom")
         params["ofrom"] = float(opened_from)

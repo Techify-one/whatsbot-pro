@@ -1942,6 +1942,30 @@ _lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limi
 check("list_protocolos(canal filter) -> exclui canal diferente",
       all(a["id"] != _cproto["id"] for a in _lc2))
 
+# 7c) BUSCA "Buscar cliente" (q → SQL) case- E acento-insensível (fix filtros protocolos).
+_proto_q = _alogic.ensure_protocolo_for_contact(70055, phone="5511960000055", name="João DA Silva")
+def _q_has(q):
+    return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200))
+check("q busca: 'joão' (exato) acha", _q_has("joão"))
+check("q busca: 'joao' (sem acento) acha", _q_has("joao"))          # acento-insensível
+check("q busca: 'JOAO' (maiúsc.) acha", _q_has("JOAO"))             # case-insensível (o bug)
+check("q busca: 'silva' (substring) acha", _q_has("silva"))
+check("q busca: 'da' (minúsc. do nome) acha", _q_has("da"))
+check("q busca: 'zzznaoexiste' NÃO acha", not _q_has("zzznaoexiste"))
+check("q busca: por telefone (substring) acha", _q_has("960000055"))
+# Campo de OPÇÃO agora casa ignorando caixa E acento (antes: exato sensível).
+check("pf opção -> case-insensível",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                  "resolvido", {"protocolo:resultado"}) is True)
+check("pf opção -> acento-insensível",
+      _alogic._row_matches_filter({"fields": {"cidade": "São Paulo"}}, "pf:protocolo:cidade",
+                                  "sao paulo", {"protocolo:cidade"}) is True)
+check("pf opção -> ainda exclui valor diferente",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                  "pendente", {"protocolo:resultado"}) is False)
+check("cattr -> acento-insensível",
+      _alogic._row_matches_filter({"contact_attrs": {"cidade": "São Paulo"}}, "cattr:cidade", "sao") is True)
+
 # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
 _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
 check("pref ausente -> default equipe",
