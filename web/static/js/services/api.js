@@ -1035,11 +1035,10 @@ export async function downloadAuditExport(params = {}, format = 'csv') {
 
 // ── Auth ──────────────────────────────────────────────────────────
 
-// Login. With an email, performs an RBAC user login ({email, password});
-// without one, falls back to the legacy single-password login ({password}).
+// RBAC user login ({email, password}) — the legacy single-password was retired
+// (plano 48). Both fields are required server-side.
 export async function login(password, email = '') {
-  const body = email ? { email: email.trim(), password } : { password };
-  return request('POST', '/api/auth/login', body);
+  return request('POST', '/api/auth/login', { email: email.trim(), password });
 }
 
 // Create the first admin user (only works while no users exist).
@@ -1047,7 +1046,7 @@ export async function bootstrapAdmin(data) {
   return request('POST', '/api/auth/bootstrap', data);
 }
 
-// Current identity for the bearer token (RBAC user, or legacy single-password).
+// Current identity for the bearer token (RBAC user session).
 export async function getMe() {
   return request('GET', '/api/auth/me');
 }

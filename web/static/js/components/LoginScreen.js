@@ -5,10 +5,8 @@ import { login, bootstrapAdmin } from '../services/api.js';
 
 const html = htm.bind(h);
 
-// Login screen. Supports three flows that coexist:
-//  - Legacy single-password login: leave the email blank, type the panel
-//    password. Sends {password}.
-//  - RBAC user login: fill in the email + password. Sends {email, password}.
+// Login screen (plano 48 — RBAC only; the legacy single-password was retired):
+//  - RBAC user login: email + password. Sends {email, password}.
 //  - First-access bootstrap: when there are no users yet (needsBootstrap),
 //    creates the first admin via /api/auth/bootstrap, then logs in.
 export function LoginScreen({ onLogin, needsBootstrap = false }) {

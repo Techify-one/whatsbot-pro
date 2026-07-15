@@ -13,7 +13,6 @@ from fastapi import Request
 
 from config.settings import (LLM_API_BASE_URL, exposed_config_keys,
                              writable_config_keys)
-from server.auth import generate_salt, hash_password
 from server.authz import permission_denied
 from server.helpers import _ok, _err, _mask_key
 from server import balance_monitor
@@ -106,12 +105,13 @@ def register_routes(app, deps):
         # Capture the panel's public base URL on first use (global var for reuse).
         _capture_public_base_url(settings, request)
         # R17: the exposed keys + their GET fallbacks come from the single config-key
-        # metadata table (config.settings.CONFIG_KEYS). The two special keys —
-        # ``openrouter_api_key`` (masked) and ``has_password`` (derived) — stay inline.
+        # metadata table (config.settings.CONFIG_KEYS). ``openrouter_api_key`` stays
+        # inline (masked). ``has_password`` is retained as a fixed ``False`` for
+        # frontend compat — the legacy panel password was retired (plano 48).
         out = {"openrouter_api_key": _mask_key(settings.get("openrouter_api_key", ""))}
         for ck in exposed_config_keys():
             out[ck.key] = settings.get(ck.key, ck.effective_get_default)
-        out["has_password"] = bool(settings.get("web_password_hash", ""))
+        out["has_password"] = False
         return _ok(out)
 
     @app.put("/api/config")
@@ -135,19 +135,7 @@ def register_routes(app, deps):
                 audit_after[key] = value
                 keys_changed.append(key)
 
-        # Handle password set/change/remove
-        if "web_password" in body:
-            raw_password = body["web_password"]
-            if raw_password:
-                salt = generate_salt()
-                settings["web_password_hash"] = hash_password(raw_password, salt)
-                settings["web_password_salt"] = salt
-                logger.info("Web panel password set/changed.")
-            else:
-                settings["web_password_hash"] = ""
-                settings["web_password_salt"] = ""
-                logger.info("Web panel password removed.")
-
+        # (The legacy "web_password" panel-password setter was retired — plano 48.)
         settings.save()
 
         # Bot phone changed → refresh mention detection (the bot's display name

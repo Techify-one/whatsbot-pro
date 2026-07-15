@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from server.auth import auth_required, verify_token, rbac_enforced, resolve_request_token
+from server.auth import rbac_enforced, resolve_request_token
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
@@ -512,32 +512,22 @@ def create_app(
                 return await call_next(request)
 
         # Only protect /api/* paths. The gate closes as soon as ≥1 RBAC user
-        # exists (``has_users``, self-healing — plano 48 F0): from that moment a
+        # exists (``has_users``, self-healing — plano 48): from that moment a
         # valid USER session is required. A genuinely zero-user install stays
         # open only until the first admin is bootstrapped (``/api/auth/`` is
-        # exempt). ``auth_required`` (legacy panel password) is kept as a 3rd OR
-        # during the transition (D5) so an install with the old password + no
-        # users yet doesn't briefly open; it's removed once the legacy scheme is.
+        # exempt). ``rbac_enforce`` is a rigid override (normally redundant).
         request.state.user = None
         if path.startswith("/api/"):
             has_users = await asyncio.to_thread(user_repo.has_any)
             enforce = rbac_enforced(settings) or has_users
-            auth_req = auth_required(settings)
             auth_header = request.headers.get("authorization", "")
             token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
             # Resolve a present token even in open mode so per-permission gating
             # applies to voluntarily-logged-in users.
-            if token or enforce or auth_req:
-                kind, user = await asyncio.to_thread(
-                    resolve_request_token, token, settings)
+            if token or enforce:
+                kind, user = await asyncio.to_thread(resolve_request_token, token)
                 request.state.user = user
-                if enforce:
-                    denied = kind != "user"      # only a USER session passes
-                elif auth_req:
-                    denied = kind is None        # legacy password + 0 users (D5)
-                else:
-                    denied = False  # open mode — token (if any) attached for gating
-                if denied:
+                if enforce and kind != "user":  # only a USER session passes
                     return JSONResponse(
                         {"ok": False, "error": "Não autenticado."},
                         status_code=401,

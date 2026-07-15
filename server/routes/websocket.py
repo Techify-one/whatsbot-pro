@@ -5,7 +5,7 @@ import json
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from server.auth import auth_required, rbac_enforced, resolve_request_token
+from server.auth import rbac_enforced, resolve_request_token
 from db.repositories import user_repo
 
 
@@ -18,17 +18,14 @@ def register_routes(app, deps):
     async def websocket_endpoint(websocket: WebSocket):
         # Auth via the ?token= query param (the Authorization header isn't usable
         # for WS in the browser). The gate closes as soon as ≥1 user exists
-        # (``has_users`` — same self-healing rule as the HTTP middleware, plano 48
-        # F0): a USER session is then required. ``auth_required`` (legacy password)
-        # stays as a transitional OR. Genuinely open install (no users, no
-        # password) → no check.
+        # (``has_users`` — same self-healing rule as the HTTP middleware, plano 48):
+        # a USER session is then required. Genuinely zero-user install → no check.
         has_users = await asyncio.to_thread(user_repo.has_any)
         enforce = rbac_enforced(settings) or has_users
-        if enforce or auth_required(settings):
+        if enforce:
             token = websocket.query_params.get("token", "")
-            kind, _user = await asyncio.to_thread(resolve_request_token, token, settings)
-            ok = (kind == "user") if enforce else (kind is not None)
-            if not ok:
+            kind, _user = await asyncio.to_thread(resolve_request_token, token)
+            if kind != "user":
                 await websocket.accept()
                 await websocket.close(code=4401, reason="Unauthorized")
                 return

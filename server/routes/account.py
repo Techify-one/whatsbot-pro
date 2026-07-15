@@ -35,10 +35,9 @@ def register_routes(app, deps):
         """Change the current RBAC user's own password (requires the current one)."""
         user = current_user(request)
         if not user:
-            # Legacy single-password / open install has no user identity — the panel
-            # password is managed elsewhere. Never 401 (that triggers a global logout).
-            return _err("Disponível apenas para usuários (não no modo de senha única).",
-                        status=403)
+            # No user identity (open install, before the first admin). Never 401 here
+            # (that would trigger a global logout in the frontend httpClient).
+            return _err("Disponível apenas para usuários autenticados.", status=403)
 
         current_password = body.get("current_password") or ""
         new_password = body.get("new_password") or ""
