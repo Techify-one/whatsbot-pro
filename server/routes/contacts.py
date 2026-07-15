@@ -25,6 +25,7 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
+from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 # ``app.services.messaging_service`` is imported INSIDE ``register_routes`` (not
@@ -561,7 +562,8 @@ def register_routes(app, deps):
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, request: Request, mark_read: bool = True,
-                          channel_id: str = ""):
+                          channel_id: str = "", limit: int = PAGE_MSGS,
+                          before_id: int | None = None):
         """Return full contact data including conversation history.
 
         Quando ``channel_id`` é informado (multicanal — abrir uma conversa NOVA pela
@@ -569,10 +571,16 @@ def register_routes(app, deps):
         thread é escopado ao canal: carrega só as mensagens da conversa daquele canal
         (vazio se ainda não houver). Sem ``channel_id`` o comportamento legado é
         mantido (funde as mensagens de todos os canais do mesmo número). NUNCA cair na
-        conversa de OUTRO canal — caixas de entrada não se confundem."""
+        conversa de OUTRO canal — caixas de entrada não se confundem.
+
+        Paginação keyset (plano 50 F3): ``limit`` (cap ``CAP_MSGS``) + ``before_id``
+        — mesma semântica de ``/api/atendimentos/{id}/messages``; devolve a página mais
+        recente e ``has_more``. Vale para os dois ramos (multicanal e legado all-channels).
+        """
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
         channel = (channel_id or "").strip()
         def _load():
@@ -619,8 +627,14 @@ def register_routes(app, deps):
             if channel:
                 data["channel_id"] = channel
                 data["conversation_id"] = scoped_conv["id"] if scoped_conv else None
-                data["messages"] = (message_repo.get_by_conversation(scoped_conv["id"])
-                                    if scoped_conv else [])
+                if scoped_conv:
+                    _page = message_repo.get_by_conversation(
+                        scoped_conv["id"], limit=page_limit + 1, before_id=before_id)
+                    data["has_more"] = len(_page) > page_limit
+                    data["messages"] = _page[1:] if data["has_more"] else _page
+                else:
+                    data["messages"] = []
+                    data["has_more"] = False
                 # Compositor hints (Frente C / plano 21): mesmo SEM conversa ainda, o
                 # canal escolhido define se aceita template e se a janela de texto livre
                 # está aberta. Sem isso, abrir um canal Cloud (windowed) sem conversa não
@@ -630,7 +644,10 @@ def register_routes(app, deps):
                 data["templates_supported"] = outbound.supports(channel, "templates")
                 data["session_open"] = outbound.session_open(channel, last_ts)
             else:
-                data["messages"] = message_repo.get_all(contact_id)
+                _page = message_repo.get_all(
+                    contact_id, limit=page_limit + 1, before_id=before_id)
+                data["has_more"] = len(_page) > page_limit
+                data["messages"] = _page[1:] if data["has_more"] else _page
             # Load usage for the full response
             data["usage"] = []
             return data, msg_ids

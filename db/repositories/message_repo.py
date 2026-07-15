@@ -62,31 +62,59 @@ def add(contact_id: int, role: str, content: str, *,
     }
 
 
-def get_all(contact_id: int) -> list[dict]:
-    """Return all messages for a contact ordered by timestamp."""
-    with get_engine().connect() as conn:
-        rows = conn.execute(
-            select(messages)
-            .where(messages.c.contact_id == contact_id)
-            .order_by(messages.c.ts)
-        ).mappings().all()
-    return [_row_to_dict(r) for r in rows]
+def get_all(contact_id: int, *, limit: int | None = None,
+            before_id: int | None = None) -> list[dict]:
+    """Return messages for a contact ordered by timestamp (oldest→newest).
+
+    ``limit`` (plano 50): keyset pagination for the chat panel. When set, fetch the
+    newest ``limit`` rows (``ts DESC, id DESC``) — optionally only those *older* than
+    ``before_id`` (``id < before_id``) — and return them chronological. ``limit=None``
+    ⇒ the historical path (all rows, ``ORDER BY ts``), byte-for-byte identical, for
+    internal callers that need the whole thread.
+    """
+    cond = messages.c.contact_id == contact_id
+    if before_id is not None:
+        cond = cond & (messages.c.id < before_id)
+    return _select_messages(cond, limit)
 
 
-def get_by_conversation(conversation_id: int) -> list[dict]:
-    """Return all messages for ONE conversation ordered by ts (plano 11 D1).
+def get_by_conversation(conversation_id: int, *, limit: int | None = None,
+                        before_id: int | None = None) -> list[dict]:
+    """Return messages for ONE conversation ordered by ts (plano 11 D1).
 
     Conversa-cêntrico: filtra por ``conversation_id`` (uma thread por canal),
     ao contrário de :func:`get_all` que casa por ``contact_id`` e funde todos os
     canais do mesmo número. Usa ``idx_msg_conversation_ts`` (db/tables.py).
+
+    ``limit``/``before_id`` (plano 50): keyset como em :func:`get_all` — página das
+    ``limit`` mais recentes (+ ``id < before_id`` p/ "carregar anteriores"), devolvida
+    cronológica. ``limit=None`` ⇒ thread inteira (byte-idêntico ao caminho legado).
+    """
+    cond = messages.c.conversation_id == conversation_id
+    if before_id is not None:
+        cond = cond & (messages.c.id < before_id)
+    return _select_messages(cond, limit)
+
+
+def _select_messages(cond, limit: int | None) -> list[dict]:
+    """Shared SELECT for the chat panel readers (:func:`get_all`/:func:`get_by_conversation`).
+
+    ``limit=None`` ⇒ all rows ``ORDER BY ts`` (legacy, chronological). ``limit`` set ⇒
+    the newest ``limit`` rows via ``ts DESC, id DESC`` (id desempata ts empatado —
+    keyset estável, plano 50 Riscos), revertidas para cronológico (oldest→newest).
     """
     with get_engine().connect() as conn:
+        if limit is None:
+            rows = conn.execute(
+                select(messages).where(cond).order_by(messages.c.ts)
+            ).mappings().all()
+            return [_row_to_dict(r) for r in rows]
         rows = conn.execute(
-            select(messages)
-            .where(messages.c.conversation_id == conversation_id)
-            .order_by(messages.c.ts)
+            select(messages).where(cond)
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
+            .limit(limit)
         ).mappings().all()
-    return [_row_to_dict(r) for r in rows]
+    return [_row_to_dict(r) for r in reversed(rows)]
 
 
 def _fetch_limit(limit: int, exclude) -> int:

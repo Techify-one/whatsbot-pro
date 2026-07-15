@@ -80,7 +80,12 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 `get_by_conversation`/`get_all` com `limit`/`before_id` opcionais; endpoints devolvem `has_more`.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** Repo — `get_all`/`get_by_conversation` ganharam `*, limit=None, before_id=None`, com SELECT compartilhado (`_select_messages`): `limit=None` = tudo `ORDER BY ts` (byte-idêntico legado); `limit` = newest `limit` via `ts DESC, id DESC` + `id < before_id`, revertido p/ cronológico. Endpoints — `GET /api/atendimentos/{id}/messages` (`conversations.py`) e `GET /api/contacts/{phone}` (multicanal + legado, `contacts.py`) leem `limit`/`before_id`, capam via `clamp_limit(..., PAGE_MSGS, CAP_MSGS)`, over-fetch por 1 p/ `has_more` (dropa a extra mais antiga), devolvem `{messages, has_more, ...}`.
+- **Como foi feito / decisões:** (1) `has_more` sem 2ª query — pede `limit+1`, se veio a mais → dropa índice 0 (a mais antiga da lista cronológica). (2) **Janela Cloud 24h**: troquei o `max(ts da página)` de `conversations.py:283` pela query dedicada `message_repo.last_inbound_ts(conversation_id=...)` — mesmo precedente já usado em `contacts.py`; a paginação não fecha mais a janela por engano (risco do plano). (3) `/api/conversations/*` continua funcionando (middleware reescreve p/ `/api/atendimentos/*`, handler único). (4) Default do endpoint agora é a página recente (mudança consciente do baseline da F2).
+- **Correção de teste (keyset id↔ts):** O cursor é por `id` mas ordena por `ts`; isso exige `id` e `ts` crescerem juntos (verdade em produção). O teste F2 original usava `ts` no passado enquanto o card `created` pegava `ts=agora` → inversão artificial. Corrigido p/ `ts` realista crescente. Frontend deve usar `_id` (chave exposta por `_row_to_dict`) como valor de `before_id`.
+- **Problemas / pendências:** F4 (frontend) vai consumir `has_more`/`before_id` (usar `_id` como cursor).
+- **Verificação:** Testes F3 (caminhada keyset reconstrói a thread inteira sem dup/gap; conversa longa `has_more=True`; curta `has_more=False`; caminho `/api/contacts/{phone}` também pagina). Suíte **1287 passed, 0 failed**.
 
 ---
 

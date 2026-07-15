@@ -2867,39 +2867,83 @@ client.put("/api/config", json={"show_agent_name": True})  # restaura o default
 # ══════════════════════════════════════════════════════════════════════
 section("Chat: caracterização pré-paginação (plano 50 F2)")
 
+from server.pagination import PAGE_MSGS as _PAGE_MSGS  # cap de página do chat (50)
+
 _pg_cm = _CM("5500050000001")
 _pg_conv = _pg_cm.ensure_conversation_live("user", None)
 # >120 mensagens nesta conversa (alterna user/assistant p/ ter ambos os papéis).
+# ts realista/crescente a partir de agora: em produção id e ts crescem juntos (msgs
+# inseridas em ordem temporal) — o keyset (cursor por id, order by ts,id) DEPENDE disso.
 _PG_TOTAL = 130
+_pg_base = time.time()
 for _i in range(_PG_TOTAL):
     _role = "user" if _i % 2 == 0 else "assistant"
     message_repo.add(_pg_cm.id, _role, f"msg-{_i:03d}",
-                     conversation_id=_pg_conv, ts=1_000_000 + _i)
-# O repo traz TUDO da conversa (minhas 130 + o card conversation_event 'created'
-# emitido na criação). O número exato não importa — o que a F3 muda é o "sem teto".
+                     conversation_id=_pg_conv, ts=_pg_base + _i)
+# O repo com limit=None traz TUDO (caminho legado byte-idêntico p/ callers internos):
+# minhas 130 + o card conversation_event 'created' emitido na criação.
 _pg_rows = message_repo.get_by_conversation(_pg_conv)
 _pg_repo_total = len(_pg_rows)
-check("F2 baseline: get_by_conversation traz TODAS as msgs (sem teto hoje)",
+check("F2: repo com limit=None traz TUDO (caminho legado intacto)",
       _pg_repo_total >= _PG_TOTAL, f"esperava >= {_PG_TOTAL}, veio {_pg_repo_total}")
 
+# F3: o ENDPOINT agora pagina — devolve a PÁGINA mais recente (PAGE_MSGS) + has_more.
 r = client.get(f"/api/atendimentos/{_pg_conv}/messages?mark_read=false")
-check("F2: GET /messages -> 200", r.status_code == 200)
+check("F3: GET /messages -> 200", r.status_code == 200)
 _pg_data = r.json()["data"]
-# Shape atual: `messages` mora na RAIZ do data (F3 mantém + adiciona has_more).
-check("F2: shape -> `messages` na raiz do data", isinstance(_pg_data.get("messages"), list))
+# Shape: `messages` na raiz do data + `has_more` (novo).
+check("F3: shape -> `messages` na raiz do data", isinstance(_pg_data.get("messages"), list))
+check("F3: shape -> `has_more` presente", "has_more" in _pg_data)
 _pg_msgs = _pg_data["messages"]
-check("F2 baseline: endpoint devolve TUDO hoje = repo (F3 muda p/ página + has_more)",
-      len(_pg_msgs) == _pg_repo_total, f"repo={_pg_repo_total}, endpoint={len(_pg_msgs)}")
-# Ordem cronológica (ts crescente) — invariante que a paginação DEVE preservar.
+check("F3: página recente tem PAGE_MSGS msgs (não a thread inteira)",
+      len(_pg_msgs) == _PAGE_MSGS, f"esperava {_PAGE_MSGS}, veio {len(_pg_msgs)}")
+check("F3: conversa longa -> has_more=True", _pg_data["has_more"] is True)
+# Ordem cronológica (ts crescente) DENTRO da página — invariante preservada.
 _pg_ts = [m.get("ts") or 0 for m in _pg_msgs]
-check("F2: mensagens em ordem cronológica (ts crescente)", _pg_ts == sorted(_pg_ts))
-# Entre as MINHAS msgs (msg-000..msg-129), a ordem é a de inserção.
-_pg_mine = [m["content"] for m in _pg_msgs if str(m.get("content", "")).startswith("msg-")]
-check("F2: minhas 130 msgs presentes e em ordem",
-      _pg_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
-      f"veio {len(_pg_mine)} msgs minhas")
-# session_open/last_inbound: janela Cloud correta (invariante crítica p/ F3).
-check("F2: session_open presente na resposta", "session_open" in _pg_data)
+check("F3: página em ordem cronológica (ts crescente)", _pg_ts == sorted(_pg_ts))
+check("F3: session_open presente na resposta", "session_open" in _pg_data)
+
+# Caminhada keyset (F3 "Pronto quando"): before_id = menor id da página → anteriores.
+# Reconstrói a thread inteira sem duplicar nem pular.
+_pg_collected = list(_pg_msgs)
+_pg_before = min(m["_id"] for m in _pg_msgs)
+_pg_guard = 0
+while _pg_data["has_more"] and _pg_guard < 20:
+    _pg_guard += 1
+    r = client.get(f"/api/atendimentos/{_pg_conv}/messages"
+                   f"?mark_read=false&limit={_PAGE_MSGS}&before_id={_pg_before}")
+    _pg_data = r.json()["data"]
+    _page = _pg_data["messages"]
+    check(f"F3 keyset: página before_id={_pg_before} não-vazia", len(_page) > 0)
+    _pg_collected = _page + _pg_collected  # prepend (mais antigas na frente)
+    if _page:
+        _pg_before = min(m["_id"] for m in _page)
+_pg_ids = [m["_id"] for m in _pg_collected]
+check("F3 keyset: reconstruiu a thread inteira (sem dup/gap)",
+      len(_pg_ids) == _pg_repo_total and len(set(_pg_ids)) == _pg_repo_total,
+      f"coletado={len(_pg_ids)} unico={len(set(_pg_ids))} repo={_pg_repo_total}")
+check("F3 keyset: última página -> has_more=False", _pg_data["has_more"] is False)
+_pg_all_mine = [m["content"] for m in _pg_collected if str(m.get("content", "")).startswith("msg-")]
+check("F3 keyset: minhas 130 msgs todas presentes e em ordem",
+      _pg_all_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
+      f"veio {len(_pg_all_mine)} msgs minhas")
+
+# Conversa CURTA (< PAGE_MSGS): devolve tudo + has_more=False.
+_pg_short_cm = _CM("5500050000003")
+_pg_short_conv = _pg_short_cm.ensure_conversation_live("user", None)
+for _i in range(5):
+    message_repo.add(_pg_short_cm.id, "user", f"s-{_i}",
+                     conversation_id=_pg_short_conv, ts=time.time() + _i)
+_r_short = client.get(f"/api/atendimentos/{_pg_short_conv}/messages?mark_read=false").json()["data"]
+check("F3: conversa curta -> has_more=False", _r_short["has_more"] is False)
+check("F3: conversa curta -> devolve todas (<= PAGE_MSGS)",
+      len(_r_short["messages"]) <= _PAGE_MSGS and len(_r_short["messages"]) >= 5)
+
+# Caminho legado GET /api/contacts/{phone} também pagina (all-channels merge).
+_r_cpath = client.get("/api/contacts/5500050000001?mark_read=false").json()["data"]
+check("F3: /api/contacts/{phone} pagina (página recente <= PAGE_MSGS)",
+      len(_r_cpath["messages"]) == _PAGE_MSGS)
+check("F3: /api/contacts/{phone} devolve has_more", _r_cpath.get("has_more") is True)
 
 # mark_read=false não zera o badge de não-lidas (comportamento preservado por F3).
 _pg_cm2 = _CM("5500050000002")
