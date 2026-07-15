@@ -232,6 +232,12 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
     return contact_query.list_for_export(inbox_ids)
 
 
+def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
+    """Gerador chunked de contatos p/ export CSV streaming (plano 50 F11). Sem N+1
+    (tags em lote por chunk) e memória constante. Ver ``contact_query.iter_for_export``."""
+    return contact_query.iter_for_export(inbox_ids, chunk=chunk)
+
+
 def _shape_contact_row(row, tags_list: list) -> dict:
     """Row (heavy SELECT) → dict de contato para a sidebar/lista. Shape byte-idêntico
     ao antigo loop inline (plano 50 F5 extraiu para reuso entre list/page)."""

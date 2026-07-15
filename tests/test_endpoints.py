@@ -463,6 +463,37 @@ r = client.post("/api/contacts/5511999999999/pin", json={"pinned": True})
 check("POST /pin (unknown contact) -> 404", r.status_code == 404)
 
 # ═══════════════════════════════════════════════════════════════════
+#  plano 50 F11 — Export CSV: streaming, sem N+1 de tags, íntegro
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Export (plano 50 F11)")
+# Contato com tags, para validar que o batch de tags carrega certo no export.
+_exp_c = contact_repo.get_or_create("5500051100001")
+contact_repo.update(_exp_c["id"], name="Export Zeca")
+tag_repo.create("vip-export", "#ff0000")
+tag_repo.set_contact_tags(_exp_c["id"], ["vip-export"])  # set_contact_tags usa NOMES
+r = client.get("/api/contacts/export")
+check("F11: GET /contacts/export -> 200", r.status_code == 200)
+check("F11: export content-type é CSV", "text/csv" in r.headers.get("content-type", ""))
+check("F11: export é attachment (contatos.csv)",
+      "contatos.csv" in r.headers.get("content-disposition", ""))
+_lines = r.text.splitlines()
+check("F11: CSV tem header com phone/name/tags", bool(_lines) and "phone" in _lines[0] and "tags" in _lines[0])
+check("F11: BOM no início (Excel UTF-8)", r.text[:1] == "﻿")
+# A linha do Zeca traz a tag (batch de tags funcionou; sem N+1).
+_zeca = [ln for ln in _lines if "5500051100001" in ln]
+check("F11: contato exportado aparece no CSV", len(_zeca) == 1)
+check("F11: tag do contato vem na linha (batch, sem N+1)",
+      bool(_zeca) and "vip-export" in _zeca[0])
+# iter_for_export em chunks cobre todos os contatos (paridade com list_for_export).
+from db.repositories import contact_query as _cq
+_all_export = list(_cq.iter_for_export(None))
+_chunked = list(_cq.iter_for_export(None, chunk=2))
+check("F11: iter_for_export chunk=2 == chunk padrão (mesma cobertura)",
+      [c["phone"] for c in _all_export] == [c["phone"] for c in _chunked])
+check("F11: list_for_export delega ao gerador (mesmo total)",
+      len(contact_repo.list_for_export(None)) == len(_all_export))
+
+# ═══════════════════════════════════════════════════════════════════
 #  6. Contact detail
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Detail")

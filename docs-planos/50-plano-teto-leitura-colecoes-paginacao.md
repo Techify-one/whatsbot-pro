@@ -157,7 +157,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 11 — Export sem N+1 + streaming
 
 #### Status de execução — Fase 11
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** `contact_query.iter_for_export(inbox_ids, *, chunk=500)` — gerador chunked (memória constante) que carrega as tags de cada chunk em **UMA** query (`tags_by_contact`), matando o N+1 (era 1 query de tags por contato). `list_for_export` agora delega a `list(iter_for_export(...))`. Endpoint `/api/contacts/export` virou `StreamingResponse` (gerador síncrono → Starlette itera em threadpool, DB não bloqueia o loop); BOM + header no 1º yield, cada contato formatado por linha.
+- **Como foi feito / decisões:** P4 opção (a) — streaming + N+1 fix. CSV byte-idêntico: `csv.writer` por linha concatenado = mesma saída do writer único (mesmo `\r\n`); BOM no início do stream. Tags alfabéticas via `sorted()` (equivale ao `ORDER BY tags.name` antigo). Trade-off documentado: offset entre chunks pode driftar se a base mudar durante o export (aceitável p/ snapshot).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** Testes F11 (streaming 200 + content-type/attachment; BOM; contato+tag na linha = batch sem N+1; `iter_for_export(chunk=2)` cobre igual ao padrão; `list_for_export` delega). Suíte **1321 passed, 0 failed**.
 
 ---
 

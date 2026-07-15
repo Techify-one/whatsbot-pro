@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from fastapi import Body, File, Form, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
@@ -375,8 +375,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
-        rows = await asyncio.to_thread(
-            contact_repo.list_for_export, visible_inbox_ids(request))
+        inbox_ids = visible_inbox_ids(request)
         # Custom attribute definitions (plano 05) become extra CSV columns,
         # dynamically — a newly created attribute shows up here automatically.
         attr_defs = await asyncio.to_thread(ca_repo.list_definitions, "contact")
@@ -389,32 +388,38 @@ def register_routes(app, deps):
         _CORE_ATTR_KEYS = {"email", "profession", "company", "address", "type"}
         extra_defs = [d for d in attr_defs if d["attribute_key"] not in _CORE_ATTR_KEYS]
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        header = ["phone", "name", "email", "profession", "company",
-                  "address", "ai_enabled", "tags", "type"]
-        header.extend(d["attribute_key"] for d in extra_defs)
-        writer.writerow(header)
-        for r in rows:
-            custom = r.get("custom_attributes") or {}
-            row_out = [
-                r["phone"], r["name"],
-                _format_attr_cell(custom.get("email")),
-                _format_attr_cell(custom.get("profession")),
-                _format_attr_cell(custom.get("company")),
-                _format_attr_cell(custom.get("address")),
-                "1" if r["ai_enabled"] else "0",
-                ", ".join(r["tags"]),
-                # Tipo do contato herdado do canal de origem (whatsapp/telegram/outros).
-                r.get("contact_type") or "outros",
-            ]
-            for d in extra_defs:
-                row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
-            writer.writerow(row_out)
-        # BOM (﻿) so Excel opens the UTF-8 file with the right encoding.
-        content = "﻿" + output.getvalue()
-        return Response(
-            content=content,
+        def _format_line(cells: list) -> str:
+            buf = io.StringIO()
+            csv.writer(buf).writerow(cells)
+            return buf.getvalue()
+
+        def _rows():
+            # Streaming (plano 50 F11): BOM + header, depois cada contato formatado em
+            # chunks pelo gerador (memória constante, sem N+1 de tags). Gerador SÍNCRONO
+            # → Starlette o itera num threadpool, então as queries de DB não bloqueiam.
+            header = ["phone", "name", "email", "profession", "company",
+                      "address", "ai_enabled", "tags", "type"]
+            header.extend(d["attribute_key"] for d in extra_defs)
+            yield "﻿" + _format_line(header)   # BOM p/ o Excel abrir UTF-8
+            for r in contact_repo.iter_for_export(inbox_ids):
+                custom = r.get("custom_attributes") or {}
+                row_out = [
+                    r["phone"], r["name"],
+                    _format_attr_cell(custom.get("email")),
+                    _format_attr_cell(custom.get("profession")),
+                    _format_attr_cell(custom.get("company")),
+                    _format_attr_cell(custom.get("address")),
+                    "1" if r["ai_enabled"] else "0",
+                    ", ".join(r["tags"]),
+                    # Tipo do contato herdado do canal de origem (whatsapp/telegram/outros).
+                    r.get("contact_type") or "outros",
+                ]
+                for d in extra_defs:
+                    row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
+                yield _format_line(row_out)
+
+        return StreamingResponse(
+            _rows(),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="contatos.csv"'},
         )
