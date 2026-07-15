@@ -1,6 +1,6 @@
 # Plano 49 — Popup "vincular ao protocolo anterior vs. novo" ao reabrir logo após fechar (plugin `protocolos`)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-15 · **Escopo:** médio
+> **Status:** IMPLEMENTADO (F1 backend + F2 frontend + F3 testes) · validação manual no browser pendente · **Data:** 2026-07-15 · **Escopo:** médio
 > **Origem:** pedido do usuário ("quando um protocolo é aberto logo depois de fechar um para a mesma conversa, abrir um popup perguntando se faz parte do protocolo anterior ou é um novo — e fechar a conversa e o protocolo juntos"). Feature **não existe hoje** (confirmado: sem popup, sem query por "último fechado", sem merge). **Método:** investigação multi-agente + leitura direta do código (plugin + core), com `arquivo:linha` verificado em 1ª mão.
 > Adiciona, **100% dentro do plugin `protocolos`** (core intocado), um popup que aparece ao abrir uma conversa cujo contato teve um protocolo **fechado há pouco** (janela configurável), perguntando ao operador: **(a)** faz parte do protocolo anterior (reabre o anterior e absorve o atendimento novo) ou **(b)** é um protocolo novo — mais um botão **(c)** "fechar conversa e protocolo juntos" reusando o encadeamento já existente.
 > **Como usar este plano:** ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro.
@@ -160,11 +160,11 @@ WAVE 1                    F3(testes + verificação manual)
 - Chamar `relink` com `previous` que não é do contato / não está fechado → **409**.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** em [logic.py](../storages/plugins/protocolos/logic.py): `get_last_closed_protocolo_for_contact` (I1, `status='fechado'` ORDER BY `closed_at DESC NULLS LAST`), `_count_atendimentos_of_protocolo`, `_discard_protocolo` (I3, apaga extras + a linha `aberto`), `relink_to_previous(previous_id, current_open_id, actor)` (I2), `relink_suggestion_for_contact` (contrato §4), helpers `relink_prompt_enabled`/`relink_window_minutes` + as 2 chaves em `get_general_config`/`set_general_config`, formatter `_f_protocolo_relinked` + `register_notice("protocolo_relinked", …)` (P6). Em [routes.py](../storages/plugins/protocolos/routes.py): `GET /contacts/{cid}/relink-suggestion` (view) e `POST /protocolos/{previous_id}/relink` (edit).
+- **Como foi feito / decisões:** ordem obrigatória em `relink_to_previous` respeitada (mover ciclos → `_discard_protocolo` → `reopen_protocolo`); erro mapeado 404 (“encontrado”) vs 409 (demais), como `reopen`. **Desvio de I4/I10:** as settings NÃO viraram declarativas (`settings.py`) — o plugin tem screen `config:true`, que substitui o `PluginSettingsForm`; então as 2 chaves foram para o mecanismo `/general-config` (prefixo real `plugin.protocolos.general_*`) e a UI foi para a aba Geral do `config.js` (I10 feito, I4 descartado). P6 implementado (aviso `protocolo_relinked` no grupo `protocolo_lifecycle`).
+- **Problemas / pendências:** nenhuma. `set_general_config` grava as chaves novas só quando presentes (payload antigo não zera o default); `relink_window_minutes` clampado a 1..1440.
+- **Verificação:** `py_compile` OK; coberto por `tests/test_protocolos_popup.py` (ver F3).
 
 ---
 
@@ -179,11 +179,11 @@ WAVE 1                    F3(testes + verificação manual)
 **Pronto quando:** abrir uma conversa cujo contato fechou um protocolo há < 30 min mostra o popup; (a) reabre o anterior e o Kanban reflete (via `plugin_protocolos_changed`); (b) dispensa e não repergunta na sessão; (c) resolve+fecha a conversa e finaliza o protocolo. Legível no modo escuro.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(…)_
-- **Problemas / pendências:** _(…)_
-- **Verificação:** _(`node --check` nos .js; validação no browser com modo escuro)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** novo [static/relink_modal.js](../storages/plugins/protocolos/static/relink_modal.js) (I8, `RelinkModal` — 3 botões a/b/c + `humanizeAgo`, estados busy/erro, `wa-*`/`.wa-field`). Em [extends.js](../storages/plugins/protocolos/static/extends.js): listener `api.on('ui.conversation.opened', …)` (I7) com guard `Set` por `previous.id`, resolução de `contact_id` via `getConversation`, `GET relink-suggestion`, `api.ui.openModal(RelinkModal)` e deep-link `/protocolos?detail=` no sucesso (a); helper de módulo `resolveAndCloseAll` (I9, replica `forceResolveAndClose`: `/atendimentos/{conv}/resolve` → `setConversationStatus('closed')` → `/protocolos/{pid}/close`). Em [config.js](../storages/plugins/protocolos/static/config.js): toggle “Perguntar ao reabrir logo após fechar” + input de minutos na aba Geral (I10) + `GENERAL_EMPTY` estendido.
+- **Como foi feito / decisões:** o `ModalHost` mantém uma PILHA (`_modals[]`) → o `ResolveForm` do botão (c) empilha por cima do `RelinkModal` sem fechá-lo. Gate por `can('edit')` (mesmo do popup de resolver). Guard marcado ANTES de abrir → cancelar/dispensar também não repergunta na sessão (P7-a). `api.services.getConversation`/`setConversationStatus` estão no allowlist `PLUGIN_SERVICES` (não sensíveis).
+- **Problemas / pendências:** nenhuma. Botão (c) é best-effort: erros voltam inline no modal via `{ok:false,error}`.
+- **Verificação:** `node --check` OK nos 3 `.js`. Validação manual no browser (modo escuro) pendente na F3.
 
 ---
 
@@ -197,11 +197,11 @@ WAVE 1                    F3(testes + verificação manual)
 **Pronto quando:** `venv/bin/python -m pytest tests/test_protocolos_popup.py -q` **verde**; (se I12) `node --test storages/plugins/protocolos/static/relink.test.js` verde; fluxo manual ok; nenhum segredo na URL.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(…)_
-- **Problemas / pendências:** _(…)_
-- **Verificação:** _(saída do pytest; node --test; validação manual)_
+**Estado:** ✅ Concluída (backend) · ⏳ validação manual no browser pendente
+- **O que foi feito:** novo [tests/test_protocolos_popup.py](../tests/test_protocolos_popup.py) (I11) — 6 testes: sugestão dentro/fora da janela + `previous` preenchido; toggle desligado ⇒ `suggest:false`; janela configurável (30→60); `relink` move ciclos + descarta o novo + reabre o anterior + **1 aberto** (índice único); `relink` sem `current_open_id` só reabre; recusas 409 (não-fechado / outro contato, sem efeito colateral) e 404 (inexistente). Fixture aponta para `storages/plugins` (monkeypatch `REAL_PLUGIN_EXAMPLES`) + `build_app(["gowa","protocolos"])`; seed por SQL direto nas tabelas do plugin.
+- **Como foi feito / decisões:** I12 (teste puro `relink.test.js`) **descartado** — a decisão da janela é server-side (`relink_suggestion_for_contact`), não há `decideRelink` no cliente; o único puro do front (`humanizeAgo`) é trivial. Chaves de config no teste usam o prefixo real `plugin.protocolos.general_*`.
+- **Problemas / pendências:** o banco de teste é COMPARTILHADO (`whatsbot_test`) e o plano 48 rodava pytest em paralelo → colisão `DROP SCHEMA` (a suíte caiu com “relation plugins does not exist” no meio). Contornado rodando num banco isolado `whatsbot_test2` (UTF8/TEMPLATE template0). Validação manual no browser (fechar protocolo → cliente volta → abrir conversa → popup a/b/c, modo escuro) ainda **pendente**.
+- **Verificação:** `WHATSBOT_TEST_DB_URL=…/whatsbot_test2 venv/bin/python -m pytest tests/test_protocolos_popup.py -q` → **6 passed**. `node --check` OK nos 3 `.js`; `py_compile` OK no backend.
 
 ---
 
