@@ -1,7 +1,7 @@
 // App-shell AuthGate (Plano 23 · D4), extracted verbatim from app.js. The
 // password/login gate + RBAC bootstrap. Behavior preserved EXACTLY:
 //   • 'checking' → checkAuth(); while NO users exist (has_users === false) force
-//     the first-admin bootstrap even over a legacy/open session.
+//     the first-admin bootstrap even over an open (no-user) session.
 //   • authenticated → enrich with permissions[] (getMe) for GearMenu gating (FF1).
 //   • the `whatsbot:unauthorized` window event drops back to the login screen.
 //   • the stored user is kept in localStorage so the gear menu can show who's in.
@@ -44,7 +44,7 @@ export function AuthGate() {
   useEffect(() => {
     checkAuth().then(res => {
       // Migration to multi-user (plano 03/10): while NO users exist, force the
-      // first-admin bootstrap — even over a legacy/open session. The panel only
+      // first-admin bootstrap — even over an open (no-user) session. The panel only
       // becomes reachable after an admin (email + senha) is created.
       const hasUsers = res && res.data && res.data.has_users;
       if (hasUsers === false) {

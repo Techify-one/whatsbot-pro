@@ -58,7 +58,7 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
     setDark(next);
   }
 
-  // Permission gate for menu items (FF1). Open/legacy installs (no currentUser)
+  // Permission gate for menu items (FF1). Open installs (no currentUser)
   // see everything; a logged-in user sees only what their role allows.
   const can = (perm) => hasPermission(currentUser, perm);
 
@@ -98,7 +98,7 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
 
           ${(() => {
             // Hide, don't disable (P48): a plugin screen with `requires: <key>`
-            // is shown only when the user holds plugin.<id>.<key>. Open/legacy
+            // is shown only when the user holds plugin.<id>.<key>. Open installs
             // installs (no currentUser) see everything (plano "RBAC para Plugins").
             const visible = (pluginScreens || []).filter(s =>
               !s.requires || can(`plugin.${s.pluginId}.${s.requires}`));

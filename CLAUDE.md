@@ -489,7 +489,7 @@ rbac:
     - { key: delete, label: "Excluir lembretes" }
 ```
 
-- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando legado/open (sem identidade de usuário) ou RBAC desligado — não quebra single-password. Nunca cheque permissão na mão; use a dependency.
+- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando open (sem identidade de usuário, instalação sem admin ainda) — não quebra o modo aberto. Nunca cheque permissão na mão; use a dependency.
   ```python
   from plugins.context import plugin_permission
   @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])

@@ -13,7 +13,7 @@
 |---|---------|------------------------|
 | D1 | Trocar a própria senha **NÃO** vira permissão RBAC ✅ (2026-07-15) | Nenhuma entrada nova em `PERMISSION_CATALOG`. Gate = apenas "ter identidade RBAC na sessão" (`current_user` != None). |
 | D2 | Exige a **senha atual** (re-autenticação) ✅ (2026-07-15) | O endpoint verifica `current_password` antes de gravar a nova. Bloqueia troca via sessão sequestrada. |
-| D3 | Vale **só para usuários RBAC** (email+senha) ✅ (2026-07-15) | No modo legado single-password (sem identidade de usuário) o endpoint recusa com mensagem clara — quem usa a "Senha do Painel" troca por lá. |
+| D3 | Vale **só para usuários RBAC** (email+senha) ✅ (2026-07-15) | Sem identidade de usuário o endpoint recusa com 403. _(Nota: o [plano 48](48-plano-aposentar-senha-painel.md) aposentou o single-password; o 403 agora só ocorre em instalação aberta antes do 1º admin.)_ |
 | D4 | Fluxo **separado** do "Resetar senha" de admin e da "Senha do Painel" ✅ (2026-07-15) | Novo endpoint + nova UI próprios; NÃO reaproveita `/api/users/{id}/password` nem o campo do `ConfigPanel`. |
 | D5 | Princípio do repo: nada em produção quebra ⇒ additive, sem stopgap | Endpoint aditivo; middleware/rotas existentes inalterados exceto o registro do novo módulo. |
 
@@ -79,7 +79,7 @@ Body:    { "current_password": "<atual>", "new_password": "<nova>" }
 400 { "ok": false, "error": "A senha atual está incorreta." }
 400 { "ok": false, "error": "A nova senha deve ter ao menos 8 caracteres." }
 400 { "ok": false, "error": "A nova senha deve ser diferente da atual." }
-403 { "ok": false, "error": "Disponível apenas para usuários (não no modo de senha única)." }
+403 { "ok": false, "error": "Disponível apenas para usuários autenticados." }  # msg atualizada no plano 48 (single-password aposentado)
 ```
 
 Regras do handler (pseudo, sem implementar):

@@ -1,7 +1,7 @@
 // Self-service "change my password" modal (plano 47). Available to any logged-in
 // RBAC user via the account block of the GearMenu — NOT gated by a permission.
 // Requires the current password (re-auth); distinct from the admin reset in
-// UsersManager and from the legacy panel password in ConfigPanel.
+// UsersManager (which sets OTHER users' passwords without the current one).
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';

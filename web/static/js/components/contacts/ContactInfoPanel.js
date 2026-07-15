@@ -23,7 +23,7 @@ const TAG_COLORS = [
 
 export function ContactInfoPanel({ phone, currentUser = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
   // P48: editing controls are gated by contact.write; the destructive delete by
-  // contact.delete. Permissive with no user identity (open/legacy install).
+  // contact.delete. Permissive with no user identity (open install, no admin yet).
   const canWrite = hasPermission(currentUser, 'contact.write');
   const canDelete = hasPermission(currentUser, 'contact.delete');
   // Only Nome stays a fixed field — Email/Profissão/Empresa/Endereço are now

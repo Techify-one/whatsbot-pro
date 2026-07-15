@@ -77,9 +77,9 @@ _ENV_OVERRIDES_BY_KEY: dict[str, tuple[str, Callable[[str], Any]]] = {
 #                     once written) but are preserved byte-for-byte.
 #   * ``writable``  — accepted by ``PUT /api/config`` (the allowlist).
 #
-# Keys handled specially by the GET handler (masked / derived) are NOT exposed via
-# this metadata: ``openrouter_api_key`` (masked), ``has_password`` (derived from
-# ``web_password_hash``). They stay inline in the route.
+# Keys handled specially by the GET handler are NOT exposed via this metadata:
+# ``openrouter_api_key`` (masked) and ``has_password`` (a fixed ``False`` kept for
+# frontend compat — the legacy panel password was retired, plano 48). Inline in the route.
 
 from dataclasses import dataclass
 
@@ -222,8 +222,6 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("usd_brl_rate", default=5.50),
     ConfigKey("bot_phone", default=""),  # writable via the PUT special-case below
     ConfigKey("bot_name", default=""),
-    ConfigKey("web_password_hash", default=""),
-    ConfigKey("web_password_salt", default=""),
     ConfigKey("access_token", default=""),
 )
 

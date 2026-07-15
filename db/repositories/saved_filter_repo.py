@@ -1,9 +1,9 @@
 """Repository for saved_conversation_filters — named inbox filter presets per user.
 
-``user_id`` scopes a preset to a logged-in RBAC user. In legacy single-password
-mode there's no user identity, so presets are stored with ``user_id IS NULL`` and
-shared on that install. All queries filter by the (possibly NULL) user_id so the
-two modes never leak presets into each other.
+``user_id`` scopes a preset to a logged-in RBAC user. In open mode (before the
+first admin) there's no user identity, so presets are stored with ``user_id IS
+NULL`` and shared on that install. All queries filter by the (possibly NULL)
+user_id so the two modes never leak presets into each other.
 """
 
 from __future__ import annotations

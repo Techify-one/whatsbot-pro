@@ -8,7 +8,7 @@ that was repeated across ~50 call sites.
 Behavior preservation (R16): ``require_permission`` produces the **byte-identical**
 403 envelope that :func:`server.authz.permission_denied` produced — ``_err(...)``'s
 ``{"ok": false, "error": "Permissão negada."}`` shape, NOT FastAPI's default
-``{"detail": ...}``. It also preserves the legacy/open default-allow (no user
+``{"detail": ...}``. It also preserves the open-install default-allow (no user
 identity ⇒ allow). The one *intentional, plan-sanctioned* difference from the old
 inline path: the dependency is **async** and calls :func:`server.authz.acheck`, so
 the ``filter.authz.decision`` ABAC seam runs LIVE (the old inline ``check`` ran on
@@ -91,7 +91,7 @@ def require_permission(key: str) -> Callable[[Request], Awaitable[None]]:
     (async ⇒ the ``filter.authz.decision`` seam is live). On deny raises
     :class:`PermissionDeniedError`, which :func:`install_exception_handlers`
     renders to the identical 403 envelope. Preserves default-allow: with no user
-    identity (legacy/open install) ``acheck`` returns True and the gate passes.
+    identity (open install, before the first admin) ``acheck`` returns True and the gate passes.
     """
 
     async def _dep(request: Request) -> None:

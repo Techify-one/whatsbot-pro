@@ -141,8 +141,8 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   // Pin toggle: when every selected is already pinned, the action unpins all.
   const allSelectedPinned = selectedContacts.length > 0 && selectedContacts.every(c => c.is_pinned);
   // Bulk assign (attendant): mirror the single-conversation menu — the flyout reuses
-  // AssigneeList (search + humans + AI). Hide in legacy single-password mode (no
-  // identity and no listable agents).
+  // AssigneeList (search + humans + AI). Hide when there's no identity and no
+  // listable agents (open install before the first admin).
   const bulkAgentsUsers = Array.isArray(agentsUsers) ? agentsUsers : [];
   const bulkAgentsAi = Array.isArray(agentsAi) ? agentsAi : [];
   const showBulkAssign = currentUserId != null || bulkAgentsUsers.length > 0 || bulkAgentsAi.length > 0;

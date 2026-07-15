@@ -58,8 +58,8 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
   const activeAgentKey = conv ? conv.active_agent_key : null;
   const isOpen = conv ? conv.status === 'open' : null;
   const canAct = !!(conv && conv.id != null) && !convLoading;
-  // Hide the whole assign section in legacy single-password mode (no identity and
-  // no listable agents) — assignment is meaningless there.
+  // Hide the whole assign section when there's no identity and no listable agents
+  // (open install before the first admin) — assignment is meaningless there.
   const showAssignSection = (currentUserId != null || humanAgents.length > 0 || aiAgents.length > 0) && can('conversation.assign');
   const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
   // Trigger label: resolve either the human assignee or the active AI subagent.

@@ -803,14 +803,14 @@ Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
 
 
 # Saved conversation filters (Chatwoot-style): each user can name and persist one
-# or more inbox filter presets. ``user_id`` is NULL for legacy single-password
-# sessions (no user identity) → those presets are shared on that install. ``spec``
+# or more inbox filter presets. ``user_id`` is NULL in open mode (no user identity,
+# before the first admin) → those presets are shared on that install. ``spec``
 # is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
 saved_atendimento_filters = Table(
     "saved_atendimento_filters",                               # RENOMEADA de "saved_conversation_filters"
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = open-mode/shared
     Column("name", Text, nullable=False),
     Column("spec", _json_type(), nullable=False),              # {statusFilter, assignmentTab, sortBy, tagFilter, advFilters}
     Column("position", Integer, nullable=False, server_default="0"),
