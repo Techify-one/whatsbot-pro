@@ -322,6 +322,42 @@ non_archived = [c for c in contacts_data if not c.get("is_archived")]
 check("GET /api/contacts -> has non-archived contacts", len(non_archived) >= 1)
 check("GET /api/contacts -> exposes avatar_v (cache-busting)", all("avatar_v" in c for c in contacts_data))
 
+# plano 50 F5 — paginação server-side (só quando `limit` é passado; sem ele = legado).
+# Semear contatos suficientes p/ ter mais de uma página.
+for _i in range(8):
+    _seed = contact_repo.get_or_create(f"55000512{_i:04d}")
+    contact_repo.update(_seed["id"], name=f"Seed Pag {_i}")
+r = client.get("/api/contacts?limit=3&offset=0")
+check("GET /api/contacts?limit=3 -> 200", r.status_code == 200)
+_pg = r.json()["data"]
+check("F5: com limit -> envelope {items,total,has_more}",
+      isinstance(_pg, dict) and "items" in _pg and "total" in _pg and "has_more" in _pg)
+check("F5: página respeita limit (<=3 itens)", len(_pg["items"]) <= 3)
+check("F5: total >= itens da página e has_more coerente",
+      _pg["total"] >= len(_pg["items"]) and _pg["has_more"] is (0 + len(_pg["items"]) < _pg["total"]))
+check("F5: itens da página expõem avatar_v", all("avatar_v" in c for c in _pg["items"]))
+# Caminhar as páginas reconstrói o universo sem dup (mesmo total).
+_seen_ids, _off, _guard = set(), 0, 0
+while _guard < 500:
+    _guard += 1
+    _p = client.get(f"/api/contacts?limit=25&offset={_off}").json()["data"]
+    for _c in _p["items"]:
+        _seen_ids.add(_c["id"])
+    if not _p["has_more"]:
+        break
+    _off += 25
+check("F5: paginação cobre todos os contatos (sem dup)", len(_seen_ids) == _p["total"],
+      f"vistos={len(_seen_ids)} total={_p['total']}")
+# limit gigante é capado (não estoura), offset negativo vira 0.
+_r_cap = client.get("/api/contacts?limit=99999").json()["data"]
+check("F5: limit=99999 capado por CAP_LIST (<=200)", len(_r_cap["items"]) <= 200)
+# Busca + paginação: envelope também, e a página é subconjunto do filtro.
+_r_qp = client.get("/api/contacts?q=Seed+Pag&limit=5&offset=0").json()["data"]
+check("F5: busca paginada -> envelope", isinstance(_r_qp, dict) and "items" in _r_qp)
+check("F5: busca paginada respeita limit", len(_r_qp["items"]) <= 5)
+check("F5: sem limit continua lista legada (retrocompat)",
+      isinstance(client.get("/api/contacts").json()["data"], list))
+
 # Search
 r = client.get("/api/contacts?q=Alice")
 check("GET /api/contacts?q=Alice -> finds Alice", len(r.json()["data"]) >= 1)

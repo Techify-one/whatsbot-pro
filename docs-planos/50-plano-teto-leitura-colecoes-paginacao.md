@@ -103,7 +103,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 5 — `/api/contacts` com limit/offset
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** `contact_search.build_count_contacts_query` (COUNT barato só do WHERE archived+inbox). `contact_repo`: extraídos `_shape_contact_row` + `_apply_q_filter`; novo `list_contacts_page(q, archived, inbox_ids, *, limit=None, offset=0) → {items, total, has_more}`; `list_contacts` legado agora delega (`["items"]`, byte-idêntico). Endpoint `GET /api/contacts` pagina **só quando `limit` é passado** (envelope), senão mantém a lista legada. `api.js getContacts(q, archived, {limit, offset})` retrocompatível.
+- **Como foi feito / decisões:** A busca `q` filtra em Python **pós-SELECT**, então: SEM `q` pagina no SQL (`LIMIT/OFFSET` + COUNT); COM `q` carrega tudo, filtra e fatia a página em Python (`total` = tamanho do filtrado). Retrocompat crítico (plano: "sidebar/`/contacts` ainda montam até F7/F8") garantido por só envelopar quando `limit` existe — os callers atuais (`server/background.py` varredura de avatares; sidebar; `/contacts`) não passam `limit` e recebem o shape antigo.
+- **Problemas / pendências:** F7/F8 vão migrar os callers para passar `{limit, offset}` e consumir o envelope. Nota P1 do plano resolvida por aditividade (não trocar o shape default agora).
+- **Verificação:** Testes F5 (envelope; caminhar páginas cobre o universo sem dup; `limit=99999` ≤ 200; busca paginada; sem `limit` = lista legada). Suíte **1297 passed, 0 failed**; `node --check api.js` OK.
 
 ---
 

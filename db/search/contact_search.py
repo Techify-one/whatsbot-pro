@@ -222,3 +222,26 @@ def build_list_contacts_query(*, archived: bool,
         func.coalesce(lm.c.ts, contacts.c.updated_at).desc(),
     )
     return stmt
+
+
+def build_count_contacts_query(*, archived: bool,
+                               inbox_ids: list[int] | None) -> Select:
+    """COUNT dos contatos que :func:`build_list_contacts_query` listaria (plano 50 F5).
+
+    Espelha só o ``WHERE`` (archived + escopo de inbox) — sem os joins de preview/
+    conversa/msg_count — para dar o ``total`` da paginação barato (uma varredura de
+    índice em ``contacts``, não a query pesada). Vale apenas para o caminho SEM busca
+    textual (com ``q`` o total é o tamanho da lista já filtrada em Python)."""
+    stmt = (
+        select(func.count())
+        .select_from(contacts)
+        .where(contacts.c.is_archived == (1 if archived else 0))
+    )
+    if inbox_ids is not None:
+        scope = (
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contacts.c.id)
+            .where(conversations.c.inbox_id.in_(inbox_ids))
+        ).exists()
+        stmt = stmt.where(scope)
+    return stmt

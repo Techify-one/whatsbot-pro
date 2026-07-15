@@ -158,10 +158,15 @@ export async function sandboxSendDocument(phone, file, caption = '') {
 
 // ── Contacts ──────────────────────────────────────────────────────
 
-export async function getContacts(q = '', archived = false) {
+// `opts` (plano 50 F5): { limit, offset } ativam a paginação server-side — a resposta
+// vira o envelope { items, total, has_more } (cap no servidor). SEM opts o shape legado
+// (data = lista completa) é mantido, então callers antigos não mudam.
+export async function getContacts(q = '', archived = false, opts = {}) {
   const params = [];
   if (archived) params.push('archived=true');
   if (q) params.push(`q=${encodeURIComponent(q)}`);
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts${query}`);
 }

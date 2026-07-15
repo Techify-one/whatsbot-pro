@@ -25,7 +25,8 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
-from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit
+from server.pagination import (CAP_LIST, CAP_MSGS, PAGE_LIST, PAGE_MSGS,
+                               clamp_limit, clamp_offset)
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 # ``app.services.messaging_service`` is imported INSIDE ``register_routes`` (not
@@ -246,21 +247,38 @@ def register_routes(app, deps):
                 logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
 
     @app.get("/api/contacts")
-    async def list_contacts(request: Request, q: str = "", archived: bool = False):
-        """List all contacts with summary info."""
+    async def list_contacts(request: Request, q: str = "", archived: bool = False,
+                            limit: int | None = None, offset: int = 0):
+        """List all contacts with summary info.
+
+        Paginação (plano 50 F5): quando ``limit`` é informado, devolve o envelope
+        ``{items, total, has_more}`` (cap ``CAP_LIST``). SEM ``limit`` mantém o shape
+        legado (``data`` = lista) — a sidebar/`/contacts` continuam montando até
+        migrarem (F7/F8). ``offset`` ≥ 0."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
         # Inbox-membership scoping (plano inboxes/canais §4.7): a sidebar
         # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
         # caixas que o usuário não acessa. Espelha GET /api/conversations.
-        results = await asyncio.to_thread(
-            contact_repo.list_contacts, q, archived, visible_inbox_ids(request))
+        inbox_ids = visible_inbox_ids(request)
+        if limit is None:
+            # Caminho legado: lista completa (retrocompatível).
+            results = await asyncio.to_thread(
+                contact_repo.list_contacts, q, archived, inbox_ids)
+            for c in results:
+                c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
+            return _ok(results)
+        # Caminho paginado: envelope {items, total, has_more}.
+        lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
+        off = clamp_offset(offset)
+        page = await asyncio.to_thread(
+            contact_repo.list_contacts_page, q, archived, inbox_ids, limit=lim, offset=off)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
-        for c in results:
+        for c in page["items"]:
             c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
-        return _ok(results)
+        return _ok(page)
 
     @app.post("/api/contacts/check-phone")
     async def check_phone(request: Request):
