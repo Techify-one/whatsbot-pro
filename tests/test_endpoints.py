@@ -2860,6 +2860,57 @@ check("config show_agent_name persiste False",
       client.get("/api/config").json()["data"].get("show_agent_name") is False)
 client.put("/api/config", json={"show_agent_name": True})  # restaura o default
 
+# ══════════════════════════════════════════════════════════════════════
+#  Caracterização do fluxo de chat (plano 50 F2) — fixa o comportamento
+#  ATUAL antes de paginar (F3/F4). O baseline "traz tudo" é a asserção que
+#  a F3 vai mudar de forma CONSCIENTE.
+# ══════════════════════════════════════════════════════════════════════
+section("Chat: caracterização pré-paginação (plano 50 F2)")
+
+_pg_cm = _CM("5500050000001")
+_pg_conv = _pg_cm.ensure_conversation_live("user", None)
+# >120 mensagens nesta conversa (alterna user/assistant p/ ter ambos os papéis).
+_PG_TOTAL = 130
+for _i in range(_PG_TOTAL):
+    _role = "user" if _i % 2 == 0 else "assistant"
+    message_repo.add(_pg_cm.id, _role, f"msg-{_i:03d}",
+                     conversation_id=_pg_conv, ts=1_000_000 + _i)
+# O repo traz TUDO da conversa (minhas 130 + o card conversation_event 'created'
+# emitido na criação). O número exato não importa — o que a F3 muda é o "sem teto".
+_pg_rows = message_repo.get_by_conversation(_pg_conv)
+_pg_repo_total = len(_pg_rows)
+check("F2 baseline: get_by_conversation traz TODAS as msgs (sem teto hoje)",
+      _pg_repo_total >= _PG_TOTAL, f"esperava >= {_PG_TOTAL}, veio {_pg_repo_total}")
+
+r = client.get(f"/api/atendimentos/{_pg_conv}/messages?mark_read=false")
+check("F2: GET /messages -> 200", r.status_code == 200)
+_pg_data = r.json()["data"]
+# Shape atual: `messages` mora na RAIZ do data (F3 mantém + adiciona has_more).
+check("F2: shape -> `messages` na raiz do data", isinstance(_pg_data.get("messages"), list))
+_pg_msgs = _pg_data["messages"]
+check("F2 baseline: endpoint devolve TUDO hoje = repo (F3 muda p/ página + has_more)",
+      len(_pg_msgs) == _pg_repo_total, f"repo={_pg_repo_total}, endpoint={len(_pg_msgs)}")
+# Ordem cronológica (ts crescente) — invariante que a paginação DEVE preservar.
+_pg_ts = [m.get("ts") or 0 for m in _pg_msgs]
+check("F2: mensagens em ordem cronológica (ts crescente)", _pg_ts == sorted(_pg_ts))
+# Entre as MINHAS msgs (msg-000..msg-129), a ordem é a de inserção.
+_pg_mine = [m["content"] for m in _pg_msgs if str(m.get("content", "")).startswith("msg-")]
+check("F2: minhas 130 msgs presentes e em ordem",
+      _pg_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
+      f"veio {len(_pg_mine)} msgs minhas")
+# session_open/last_inbound: janela Cloud correta (invariante crítica p/ F3).
+check("F2: session_open presente na resposta", "session_open" in _pg_data)
+
+# mark_read=false não zera o badge de não-lidas (comportamento preservado por F3).
+_pg_cm2 = _CM("5500050000002")
+_pg_conv2 = _pg_cm2.ensure_conversation_live("user", None)
+message_repo.add(_pg_cm2.id, "user", "oi", conversation_id=_pg_conv2, ts=2_000_000)
+_before = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+client.get(f"/api/atendimentos/{_pg_conv2}/messages?mark_read=false")
+_after = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+check("F2: mark_read=false NÃO altera unread_count", _before == _after,
+      f"antes={_before} depois={_after}")
+
 # ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
 _cmdel = _CM("5500077766655")
 _cmdel.add_message("user", "primeira conversa")

@@ -68,7 +68,11 @@ Criar `server/pagination.py` com `clamp_limit` + constantes.
 Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de paginar.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** Seção nova em `test_endpoints.py` ("Chat: caracterização pré-paginação (plano 50 F2)"): conversa com 130 msgs, fixa (a) baseline "traz tudo" — endpoint devolve o mesmo total que `get_by_conversation` (sem teto), (b) shape `messages` na raiz do `data`, (c) ordem cronológica (ts crescente) + minhas 130 msgs em ordem, (d) `session_open` presente, (e) `mark_read=false` não altera `unread_count`.
+- **Como foi feito / decisões:** Descoberta importante — criar a conversa emite 1 card `conversation_event` ('created') com ts real, então o total do repo é 131 (130 + 1). O baseline compara **endpoint == repo** (ambos sem teto) em vez de número fixo, e valida ordem só entre as msgs `msg-NNN`. Endpoint alvo confirmado: `GET /api/atendimentos/{conv_id}/messages`. Precedente achado: `contacts.py:628` **já** usa `message_repo.last_inbound_ts()` (query dedicada) — a F3 vai replicar isso em `conversations.py:283` (hoje calcula `max(ts)` da página, o risco da janela Cloud).
+- **Problemas / pendências:** Nenhuma. Os 3 baselines "traz tudo" são exatamente o que a F3 vai atualizar conscientemente.
+- **Verificação:** Suíte **1277 passed, 0 failed** (8 checagens novas).
 
 ---
 
