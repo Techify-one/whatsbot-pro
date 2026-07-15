@@ -126,7 +126,8 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
 
 
 def build_list_contacts_query(*, archived: bool,
-                              inbox_ids: list[int] | None) -> Select:
+                              inbox_ids: list[int] | None,
+                              sort: str = "recency") -> Select:
     """Build the ``list_contacts`` SELECT as a SQLAlchemy Core statement.
 
     Replaces the prior raw ``text().format(preview_excluded=…, inbox_clause=…)``:
@@ -236,10 +237,18 @@ def build_list_contacts_query(*, archived: bool,
         ).exists()
         stmt = stmt.where(scope)
 
-    stmt = stmt.order_by(
-        contacts.c.is_pinned.desc(),
-        func.coalesce(lm.c.ts, contacts.c.updated_at).desc(),
-    )
+    if sort == "name":
+        # Tela /contacts (full-page): ordem alfabética por nome, caindo no telefone.
+        # (plano 50 F7 — a sidebar segue por recência via o default abaixo.)
+        stmt = stmt.order_by(
+            func.coalesce(func.nullif(contacts.c.name, ""), contacts.c.phone),
+            contacts.c.phone,
+        )
+    else:
+        stmt = stmt.order_by(
+            contacts.c.is_pinned.desc(),
+            func.coalesce(lm.c.ts, contacts.c.updated_at).desc(),
+        )
     return stmt
 
 

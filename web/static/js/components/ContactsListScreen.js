@@ -299,6 +299,8 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);        // plano 50 F7: total do modo servidor
+  const [hasMore, setHasMore] = useState(false); // plano 50 F7: há próxima página (servidor)
   const [detail, setDetail] = useState(null); // contato aberto no painel
   const [showCreate, setShowCreate] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
@@ -328,29 +330,49 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     deps: [search, advFilters],
   });
 
-  function reload() {
+  // plano 50 F7 — modo SERVIDOR (browse puro: sem busca e sem filtros): pagina no
+  // servidor (limit/offset, ordem alfabética) — o DOM fica com uma página só, sem
+  // trazer 100k contatos. QUALQUER busca ou filtro cai no modo CLIENTE: carrega tudo
+  // uma vez e ordena/filtra/pagina no cliente (comportamento preservado, semântica de
+  // busca/filtro idêntica). serverMode é derivado de search+advFilters.
+  const serverMode = !search.trim() && advFilters.length === 0;
+
+  const loadContacts = useCallback(() => {
     setLoading(true);
-    return getContacts('', false)
+    const req = serverMode
+      ? getContacts('', false, { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE, sort: 'name' })
+      : getContacts('', false);  // modo cliente: lista completa (filtra no cliente)
+    return req
       .then((res) => {
-        if (res && res.ok) { setContacts(res.data || []); setError(null); }
-        else setError((res && res.error) || 'Falha ao carregar contatos');
+        if (res && res.ok) {
+          if (serverMode) {
+            const env = res.data || {};
+            setContacts(env.items || []);
+            setTotal(env.total || 0);
+            setHasMore(!!env.has_more);
+          } else {
+            setContacts(res.data || []);
+            setHasMore(false);
+          }
+          setError(null);
+        } else {
+          setError((res && res.error) || 'Falha ao carregar contatos');
+        }
         return res;
       })
       .catch((e) => { setError(String(e)); })
       .finally(() => setLoading(false));
-  }
+  }, [serverMode, page]);
 
+  // reload após ações (delete/import) reusa o loader do modo atual.
+  const reload = loadContacts;
+
+  // Carrega/recarrega ao (re)entrar num modo ou mudar de página no modo servidor.
+  useEffect(() => { loadContacts(); }, [loadContacts]);
+
+  // Tags globais — carregadas uma vez no mount (independente do modo).
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    getContacts('', false)
-      .then((res) => {
-        if (!alive) return;
-        if (res && res.ok) setContacts(res.data || []);
-        else setError((res && res.error) || 'Falha ao carregar contatos');
-      })
-      .catch((e) => { if (alive) setError(String(e)); })
-      .finally(() => { if (alive) setLoading(false); });
     getTags().then((res) => { if (alive && res.ok) setGlobalTags(res.data || {}); });
     return () => { alive = false; };
   }, []);
@@ -469,8 +491,10 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     push(null);
   }
 
-  // Ordem alfabética por nome (cai no telefone quando não há nome).
+  // Ordem alfabética por nome (cai no telefone quando não há nome). No modo servidor
+  // a página já vem ordenada (sort=name) — não reordena (só bagunçaria a página).
   const sorted = useMemo(() => {
+    if (serverMode) return contacts;
     const arr = [...contacts];
     arr.sort((a, b) => {
       const an = (a.name || a.phone || '').trim();
@@ -478,12 +502,14 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
       return an.localeCompare(bn, 'pt-BR', { sensitivity: 'base' });
     });
     return arr;
-  }, [contacts]);
+  }, [contacts, serverMode]);
 
   // Busca client-side (nome, telefone, tags) + filtros avançados (etiqueta/atributos
   // personalizados do contato). A avaliação reusa matchesAdvFilters: cada contato
   // carrega `tags` e `custom_attributes`, então `tag`/`cattr:contact:*` casam direto.
+  // No modo servidor não há busca/filtro client (o browse puro já veio paginado).
   const filtered = useMemo(() => {
+    if (serverMode) return sorted;
     const q = foldStr(search.trim());
     const digits = search.replace(/\D/g, '');
     const now = Math.floor(Date.now() / 1000);
@@ -497,15 +523,18 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     });
     if (!advFilters.length) return bySearch;
     return bySearch.filter((c) => matchesAdvFilters(c, advFilters, now));
-  }, [sorted, search, advFilters]);
+  }, [sorted, search, advFilters, serverMode]);
 
   // Reseta a página quando a busca ou os filtros mudam o conjunto.
   useEffect(() => { setPage(1); }, [search, advFilters]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  // Paginação: no modo servidor o total vem do envelope; no cliente, do filtrado.
+  const totalCount = serverMode ? total : filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const start = (safePage - 1) * PAGE_SIZE;
-  const pageItems = filtered.slice(start, start + PAGE_SIZE);
+  // Modo servidor: `filtered` já é a página (não fatia de novo). Cliente: fatia local.
+  const pageItems = serverMode ? filtered : filtered.slice(start, start + PAGE_SIZE);
 
   // Abre o chat do contato no hub. Resolve o atendimento ativo (se houver) e navega
   // por /conversations/{id}; sem atendimento ainda, cai na raiz do hub.
@@ -665,7 +694,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
 
         <!-- Paginação -->
         <div class="flex items-center justify-between mt-4 text-[13px] text-wa-secondary">
-          <span>Exibindo ${start + 1} - ${start + pageItems.length} de ${filtered.length} contatos</span>
+          <span>Exibindo ${start + 1} - ${start + pageItems.length} de ${totalCount} contatos</span>
           ${totalPages > 1 ? html`
             <div class="flex items-center gap-1">
               <button

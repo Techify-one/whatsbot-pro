@@ -336,7 +336,8 @@ def list_contacts(q: str = "", archived: bool = False,
 
 def list_contacts_page(q: str = "", archived: bool = False,
                        inbox_ids: list[int] | None = None, *,
-                       limit: int | None = None, offset: int = 0) -> dict:
+                       limit: int | None = None, offset: int = 0,
+                       sort: str = "recency") -> dict:
     """Página de contatos (plano 50 F5) → ``{items, total, has_more}``.
 
     ``limit=None`` ⇒ tudo (byte-idêntico ao legado; ``total=len``, ``has_more=False``).
@@ -350,7 +351,7 @@ def list_contacts_page(q: str = "", archived: bool = False,
     with get_engine().connect() as conn:
         if q:
             # Busca: precisa de TODAS as linhas p/ o filtro Python; fatia a página depois.
-            stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids)
+            stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
             rows = conn.execute(stmt).mappings().all()
             tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
             results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
@@ -362,7 +363,7 @@ def list_contacts_page(q: str = "", archived: bool = False,
                     "has_more": (offset + len(results)) < total}
 
         # Sem busca: pagina no SQL (o ponto do plano — não trazer 100k linhas).
-        stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids)
+        stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
         if limit is not None:
             stmt = stmt.limit(limit).offset(offset)
         rows = conn.execute(stmt).mappings().all()

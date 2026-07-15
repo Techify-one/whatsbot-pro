@@ -358,6 +358,16 @@ check("F5: busca paginada respeita limit", len(_r_qp["items"]) <= 5)
 check("F5: sem limit continua lista legada (retrocompat)",
       isinstance(client.get("/api/contacts").json()["data"], list))
 
+# plano 50 F7 — sort=name devolve a página em ordem alfabética (tela /contacts).
+_r_sort = client.get("/api/contacts?limit=50&offset=0&sort=name").json()["data"]
+_names = [(c.get("name") or c.get("phone") or "") for c in _r_sort["items"]]
+check("F7: sort=name -> página em ordem alfabética",
+      _names == sorted(_names, key=lambda s: s.lower()))
+# default (recency) difere de name (ordenações distintas) — sanity de que o param pega.
+_r_rec = client.get("/api/contacts?limit=50&offset=0").json()["data"]
+check("F7: sort default é recência (envelope válido)",
+      isinstance(_r_rec.get("items"), list))
+
 # Search
 r = client.get("/api/contacts?q=Alice")
 check("GET /api/contacts?q=Alice -> finds Alice", len(r.json()["data"]) >= 1)

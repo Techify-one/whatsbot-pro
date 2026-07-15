@@ -248,16 +248,18 @@ def register_routes(app, deps):
 
     @app.get("/api/contacts")
     async def list_contacts(request: Request, q: str = "", archived: bool = False,
-                            limit: int | None = None, offset: int = 0):
+                            limit: int | None = None, offset: int = 0,
+                            sort: str = "recency"):
         """List all contacts with summary info.
 
         Paginação (plano 50 F5): quando ``limit`` é informado, devolve o envelope
         ``{items, total, has_more}`` (cap ``CAP_LIST``). SEM ``limit`` mantém o shape
-        legado (``data`` = lista) — a sidebar/`/contacts` continuam montando até
-        migrarem (F7/F8). ``offset`` ≥ 0."""
+        legado (``data`` = lista). ``sort`` (F7): ``name`` = alfabético (tela /contacts),
+        default ``recency`` (sidebar). ``offset`` ≥ 0."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        sort = "name" if sort == "name" else "recency"
         # Inbox-membership scoping (plano inboxes/canais §4.7): a sidebar
         # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
         # caixas que o usuário não acessa. Espelha GET /api/conversations.
@@ -273,7 +275,8 @@ def register_routes(app, deps):
         lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
         off = clamp_offset(offset)
         page = await asyncio.to_thread(
-            contact_repo.list_contacts_page, q, archived, inbox_ids, limit=lim, offset=off)
+            contact_repo.list_contacts_page, q, archived, inbox_ids,
+            limit=lim, offset=off, sort=sort)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
         for c in page["items"]:

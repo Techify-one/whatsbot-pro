@@ -125,7 +125,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 7 — Tela `/contacts` server-side
 
 #### Status de execução — Fase 7
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída (verificação de navegador manual pendente)
+- **O que foi feito:** Backend — `build_list_contacts_query(..., sort="recency")` ganhou `sort="name"` (ordem alfabética por nome→telefone); threaded em `list_contacts_page` + endpoint (`?sort=name`); `getContacts` aceita `{sort}`. Frontend `ContactsListScreen` — **modo duplo**: browse puro (sem busca e sem filtros) pagina no servidor (`limit/offset` + `sort=name`, DOM = 1 página); qualquer busca ou filtro cai no modo cliente (carrega tudo uma vez, ordena/filtra/pagina no cliente — comportamento e semântica atuais preservados). Prev/Next e "Exibindo X-Y de N" funcionam nos dois modos.
+- **Como foi feito / decisões:** Três requisitos brigavam com paginação server-side pura: ordem **alfabética** (tela é alfabética, endpoint é por recência → resolvido com `sort=name`), **busca client-side** com semântica própria (nome/telefone/tags, sem conteúdo de mensagem) e **filtros avançados client-side** (atributos/tags). Escolhi o menor risco: server-side só no **browse puro** (o caso que dói com 100k contatos), mantendo busca/filtros 100% no cliente (zero mudança de semântica). `loadContacts` é um `useCallback([serverMode, page])` que o efeito e o `reload` reusam.
+- **Problemas / pendências:** **Verificação de navegador pendente** (mesma restrição da F4). Testar: browse pagina no servidor (Prev/Next), buscar/filtrar volta ao modo cliente e pagina local, alternar entre os dois não trava, modo escuro.
+- **Verificação:** `node --check` OK; teste F7 backend (`sort=name` devolve página alfabética). Suíte **1325 passed, 0 failed**.
 
 ---
 
