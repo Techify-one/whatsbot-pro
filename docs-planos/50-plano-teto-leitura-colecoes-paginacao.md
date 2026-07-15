@@ -139,7 +139,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 9 — Usage por contato com teto
 
 #### Status de execução — Fase 9
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** `usage_repo.by_contact`/`detail` ganharam `*, limit=None, offset=0` (aditivo); novos `count_by_contact`/`count_detail` p/ o `total`. Endpoints `/api/usage/by-contact` e `/api/usage/contact/{phone}` envelopam `{items, total, has_more}` **só com `limit`** (senão lista legada). `by_contact` já ordena por custo desc = top-N gastadores.
+- **Como foi feito / decisões:** No `by_contact` paginado, o agregado `by_type` é **restringido aos contatos da página** (`WHERE contact_id IN page_ids`, ou `false()` p/ página vazia) — evita reagregar a base inteira. `summary`/`global_summary` (agregados de 1 linha) ficam intactos (não paginados — falso positivo do plano). Retrocompat pelo mesmo padrão da F5 (só envelopa com `limit`).
+- **Problemas / pendências:** F10 (CostsDashboard) consome esse envelope — fica no checkpoint de frontend.
+- **Verificação:** Testes F9 (envelope; página respeita limit; caminhar cobre o total; `by_type` presente na página; detail paginado; sem `limit` = lista; summary intacto). Suíte **1312 passed, 0 failed**.
 
 ---
 

@@ -3602,6 +3602,44 @@ check("GET /usage/contact -> has records", len(detail) >= 2)
 r = client.get("/api/usage/contact/0000000000")
 check("GET /usage/contact/0000 -> empty", r.json()["data"] == [])
 
+# plano 50 F9 — paginação de usage (envelope só com `limit`; sem ele = lista legada).
+r = client.get("/api/usage/by-contact?limit=1&offset=0")
+_ub = r.json()["data"]
+check("F9: by-contact?limit -> envelope {items,total,has_more}",
+      isinstance(_ub, dict) and "items" in _ub and "total" in _ub and "has_more" in _ub)
+check("F9: by-contact página respeita limit", len(_ub["items"]) <= 1)
+check("F9: by-contact ordenado por custo desc (top gastadores)",
+      _ub["total"] >= 1)
+# by_type da página vem preenchido (não perdido pela paginação).
+if _ub["items"]:
+    check("F9: by-contact item da página traz by_type", "by_type" in _ub["items"][0])
+# Caminhar as páginas cobre o total sem dup.
+_seen, _o, _g = set(), 0, 0
+while _g < 200:
+    _g += 1
+    _p = client.get(f"/api/usage/by-contact?limit=2&offset={_o}").json()["data"]
+    for _it in _p["items"]:
+        _seen.add(_it["phone"])
+    if not _p["has_more"]:
+        break
+    _o += 2
+check("F9: by-contact paginação cobre o total", len(_seen) == _p["total"],
+      f"vistos={len(_seen)} total={_p['total']}")
+# detail paginado
+r = client.get("/api/usage/contact/5511999990001?limit=1&offset=0")
+_ud = r.json()["data"]
+check("F9: contact/{phone}?limit -> envelope", isinstance(_ud, dict) and "items" in _ud)
+check("F9: contact detail respeita limit", len(_ud["items"]) <= 1)
+check("F9: contact detail total >= 2", _ud["total"] >= 2)
+# sem limit -> lista legada (retrocompat)
+check("F9: by-contact sem limit continua lista",
+      isinstance(client.get("/api/usage/by-contact").json()["data"], list))
+check("F9: contact detail sem limit continua lista",
+      isinstance(client.get("/api/usage/contact/5511999990001").json()["data"], list))
+# summary global intacto (não paginado)
+check("F9: summary segue com total_tokens (agregado intacto)",
+      "total_tokens" in client.get("/api/usage/summary").json()["data"])
+
 # Executions writer (Onda 0): agent_key/total_tokens/total_cost_usd were created
 # in migration 0007 but never populated. Verify the new writer accumulates them.
 _exec_id = execution_repo.create("5511999990001", "test")
