@@ -31,7 +31,7 @@ from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
 from channels.outbound import OutboundRouter
 from channels.providers.gowa_channel import GOWAChannel
-from db.repositories import channel_repo
+from db.repositories import channel_repo, user_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
     register_plugin_events,
@@ -511,27 +511,30 @@ def create_app(
             if path.startswith(prefix):
                 return await call_next(request)
 
-        # Only protect /api/* paths. RBAC is additive (plano 03): a valid USER
-        # session OR the legacy single-password token both authenticate. When
-        # rbac_enforce is on, ONLY a user session is accepted. Default off so a
-        # live single-password / open install keeps working.
+        # Only protect /api/* paths. The gate closes as soon as ≥1 RBAC user
+        # exists (``has_users``, self-healing — plano 48 F0): from that moment a
+        # valid USER session is required. A genuinely zero-user install stays
+        # open only until the first admin is bootstrapped (``/api/auth/`` is
+        # exempt). ``auth_required`` (legacy panel password) is kept as a 3rd OR
+        # during the transition (D5) so an install with the old password + no
+        # users yet doesn't briefly open; it's removed once the legacy scheme is.
         request.state.user = None
         if path.startswith("/api/"):
-            enforce = rbac_enforced(settings)
+            has_users = await asyncio.to_thread(user_repo.has_any)
+            enforce = rbac_enforced(settings) or has_users
             auth_req = auth_required(settings)
             auth_header = request.headers.get("authorization", "")
             token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
             # Resolve a present token even in open mode so per-permission gating
-            # applies to voluntarily-logged-in users; only hit the DB when there's
-            # a token or auth is actually required/enforced.
+            # applies to voluntarily-logged-in users.
             if token or enforce or auth_req:
                 kind, user = await asyncio.to_thread(
                     resolve_request_token, token, settings)
                 request.state.user = user
                 if enforce:
-                    denied = kind != "user"
+                    denied = kind != "user"      # only a USER session passes
                 elif auth_req:
-                    denied = kind is None
+                    denied = kind is None        # legacy password + 0 users (D5)
                 else:
                     denied = False  # open mode — token (if any) attached for gating
                 if denied:

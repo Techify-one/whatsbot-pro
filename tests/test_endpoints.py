@@ -131,6 +131,11 @@ app.router.lifespan_context = _noop_lifespan
 
 from starlette.testclient import TestClient
 client = TestClient(app, raise_server_exceptions=False)
+# Anonymous client (never carries a default auth header). Used for the "no token"
+# assertions once the suite bootstraps an admin and sets a default Authorization
+# header on ``client`` (plano 48 F0 — the API gate closes once ≥1 user exists, so
+# an unauthenticated request must come from a client with no bearer token).
+anon = TestClient(app, raise_server_exceptions=False)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1202,19 +1207,32 @@ check("GET members -> users é lista", isinstance(_m.get("users"), list))
 r = client.get("/api/channels/inexistente/members")
 check("GET members canal desconhecido -> 404", r.status_code == 404)
 # Cria um usuário e o atribui como membro da inbox do canal default.
+# Criar um usuário liga o gate has_users (plano 48 F0): a partir daqui as rotas
+# channel.manage exigem uma sessão de admin. O bootstrap do admin da suíte só
+# acontece na seção RBAC adiante, então autenticamos estas chamadas com uma
+# sessão de admin DESCARTÁVEL, removida no fim junto com o membro — o intervalo
+# seguinte (delete/restore de canais) volta a rodar em modo aberto (0 usuários).
 from db.repositories import user_repo as _urepo
+from server.auth import hash_password_argon2 as _hpa_mem
 _u = _urepo.create(email="agente_inbox@x.com", name="Agente Inbox",
                    password_hash="x", role_keys=["atendente"])
-r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]})
+_mem_admin = _urepo.create(email="_memtest_admin@x.com", name="MemAdmin",
+                           password_hash=_hpa_mem("supersecret"), role_keys=["admin"])
+_mem_tok = client.post("/api/auth/login",
+                       json={"email": "_memtest_admin@x.com", "password": "supersecret"}
+                       ).json()["data"]["token"]
+_mem_h = {"Authorization": f"Bearer {_mem_tok}"}
+r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]}, headers=_mem_h)
 check("PUT members -> 200", r.status_code == 200)
 check("PUT members -> persiste o membro", _u["id"] in r.json()["data"]["member_ids"])
-r = client.get("/api/channels/default/members")
+r = client.get("/api/channels/default/members", headers=_mem_h)
 check("GET members -> reflete o membro salvo", _u["id"] in r.json()["data"]["member_ids"])
-r = client.put("/api/channels/default/members", json={"user_ids": []})
+r = client.put("/api/channels/default/members", json={"user_ids": []}, headers=_mem_h)
 check("PUT members -> esvazia o conjunto", r.json()["data"]["member_ids"] == [])
-r = client.put("/api/channels/default/members", json={"user_ids": "nope"})
+r = client.put("/api/channels/default/members", json={"user_ids": "nope"}, headers=_mem_h)
 check("PUT members tipo inválido -> 400", r.status_code == 400)
 _urepo.delete(_u["id"])
+_urepo.delete(_mem_admin["id"])  # volta a 0 usuários (gate aberto) para o resto da seção
 
 # Handshake do webhook por provider (Cloud API verification) — auth-exempt
 r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
@@ -1355,11 +1373,12 @@ r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": 
 check("login old password after self-change -> 401", r.status_code == 401)
 r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "newsecret123"})
 check("login new password after self-change -> 200", r.status_code == 200)
-# No RBAC identity (no token) -> rejected, never handled as a change. 403 in open
-# mode today; becomes 401 once the middleware enforces sessions (plano 48 F0).
-r = client.post("/api/me/password",
-                json={"current_password": "newsecret123", "new_password": "another12345"})
-check("POST /me/password (no session) -> 401/403", r.status_code in (401, 403))
+# No RBAC identity (no token) -> the middleware rejects with 401 before the handler
+# runs (plano 48 F0: the API gate is closed because ≥1 user exists). Uses `anon`
+# since `client` is about to carry a default admin header.
+r = anon.post("/api/me/password",
+              json={"current_password": "newsecret123", "new_password": "another12345"})
+check("POST /me/password (no session) -> 401", r.status_code == 401)
 # The session token stays valid across a password change (opaque, not derived).
 r = client.get("/api/auth/me", headers=_meh)
 check("session valid after self password change", r.status_code == 200)
@@ -1373,6 +1392,17 @@ r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_utok}"}
 check("POST /auth/logout -> 200", r.status_code == 200)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (after logout) -> 401", r.status_code == 401)
+
+# ── From here on, the suite runs authenticated as a full admin BY DEFAULT ──────
+# The API gate is now closed (an admin exists → has_users, plano 48 F0), so every
+# tokenless `client.*` call would 401. We attach a DEDICATED admin session as the
+# default Authorization header — deliberately NOT `_utok` (just logged out above)
+# — so it stays valid through the rest of the suite. Requests that pass their own
+# `headers={Authorization: ...}` still override this; "no token" cases use `anon`.
+_suite_admin_tok = client.post(
+    "/api/auth/login", json={"email": "admin@test.com", "password": "supersecret"}
+).json()["data"]["token"]
+client.headers["Authorization"] = f"Bearer {_suite_admin_tok}"
 
 # Resolver + short-circuit (gestor via repo, since user-management UI is Fase 5)
 from db.repositories import user_repo as _urepo, rbac_repo as _rrepo
@@ -1393,7 +1423,7 @@ check("GET /api/roles -> 3 roles + 37 perms",
       len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 37)
 
 r = client.get("/api/users")
-check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
+check("GET /api/users (admin session) -> 200", r.status_code == 200)
 check("GET /api/users -> lists admin + gestor", len(r.json()["data"]["users"]) >= 2)
 
 r = client.post("/api/users", json={"email": "att@test.com", "name": "Atendente",
@@ -2536,7 +2566,8 @@ check("GET /contacts/{phone} (inbox não-membro) -> 404", r.status_code == 404)
 _imrepo.set_inboxes_for_user(_at["id"], [])  # limpa para não afetar testes seguintes
 
 # ── plano 10 Onda 0: assign-me, ai, agent, info, contact→conversation ──
-# Usuário admin vivo (o _admin original foi deletado num teste anterior)
+# Segundo admin, com sessão própria (_mgrtok), para exercitar assign-me/ai como
+# um operador distinto do admin default da suíte.
 _mgr = _urepo2.create(email="mgr@test.com", name="Mgr",
                       password_hash=_hpa2("supersecret"), role_keys=["admin"])
 _mgrtok = client.post("/api/auth/login",
@@ -2545,7 +2576,7 @@ r = client.post(f"/api/conversations/{_conv2['id']}/assign-me",
                 headers={"Authorization": f"Bearer {_mgrtok}"})
 check("POST assign-me (admin) -> 200 + assignee=eu",
       r.status_code == 200 and r.json()["data"]["conversation"]["assignee_user_id"] == _mgr["id"])
-r = client.post(f"/api/conversations/{_conv2['id']}/assign-me")
+r = anon.post(f"/api/conversations/{_conv2['id']}/assign-me")
 check("POST assign-me sem auth -> 401", r.status_code == 401)
 
 # reopen: resolver limpa o assignee; reabrir (status=open) deixa a conversa SEM
@@ -2735,13 +2766,17 @@ _d2 = r.json()["data"]["conversation"]
 check("P17 ai on -> ai_active=1", _d2["ai_active"] == 1)
 check("P17 ai on -> religa agente default", _d2["active_agent_key"] == "default")
 check("P17 ai on -> limpa responsável humano (IA assume)", _d2["assignee_user_id"] is None)
-# Legacy/open (sem identidade de operador) cai em "Não atribuídas".
+# Sem operador (automação / serviço interno) o "desligar IA" não tem a quem
+# atribuir → cai em "Não atribuídas". Via HTTP isso não é mais alcançável (o gate
+# has_users exige sessão de usuário — plano 48 F0), então exercemos a política de
+# transferência direto no serviço com actor_id=None.
 _conv_repo.set_status(_p17["id"], "closed")  # 1 aberta por (contato, inbox)
 _p17b = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17b["id"], _mgr["id"])
-r = client.post(f"/api/conversations/{_p17b['id']}/ai", json={"active": False})
-_db17 = r.json()["data"]["conversation"]
-check("P17 ai off (sem auth) -> Não atribuídas", _db17["assignee_user_id"] is None)
+from app.services import conversation_service as _csvc_p17
+_db17 = _asyncio.run(_csvc_p17.set_ai(app.state.deps, _conv_repo.get(_p17b["id"]), 0,
+                                      actor_id=None, actor_name=None))
+check("P17 ai off (sem operador) -> Não atribuídas", _db17["assignee_user_id"] is None)
 
 # ── set_ai(clear_transfer_tag): religar a IA mantendo a tag (usado pelo fechar-
 #    protocolo). Default=True remove a tag; False preserva o rótulo. ──
@@ -4352,62 +4387,53 @@ check("GET /quick-replies/%2Fsaud (SPA) -> 200",
 check("GET /users/roles != user_id (SPA) -> 200", client.get("/users/roles").status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
-#  23. Auth with password
+#  23. Auth enforcement — o gate da API/WS fecha quando existe ≥1 usuário
+#      (plano 48 F0 — substitui a antiga "Senha do Painel", já aposentada)
 # ═══════════════════════════════════════════════════════════════════
-section("Auth — With Password")
+section("Auth — enforcement (has_users)")
+import json as _json23
 
-# Set a password
-r = client.put("/api/config", json={"web_password": "mysecret123"})
-check("SET password -> 200", r.status_code == 200)
+# A suíte já criou um admin (bootstrap acima), então existe ≥1 usuário → o gate da
+# API está FECHADO: um request sem sessão de usuário válida é recusado pelo
+# middleware com 401, independentemente de qualquer senha de painel (aposentada).
+# `anon` não carrega token; `client` carrega a sessão de admin default.
+check("GET /api/config (no token) -> 401", anon.get("/api/config").status_code == 401)
+check("GET /api/channels (no token) -> 401", anon.get("/api/channels").status_code == 401)
+check("GET /api/users (no token) -> 401", anon.get("/api/users").status_code == 401)
 
-# Now auth should be required
-r = client.get("/api/auth/check")
+# /api/auth/check é isento do middleware, mas o handler ainda responde 401 quando
+# exige sessão e nenhuma é apresentada; carrega has_users=True.
+r = anon.get("/api/auth/check")
 check("GET /auth/check (no token) -> 401", r.status_code == 401)
+check("GET /auth/check -> has_users=true", (r.json().get("data") or {}).get("has_users") is True)
 
-# Os prefixos de deep-link (SPA) ficam abertos mesmo com senha, para o reload de
-# uma URL de entidade servir o index.html — mas a API equivalente segue protegida.
+# Prefixos de deep-link (SPA) ficam abertos mesmo sem token (o reload de uma URL de
+# entidade serve o index.html) — mas o /api/* equivalente segue protegido.
 check("GET /channels/default (SPA, no token) -> 200",
-      client.get("/channels/default").status_code == 200)
+      anon.get("/channels/default").status_code == 200)
 check("GET /ai/agents/default (SPA, no token) -> 200",
-      client.get("/ai/agents/default").status_code == 200)
-check("GET /api/channels (no token) -> 401 (API ainda protegida)",
-      client.get("/api/channels").status_code == 401)
+      anon.get("/ai/agents/default").status_code == 200)
 
-# Login
-r = client.post("/api/auth/login", json={"password": "mysecret123"})
-check("POST /auth/login -> 200", r.status_code == 200)
-token = r.json()["data"]["token"]
-check("POST /auth/login -> has token", len(token) > 0)
+# Endpoints isentos funcionam sem token.
+check("POST /webhook (auth exempt, no token) -> 200",
+      anon.post("/api/webhook/gowa/default", json={"event": "unknown"}).status_code == 200)
+check("GET /health (auth exempt, no token) -> 200", anon.get("/health").status_code == 200)
 
-# Check with token
-r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {token}"})
-check("GET /auth/check (valid token) -> 200", r.status_code == 200)
-check("GET /auth/check -> authenticated", r.json()["data"]["authenticated"] is True)
+# Com sessão de admin válida, o gate deixa passar.
+check("GET /api/config (admin session) -> 200", client.get("/api/config").status_code == 200)
 
-# Wrong password
-r = client.post("/api/auth/login", json={"password": "wrong"})
-check("POST /auth/login (wrong) -> 401", r.status_code == 401)
+# O gate do WebSocket espelha o do HTTP (plano 48 F0): sem ?token= o servidor aceita
+# e fecha com 4401; com sessão de usuário válida conecta e envia o status inicial.
+try:
+    with anon.websocket_connect("/ws") as _ws_noauth:
+        _ws_noauth.receive_text()
+    check("WS sem token -> fechado (4401)", False)
+except Exception:
+    check("WS sem token -> fechado (4401)", True)
 
-# API endpoint without auth (should be blocked)
-r = client.get("/api/config")
-check("GET /api/config (no auth) -> 401", r.status_code == 401)
-
-# API endpoint with auth
-r = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
-check("GET /api/config (with auth) -> 200", r.status_code == 200)
-
-# Webhook should be exempt from auth (live generic route, exempt via the
-# ``/api/webhook/`` prefix — the legacy exact ``/api/webhook`` route is retired).
-r = client.post("/api/webhook/gowa/default", json={"event": "unknown"})
-check("POST /webhook (auth exempt) -> 200", r.status_code == 200)
-
-# Health should be exempt
-r = client.get("/health")
-check("GET /health (auth exempt) -> 200", r.status_code == 200)
-
-# Remove password to not affect other tests
-r = client.put("/api/config", json={"web_password": ""}, headers={"Authorization": f"Bearer {token}"})
-check("REMOVE password -> 200", r.status_code == 200)
+with client.websocket_connect(f"/ws?token={_suite_admin_tok}") as _ws_ok:
+    _ws_first = _json23.loads(_ws_ok.receive_text())
+    check("WS com sessão de admin -> conecta (status inicial)", _ws_first.get("event") == "status")
 
 # ═══════════════════════════════════════════════════════════════════
 #  Audit trail (plano 07)
@@ -5197,10 +5223,10 @@ check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
 
 # ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
 # @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
-# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. Modo de teste é
-# open/legacy (sem sessão → current_user=None), então o autor (sent_by) e os endpoints
-# que dependem de current_user ficam None; as peças por-usuário são checadas via repo.
-# Fica no FIM da suíte (depois do /auth/bootstrap, que exige zero usuários).
+# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. A partir do
+# bootstrap a suíte roda como admin (default header — plano 48 F0), então a nota é
+# autorada pelo admin; as peças por-usuário (has_user_mention, unread_count) são
+# checadas via repo com o user_id explícito (independem do current_user do request).
 section("Contacts — Private Note Mentions")
 from db.repositories import user_repo as _mrepo_users, mention_repo, inbox_member_repo, conversation_repo as _mrepo_conv
 

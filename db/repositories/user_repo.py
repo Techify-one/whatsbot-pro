@@ -16,6 +16,29 @@ def count() -> int:
         return conn.execute(select(func.count()).select_from(users)).scalar() or 0
 
 
+# ── has_users cache (plano 48 F0) ───────────────────────────────────────────
+# The auth gate calls ``has_any()`` on every ``/api/*`` request to decide whether
+# to enforce a user session (the API closes as soon as ≥1 user exists). The cache
+# is invalidation-based — ``create`` sets it True, ``delete`` clears it — so there
+# is NO staleness window (a plain TTL could briefly report the wrong value right
+# after the first user is created / the last one is deleted).
+_has_any_cache: bool | None = None
+
+
+def has_any() -> bool:
+    """Whether at least one user exists. Cached; invalidated by create/delete."""
+    global _has_any_cache
+    if _has_any_cache is None:
+        _has_any_cache = count() > 0
+    return _has_any_cache
+
+
+def invalidate_has_any_cache() -> None:
+    """Reset the has_users cache (call after any create/delete of users)."""
+    global _has_any_cache
+    _has_any_cache = None
+
+
 def get(user_id: int) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(select(users).where(users.c.id == user_id)).mappings().first()
@@ -83,6 +106,7 @@ def create(*, email: str, name: str, password_hash: str,
             _assign_permissions(conn, uid, permission_keys or [])
         elif role_keys:
             _assign_roles(conn, uid, role_keys)
+    invalidate_has_any_cache()  # a user now exists — the gate must re-evaluate
     return get(uid)
 
 
@@ -160,6 +184,7 @@ def clear_custom_permissions(user_id: int, role_keys: list[str]) -> dict | None:
 def delete(user_id: int) -> bool:
     with get_engine().begin() as conn:
         result = conn.execute(sa_delete(users).where(users.c.id == user_id))
+    invalidate_has_any_cache()  # may have removed the last user — re-evaluate the gate
     return (result.rowcount or 0) > 0
 
 
