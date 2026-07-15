@@ -191,19 +191,29 @@ export async function getUnreadCount() {
 // atendimento Novo pela caixa de entrada selecionada, antes de existir um atendimento
 // nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
 // nunca cai no atendimento de outro canal do mesmo número.
-export async function getContact(phone, markRead = true, channelId = null) {
+// `opts` (plano 50 F4): { limit, beforeId } paginam o histórico (keyset). Sem opts
+// = página mais recente (retrocompatível). `beforeId` (o _id da 1ª msg da página
+// atual) carrega as anteriores; a resposta traz `has_more`.
+export async function getContact(phone, markRead = true, channelId = null, opts = {}) {
   const params = [];
   if (!markRead) params.push('mark_read=false');
   if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
   const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
 // Atendimento-cêntrico (plano 11 D1): carrega a thread de Um atendimento (um canal),
 // sem fundir os canais do mesmo número. Retorna {conversation, contact, messages,
-// channel_id, avatar_v}. markRead=false não zera o badge daquela atendimento.
-export async function getConversationMessages(convId, markRead = true) {
-  const qs = markRead ? '' : '?mark_read=false';
+// has_more, channel_id, avatar_v}. markRead=false não zera o badge daquela atendimento.
+// `opts` (plano 50 F4): { limit, beforeId } — keyset scroll-up (ver getContact).
+export async function getConversationMessages(convId, markRead = true, opts = {}) {
+  const params = [];
+  if (!markRead) params.push('mark_read=false');
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/atendimentos/${convId}/messages${qs}`);
 }
 

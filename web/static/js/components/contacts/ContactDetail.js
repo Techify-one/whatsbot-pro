@@ -37,7 +37,7 @@ const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 // reply-quote lookup and the dialogs (delete / improve / template / context menu)
 // stay here; everything composer-related lives in the hooks/components.
 
-export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -50,6 +50,24 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   };
 
   const chatRef = useRef(null);
+  // Scroll-up (plano 50 F4): sentinela no topo + âncora de scroll. `prependingRef`
+  // sinaliza que a próxima atualização de `messages` veio de "carregar anteriores"
+  // (prepend) — o efeito de scroll então RESTAURA a posição em vez de rolar pro fim.
+  const topSentinelRef = useRef(null);
+  const prependingRef = useRef(false);
+  const anchorRef = useRef({ height: 0, top: 0 });
+
+  // Dispara loadOlder ancorando a viewport: guarda scrollHeight/scrollTop ANTES do
+  // prepend p/ compensar depois (o conteúdo entra ACIMA, empurraria a lista pra baixo).
+  function handleLoadOlder() {
+    if (!loadOlder || !hasMore || loadingOlder) return;
+    if (chatRef.current) {
+      anchorRef.current = { height: chatRef.current.scrollHeight, top: chatRef.current.scrollTop };
+    }
+    prependingRef.current = true;
+    loadOlder();
+  }
+
   // Header subtitle (line under the name): raw phone by default, but a plugin may
   // rewrite it via `filter.contact.headerSubtitle` — e.g. the website widget maps
   // the opaque session token (`wsess_…`) to a short visitor code (WEB-XXXXXX).
@@ -135,6 +153,17 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   }
 
   useEffect(() => {
+    // Prepend de "carregar anteriores" (F4): restaura a posição visual — o novo bloco
+    // entrou ACIMA, então soma o delta de altura ao scrollTop guardado. NÃO rola pro
+    // fim (senão a viewport saltaria). Só vale para ESTA atualização.
+    if (prependingRef.current) {
+      prependingRef.current = false;
+      if (chatRef.current) {
+        const delta = chatRef.current.scrollHeight - anchorRef.current.height;
+        chatRef.current.scrollTop = anchorRef.current.top + delta;
+      }
+      return;
+    }
     const target = pendingScrollRef.current;
     if (target != null) {
       if (focusMessage(target)) {
@@ -147,6 +176,19 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     }
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
+
+  // IntersectionObserver no sentinela do topo (F4): ao chegar perto do topo com
+  // has_more, carrega a página anterior. Recriado quando has_more/thread muda.
+  useEffect(() => {
+    const sentinel = topSentinelRef.current;
+    const root = chatRef.current;
+    if (!sentinel || !root || !hasMore || !loadOlder) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries[0] && entries[0].isIntersecting) handleLoadOlder();
+    }, { root, rootMargin: '120px 0px 0px 0px' });
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [hasMore, loadOlder, phone, conversationId]);
 
   // Client-side plugin lifecycle (plano 23 §3.4): emit `ui.conversation.opened`
   // when this chat view mounts/changes and `ui.conversation.closed` on teardown.
@@ -331,6 +373,17 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
       <!-- Chat area with doodle pattern -->
       <div ref=${chatRef} class="flex-1 min-h-0 overflow-y-auto overscroll-contain wa-scrollbar wa-chat-pattern py-2 px-[4%] lg:px-[7%]">
+        <!-- Sentinela do topo (F4): dispara "carregar anteriores" ao entrar na viewport.
+             Fallback acessível: botão explícito quando há mais e nada carregando. -->
+        ${hasMore ? html`
+          <div ref=${topSentinelRef} class="flex justify-center py-2">
+            ${loadingOlder
+              ? html`<span class="bg-wa-bg/80 text-wa-secondary rounded-lg px-3 py-1.5 text-[12px] shadow-sm">Carregando anteriores…</span>`
+              : html`<button type="button" onClick=${handleLoadOlder}
+                  class="bg-wa-bg/80 text-wa-secondary hover:text-wa-text rounded-lg px-3 py-1.5 text-[12px] shadow-sm">
+                  Carregar mensagens anteriores
+                </button>`}
+          </div>` : null}
         ${!messages || messages.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 text-[14px]">
               <span class="bg-wa-bg/80 rounded-lg px-3 py-1.5 text-[12.5px] shadow-sm">Nenhuma mensagem ainda</span>

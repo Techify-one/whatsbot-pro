@@ -415,6 +415,8 @@ export function shapeConvData(d) {
   return {
     ...(d.contact || {}),
     messages: d.messages || [],
+    // plano 50 F4: keyset — ainda há mensagens mais antigas p/ carregar (scroll-up).
+    has_more: !!d.has_more,
     avatar_v: d.avatar_v,
     channel_id: d.channel_id || 'default',
     conversation: d.conversation || null,

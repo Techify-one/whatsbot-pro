@@ -95,6 +95,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect,
@@ -339,6 +340,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
                 showAgentName=${config ? (config.show_agent_name !== false) : true}
+                loadOlder=${loadOlder}
+                loadingOlder=${loadingOlder}
+                hasMore=${contactData && contactData.has_more}
               />`
           }
           ${openPanel === 'contact' && selected && canReadContact ? html`

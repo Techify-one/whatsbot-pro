@@ -92,7 +92,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 4 — Frontend: carregar mensagens anteriores (scroll-up)
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída (verificação de navegador manual pendente — ver abaixo)
+- **O que foi feito:** (1) `api.js` — `getContact`/`getConversationMessages` aceitam `opts={limit, beforeId}` (retrocompatível). (2) `shapeConvData` repassa `has_more`. (3) `useConversationSelection` — novo `loadOlder()` (cursor = menor `_id` carregado; fetch SEM re-marcar lida; **prepend** com dedup por `_id`; guarda `loadingOlderRef` contra concorrência) + `loadingOlder` state, expostos no return. (4) `ContactDetail` — sentinela `IntersectionObserver` no topo (+ botão fallback "Carregar mensagens anteriores"), **âncora de scroll** (`prependingRef`+`anchorRef`: guarda `scrollHeight/scrollTop` antes do prepend, soma o delta depois → viewport não salta), e o auto-scroll-pro-fim só roda quando NÃO é prepend. (5) `Contacts.js` passa `loadOlder/loadingOlder/hasMore=contactData.has_more`.
+- **Como foi feito / decisões:** Cursor é o `_id` (chave exposta por `_row_to_dict`; o `before_id` do backend compara com `messages.id`). Sandbox não passa os novos props → defaults (`loadOlder=null`, `hasMore=false`) desativam o sentinela; sandbox segue intacto (D3/plano). Fallback de botão além do observer (acessibilidade + ambientes sem IO).
+- **Problemas / pendências:** **Verificação de navegador não executada** — o ambiente é pasta compartilhada e há regra de não subir/reiniciar o servido :8090 sem confirmar ([[project-whatsbot-pro]]). Recomendado ao operador: abrir conversa >200 msgs (carrega 50, ancorada no fim), rolar ao topo (carrega +50 sem salto), chegar ao início (para de carregar), receber msg nova (auto-scroll pro fim ainda funciona).
+- **Verificação:** `node --check` nos 5 arquivos JS OK; `node --test conversationRows.test.js` **47 pass** (inclui `has_more` no `shapeConvData`); suíte backend **1287 passed** (sem regressão).
 
 ---
 
