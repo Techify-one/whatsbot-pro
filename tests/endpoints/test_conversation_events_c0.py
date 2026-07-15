@@ -100,6 +100,24 @@ def _make_open_conversation(phone: str) -> tuple[int, int]:
     return conv["id"], contact["id"]
 
 
+def _auth_admin(client):
+    """Authenticate the client as a DEDICATED admin (plano 48: the mutating
+    /api/conversations/* routes require a user session once ≥1 user exists — which
+    the tests below trigger by creating an assignee). The admin is distinct from
+    any assignee under test, so the assign/attribute bus verbs stay actor-neutral
+    (``conversation.assigned``, not ``assigned_me``). Returns the same client."""
+    from db.repositories import user_repo, session_repo
+    from server.auth import hash_password_argon2, generate_session_token
+    admin = (user_repo.get_by_email("c0_admin@test.com")
+             or user_repo.create(email="c0_admin@test.com", name="C0 Admin",
+                                 password_hash=hash_password_argon2("x"),
+                                 role_keys=["admin"]))
+    tok = generate_session_token()
+    session_repo.create(tok, admin["id"], user_agent="test", ip="127.0.0.1")
+    client.headers["Authorization"] = f"Bearer {tok}"
+    return client
+
+
 # ── 1. conversation.reopened (manual status route) ─────────────────────────
 
 def test_reopened_manual_via_status_route(client, captured_events):
@@ -183,6 +201,7 @@ def test_assigned_verb_kept_for_non_null(client, captured_events):
     user = user_repo.create(email="c0assignee@test.com", name="C0 Assignee",
                             password_hash="x")
     uid = user["id"]
+    _auth_admin(client)  # mutating route needs a session now that a user exists
     captured_events.clear()
 
     r = client.post(f"/api/conversations/{conv_id}/assign",
@@ -204,6 +223,7 @@ def test_attribute_set_via_info_route(client, captured_events):
     custom_attribute_repo.create_definition(
         attribute_key="c0_priority", display_name="Prioridade",
         type="text", applies_to="conversation")
+    _auth_admin(client)  # a prior test created a user → this mutating route needs a session
     captured_events.clear()
 
     r = client.put(f"/api/conversations/{conv_id}/info",
