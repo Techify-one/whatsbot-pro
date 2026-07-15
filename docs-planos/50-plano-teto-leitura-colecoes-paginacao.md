@@ -168,7 +168,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 12 — Caps admin/config (defesa em profundidade)
 
 #### Status de execução — Fase 12
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída (verificação — sem mudança de código)
+- **O que foi feito:** Auditoria completa dos list endpoints. Resultado: **todo** parâmetro `limit`/`offset` de input já é capado — `conversations` (`min(limit,200)`), `audit` (`min(limit,200)`), `logs`/gowa-logs (`min(limit,5000)`), `webhook-payloads`+`executions` (F1), `channel-webhook-payloads` (`min(limit,_RECENT_CAP)`), `contacts`/`usage` (F5/F9). Nenhum outro parâmetro de tamanho (`count`/`size`/`per_page`/`top`) existe nas rotas. Os endpoints admin (agents/tools/users/roles/channels/quick-replies/custom-attributes/histories) **não recebem `limit`** — dataset naturalmente pequeno (1 linha por entidade administrada), documentado como limite natural (não paginar, plano I12).
+- **Como foi feito / decisões:** Fase de defesa em profundidade — não havia nada uncapped para corrigir, então o entregável é a auditoria + uma asserção de regressão travando o cap da lista de atendimentos.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `grep` de todos os `limit:int`/params de tamanho em `server/routes` (todos capados). Asserção F12 (`/api/atendimentos?limit=99999` ≤ 200). Suíte **1323 passed, 0 failed**.
 
 ---
 

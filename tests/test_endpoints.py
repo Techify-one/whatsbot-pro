@@ -493,6 +493,16 @@ check("F11: iter_for_export chunk=2 == chunk padrão (mesma cobertura)",
 check("F11: list_for_export delega ao gerador (mesmo total)",
       len(contact_repo.list_for_export(None)) == len(_all_export))
 
+# plano 50 F12 — defesa em profundidade: a lista de atendimentos também capa o limit
+# (já tinha min(limit,200); confirma que ?limit gigante nunca estoura). Os demais list
+# endpoints admin (agents/tools/users/roles/channels/quick-replies/custom-attributes)
+# não recebem `limit` — dataset naturalmente pequeno (1 linha por entidade).
+_r_atd = client.get("/api/atendimentos?limit=99999")
+check("F12: /api/atendimentos?limit=99999 -> 200", _r_atd.status_code == 200)
+_atd_data = _r_atd.json()["data"]
+_atd_items = _atd_data.get("conversations") if isinstance(_atd_data, dict) else _atd_data
+check("F12: lista de atendimentos capa o limit (<=200)",
+      not isinstance(_atd_items, list) or len(_atd_items) <= 200)
 # ═══════════════════════════════════════════════════════════════════
 #  6. Contact detail
 # ═══════════════════════════════════════════════════════════════════
