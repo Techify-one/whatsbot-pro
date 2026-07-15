@@ -154,7 +154,11 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 10 — CostsDashboard paginação
 
 #### Status de execução — Fase 10
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída (verificação de navegador manual pendente)
+- **O que foi feito:** `CostsDashboard` consome o envelope da F9 em **modo duplo** (mesmo padrão da F7): a vista natural (top gastadores = custo desc, sem busca) pagina no servidor (`limit/offset`, top-N, DOM = 1 página) com Prev/Next; buscar ou ordenar por outro campo/asc cai no modo cliente (carrega tudo e ordena/filtra/pagina local, comportamento preservado). `getUsageByContact` já repassava `params` (sem mudança de API). Adicionado bloco Prev/Next + "Exibindo X-Y de N".
+- **Como foi feito / decisões:** `serverMode = !search && sortField === 'cost_usd' && !sortAsc`. `summary` (totais) segue vindo do `getUsageSummary` intacto (não paginado). Reset de página em mudança de período/ordenação/busca.
+- **Problemas / pendências:** **Verificação de navegador pendente**. Testar: default mostra top-N + Prev/Next; ordenar por nome/tokens ou buscar volta ao modo cliente; totais (cards) corretos; modo escuro.
+- **Verificação:** `node --check` OK. Backend (F9) já coberto por testes (1325 passed). Sem mudança de backend nesta fase.
 
 ---
 

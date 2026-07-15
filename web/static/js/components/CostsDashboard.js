@@ -7,6 +7,9 @@ import { readParams, writeParams, enumStr, str } from '../services/urlState.js';
 
 const html = htm.bind(h);
 
+// Tamanho de página da paginação server-side (plano 50 F10) — top gastadores.
+const PAGE_SIZE = 25;
+
 // Deep-link do estado da tela de custos (Plano 24): período/ordenação/busca na
 // query-string. `start`/`end` (formato YYYY-MM-DDTHH:mm) só saem no período custom
 // e fazem round-trip com os inputs date+time. Serialize omite tudo no default.
@@ -72,6 +75,15 @@ export function CostsDashboard() {
   const [sortField, setSortField] = useState('cost_usd');
   const [sortAsc, setSortAsc] = useState(false);
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);           // plano 50 F10
+  const [total, setTotal] = useState(0);          // total do modo servidor
+  const [hasMore, setHasMore] = useState(false);  // há próxima página (servidor)
+
+  // Modo SERVIDOR (plano 50 F10): a vista natural do dashboard = top gastadores
+  // (custo desc, sem busca) — o servidor já entrega assim, então pagina no servidor
+  // (top-N + Prev/Next, DOM = 1 página). Buscar ou ordenar por outro campo/asc cai no
+  // modo CLIENTE (carrega tudo e ordena/filtra/pagina local — comportamento preservado).
+  const serverMode = !search && sortField === 'cost_usd' && !sortAsc;
 
   useEffect(() => {
     getConfig().then(res => {
@@ -91,15 +103,33 @@ export function CostsDashboard() {
       params.period = period;
     }
 
+    // Modo servidor: pede a página (top gastadores). Cliente: lista completa.
+    const conParams = serverMode
+      ? { ...params, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }
+      : params;
     const [sumRes, conRes] = await Promise.all([
       getUsageSummary(params),
-      getUsageByContact(params),
+      getUsageByContact(conParams),
     ]);
 
     if (sumRes.ok) setSummary(sumRes.data);
-    if (conRes.ok) setContacts(conRes.data || []);
+    if (conRes.ok) {
+      if (serverMode) {
+        const env = conRes.data || {};
+        setContacts(env.items || []);
+        setTotal(env.total || 0);
+        setHasMore(!!env.has_more);
+      } else {
+        setContacts(conRes.data || []);
+        setHasMore(false);
+      }
+    }
     setLoading(false);
-  }, [period, customStartDate, customStartTime, customEndDate, customEndTime]);
+  }, [period, customStartDate, customStartTime, customEndDate, customEndTime, serverMode, page]);
+
+  // Reseta a página quando período/ordenação/busca mudam o conjunto.
+  useEffect(() => { setPage(1); }, [period, search, sortField, sortAsc,
+    customStartDate, customStartTime, customEndDate, customEndTime]);
 
   useEffect(() => {
     fetchData();
@@ -143,13 +173,15 @@ export function CostsDashboard() {
     deps: [period, customStartDate, customStartTime, customEndDate, customEndTime, sortField, sortAsc, search],
   });
 
-  const filtered = contacts.filter(c => {
+  // Modo servidor: a página já veio filtrada (sem busca) e ordenada (custo desc) do
+  // servidor — não refiltra/reordena. Modo cliente: busca + ordena localmente.
+  const filtered = serverMode ? contacts : contacts.filter(c => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
   });
 
-  const sorted = [...filtered].sort((a, b) => {
+  const sorted = serverMode ? filtered : [...filtered].sort((a, b) => {
     const va = a[sortField] || 0;
     const vb = b[sortField] || 0;
     if (sortField === 'name') {
@@ -159,6 +191,13 @@ export function CostsDashboard() {
     }
     return sortAsc ? va - vb : vb - va;
   });
+
+  // Paginação: servidor usa total/hasMore; cliente pagina o `sorted` localmente.
+  const totalCount = serverMode ? total : sorted.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const pageItems = serverMode ? sorted : sorted.slice(pageStart, pageStart + PAGE_SIZE);
 
   const typeLabel = { text: 'Texto', audio: 'Audio', image: 'Imagem' };
 
@@ -315,13 +354,13 @@ export function CostsDashboard() {
               </tr>
             </thead>
             <tbody>
-              ${sorted.length === 0 ? html`
+              ${pageItems.length === 0 ? html`
                 <tr>
                   <td colspan="6" class="text-center py-8 text-wa-secondary">
                     ${search ? 'Nenhum contato encontrado.' : 'Nenhum dado de uso encontrado para este periodo.'}
                   </td>
                 </tr>
-              ` : sorted.map(c => html`
+              ` : pageItems.map(c => html`
                 <${ContactRow}
                   key=${c.phone}
                   contact=${c}
@@ -331,6 +370,26 @@ export function CostsDashboard() {
               `)}
             </tbody>
           </table>
+        </div>
+
+        <!-- Paginação (plano 50 F10) -->
+        <div class="flex items-center justify-between mt-3 text-[13px] text-wa-secondary">
+          <span>Exibindo ${pageItems.length ? pageStart + 1 : 0} - ${pageStart + pageItems.length} de ${totalCount} contatos</span>
+          ${totalPages > 1 ? html`
+            <div class="flex items-center gap-1">
+              <button
+                onClick=${() => setPage(p => Math.max(1, p - 1))}
+                disabled=${safePage <= 1}
+                class="px-3 py-[6px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >Anterior</button>
+              <span class="px-2">${safePage} de ${totalPages}</span>
+              <button
+                onClick=${() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled=${safePage >= totalPages || (serverMode && !hasMore)}
+                class="px-3 py-[6px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >Próxima</button>
+            </div>
+          ` : null}
         </div>
       `}
     </div>
