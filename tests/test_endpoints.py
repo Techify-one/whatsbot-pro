@@ -195,7 +195,9 @@ check("F1 fresh install: /auth/check -> has_users=false",
       client.get("/api/auth/check").json()["data"]["has_users"] is False)
 check("F1 fresh install: /api/config aberto sem token (0 usuários)",
       anon.get("/api/config").status_code == 200)
-check("F1 fresh install: /api/auth/bootstrap isento (sem token) — 400 sem body, não 401",
+# (At 0 users the gate is open, so this proves bootstrap is REACHABLE — reaches the
+# handler and validates the body — not the prefix-exemption mechanism per se.)
+check("F1 fresh install: /api/auth/bootstrap alcançável a 0 usuários (400 sem body)",
       anon.post("/api/auth/bootstrap", json={}).status_code == 400)
 try:
     with anon.websocket_connect("/ws") as _ws_f1:
@@ -4446,9 +4448,11 @@ check("GET /api/config (admin session) -> 200", client.get("/api/config").status
 try:
     with anon.websocket_connect("/ws") as _ws_noauth:
         _ws_noauth.receive_text()
-    check("WS sem token -> fechado (4401)", False)
-except Exception:
-    check("WS sem token -> fechado (4401)", True)
+    check("WS sem token -> fechado (4401)", False)  # never reached: gate must close it
+except Exception as _ws_exc:
+    # Assert the ACTUAL close code is 4401 (not merely "some exception") — a
+    # different code (4403/1008) or an unrelated error must fail this.
+    check("WS sem token -> fechado (4401)", getattr(_ws_exc, "code", None) == 4401)
 
 with client.websocket_connect(f"/ws?token={_suite_admin_tok}") as _ws_ok:
     _ws_first = _json23.loads(_ws_ok.receive_text())
