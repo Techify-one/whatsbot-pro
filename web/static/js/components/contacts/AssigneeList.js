@@ -29,6 +29,7 @@ export function AssigneeList({
   activeAgentKey = null,
   onPick,
   showAssignToMe = false,
+  showUnassign = null,
   busy = false,
   autoFocus = true,
   searchPlaceholder = 'Pesquisar agentes',
@@ -39,6 +40,9 @@ export function AssigneeList({
   const filteredUsers = users.filter(u => !q || (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q));
   const filteredAi = aiAgents.filter(a => !q || (a.display_name || '').toLowerCase().includes(q));
   const assignedToMe = me && assigneeUserId != null && assigneeUserId === me.id;
+  // Default: offer "Desatribuir" when this conversation has an assignee (human or AI).
+  // Callers with a mixed selection (bulk menu) pass an explicit bool to force it on.
+  const canUnassign = showUnassign != null ? showUnassign : (assigneeUserId != null || !!activeAgentKey);
 
   const rowCls = (active) =>
     `w-full text-left px-3 py-1.5 text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 ${active ? 'text-wa-teal font-medium' : 'text-wa-text'}`;
@@ -57,7 +61,7 @@ export function AssigneeList({
           class="wa-field w-full text-[13px] rounded-md px-2 py-1.5 border border-wa-border outline-none"
         />
       </div>
-      ${(assigneeUserId != null || activeAgentKey) ? html`
+      ${canUnassign ? html`
         <button onClick=${() => pick({ kind: 'none' })} class="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-2">
           <span class="w-[15px] shrink-0"></span> Desatribuir
         </button>

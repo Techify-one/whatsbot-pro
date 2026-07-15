@@ -1,14 +1,19 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime, avatarUrl } from './utils.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
+import { AssigneeList } from './AssigneeList.js';
+import { clampFlyoutOffset } from './menuLayout.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
 import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
+
+// Approximate flyout width (px) — used to decide which side the bulk submenu opens on.
+const FLYOUT_WIDTH = 264;
 
 // Tiny assignee chip shown on each row (plano 10): person for a human agent, bot
 // for an AI agent. Highlighted in teal when the conversation is assigned to me.
@@ -121,7 +126,7 @@ function highlightParts(text, query) {
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
-  users, currentUserId,
+  currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
@@ -135,31 +140,67 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
   const allSelectedPinned = selectedContacts.length > 0 && selectedContacts.every(c => c.is_pinned);
-  // Bulk assign (attendant): mirror the single-conversation menu's visibility rule
-  // — hide in legacy single-password mode (no identity and no listable users).
-  const userList = Array.isArray(users) ? users : [];
-  const showBulkAssign = currentUserId != null || userList.length > 0;
-  const userName = (u) => u.name || u.email || `Usuário #${u.id}`;
-  // Checkmark a user only when EVERY selected conversation is already assigned to them.
-  const allSelectedAssignedTo = (uid) =>
-    selectedContacts.length > 0 && selectedContacts.every(c => c.assignee_user_id === uid);
-  // "Remover atribuição" clears whoever is assigned — human OR AI agent — so it
-  // must appear whenever any selected conversation has either set (incl. those
-  // assigned before entering selection mode).
+  // Bulk assign (attendant): mirror the single-conversation menu — the flyout reuses
+  // AssigneeList (search + humans + AI). Hide in legacy single-password mode (no
+  // identity and no listable agents).
+  const bulkAgentsUsers = Array.isArray(agentsUsers) ? agentsUsers : [];
+  const bulkAgentsAi = Array.isArray(agentsAi) ? agentsAi : [];
+  const showBulkAssign = currentUserId != null || bulkAgentsUsers.length > 0 || bulkAgentsAi.length > 0;
+  // AssigneeList checkmarks a single assignee/agent. For the multi-selection, resolve
+  // the COMMON value: the shared assignee (or AI agent) when every selected row agrees,
+  // else null (mixed → no checkmark).
+  const _uids = new Set(selectedContacts.map(c => c.assignee_user_id ?? null));
+  const commonAssigneeId = _uids.size === 1 ? [..._uids][0] : null;
+  const _keys = new Set(selectedContacts.map(c => c.active_agent_key ?? null));
+  const commonActiveKey = _keys.size === 1 ? [..._keys][0] : null;
+  // "Desatribuir" clears whoever is assigned — human OR AI agent — so it must appear
+  // whenever any selected conversation has either set (incl. those assigned before
+  // entering selection mode), even when the selection is mixed.
   const anySelectedAssigned = selectedContacts.some(c => c.assignee_user_id != null || c.active_agent_key != null);
 
   // Header dropdown state (one menu visible at a time given selectionMode).
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
-  const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
-  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
   const menuRef = useRef(null);
+
+  // Bulk submenus (Adicionar tags / Atribuir atendente) render as a flyout BESIDE the
+  // dropdown (`openSub` = 'tags' | 'assign' | null), mirroring the right-click ContextMenu
+  // instead of expanding inline. The flyout is `position: fixed` (like ContextMenu) so it
+  // escapes the sidebar's `overflow-hidden` and paints ABOVE the conversation pane instead
+  // of being clipped by it. Opens on hover; a short close delay lets the pointer travel
+  // from the trigger into the flyout without it flickering shut.
+  const [openSub, setOpenSub] = useState(null);
+  const [flyoutSide, setFlyoutSide] = useState('right');
+  const flyoutRef = useRef(null);
+  const tagsRowRef = useRef(null);
+  const assignRowRef = useRef(null);
+  const [flyoutTop, setFlyoutTop] = useState(0);
+  const [flyoutLeft, setFlyoutLeft] = useState(0);
+  const [flyoutReady, setFlyoutReady] = useState(false);
+  // While the Tags flyout's inline "create tag" form is open, pin the flyout so it
+  // doesn't close on mouse-leave (the form pops up away from the pointer).
+  const [flyoutPinned, setFlyoutPinned] = useState(false);
+  const flyoutPinnedRef = useRef(false);
+  const closeTimer = useRef(null);
+  const openSubmenu = (name) => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } if (name !== openSub) setFlyoutReady(false); setOpenSub(name); };
+  const scheduleClose = () => { if (flyoutPinnedRef.current) return; if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => { if (!flyoutPinnedRef.current) setOpenSub(null); }, 180); };
+
+  // Chevron pointing toward where the flyout opens.
+  const SubArrow = () => html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0">
+    ${flyoutSide === 'left'
+      ? html`<path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/>`
+      : html`<path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/>`}
+  </svg>`;
+  // `fixed` (viewport-anchored) + high z so it is neither clipped by the sidebar's
+  // overflow nor painted under the conversation pane. Hidden until measured (no flash).
+  const flyoutCls = `fixed z-[110] w-64 bg-wa-panel border border-wa-border rounded-lg shadow-lg ${flyoutReady ? '' : 'invisible'}`;
 
   function closeMenus() {
     setHeaderMenuOpen(false);
     setBulkMenuOpen(false);
-    setBulkTagsOpen(false);
-    setBulkAssignOpen(false);
+    setOpenSub(null);
+    setFlyoutPinned(false);
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
   }
 
   useEffect(() => {
@@ -173,6 +214,33 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
 
   // Leaving selection mode collapses any open bulk menu.
   useEffect(() => { if (!selectionMode) closeMenus(); }, [selectionMode]);
+
+  // Drop the pin whenever the open submenu is not the Tags flyout (only its create-tag
+  // form needs it); mirror it into the ref and cancel a pending close the instant we pin.
+  useEffect(() => { if (openSub !== 'tags') setFlyoutPinned(false); }, [openSub]);
+  useEffect(() => {
+    flyoutPinnedRef.current = flyoutPinned;
+    if (flyoutPinned && closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+  }, [flyoutPinned]);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+
+  // Position the open flyout in viewport (fixed) coords, computed from its trigger row's
+  // rect. Opens to the right of the row by default; flips to the left when it would
+  // overflow the right viewport edge. Vertically clamped so it stays fully on screen
+  // (clampFlyoutOffset); its max-height caps it below the viewport, so it always fits.
+  useLayoutEffect(() => {
+    if (!openSub) { setFlyoutReady(false); return; }
+    const el = flyoutRef.current;
+    const rowEl = openSub === 'tags' ? tagsRowRef.current : assignRowRef.current;
+    if (!el || !rowEl) return;
+    const rect = rowEl.getBoundingClientRect();
+    const flyH = el.getBoundingClientRect().height;
+    const side = rect.right + FLYOUT_WIDTH + 8 > window.innerWidth ? 'left' : 'right';
+    setFlyoutSide(side);
+    setFlyoutLeft(side === 'left' ? Math.max(8, rect.left - FLYOUT_WIDTH) : rect.right);
+    setFlyoutTop(rect.top + clampFlyoutOffset(rect.top, flyH, window.innerHeight));
+    setFlyoutReady(true);
+  }, [openSub, globalTags, bulkAgentsUsers.length, bulkAgentsAi.length]);
 
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
@@ -191,7 +259,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
         </div>
         <div ref=${menuRef} class="relative shrink-0">
           <button
-            onClick=${() => { setBulkMenuOpen(o => !o); setBulkTagsOpen(false); setBulkAssignOpen(false); }}
+            onClick=${() => { setBulkMenuOpen(o => !o); setOpenSub(null); }}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 text-white"
             title="Ações em massa"
           ><${KebabIcon} /></button>
@@ -239,84 +307,60 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
                 Marcar como não lidas
               </button>
-              <button
-                disabled=${selCount === 0}
-                onClick=${() => { setBulkTagsOpen(o => !o); setBulkAssignOpen(false); }}
-                class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
-              >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
-                Adicionar tags
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${bulkTagsOpen ? 'rotate-180' : ''}"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-              </button>
-              ${(bulkTagsOpen && selCount > 0) ? html`
-                <div class="border-t border-wa-border">
-                  <button
-                    onClick=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
-                    class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-                  >
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="#ef4444"><path d="M19 13H5v-2h14v2z"/></svg>
-                    Remover todas as tags
-                  </button>
-                  <${TagPicker}
-                    globalTags=${globalTags}
-                    isActive=${allSelectedHaveTag}
-                    onToggle=${(name) => onBulkTag && onBulkTag(name)}
-                    onCreateTag=${onCreateTag}
-                  />
-                </div>
-              ` : ''}
-              ${showBulkAssign ? html`
-              <button
-                disabled=${selCount === 0}
-                onClick=${() => { setBulkAssignOpen(o => !o); setBulkTagsOpen(false); }}
-                class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
-              >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
-                Atribuir atendente
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${bulkAssignOpen ? 'rotate-180' : ''}"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-              </button>
-              ${(bulkAssignOpen && selCount > 0) ? html`
-                <div class="border-t border-wa-border">
-                  ${currentUserId != null ? html`
-                    <button
-                      onClick=${() => { onBulkAssign && onBulkAssign(currentUserId); }}
-                      class="w-full text-left px-4 py-[8px] text-[13px] text-wa-teal hover:bg-wa-hover transition-colors flex items-center gap-3"
-                    >
-                      <span class="w-[16px] h-[16px] shrink-0"></span>
-                      Atribuir a mim
-                    </button>
-                  ` : ''}
-                  <div class="max-h-[200px] overflow-y-auto wa-scrollbar">
-                    ${userList.length === 0 ? html`
-                      <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Sem usuários para listar</div>
-                    ` : userList.map(u => {
-                      const active = allSelectedAssignedTo(u.id);
-                      return html`
-                        <button
-                          key=${u.id}
-                          onClick=${() => { onBulkAssign && onBulkAssign(u.id); }}
-                          class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-                          title=${active ? 'Todas as selecionadas já estão com este atendente' : 'Atribuir a este atendente'}
-                        >
-                          <span class="w-[16px] h-[16px] shrink-0 flex items-center justify-center text-wa-teal">
-                            ${active ? html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>` : ''}
-                          </span>
-                          <span class="truncate ${active ? 'font-medium' : ''}">${userName(u)}</span>
-                        </button>
-                      `;
-                    })}
+              <div ref=${tagsRowRef} class="relative" onMouseEnter=${() => { if (selCount > 0) openSubmenu('tags'); }} onMouseLeave=${scheduleClose}>
+                <button
+                  disabled=${selCount === 0}
+                  onClick=${() => { if (selCount > 0) openSubmenu('tags'); }}
+                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : (openSub === 'tags' ? 'bg-wa-hover text-wa-text' : 'text-wa-text')}"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
+                  Adicionar tags
+                  <${SubArrow} />
+                </button>
+                ${(openSub === 'tags' && selCount > 0) ? html`
+                  <div ref=${flyoutRef} class=${flyoutCls} style="left:${flyoutLeft}px;top:${flyoutTop}px">
+                    <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                      <${TagPicker}
+                        globalTags=${globalTags}
+                        isActive=${allSelectedHaveTag}
+                        onToggle=${(name) => onBulkTag && onBulkTag(name)}
+                        onCreateTag=${onCreateTag}
+                        onClearAll=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
+                        onCreatingChange=${setFlyoutPinned}
+                      />
+                    </div>
                   </div>
-                  ${anySelectedAssigned ? html`
-                    <button
-                      onClick=${() => { onBulkAssign && onBulkAssign(null); }}
-                      class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-3 border-t border-wa-border"
-                    >
-                      <span class="w-[16px] h-[16px] shrink-0"></span>
-                      Remover atribuição
-                    </button>
-                  ` : ''}
-                </div>
-              ` : ''}
+                ` : ''}
+              </div>
+              ${showBulkAssign ? html`
+              <div ref=${assignRowRef} class="relative" onMouseEnter=${() => { if (selCount > 0) openSubmenu('assign'); }} onMouseLeave=${scheduleClose}>
+                <button
+                  disabled=${selCount === 0}
+                  onClick=${() => { if (selCount > 0) openSubmenu('assign'); }}
+                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : (openSub === 'assign' ? 'bg-wa-hover text-wa-text' : 'text-wa-text')}"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                  Atribuir atendente
+                  <${SubArrow} />
+                </button>
+                ${(openSub === 'assign' && selCount > 0) ? html`
+                  <div ref=${flyoutRef} class=${flyoutCls} style="left:${flyoutLeft}px;top:${flyoutTop}px">
+                    <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                      <${AssigneeList}
+                        users=${bulkAgentsUsers}
+                        aiAgents=${bulkAgentsAi}
+                        me=${currentUserId != null ? { id: currentUserId } : null}
+                        assigneeUserId=${commonAssigneeId}
+                        activeAgentKey=${commonActiveKey}
+                        showUnassign=${anySelectedAssigned}
+                        onPick=${(payload) => onBulkAssign && onBulkAssign(payload)}
+                        showAssignToMe=${currentUserId != null}
+                        searchPlaceholder="Buscar atendentes"
+                      />
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
               ` : ''}
               <button
                 disabled=${selCount === 0}

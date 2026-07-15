@@ -302,7 +302,6 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onBulkMarkRead=${handleBulkMarkRead}
           onBulkMarkUnread=${handleBulkMarkUnread}
           onBulkAssign=${handleBulkAssign}
-          users=${users}
           currentUserId=${currentUserId}
         />
       </div>
