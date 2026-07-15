@@ -187,4 +187,8 @@ Fixar (testes) o comportamento atual de abrir/carregar mensagens antes de pagina
 ### Fase 13 — Batch para os fan-outs
 
 #### Status de execução — Fase 13
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** Dois endpoints batch (P6 opção a): `POST /api/atendimentos/labels-batch` (`{ids}` → `{labels_by_conv:{id:[...]}}`, via novo `conversation_label_repo.get_for_conversations` — UMA query) e `POST /api/channels/status-batch` (`{ids}` → `{status_by_id:{id:status}}`). Frontend: `Attendances.js` (modo etiqueta) e `ChannelsManager.js` (refresh de status) trocaram o `Promise.all(map(getX))` por 1 request batch. `getConversationLabelsBatch`/`getChannelStatusBatch` no `api.js`.
+- **Como foi feito / decisões:** Labels = UMA query no banco (`IN (ids)`), matando o N+1 real. Status de canal é volátil (rede/GOWA) → batch-endpoint (não embutido no payload da lista), como recomenda o P6; server-side ainda faz N `status()` mas em 1 round-trip HTTP. Caps defensivos no nº de ids (labels ≤1000, status ≤200).
+- **Problemas / pendências:** Verificação de navegador dos dois consumidores pendente (backend testado).
+- **Verificação:** Testes F13 (labels-batch: etiquetas corretas, ids desconhecidos→[], não-lista→erro; status-batch: canal existente presente, inexistente omitido, não-lista→erro). Suíte **1334 passed, 0 failed**; `node --check` nos 3 arquivos.

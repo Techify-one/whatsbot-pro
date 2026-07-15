@@ -8,8 +8,8 @@ import htm from 'htm';
 import {
   filterConversations, assignConversation, assignAgent,
   archiveConversation, updateConversationInfo, updateConversationLabels,
-  getConversationLabels, getConversationLabelsFor, getAssignableAgents,
-  getCustomAttributes, getMe,
+  getConversationLabels, getConversationLabelsFor, getConversationLabelsBatch,
+  getAssignableAgents, getCustomAttributes, getMe,
 } from '../../services/api.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
 import { Slot } from '../../plugins/Slot.js';
@@ -137,8 +137,21 @@ export function Attendances() {
     let alive = true;
     const missing = conversations.filter(c => c.label_names == null && labelsByConv[c.id] == null);
     if (!missing.length) return;
-    Promise.all(missing.map(c => getConversationLabelsFor(c.id).then(r => [c.id, (r && r.ok && r.data && r.data.labels) ? r.data.labels.map(l => l.name) : []]).catch(() => [c.id, []])))
-      .then(pairs => { if (!alive) return; setLabelsByConv(prev => { const next = { ...prev }; for (const [id, names] of pairs) next[id] = names; return next; }); });
+    // plano 50 F13 — UMA request batch em vez de 1 GET por atendimento.
+    getConversationLabelsBatch(missing.map(c => c.id))
+      .then(r => {
+        if (!alive) return;
+        const byConv = (r && r.ok && r.data && r.data.labels_by_conv) || {};
+        setLabelsByConv(prev => {
+          const next = { ...prev };
+          for (const c of missing) {
+            const rows = byConv[c.id] || [];
+            next[c.id] = rows.map(l => l.name);
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
     return () => { alive = false; };
   }, [mode, conversations, labelsByConv]);
 

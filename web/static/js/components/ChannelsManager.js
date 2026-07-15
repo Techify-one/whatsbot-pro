@@ -28,6 +28,7 @@ import {
   updateChannel,
   deleteChannel,
   getChannelStatus,
+  getChannelStatusBatch,
   channelReconnect,
   channelLogout,
   setChannelMembers,
@@ -213,13 +214,12 @@ export default function ChannelsManager({ initialEntity }) {
   async function refreshStatuses() {
     const list = channelsRef.current;
     if (!list || !list.length) return;
-    const results = await Promise.all(
-      list.map(c => getChannelStatus(c.id).then(r => [c.id, r]).catch(() => [c.id, null]))
-    );
-    const byId = {};
-    for (const [id, r] of results) {
-      if (r && r.ok && r.data) byId[id] = r.data;
-    }
+    // plano 50 F13 — UMA request batch em vez de 1 GET por canal.
+    let byId = {};
+    try {
+      const r = await getChannelStatusBatch(list.map(c => c.id));
+      if (r && r.ok && r.data && r.data.status_by_id) byId = r.data.status_by_id;
+    } catch { /* mantém os flags atuais em falha de rede */ }
     setChannels(prev => prev.map(c => byId[c.id]
       ? { ...c, connected: !!byId[c.id].connected, logged_in: !!byId[c.id].logged_in,
           own_phone: byId[c.id].own_phone || c.own_phone, last_error: byId[c.id].error || null }

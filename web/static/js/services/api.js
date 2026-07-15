@@ -584,6 +584,12 @@ export async function getConversationLabelsFor(convId) {
   return request('GET', `/api/atendimentos/${convId}/labels`);
 }
 
+// plano 50 F13 — etiquetas de VÁRIAS conversas numa request: {labels_by_conv:{id:[...]}}.
+// Substitui o fan-out de 1 GET por atendimento no modo etiqueta do Kanban.
+export async function getConversationLabelsBatch(ids) {
+  return request('POST', '/api/atendimentos/labels-batch', { ids });
+}
+
 // Replace a conversation's labels (snapshot of names).
 export async function updateConversationLabels(convId, labels) {
   return request('PUT', `/api/atendimentos/${convId}/labels`, { labels });
@@ -752,6 +758,12 @@ export async function setChannelMembers(id, userIds) {
 // {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
+// plano 50 F13 — status de VÁRIOS canais numa request: {status_by_id:{id:status}}.
+// Substitui o fan-out de 1 GET por canal na tela Canais.
+export async function getChannelStatusBatch(ids) {
+  return request('POST', '/api/channels/status-batch', { ids });
 }
 
 // Reconnect a GOWA channel's device socket (plano 27) — acts on the right

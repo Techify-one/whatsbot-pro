@@ -1220,6 +1220,15 @@ check("GET /channels/default -> 200", r.status_code == 200)
 r = client.get("/api/channels/inexistente")
 check("GET /channels/{unknown} -> 404", r.status_code == 404)
 
+# plano 50 F13 — status-batch: UMA request cobre N canais.
+r = client.post("/api/channels/status-batch", json={"ids": ["default", "inexistente"]})
+check("F13: channels status-batch -> 200", r.status_code == 200)
+_sb = r.json()["data"]["status_by_id"]
+check("F13: status-batch traz o canal existente", "default" in _sb)
+check("F13: status-batch ignora canal inexistente", "inexistente" not in _sb)
+check("F13: status-batch ids não-lista -> erro",
+      client.post("/api/channels/status-batch", json={"ids": 5}).json().get("ok") is False)
+
 # Credential masking (P15): set a secret via repo, ensure the API masks it.
 from db.repositories import channel_credential_repo as _ccrepo
 _ccrepo.set("default", "access_token", "supersecrettoken9876")
@@ -4865,6 +4874,19 @@ check("PUT conv labels -> 200 + snapshot",
       r.status_code == 200 and set(r.json()["data"]["labels"]) == {"Urgente", "VIP"})
 r = client.get(f"/api/conversations/{_conv2['id']}/labels")
 check("GET conv labels -> 2 etiquetas", r.status_code == 200 and len(r.json()["data"]["labels"]) == 2)
+
+# plano 50 F13 — batch de etiquetas: UMA request cobre N conversas.
+r = client.post("/api/atendimentos/labels-batch", json={"ids": [_conv2["id"], 999999]})
+check("F13: labels-batch -> 200", r.status_code == 200)
+_lb = r.json()["data"]["labels_by_conv"]
+check("F13: labels-batch traz as etiquetas da conversa",
+      {l["name"] for l in _lb.get(str(_conv2["id"]), [])} == {"Urgente", "VIP"})
+check("F13: labels-batch ids desconhecidos -> lista vazia",
+      _lb.get(str(999999), []) == [])
+check("F13: labels-batch ids não-lista -> erro",
+      client.post("/api/atendimentos/labels-batch", json={"ids": "x"}).json().get("ok") is False)
+check("F13: labels-batch sem ids -> vazio ok",
+      client.post("/api/atendimentos/labels-batch", json={}).json().get("ok") is True)
 check("PUT conv labels remove p/ snapshot menor",
       client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["VIP"]}).json()["data"]["labels"] == ["VIP"])
 check("PUT conv labels ignora nome inexistente",
