@@ -2,7 +2,7 @@
   "conversation": {
     "active_agent_key": null,
     "ai_active": 0,
-    "assignee_user_id": null,
+    "assignee_user_id": "<USER>",
     "status": "open"
   },
   "events": {
@@ -21,7 +21,11 @@
   },
   "notices": [
     {
-      "content": "🤖 SISTEMA pausou a IA.",
+      "content": "🤖 Operador pausou a IA.",
+      "role": "conversation_event"
+    },
+    {
+      "content": "🧑‍💼 Operador assumiu a conversa.",
       "role": "conversation_event"
     }
   ],

@@ -19,8 +19,9 @@ NORMALIZED tri-facet outcome:
       double-fire is impossible to miss;
   (d) ``notices`` — the ``conversation_event`` rows written into the thread
       (role + PT-BR content), since the lifecycle card is part of the behavior
-      the refactor must preserve. ``actor`` is None here (the TestClient has no
-      authenticated user → neutral phrasing), which is deterministic.
+      the refactor must preserve. Post-plano-48 the routes require an authenticated
+      operator, so the client authenticates as a fixed admin ("Operador") — the
+      notices show the deterministic actor-variant phrasing.
 
 MANDATORY cell matrix (every cell is PASS or an explicit SKIP — the matrix is
 visibly complete):
@@ -61,7 +62,13 @@ def _make_conversation(phone: str, *, status: str = "open"):
     the desired status. Picks the SAME phone the caller passes so each test stays
     isolated on the shared DB.
     """
-    from db.repositories import contact_repo, conversation_repo
+    from db.repositories import contact_repo, conversation_repo, config_repo
+    # Pin the AI seed ON: a fresh conversation's ai_active/active_agent_key derive
+    # from the global auto_reply + default_ai_enabled config, which can drift across
+    # the shared-session tests — pinning them keeps this golden's INITIAL state
+    # deterministic regardless of test order (the goldens capture these columns).
+    config_repo.set("auto_reply", True)
+    config_repo.set("default_ai_enabled", True)
     contact = contact_repo.get_or_create(phone)
     conv, _ = conversation_repo.resolve_for_contact_ex(
         contact["id"], f"{phone}@s.whatsapp.net")
@@ -74,6 +81,30 @@ def _make_user(name: str, email: str) -> int:
     from db.repositories import user_repo
     user = user_repo.create(email=email, name=name, password_hash="x")
     return user["id"]
+
+
+_OPERATOR_TOKEN = None
+
+
+def _operator_client(built):
+    """Authenticate ``built.client`` as a fixed admin operator (plano 48).
+
+    Post-48 the API gate closes once ≥1 user exists, so the lifecycle routes need a
+    real user session — and the authenticated operator becomes the *actor* in the
+    lifecycle notices/audit (the goldens now show the actor-variant phrasing, e.g.
+    "Operador resolveu a conversa"). A single shared session is reused across tests
+    (the DB is process-shared). Returns the same ``built`` for chaining."""
+    global _OPERATOR_TOKEN
+    from db.repositories import user_repo, session_repo
+    from server.auth import generate_session_token
+    if _OPERATOR_TOKEN is None:
+        op = (user_repo.get_by_email("lifecycle_operator@test.com")
+              or user_repo.create(email="lifecycle_operator@test.com", name="Operador",
+                                  password_hash="x", role_keys=["admin"]))
+        _OPERATOR_TOKEN = generate_session_token()
+        session_repo.create(_OPERATOR_TOKEN, op["id"], user_agent="test", ip="127.0.0.1")
+    built.client.headers["Authorization"] = f"Bearer {_OPERATOR_TOKEN}"
+    return built
 
 
 def _conv_state(conv_id: int) -> dict:
@@ -136,7 +167,7 @@ def test_assign_then_close(build_app):
     phone = "5511960000001"
     conv_id, _cid = _make_conversation(phone, status="open")
     uid = _make_user("Atendente A2b", "lifecycle_assign_close@test.com")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     # Step 1: assign to a real user → conversation.assigned (NOT unassigned).
     with EventRecorder() as rec_assign:
@@ -187,7 +218,7 @@ def test_reopen_closed_conversation(build_app):
     (close already cleared it), so the reopened conversation has no assignee."""
     phone = "5511960000002"
     conv_id, _cid = _make_conversation(phone, status="closed")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     with EventRecorder() as rec:
         r = built.client.post(f"/api/conversations/{conv_id}/status",
@@ -214,7 +245,7 @@ def test_reopen_noop_when_already_open(build_app):
     gated on previous_status == 'closed'). status_changed still fires once."""
     phone = "5511960000003"
     conv_id, _cid = _make_conversation(phone, status="open")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     with EventRecorder() as rec:
         r = built.client.post(f"/api/conversations/{conv_id}/status",
@@ -249,14 +280,13 @@ def test_ai_toggle_conversation_scope(build_app):
     ALSO fires (turning the AI off hands the chat to the operator → re-assign).
     contact.ai_toggled does NOT fire on this route (distinct scope).
 
-    Note (current behavior): with no authenticated user the takeover assignee is
-    None (``current_user`` is None on the TestClient), so set_conversation_ai(off)
-    lands the conversation UNASSIGNED — assignee stays null. active_agent_key is
-    cleared and ai_active flips to 0. Both ai_toggled and assigned fire EXACTLY
-    once each."""
+    Note (post-plano-48): the route now runs as an authenticated operator, so
+    turning the AI off HANDS the chat to that operator — assignee becomes the
+    operator ("<USER>"), not null. active_agent_key is cleared and ai_active flips
+    to 0. Both ai_toggled and assigned fire EXACTLY once each."""
     phone = "5511960000004"
     conv_id, _cid = _make_conversation(phone, status="open")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     with EventRecorder() as rec:
         r = built.client.post(f"/api/conversations/{conv_id}/ai",
@@ -293,7 +323,7 @@ def test_ai_toggle_contact_scope(build_app):
     ai_active is mirrored to 0 (low-level set_ai_active, no (un)assign)."""
     phone = "5511960000005"
     conv_id, contact_id = _make_conversation(phone, status="open")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     with EventRecorder() as rec:
         r = built.client.post(f"/api/contacts/{phone}/toggle-ai",
@@ -332,7 +362,7 @@ def test_assign_then_unassign(build_app):
     phone = "5511960000006"
     conv_id, _cid = _make_conversation(phone, status="open")
     uid = _make_user("Atendente Unassign", "lifecycle_unassign@test.com")
-    built = build_app(["gowa"])
+    built = _operator_client(build_app(["gowa"]))
 
     # Step 1: assign a real user.
     with EventRecorder() as rec_assign:

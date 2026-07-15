@@ -19,11 +19,11 @@
     },
     "notices": [
       {
-        "content": "🧑‍💼 Conversa atribuída para Atendente A2b.",
+        "content": "🧑‍💼 Operador atribuiu a conversa para Atendente A2b.",
         "role": "conversation_event"
       },
       {
-        "content": "✅ Conversa resolvida.",
+        "content": "✅ Operador resolveu a conversa.",
         "role": "conversation_event"
       }
     ]
@@ -49,11 +49,11 @@
   },
   "final_notices": [
     {
-      "content": "🧑‍💼 Conversa atribuída para Atendente A2b.",
+      "content": "🧑‍💼 Operador atribuiu a conversa para Atendente A2b.",
       "role": "conversation_event"
     },
     {
-      "content": "✅ Conversa resolvida.",
+      "content": "✅ Operador resolveu a conversa.",
       "role": "conversation_event"
     }
   ]
