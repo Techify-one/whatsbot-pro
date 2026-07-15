@@ -56,7 +56,11 @@ Criar `server/pagination.py` com `clamp_limit` + constantes.
 `/api/executions` e `/api/webhook-payloads` passam o `limit` por `clamp_limit`.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
+**Estado:** ✅ Concluída
+- **O que foi feito:** `clamp_limit` aplicado em `/api/executions` ([executions.py:82](../server/routes/executions.py#L82), + `clamp_offset` no offset) e `/api/webhook-payloads` ([logs.py:60](../server/routes/logs.py#L60)).
+- **Como foi feito / decisões:** Varredura `grep "limit: int" server/routes` confirmou que os demais já estão protegidos: `conversations.py:104` (`min(limit,200)`), `audit.py:51` (`min(limit,200)`), `gowa-logs`/`logs.py:79` (`min(limit,5000)`), `channel-webhook-payloads` (`min(limit,_RECENT_CAP)`). `/api/logs` lê de `deque(maxlen=500)` — teto natural, deixado como está (falso positivo do plano).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** Testes de regressão adicionados em `test_endpoints.py` (`?limit=99999` → HTTP 200 e itens ≤ 200 nos dois endpoints). Suíte **1269 passed, 0 failed**.
 
 ---
 

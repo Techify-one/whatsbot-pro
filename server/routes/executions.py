@@ -8,6 +8,7 @@ from fastapi import Request
 from db.repositories import execution_repo, usage_repo
 from server.authz import permission_denied
 from server.helpers import _ok, _err
+from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
 
 def _period_window(period: str | None, date_from: str | None,
@@ -78,6 +79,8 @@ def register_routes(app, deps):
         denied = permission_denied(request, "execution.read")
         if denied:
             return denied
+        limit = clamp_limit(limit, PAGE_LIST, CAP_LIST)  # plano 50 F1 — ?limit livre
+        offset = clamp_offset(offset)
         df = _parse_date(date_from)
         dt = _parse_date(date_to, end_of_day=True)
         # channel_id chega como CSV (multi-seleção no painel): "a,b,c" → ["a","b","c"].

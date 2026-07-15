@@ -3494,6 +3494,15 @@ r = client.get("/api/webhook-payloads")
 check("GET /api/webhook-payloads -> 200", r.status_code == 200)
 check("GET /api/webhook-payloads -> is list", isinstance(r.json()["data"], list))
 
+# plano 50 F1 — limit livre é capado por clamp_limit (?limit=99999 nunca > cap 200)
+r = client.get("/api/webhook-payloads?limit=99999")
+check("GET /api/webhook-payloads?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/webhook-payloads?limit=99999 -> <= cap 200", len(r.json()["data"]) <= 200)
+r = client.get("/api/executions?limit=99999")
+check("GET /api/executions?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/executions?limit=99999 -> items <= cap 200",
+      len(r.json()["data"]["items"]) <= 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  19. Webhook (incoming message simulation)
 # ═══════════════════════════════════════════════════════════════════
