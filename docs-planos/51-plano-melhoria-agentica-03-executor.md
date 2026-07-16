@@ -316,7 +316,7 @@ O executor de referência é o `ai-server` do relatórios, hoje em **`/root/opt/
 **Estado:** ✅ Concluída (2026-07-16)
 - **O que foi feito:** unit systemd `whatsbot-ai-server.service` (Restart=always, root, --env-file), .env chmod 600 com secret `openssl rand -hex 32`; MESMO secret colado na config do gateway (`plugin.melhorias.ai_server_secret`) + URL; monitor: /health público, /auth-check p/ secret (botão Testar conexão na seção de IA do plugin).
 - **Como foi feito / decisoes:** systemd (o :8014 já usava); OAuth ~/.claude compartilhado (já logado — serve os dois).
-- **Problemas / pendencias:** rate-limit no gateway fica p/ v2; feature segue DORMENTE (generator_backend=direct) até o operador ligar.
+- **Problemas / pendencias:** rate-limit no gateway fica p/ v2. ⚠️ GOTCHA descoberto no 1º uso real: o CLI do Agent SDK RECUSA `bypassPermissions` rodando como root e sai com código 1 ("Claude Code process exited with code 1") — exige `Environment=IS_SANDBOX=1` no service (o :8014 já tinha via override.conf; replicado em whatsbot-ai-server.service.d/override.conf). Runner agora loga o erro no journal (o frame SSE de erro pode se perder se chegar antes do consumidor). Send do gateway faz auto-resume+retry em 404 do executor (runner morto).
 - **Verificacao:** systemctl enable --now sobe; /health verde; auth-check assinado (secret real) 200; rede bidirecional confirmada (gateway→:8015 e :8015→203.0.113.20:8090 = 200); :8014 intacto.
 ```
 

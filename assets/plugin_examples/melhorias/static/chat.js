@@ -138,7 +138,13 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   const [pendingImage, setPendingImage] = useState(null); // {dataUrl, mediaType, b64}
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Estado REAL da conversa: a prop pode estar defasada (ex.: runner morreu e o
+  // status virou ERRORED no banco) — a hidratação corrige, e o rodapé decide
+  // entre input e "Continuar conversa" por AQUI.
+  const [conv, setConv] = useState(conversation || null);
   const scrollRef = useRef(null);
+
+  useEffect(() => { setConv(conversation || null); }, [cid]);
 
   // Hidrata do DB ao abrir.
   useEffect(() => {
@@ -148,8 +154,7 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
         const r = await apiJson(`${apiBase}/conversations/${cid}`);
         if (r.ok) {
           setItems(persistedToItems(r.body.data.messages, r.body.data.approvals));
-          const st = (r.body.data.conversation || {}).status;
-          setStatus(st === 'ACTIVE' ? 'idle' : 'idle');
+          if (r.body.data.conversation) setConv(r.body.data.conversation);
         }
       } catch (_) { /* ignore */ }
     })();
@@ -238,12 +243,13 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
     setBusy(true); setError('');
     try {
       const r = await apiJson(`${apiBase}/conversations/${cid}/resume`, { method: 'POST' });
-      if (!r.ok) setError((r.body && r.body.error) || 'Falha ao retomar.');
+      if (r.ok) setConv((c) => ({ ...(c || {}), status: 'ACTIVE' }));
+      else setError((r.body && r.body.error) || 'Falha ao retomar.');
     } catch (e) { setError(String(e.message || e)); }
     setBusy(false);
   }
 
-  const convStatus = (conversation || {}).status || 'ACTIVE';
+  const convStatus = (conv || {}).status || 'ACTIVE';
 
   return html`
     <div class="flex flex-col border border-wa-border rounded-lg overflow-hidden" style="height: 420px;">

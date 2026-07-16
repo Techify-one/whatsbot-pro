@@ -206,7 +206,20 @@ async def send_agentic_message(cid: str, body: dict, request: Request):
         chat_logic.ensure_consumer(cid, conv.get("suggestion_id"), user_id=uid)
         await ai_client.send(cid, user_id=uid, text=text, parts=parts)
     except Exception as e:  # noqa: BLE001
-        return _err(f"Falha ao enviar ao executor: {e}", status=502)
+        # 404 do executor = runner in-memory morto (restart/erro). Auto-resume
+        # (recria o runner hidratando o histórico) e reenvia UMA vez — o
+        # operador não precisa saber que o executor reiniciou.
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code != 404:
+            return _err(f"Falha ao enviar ao executor: {e}", status=502)
+        _conv, err = await chat_logic.resume_conversation(cid, user_id=uid)
+        if err:
+            return _err(f"Conversa inativa no executor e o resume falhou: {err}",
+                        status=502)
+        try:
+            await ai_client.send(cid, user_id=uid, text=text, parts=parts)
+        except Exception as e2:  # noqa: BLE001
+            return _err(f"Falha ao reenviar após resume: {e2}", status=502)
     # O executor só persiste as mensagens do ASSISTANT (write-through); a do
     # humano é persistida AQUI (a mensagem inicial de contexto do start não é
     # persistida de propósito — não polui a hidratação do chat).
