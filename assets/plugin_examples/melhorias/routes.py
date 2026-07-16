@@ -15,9 +15,13 @@ from fastapi import APIRouter, Request
 from plugins.context import get_deps, plugin_permission
 from server.authz import current_user
 
-from . import logic
+from . import ai_client, chat_logic, logic
+from .internal_routes import router as internal_router
 
 router = APIRouter()
+# Callbacks do executor (HMAC): /public/_internal/* — auth-exempt via a
+# convenção /public/ do core; a autenticação real é o hmac_guard (plano 51).
+router.include_router(internal_router)
 
 
 def _actor(request: Request) -> tuple[int | None, str]:
@@ -59,10 +63,16 @@ async def create_suggestion(body: dict, request: Request):
     uid, name = _actor(request)
     body = body or {}
     target = body.get("message") or {}
+    # plano 51: multi-seleção — `messages:[{content,ts,_id,...}]`. O singular
+    # `message:{...}` continua aceito (compat).
+    targets = body.get("messages")
+    if not isinstance(targets, list):
+        targets = None
     data, err = await asyncio.to_thread(
         logic.create_suggestion,
         phone=str(body.get("phone") or ""),
         target_message=target,
+        target_messages=targets,
         feedback=str(body.get("feedback") or ""),
         conversation_id=body.get("conversation_id"),
         requester_user_id=uid, requester_name=name)
@@ -103,6 +113,18 @@ async def get_suggestion(sid: int):
 @router.post("/suggestions/{sid}/approve", dependencies=[plugin_permission("approve")])
 async def approve_suggestion(sid: int, request: Request):
     uid, name = _actor(request)
+    # plano 51: com o backend agêntico, aprovar = abrir a conversa (gate D1-a)
+    # em vez de gerar a análise inline. O painel novo usa o endpoint dedicado
+    # POST /suggestions/{sid}/conversations (com observação); este continua
+    # funcionando para chamadas legadas.
+    if logic._setting("generator_backend", "direct") == "external":
+        conv, err = await chat_logic.start_conversation(
+            sid, observation="", model="", user_id=uid, handler=_handler(request))
+        if err:
+            status = 404 if "não encontrada" in err else (409 if "já foi" in err else 400)
+            return _err(err, status=status)
+        return {"ok": True, "data": {"conversation": conv,
+                                     "suggestion": logic.get_suggestion(sid)}}
     data, err = await asyncio.to_thread(
         logic.decide_suggestion, sid, "aprovada",
         handler=_handler(request), approver_user_id=uid, approver_name=name)
@@ -124,7 +146,177 @@ async def reject_suggestion(sid: int, request: Request):
     return {"ok": True, "data": data}
 
 
-# ── Config (modelo/prompt da análise — namespace do plugin) ──────────────────
+# ── Conversa agêntica (plano 51 · 02 F3) ─────────────────────────────────────
+
+@router.post("/suggestions/{sid}/conversations",
+             dependencies=[plugin_permission("approve")])
+async def start_agentic_conversation(sid: int, body: dict, request: Request):
+    """Gate D1-(a): humano aprova a IA COMEÇAR + injeta observação extra."""
+    uid, _name = _actor(request)
+    body = body or {}
+    conv, err = await chat_logic.start_conversation(
+        sid, observation=str(body.get("observation") or ""),
+        model=str(body.get("model") or ""), user_id=uid,
+        handler=_handler(request))
+    if err:
+        status = (404 if "não encontrada" in err
+                  else 409 if "já foi" in err
+                  else 400)
+        return _err(err, status=status)
+    return {"ok": True, "data": {"conversation": conv,
+                                 "suggestion": logic.get_suggestion(sid)}}
+
+
+@router.get("/suggestions/{sid}/conversations",
+            dependencies=[plugin_permission("view")])
+async def list_agentic_conversations(sid: int):
+    return {"ok": True, "data": await asyncio.to_thread(
+        chat_logic.list_conversations, sid)}
+
+
+@router.get("/conversations/{cid}", dependencies=[plugin_permission("view")])
+async def get_agentic_conversation(cid: str):
+    conv = await asyncio.to_thread(chat_logic.get_conversation, cid)
+    if not conv:
+        return _err("Conversa não encontrada.", status=404)
+    messages = await asyncio.to_thread(chat_logic.list_chat_messages, cid)
+    approvals = await asyncio.to_thread(chat_logic.list_approvals, cid)
+    return {"ok": True, "data": {"conversation": conv, "messages": messages,
+                                 "approvals": approvals}}
+
+
+@router.post("/conversations/{cid}/messages",
+             dependencies=[plugin_permission("approve")])
+async def send_agentic_message(cid: str, body: dict, request: Request):
+    """Mensagem do humano no chat: ``{text}`` ou ``{parts:[{type:'text'|'image',…}]}``."""
+    uid, _name = _actor(request)
+    body = body or {}
+    conv = await asyncio.to_thread(chat_logic.get_conversation, cid)
+    if not conv:
+        return _err("Conversa não encontrada.", status=404)
+    text = str(body.get("text") or "")
+    parts = body.get("parts") if isinstance(body.get("parts"), list) else None
+    if parts:
+        # Imagens selecionadas (media_path) viram base64 AQUI — o executor não
+        # lê arquivo; path confinado a statics/ (anti-traversal).
+        parts = await asyncio.to_thread(chat_logic.resolve_image_parts, parts)
+    if not text.strip() and not parts:
+        return _err("Mensagem vazia.")
+    try:
+        chat_logic.ensure_consumer(cid, conv.get("suggestion_id"), user_id=uid)
+        await ai_client.send(cid, user_id=uid, text=text, parts=parts)
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Falha ao enviar ao executor: {e}", status=502)
+    return {"ok": True, "data": {"sent": True}}
+
+
+@router.post("/conversations/{cid}/approve",
+             dependencies=[plugin_permission("approve")])
+async def approve_agentic_tool(cid: str, body: dict, request: Request):
+    """Gate D1-(b): V/X por mutação. Idempotente (já decidido ⇒ 409)."""
+    uid, _name = _actor(request)
+    body = body or {}
+    aid = str(body.get("approval_id") or body.get("approvalId") or "")
+    if not aid:
+        return _err("approval_id obrigatório.")
+    approved = bool(body.get("approved"))
+    reason = str(body.get("reason") or "")
+    row, err = await asyncio.to_thread(
+        chat_logic.decide_approval, aid, cid,
+        approved=approved, reason=reason, decided_by=uid)
+    if err:
+        return _err(err, status=409 if "já decidida" in err else 404)
+    try:
+        await ai_client.approve(cid, user_id=uid, approval_id=aid,
+                                approved=approved, reason=reason)
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Decisão registrada, mas o executor não respondeu: {e}",
+                    status=502)
+    return {"ok": True, "data": row}
+
+
+@router.post("/conversations/{cid}/cancel",
+             dependencies=[plugin_permission("approve")])
+async def cancel_agentic_conversation(cid: str, request: Request):
+    uid, _name = _actor(request)
+    conv = await asyncio.to_thread(chat_logic.get_conversation, cid)
+    if not conv:
+        return _err("Conversa não encontrada.", status=404)
+    try:
+        await ai_client.cancel(cid, user_id=uid)
+    except Exception:  # noqa: BLE001 — executor fora do ar não impede o cancelamento local
+        pass
+    conv = await asyncio.to_thread(chat_logic.set_conversation_status, cid, "CANCELLED")
+    chat_logic.stop_consumer(cid)
+    return {"ok": True, "data": conv}
+
+
+@router.post("/conversations/{cid}/resume",
+             dependencies=[plugin_permission("approve")])
+async def resume_agentic_conversation(cid: str, request: Request):
+    """Recria o runner in-memory do executor hidratando do DB (restart do
+    executor perde os runners — 'Continuar' reabre)."""
+    uid, _name = _actor(request)
+    conv, err = await chat_logic.resume_conversation(cid, user_id=uid)
+    if err:
+        return _err(err, status=404 if "não encontrada" in err else 502)
+    return {"ok": True, "data": conv}
+
+
+# ── Relogin OAuth do executor (proxy assinado) ───────────────────────────────
+
+@router.post("/admin/relogin/start", dependencies=[plugin_permission("configure")])
+async def relogin_start(request: Request):
+    uid, _name = _actor(request)
+    try:
+        data = await ai_client.relogin_start(uid)
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Executor indisponível: {e}", status=502)
+    return {"ok": True, "data": data}
+
+
+@router.post("/admin/relogin/complete", dependencies=[plugin_permission("configure")])
+async def relogin_complete(body: dict, request: Request):
+    uid, _name = _actor(request)
+    body = body or {}
+    try:
+        data = await ai_client.relogin_complete(
+            uid, str(body.get("sessionId") or body.get("session_id") or ""),
+            str(body.get("code") or ""))
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Executor indisponível: {e}", status=502)
+    return {"ok": True, "data": data}
+
+
+@router.post("/admin/relogin/abort", dependencies=[plugin_permission("configure")])
+async def relogin_abort(body: dict, request: Request):
+    uid, _name = _actor(request)
+    body = body or {}
+    try:
+        data = await ai_client.relogin_abort(
+            uid, str(body.get("sessionId") or body.get("session_id") or ""))
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Executor indisponível: {e}", status=502)
+    return {"ok": True, "data": data}
+
+
+@router.post("/admin/test-connection", dependencies=[plugin_permission("configure")])
+async def test_connection(request: Request):
+    """Prova o secret contra /auth-check do executor (não o /health)."""
+    uid, _name = _actor(request)
+    if not ai_client.is_configured():
+        return _err("Configure URL e secret (≥32 chars) primeiro.")
+    try:
+        data = await ai_client.auth_check(uid)
+    except Exception as e:  # noqa: BLE001
+        return _err(f"Executor inalcançável: {e}", status=502)
+    return {"ok": True, "data": data}
+
+
+# ── Config (modelo/prompt da análise + servidor agêntico) ────────────────────
+
+_AI_CFG_KEYS = ("ai_server_url", "ai_model", "ai_timeout_ms", "generator_backend")
+
 
 @router.get("/config", dependencies=[plugin_permission("view")])
 async def get_config():
@@ -132,6 +324,12 @@ async def get_config():
         "model": logic._setting("model"),
         "prompt": logic._setting("prompt"),
         "prompt_default": logic.generation.DEFAULT_IMPROVEMENT_PROMPT,
+        # plano 51 — servidor agêntico. Secret NUNCA sai em claro.
+        "generator_backend": logic._setting("generator_backend", "direct") or "direct",
+        "ai_server_url": logic._setting("ai_server_url"),
+        "ai_server_secret": "***" if ai_client.shared_secret() else "",
+        "ai_model": logic._setting("ai_model"),
+        "ai_timeout_ms": logic._setting("ai_timeout_ms", "30000"),
     }}
 
 
@@ -145,6 +343,28 @@ async def put_config(body: dict):
             config_repo.set(f"plugin.{logic.PLUGIN_ID}.model", str(body.get("model") or ""))
         if "prompt" in body:
             config_repo.set(f"plugin.{logic.PLUGIN_ID}.prompt", str(body.get("prompt") or ""))
-    await asyncio.to_thread(_save)
+        for key in _AI_CFG_KEYS:
+            if key in body:
+                config_repo.set(f"plugin.{logic.PLUGIN_ID}.{key}",
+                                str(body.get(key) or "").strip())
+        # Secret: vazio/"***" PRESERVA o atual (molde settings.service.ts do nexus).
+        if "ai_server_secret" in body:
+            secret = str(body.get("ai_server_secret") or "").strip()
+            if secret and secret != "***":
+                if len(secret) < ai_client.SECRET_MIN_LEN:
+                    raise ValueError(
+                        f"Secret muito curto (mínimo {ai_client.SECRET_MIN_LEN} chars).")
+                config_repo.set(f"plugin.{logic.PLUGIN_ID}.ai_server_secret", secret)
+
+    try:
+        await asyncio.to_thread(_save)
+    except ValueError as e:
+        return _err(str(e))
     return {"ok": True, "data": {
-        "model": logic._setting("model"), "prompt": logic._setting("prompt")}}
+        "model": logic._setting("model"), "prompt": logic._setting("prompt"),
+        "generator_backend": logic._setting("generator_backend", "direct") or "direct",
+        "ai_server_url": logic._setting("ai_server_url"),
+        "ai_server_secret": "***" if ai_client.shared_secret() else "",
+        "ai_model": logic._setting("ai_model"),
+        "ai_timeout_ms": logic._setting("ai_timeout_ms", "30000"),
+    }}

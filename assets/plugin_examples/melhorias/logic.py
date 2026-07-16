@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "melhorias"
 _TABLE = "plugin_melhorias_suggestions"
-_STATUSES = ("pendente", "aprovada", "recusada")
+_MSGS_TABLE = "plugin_melhorias_suggestion_messages"
+# plano 51: "em_chat" = conversa agêntica aberta (backend external). O filtro do
+# painel usa esta tupla (_str_list(status, allowed=_STATUSES)) — estender aqui
+# mantém as pendências agênticas filtráveis.
+_STATUSES = ("pendente", "em_chat", "aprovada", "recusada")
 
 
 def now() -> float:
@@ -126,12 +130,24 @@ def _suggestion_dict(row) -> dict:
 def create_suggestion(*, phone: str, target_message: dict, feedback: str = "",
                       conversation_id=None,
                       requester_user_id=None, requester_name: str = "",
+                      target_messages: list | None = None,
                       ) -> tuple[dict | None, str | None]:
-    """Registra um PEDIDO pendente + posta o aviso de sistema. NÃO gera a análise."""
-    target_message = target_message or {}
-    content = (target_message.get("content") or "").strip()
-    if not content:
+    """Registra um PEDIDO pendente + posta o aviso de sistema. NÃO gera a análise.
+
+    plano 51 (02 F6): ``target_messages`` aceita a MULTI-seleção (lista de
+    ``{content, ts, _id, media_type?, media_path?}``, na ordem da seleção). As
+    colunas single continuam sendo a ÂNCORA (1ª mensagem — deep-link/busca);
+    o conjunto vai na tabela filha. ``target_message`` singular segue aceito
+    (embrulhado em lista de 1)."""
+    targets = [t for t in (target_messages or []) if t and (t.get("content") or "").strip()]
+    if not targets:
+        target_message = target_message or {}
+        if (target_message.get("content") or "").strip():
+            targets = [target_message]
+    if not targets:
         return None, "Mensagem inválida para análise."
+    target_message = targets[0]
+    content = (target_message.get("content") or "").strip()
 
     row = contact_repo.get_by_phone(phone)
     if not row:
@@ -173,10 +189,34 @@ def create_suggestion(*, phone: str, target_message: dict, feedback: str = "",
                 "feedback": (feedback or "").strip(),
                 "requested_at": ts, "created_at": ts, "updated_at": ts,
             }).scalar_one()
+        # Conjunto completo da seleção (ordem preservada) na tabela filha.
+        for seq, t in enumerate(targets):
+            conn.execute(text(
+                f"INSERT INTO {_MSGS_TABLE} (suggestion_id, seq, message_db_id, "
+                "message_ts, message_content, media_type, media_path) VALUES "
+                "(:sid, :seq, :db_id, :mts, :content, :mtype, :mpath)"), {
+                    "sid": sid, "seq": seq, "db_id": t.get("_id"),
+                    "mts": float(t.get("ts") or ts),
+                    "content": (t.get("content") or "").strip(),
+                    "mtype": t.get("media_type"), "mpath": t.get("media_path"),
+                })
 
     _post_system_notice(contact_id, phone, conv_id, sid)
     broadcast("plugin_melhorias_changed", {"id": sid, "action": "created"})
     return get_suggestion(sid), None
+
+
+def get_suggestion_messages(sid: int) -> list[dict]:
+    """As N mensagens marcadas da sugestão (ordem da seleção), como
+    ``[{content, ts, _id, media_type, media_path}]`` — o formato do GenContext.
+    Vazio para sugestões antigas (pré-002; o caller cai nas colunas âncora)."""
+    with make_plugin_db() as conn:
+        rows = conn.execute(text(
+            f"SELECT * FROM {_MSGS_TABLE} WHERE suggestion_id = :sid ORDER BY seq"),
+            {"sid": int(sid)}).mappings().all()
+    return [{"content": r["message_content"], "ts": r["message_ts"],
+             "_id": r["message_db_id"], "media_type": r.get("media_type"),
+             "media_path": r.get("media_path")} for r in rows]
 
 
 def _post_system_notice(contact_id: int, phone: str, conversation_id, sid: int) -> None:
@@ -259,6 +299,40 @@ def decide_suggestion(sid: int, status: str, *, handler=None,
     return get_suggestion(sid), None
 
 
+def mark_suggestion_in_chat(sid: int) -> dict | None:
+    """Transição pendente → em_chat (conversa agêntica aberta — gate D1-a).
+    Idempotente para sugestões já em_chat (reabrir conversa)."""
+    row = get_suggestion(sid)
+    if not row or row.get("status") not in ("pendente", "em_chat"):
+        return None
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(text(
+            f"UPDATE {_TABLE} SET status = 'em_chat', updated_at = :ts "
+            "WHERE id = :id"), {"ts": ts, "id": sid})
+    broadcast("plugin_melhorias_changed", {"id": sid, "action": "em_chat"})
+    return get_suggestion(sid)
+
+
+def finalize_agentic_suggestion(sid: int, *, analysis: str = "",
+                                model: str = "") -> dict | None:
+    """Fecha a sugestão quando o executor conclui a conversa (COMPLETED).
+    Grava o artefato final (última resposta da IA) como ``analysis``."""
+    row = get_suggestion(sid)
+    if not row:
+        return None
+    ts = now()
+    with make_plugin_db() as conn:
+        conn.execute(text(
+            f"UPDATE {_TABLE} SET status = 'aprovada', analysis = :analysis, "
+            "model = :model, decided_at = COALESCE(decided_at, :ts), "
+            "updated_at = :ts WHERE id = :id"), {
+                "analysis": analysis or "", "model": model or "",
+                "ts": ts, "id": sid})
+    broadcast("plugin_melhorias_changed", {"id": sid, "action": "aprovada"})
+    return get_suggestion(sid)
+
+
 def refresh_contact_snapshot(phone: str) -> int:
     """Contato renomeado → atualiza o snapshot (contact_name/contact_phone) de TODAS
     as sugestões daquele contato, para que exibição E busca reflitam o nome atual.
@@ -305,7 +379,13 @@ def get_suggestion(sid: int) -> dict | None:
         row = conn.execute(
             text(f"SELECT * FROM {_TABLE} WHERE id = :id"), {"id": sid}
         ).mappings().first()
-    return _suggestion_dict(row) if row else None
+    if not row:
+        return None
+    d = _suggestion_dict(row)
+    # Detalhe carrega o conjunto da multi-seleção (lista vazia = sugestão
+    # antiga single — o frontend cai nas colunas âncora).
+    d["messages"] = get_suggestion_messages(sid)
+    return d
 
 
 def _int_list(v) -> list[int]:

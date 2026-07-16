@@ -78,8 +78,10 @@ class GenContext:
 
     ``handler`` é o seam de LLM do core (``_get_client`` / ``_record_usage`` /
     ``_get_contact`` / ``max_context_messages``). ``target_message`` é
-    ``{content, ts, _id}`` da resposta marcada. ``model_override`` /
-    ``prompt_override`` vêm das settings do plugin (vazio = fallback)."""
+    ``{content, ts, _id}`` da resposta marcada (ÂNCORA — a 1ª da seleção);
+    ``target_messages`` (plano 51) é a lista completa da multi-seleção
+    (``None``/vazio ⇒ ``[target_message]``, compat single). ``model_override``
+    / ``prompt_override`` vêm das settings do plugin (vazio = fallback)."""
     handler: object
     phone: str
     target_message: dict
@@ -87,6 +89,7 @@ class GenContext:
     conversation_id: int | None = None
     model_override: str = ""
     prompt_override: str = ""
+    target_messages: list | None = None
 
 
 @dataclass
@@ -117,6 +120,199 @@ def _format_tools_used(used: list[dict]) -> str:
     )
 
 
+def _resolve_target_execution(phone: str, target: dict) -> dict | None:
+    """Execução de UMA mensagem marcada: link preciso (``messages.execution_id``,
+    via ``message_repo.get_by_db_id``) → fuzzy por janela de ts (DL2)."""
+    from db.repositories import message_repo as _mr
+    db_id = (target or {}).get("_id")
+    if db_id is not None:
+        try:
+            row = _mr.get_by_db_id(int(db_id))
+        except (TypeError, ValueError):
+            row = None
+        if row is not None:
+            found = _trace.find_execution_for_message(row, phone=phone)
+            if found is not None:
+                return found
+    ts = (target or {}).get("ts") or 0
+    return _find_execution_around(phone, ts) if ts else None
+
+
+def build_analysis_payload(ctx: GenContext) -> dict:
+    """Monta o contexto da análise (plano 51 · 02 F6) — função reusável.
+
+    Extraída de ``DirectApiGenerator.generate`` (comportamento byte-idêntico no
+    caso single-message) e estendida para N mensagens marcadas: o trace roda POR
+    mensagem (cada uma pode ser de agente/execução diferente) e é agregado.
+
+    Retorna ``{channel_id, contact, targets, chain, agents_block, history_block,
+    feedback_block, analysis_user, analysis_model, agent_spec}`` — consumido
+    pelo ``DirectApiGenerator`` (one-shot) e pelo ``ExternalAgentGenerator``
+    (mensagem inicial da conversa agêntica)."""
+    handler = ctx.handler
+    phone = ctx.phone
+
+    # Canal da conversa marcada. Sem id → default (comportamento legado).
+    from db.repositories import conversation_repo
+    channel_id = "default"
+    if ctx.conversation_id:
+        try:
+            conv = conversation_repo.get_with_channel(int(ctx.conversation_id))
+            if conv and conv.get("channel_id"):
+                channel_id = conv["channel_id"]
+        except (TypeError, ValueError):
+            pass
+    contact = handler._get_contact(phone, channel_id=channel_id)
+
+    targets = [t for t in (ctx.target_messages or []) if t] or [ctx.target_message]
+    target_contents = [(t.get("content") or "").strip() for t in targets]
+
+    # 1. Cadeia de agentes POR mensagem marcada, agregada (dedup por execução).
+    executions: list[dict] = []
+    seen_exec_ids: set = set()
+    for t in targets:
+        execution = _resolve_target_execution(phone, t)
+        if execution and execution.get("id") not in seen_exec_ids:
+            seen_exec_ids.add(execution.get("id"))
+            executions.append(execution)
+    chain: list[str] = []
+    used: list[dict] = []
+    for execution in executions:
+        for key in _agent_chain(execution):
+            if key not in chain:
+                chain.append(key)
+        used.extend(_tools_used(execution))
+
+    agent_spec = agent_factory.build_for_contact(handler, contact)
+    if not chain and agent_spec:
+        chain = [agent_spec.agent_key]
+
+    try:
+        variables = dynamic_registry.variables_map()
+    except Exception:
+        variables = {}
+
+    registered = {t["name"]: t for t in handler.list_tools() if t.get("enabled")}
+
+    def _tool_line(name: str) -> str:
+        desc = (registered.get(name) or {}).get("current_description") or ""
+        return f"- {name}: {desc}".rstrip()
+
+    # 2. Uma seção por agente do turno: prompt inline cru (renderizado com
+    #    ai_variables), tools atribuídas e as usadas neste turno.
+    agent_rows: dict[str, dict | None] = {k: agent_repo.get(k) for k in chain}
+    unattributed = [u for u in used if not u.get("agent_key")]
+    sections: list[str] = []
+    for key in chain:
+        agent = agent_rows.get(key)
+        display = (agent or {}).get("display_name") or key
+        router_tag = " — ROTEADOR" if (agent or {}).get("is_router") else ""
+        if agent:
+            body = agent.get("prompt") or agent_factory.DEFAULT_SYSTEM_PROMPT
+            prompt_text = agent_factory.render_template(body, variables)
+        else:
+            prompt_text = "(agente não encontrado no banco — prompt indisponível)"
+        tool_names = (agent or {}).get("tool_names")
+        if agent is None:
+            assigned_block = "(desconhecidas)"
+        elif tool_names is None:
+            assigned_block = ("Todas as tools habilitadas:\n"
+                              + ("\n".join(_tool_line(n) for n in sorted(registered))
+                                 or "- (nenhuma tool habilitada)"))
+        else:
+            lines = [_tool_line(n) for n in tool_names if n in registered]
+            assigned_block = "\n".join(lines) or "- (nenhuma tool habilitada)"
+        used_here = [u for u in used if u.get("agent_key") == key]
+        if len(chain) == 1 and not used_here and unattributed:
+            used_here, unattributed = unattributed, []
+        used_block = (_format_tools_used(used_here)
+                      or "Nenhuma ferramenta foi usada por este agente.")
+        sections.append(
+            f"### Agente: {display} ({key}){router_tag}\n"
+            f"Ferramentas atribuídas:\n{assigned_block}\n"
+            f"Ferramentas usadas nesta resposta:\n{used_block}\n"
+            f"Prompt do agente:\n{prompt_text}"
+        )
+    agents_block = "\n\n".join(sections) if sections else "(nenhum agente identificado)"
+    if unattributed:
+        agents_block += ("\n\n### Ferramentas usadas sem atribuição a um agente\n"
+                         + _format_tools_used(unattributed))
+
+    # 3. Histórico recente — escopado à conversa marcada quando temos o id.
+    if ctx.conversation_id:
+        history = message_repo.get_context_by_conversation(
+            int(ctx.conversation_id), handler.max_context_messages)
+    else:
+        history = message_repo.get_context(contact.id, handler.max_context_messages)
+    # plano 43: a análise vê o MESMO histórico que a IA de atendimento viu —
+    # aplica a mesma lista-negra por regex (config ``ai_history_exclude_patterns``).
+    # As respostas-alvo marcadas NUNCA são cortadas (a análise se ancora nelas,
+    # mesmo que casem um padrão).
+    compiled = history_filter.load_compiled()
+    if compiled:
+        history = [
+            m for m in history
+            if (m.get("role") == "assistant"
+                and (m.get("content") or "").strip() in target_contents)
+            or not history_filter.matches(
+                m.get("role") or "", m.get("content") or "", compiled)
+        ]
+    lines: list[str] = []
+    unmarked = list(target_contents)  # marca a 1ª ocorrência de CADA alvo
+    for m in history:
+        role = m.get("role")
+        who = {"user": "Cliente", "assistant": "IA"}.get(role, str(role))
+        content = (m.get("content") or "").strip()
+        marker = ""
+        if role == "assistant" and content in unmarked:
+            marker = "   ⟵ RESPOSTA MARCADA COMO INCORRETA"
+            unmarked.remove(content)
+        lines.append(f"{who}: {content}{marker}")
+    history_block = "\n".join(lines) if lines else "(sem histórico)"
+
+    feedback_block = ctx.feedback.strip() or "(o operador não detalhou o que saiu errado)"
+
+    if len(targets) == 1:
+        targets_section = f"## Resposta marcada como incorreta\n{target_contents[0]}"
+    else:
+        numbered = "\n\n".join(f"{i + 1}. {c}" for i, c in enumerate(target_contents))
+        targets_section = (f"## Respostas marcadas como incorretas "
+                           f"({len(targets)}, na ordem da seleção)\n{numbered}")
+    analysis_user = (
+        f"## Agentes do turno (na ordem em que atuaram)\n{agents_block}\n\n"
+        f"## Histórico recente da conversa\n{history_block}\n\n"
+        f"{targets_section}\n\n"
+        f"## O que o operador disse que saiu errado\n{feedback_block}\n"
+    )
+
+    # Modelo: override do plugin → modelo do agente ativo do turno → agente
+    # resolvido → DEFAULT_MODEL (mesma precedência de antes; multi-seleção usa
+    # a ÚLTIMA execução resolvida).
+    last_execution = executions[-1] if executions else None
+    active_key = ((last_execution or {}).get("agent_key")
+                  or (chain[-1] if chain else None))
+    active_agent = agent_rows.get(active_key) or (agent_repo.get(active_key)
+                                                  if active_key else None)
+    active_model = dict((active_agent or {}).get("model_config") or {}).get("model")
+    analysis_model = (ctx.model_override
+                      or active_model
+                      or (agent_spec.model_config.get("model") if agent_spec else None)
+                      or agent_factory.DEFAULT_MODEL)
+
+    return {
+        "channel_id": channel_id,
+        "contact": contact,
+        "targets": targets,
+        "chain": chain,
+        "agents_block": agents_block,
+        "history_block": history_block,
+        "feedback_block": feedback_block,
+        "analysis_user": analysis_user,
+        "analysis_model": analysis_model,
+        "agent_spec": agent_spec,
+    }
+
+
 class DirectApiGenerator:
     """DEFAULT: chamada DIRETA a um modelo (comportamento one-shot de antes)."""
 
@@ -126,133 +322,10 @@ class DirectApiGenerator:
         if not getattr(handler, "api_key", ""):
             return GenResult("[WhatsBot] API key não configurada.", "")
 
-        # Canal da conversa marcada. Sem id → default (comportamento legado).
-        from db.repositories import conversation_repo
-        channel_id = "default"
-        if ctx.conversation_id:
-            try:
-                conv = conversation_repo.get_with_channel(int(ctx.conversation_id))
-                if conv and conv.get("channel_id"):
-                    channel_id = conv["channel_id"]
-            except (TypeError, ValueError):
-                pass
-        contact = handler._get_contact(phone, channel_id=channel_id)
-
-        target_content = (ctx.target_message.get("content") or "").strip()
-        target_ts = ctx.target_message.get("ts") or 0
-
-        # 1. Cadeia de agentes do turno que produziu a resposta marcada.
-        execution = _find_execution_around(phone, target_ts)
-        chain = _agent_chain(execution)
-        used = _tools_used(execution)
-
-        agent_spec = agent_factory.build_for_contact(handler, contact)
-        if not chain and agent_spec:
-            chain = [agent_spec.agent_key]
-
-        try:
-            variables = dynamic_registry.variables_map()
-        except Exception:
-            variables = {}
-
-        registered = {t["name"]: t for t in handler.list_tools() if t.get("enabled")}
-
-        def _tool_line(name: str) -> str:
-            desc = (registered.get(name) or {}).get("current_description") or ""
-            return f"- {name}: {desc}".rstrip()
-
-        # 2. Uma seção por agente do turno: prompt inline cru (renderizado com
-        #    ai_variables), tools atribuídas e as usadas neste turno.
-        agent_rows: dict[str, dict | None] = {k: agent_repo.get(k) for k in chain}
-        unattributed = [u for u in used if not u.get("agent_key")]
-        sections: list[str] = []
-        for key in chain:
-            agent = agent_rows.get(key)
-            display = (agent or {}).get("display_name") or key
-            router_tag = " — ROTEADOR" if (agent or {}).get("is_router") else ""
-            if agent:
-                body = agent.get("prompt") or agent_factory.DEFAULT_SYSTEM_PROMPT
-                prompt_text = agent_factory.render_template(body, variables)
-            else:
-                prompt_text = "(agente não encontrado no banco — prompt indisponível)"
-            tool_names = (agent or {}).get("tool_names")
-            if agent is None:
-                assigned_block = "(desconhecidas)"
-            elif tool_names is None:
-                assigned_block = ("Todas as tools habilitadas:\n"
-                                  + ("\n".join(_tool_line(n) for n in sorted(registered))
-                                     or "- (nenhuma tool habilitada)"))
-            else:
-                lines = [_tool_line(n) for n in tool_names if n in registered]
-                assigned_block = "\n".join(lines) or "- (nenhuma tool habilitada)"
-            used_here = [u for u in used if u.get("agent_key") == key]
-            if len(chain) == 1 and not used_here and unattributed:
-                used_here, unattributed = unattributed, []
-            used_block = (_format_tools_used(used_here)
-                          or "Nenhuma ferramenta foi usada por este agente.")
-            sections.append(
-                f"### Agente: {display} ({key}){router_tag}\n"
-                f"Ferramentas atribuídas:\n{assigned_block}\n"
-                f"Ferramentas usadas nesta resposta:\n{used_block}\n"
-                f"Prompt do agente:\n{prompt_text}"
-            )
-        agents_block = "\n\n".join(sections) if sections else "(nenhum agente identificado)"
-        if unattributed:
-            agents_block += ("\n\n### Ferramentas usadas sem atribuição a um agente\n"
-                             + _format_tools_used(unattributed))
-
-        # 3. Histórico recente — escopado à conversa marcada quando temos o id.
-        if ctx.conversation_id:
-            history = message_repo.get_context_by_conversation(
-                int(ctx.conversation_id), handler.max_context_messages)
-        else:
-            history = message_repo.get_context(contact.id, handler.max_context_messages)
-        # plano 43: a análise vê o MESMO histórico que a IA de atendimento viu —
-        # aplica a mesma lista-negra por regex (config ``ai_history_exclude_patterns``).
-        # A resposta-alvo marcada NUNCA é cortada (a análise se ancora nela, mesmo
-        # que case um padrão).
-        compiled = history_filter.load_compiled()
-        if compiled:
-            history = [
-                m for m in history
-                if (m.get("role") == "assistant"
-                    and (m.get("content") or "").strip() == target_content)
-                or not history_filter.matches(
-                    m.get("role") or "", m.get("content") or "", compiled)
-            ]
-        lines: list[str] = []
-        marked = False
-        for m in history:
-            role = m.get("role")
-            who = {"user": "Cliente", "assistant": "IA"}.get(role, str(role))
-            content = (m.get("content") or "").strip()
-            marker = ""
-            if not marked and role == "assistant" and content == target_content:
-                marker = "   ⟵ RESPOSTA MARCADA COMO INCORRETA"
-                marked = True
-            lines.append(f"{who}: {content}{marker}")
-        history_block = "\n".join(lines) if lines else "(sem histórico)"
-
-        feedback_block = ctx.feedback.strip() or "(o operador não detalhou o que saiu errado)"
-
+        payload = build_analysis_payload(ctx)
         analysis_system = (ctx.prompt_override or "").strip() or DEFAULT_IMPROVEMENT_PROMPT
-        analysis_user = (
-            f"## Agentes do turno (na ordem em que atuaram)\n{agents_block}\n\n"
-            f"## Histórico recente da conversa\n{history_block}\n\n"
-            f"## Resposta marcada como incorreta\n{target_content}\n\n"
-            f"## O que o operador disse que saiu errado\n{feedback_block}\n"
-        )
-
-        # Modelo: override do plugin → modelo do agente ativo do turno → agente
-        # resolvido → DEFAULT_MODEL (mesma precedência de antes).
-        active_key = (execution or {}).get("agent_key") or (chain[-1] if chain else None)
-        active_agent = agent_rows.get(active_key) or (agent_repo.get(active_key)
-                                                      if active_key else None)
-        active_model = dict((active_agent or {}).get("model_config") or {}).get("model")
-        analysis_model = (ctx.model_override
-                          or active_model
-                          or (agent_spec.model_config.get("model") if agent_spec else None)
-                          or agent_factory.DEFAULT_MODEL)
+        analysis_user = payload["analysis_user"]
+        analysis_model = payload["analysis_model"]
         try:
             client = handler._get_client()
             response = client.chat.completions.create(
@@ -300,6 +373,28 @@ class MultiAgentGenerator:
             "MultiAgentGenerator ainda não implementado — use o backend 'direct'.")
 
 
+class ExternalAgentGenerator:
+    """AGÊNTICO (plano 51): a análise vira uma CONVERSA com o executor Claude
+    Code externo (whatsbot-ai-server), que lê o trace, propõe e aplica mudanças
+    versionadas com aprovação humana por mutação.
+
+    Este backend NÃO gera texto inline: ``decide_suggestion``/o approve abrem a
+    conversa agêntica (``chat_logic.start_conversation``) e o resultado chega
+    por callback assíncrono (``/_internal/conversation-status``). O payload
+    inicial da conversa reusa o MESMO ``build_analysis_payload`` do backend
+    direto (uma fonte de montagem de contexto)."""
+
+    @staticmethod
+    def build_initial_message(ctx: GenContext) -> str:
+        payload = build_analysis_payload(ctx)
+        return payload["analysis_user"]
+
+    def generate(self, ctx: GenContext) -> GenResult:
+        raise RuntimeError(
+            "backend 'external' é conversacional — aprovar abre a conversa "
+            "agêntica (chat), não gera análise inline.")
+
+
 class StubGenerator:
     """Análise determinística p/ testes (sem LLM)."""
 
@@ -315,6 +410,7 @@ class StubGenerator:
 _BACKENDS = {
     "direct": DirectApiGenerator,
     "multi_agent": MultiAgentGenerator,
+    "external": ExternalAgentGenerator,
     "stub": StubGenerator,
 }
 
