@@ -145,19 +145,26 @@ export function useMediaUpload({
       : { role: 'assistant', status: 'operator',
           sent_by_name: (currentUser && currentUser.name) || undefined };
 
+    // Nota privada (imagem/documento/áudio) carrega o autor desde a bolha
+    // otimista (plano 53) — igual ao envio normal via `base` acima.
+    const privateNote = {
+      role: 'private_note', status: null,
+      sent_by_name: (currentUser && currentUser.name) || undefined,
+    };
+
     let optimistic, sendPromise;
     if (media.type === 'image' && isPrivate) {
       // Imagem como nota privada (só no painel).
-      optimistic = { role: 'private_note', content: caption || '[Imagem]',
-                     media_type: 'image', media_path: localUrl, status: null };
+      optimistic = { ...privateNote, content: caption || '[Imagem]',
+                     media_type: 'image', media_path: localUrl };
       sendPromise = sendPrivateImage(phone, media.file, caption, { conversationId, channelId });
     } else if (media.type === 'document' && isPrivate) {
       // Documento como nota privada (só no painel).
       const docContent = caption
         ? `[Documento enviado: ${media.filename}]\n${caption}`
         : `[Documento enviado: ${media.filename}]`;
-      optimistic = { role: 'private_note', content: docContent,
-                     media_type: 'document', media_path: localUrl, status: null };
+      optimistic = { ...privateNote, content: docContent,
+                     media_type: 'document', media_path: localUrl };
       sendPromise = sendPrivateDocument(phone, media.file, caption, { conversationId, channelId });
     } else if (media.type === 'image') {
       optimistic = { ...base, content: caption, media_type: 'image', media_path: localUrl };
@@ -173,8 +180,8 @@ export function useMediaUpload({
     } else if (isPrivateAudio) {
       // Panel-only audio note (role private_note). "IA lê" / "IA responde no chat"
       // toggles ride along so the backend can transcribe + optionally run the AI.
-      optimistic = { role: 'private_note', content: '[Áudio]',
-                     media_type: 'audio', media_path: localUrl, status: null };
+      optimistic = { ...privateNote, content: '[Áudio]',
+                     media_type: 'audio', media_path: localUrl };
       sendPromise = sendPrivateAudio(phone, media.blob, media.filename, {
         aiRead: aiReadPrivate, aiReply: aiReplyInChat, conversationId, channelId,
       });
@@ -189,13 +196,35 @@ export function useMediaUpload({
       ...prev,
       messages: [...(prev.messages || []), optimistic],
     } : prev);
+    const isPrivateNote = isPrivate
+      && (media.type === 'image' || media.type === 'document' || media.type === 'audio');
     try {
       const res = await sendPromise;
-      if (isPrivateAudio) {
-        updateMsgByLocalId(localId, () => ({
-          _status: res.ok ? null : 'failed',
-          ...(res.ok && res.data && res.data._id ? { _id: res.data._id } : {}),
-        }));
+      if (isPrivateNote) {
+        // Plano 53 — padrão serverCopyArrived (mesmo do useComposer): se a cópia
+        // do broadcast WS já chegou como linha própria (relógio defasado fura a
+        // janela de 30s), dropa a bolha; senão adota ts/_id/msg_id/autor do
+        // servidor. `media_path` local (blob) é preservado — P1.
+        if (res.ok && res.data) {
+          const saved = res.data;
+          setContactData(prev => {
+            if (!prev || !prev.messages) return prev;
+            const serverCopyArrived = saved._id != null
+              && prev.messages.some(m => m._id === saved._id && m._localId !== localId);
+            const messages = serverCopyArrived
+              ? prev.messages.filter(m => m._localId !== localId)
+              : prev.messages.map(m => m._localId === localId
+                  ? { ...m, _status: null,
+                      ...(saved._id != null ? { _id: saved._id } : {}),
+                      ...(saved.msg_id ? { msg_id: saved.msg_id } : {}),
+                      ...(saved.ts != null ? { ts: saved.ts } : {}),
+                      ...(saved.sent_by_name ? { sent_by_name: saved.sent_by_name } : {}) }
+                  : m);
+            return { ...prev, messages };
+          });
+        } else {
+          updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+        }
       } else {
         updateMsgByLocalId(localId, () => sandbox
           ? { _status: res.ok ? null : 'failed' }

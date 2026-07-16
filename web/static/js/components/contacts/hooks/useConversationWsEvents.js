@@ -517,17 +517,44 @@ export function useConversationWsEvents(opts) {
             return { ...prev, messages: updated };
           }
         }
+        // Reconcile by DB row id next (plano 53): private-note broadcasts and the
+        // POST response both carry `_id`, so a copy of a row already present
+        // (e.g. the optimistic bubble reconciled by the POST before the WS copy
+        // landed) merges in place instead of appending. Adopt the server's
+        // content/ts/author — the bubble's ts came from the CLIENT clock, which
+        // may be skewed (the very bug this fixes). `media_path` is deliberately
+        // NOT adopted: an optimistic media bubble keeps its local blob preview.
+        if (message._id != null && prev.messages) {
+          const byDbId = prev.messages.findIndex(m => m._id === message._id);
+          if (byDbId !== -1) {
+            const updated = [...prev.messages];
+            updated[byDbId] = {
+              ...updated[byDbId],
+              content: message.content != null ? message.content : updated[byDbId].content,
+              status: message.status !== undefined ? message.status : updated[byDbId].status,
+              ...(message.ts != null ? { ts: message.ts } : {}),
+              ...(message.msg_id ? { msg_id: message.msg_id } : {}),
+              ...(message.sent_by_name ? { sent_by_name: message.sent_by_name } : {}),
+              _status: null,
+            };
+            return { ...prev, messages: updated };
+          }
+        }
         // Collapse only an OPTIMISTIC bubble (no msg_id) into its server echo —
         // NOT two distinct inbound rows of identical content (plano 33 F4).
         const dupIdx = optimisticDupIndex(message, prev.messages);
         if (dupIdx !== -1) {
-          // Merge ids/status from server into existing (optimistic) message
+          // Merge ids/status from server into existing (optimistic) message.
+          // Server ts/author are adopted too (plano 53): the bubble's ts came
+          // from the client clock and private-note bubbles may lack the author.
           if (message.msg_id || message.status || message._id) {
             const updated = [...prev.messages];
             updated[dupIdx] = { ...updated[dupIdx],
               ...(message.msg_id ? { msg_id: message.msg_id } : {}),
               ...(message._id && !updated[dupIdx]._id ? { _id: message._id } : {}),
               ...(message.status && !updated[dupIdx]._status ? { status: message.status } : {}),
+              ...(message.ts != null ? { ts: message.ts } : {}),
+              ...(message.sent_by_name ? { sent_by_name: message.sent_by_name } : {}),
             };
             return { ...prev, messages: updated };
           }

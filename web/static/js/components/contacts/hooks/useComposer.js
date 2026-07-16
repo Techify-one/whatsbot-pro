@@ -171,6 +171,7 @@ export function useComposer({
         ...prev,
         messages: [...(prev.messages || []), {
           role: 'private_note', content: text, ts: msgTs, status: null,
+          sent_by_name: (currentUser && currentUser.name) || undefined,
           _localId: localId, _status: 'sending',
         }],
       } : prev);
@@ -185,10 +186,31 @@ export function useComposer({
           mentions: mm.mentions,
           mentionInbox: mm.mention_inbox,
         });
-        updateMsgByLocalId(localId, () => ({
-          _status: res.ok ? null : 'failed',
-          ...(res.ok && res.data && res.data._id ? { _id: res.data._id } : {}),
-        }));
+        if (res.ok && res.data) {
+          // Plano 53 — mesmo padrão serverCopyArrived do envio normal (abaixo),
+          // com identidade `_id`: se a cópia do broadcast WS já chegou (relógio
+          // do cliente defasado fura a janela de dedup de 30s e ela é apendada
+          // como linha própria), dropa a bolha otimista; senão a bolha adota os
+          // campos do servidor (ts/_id/msg_id/autor) e vira o espelho da row.
+          const saved = res.data;
+          setContactData(prev => {
+            if (!prev || !prev.messages) return prev;
+            const serverCopyArrived = saved._id != null
+              && prev.messages.some(m => m._id === saved._id && m._localId !== localId);
+            const messages = serverCopyArrived
+              ? prev.messages.filter(m => m._localId !== localId)
+              : prev.messages.map(m => m._localId === localId
+                  ? { ...m, _status: null,
+                      ...(saved._id != null ? { _id: saved._id } : {}),
+                      ...(saved.msg_id ? { msg_id: saved.msg_id } : {}),
+                      ...(saved.ts != null ? { ts: saved.ts } : {}),
+                      ...(saved.sent_by_name ? { sent_by_name: saved.sent_by_name } : {}) }
+                  : m);
+            return { ...prev, messages };
+          });
+        } else {
+          updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+        }
       } catch (err) {
         console.error('Private send error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));

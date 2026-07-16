@@ -1061,6 +1061,8 @@ def register_routes(app, deps):
                 }
                 if saved_note and saved_note.get("id"):
                     note_msg["_id"] = saved_note["id"]
+                if saved_note and saved_note.get("msg_id"):
+                    note_msg["msg_id"] = saved_note["msg_id"]
                 await ws_manager.broadcast(
                     "new_message",
                     {"phone": phone, "channel_id": note_channel, "message": note_msg})
@@ -1233,7 +1235,9 @@ def register_routes(app, deps):
 
         # Carry the DB row id (delete without reload) + conversation_id/channel_id
         # so the panel routes the note to the right thread (plano 11). Uses the row
-        # add_message returned — not a racy get_last.
+        # add_message returned — not a racy get_last. `_id` (+ the synthetic
+        # "pn:…" msg_id when notify_private_messages is on) is the stable identity
+        # the frontend dedups by (plano 53) — clock-skew immune.
         note_msg = {
             "role": "private_note",
             "content": text,
@@ -1245,6 +1249,8 @@ def register_routes(app, deps):
             note_msg["sent_by_name"] = _u.get("name")
         if saved and saved.get("id"):
             note_msg["_id"] = saved["id"]
+        if saved and saved.get("msg_id"):
+            note_msg["msg_id"] = saved["msg_id"]
         await ws_manager.broadcast(
             "new_message",
             {"phone": phone, "channel_id": note_channel, "message": note_msg})
@@ -1338,11 +1344,14 @@ def register_routes(app, deps):
         try:
             def _save():
                 contact = agent_handler._get_contact(phone, channel_id=resolved_channel)
-                contact.add_message("private_note", db_content,
-                                    media_type="audio", media_path=rel_path,
-                                    sent_by_user_id=(_u.get("id") if _u else None),
-                                    sent_by_name=(_u.get("name") if _u else None))
-                return contact.id, message_repo.get_last(contact.id)
+                # Use the row add_message RETURNS (id/ts/conversation_id/msg_id)
+                # instead of a racy get_last — same fix /private-message got.
+                saved_row = contact.add_message(
+                    "private_note", db_content,
+                    media_type="audio", media_path=rel_path,
+                    sent_by_user_id=(_u.get("id") if _u else None),
+                    sent_by_name=(_u.get("name") if _u else None))
+                return contact.id, saved_row
             contact_id, saved = await asyncio.to_thread(_save)
         except Exception as e:
             logger.error("[Private] Failed to save private audio for %s: %s", phone, e)
@@ -1356,6 +1365,7 @@ def register_routes(app, deps):
 
         # Broadcast/return "[Áudio]" (not the transcription) so the operator's
         # optimistic bubble dedups cleanly; the player renders from media_path.
+        # Full identity contract (plano 53): _id + msg_id + sent_by_name.
         note_msg = {
             "role": "private_note",
             "content": "[Áudio]",
@@ -1363,9 +1373,14 @@ def register_routes(app, deps):
             "media_type": "audio",
             "media_path": rel_path,
             "status": None,
+            "conversation_id": (saved or {}).get("conversation_id"),
         }
-        if saved and saved.get("_id"):
-            note_msg["_id"] = saved["_id"]
+        if _u and _u.get("name"):
+            note_msg["sent_by_name"] = _u.get("name")
+        if saved and saved.get("id"):
+            note_msg["_id"] = saved["id"]
+        if saved and saved.get("msg_id"):
+            note_msg["msg_id"] = saved["msg_id"]
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": resolved_channel, "message": note_msg})
 
@@ -1433,22 +1448,27 @@ def register_routes(app, deps):
 
         def _save():
             contact = agent_handler._get_contact(phone, channel_id=resolved_channel)
-            contact.add_message("private_note", db_content,
-                                media_type=kind, media_path=rel_path,
-                                sent_by_user_id=(_u.get("id") if _u else None),
-                                sent_by_name=(_u.get("name") if _u else None))
-            return contact.id, message_repo.get_last(contact.id)
+            # Row from add_message (not a racy get_last) — plano 53.
+            saved_row = contact.add_message(
+                "private_note", db_content,
+                media_type=kind, media_path=rel_path,
+                sent_by_user_id=(_u.get("id") if _u else None),
+                sent_by_name=(_u.get("name") if _u else None))
+            return contact.id, saved_row
         contact_id, saved = await asyncio.to_thread(_save)
 
         note_msg = {
             "role": "private_note", "content": db_content,
             "ts": (saved or {}).get("ts", time.time()),
             "media_type": kind, "media_path": rel_path, "status": None,
+            "conversation_id": (saved or {}).get("conversation_id"),
         }
         if _u and _u.get("name"):
             note_msg["sent_by_name"] = _u.get("name")
-        if saved and saved.get("_id"):
-            note_msg["_id"] = saved["_id"]
+        if saved and saved.get("id"):
+            note_msg["_id"] = saved["id"]
+        if saved and saved.get("msg_id"):
+            note_msg["msg_id"] = saved["msg_id"]
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": resolved_channel, "message": note_msg})
 

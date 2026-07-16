@@ -633,6 +633,29 @@ check(
     private_notes and private_notes[-1].get("status") in (None, ""),
 )
 
+# Plano 53 — contrato de identidade do payload/response da nota (dedup do painel):
+# (a) default (notify_private_messages OFF): `_id` sempre presente, `msg_id` ausente
+#     (a row nasce sem msg_id); autor no payload espelha a row (ausente em modo aberto).
+check("POST /private-message -> sem msg_id com notify_private_messages off",
+      not _pn.get("msg_id"))
+check("POST /private-message -> sent_by_name espelha a row",
+      _pn.get("sent_by_name") == private_notes[-1].get("sent_by_name"))
+
+# (b) com notify_private_messages ON a nota ganha o msg_id sintético "pn:<uuid>"
+#     e o response/broadcast o carregam — identidade estável imune a clock skew.
+config_repo.set("notify_private_messages", True)
+r = client.post("/api/contacts/5511999990001/private-message",
+                json={"text": "nota com identidade pn"})
+check("POST /private-message (notify on) -> 200", r.status_code == 200)
+_pn2 = r.json()["data"]
+check("POST /private-message (notify on) -> msg_id sintético pn:",
+      str(_pn2.get("msg_id") or "").startswith("pn:"))
+check("POST /private-message (notify on) -> _id presente junto do msg_id",
+      bool(_pn2.get("_id")))
+config_repo.set("notify_private_messages", False)
+# Limpa o unread que o modo notify gera (não vazar estado p/ testes seguintes).
+client.post("/api/contacts/5511999990001/read")
+
 # Private notes are deletable by DB id (scope=me) without a msg_id -> kept, flagged revoked
 r = client.post("/api/contacts/5511999990001/messages/delete",
                 json={"db_id": _pn["_id"], "scope": "me"})

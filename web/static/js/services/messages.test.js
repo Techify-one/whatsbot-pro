@@ -96,8 +96,10 @@ test('optimisticDupIndex: two distinct inbound "ok" (each with a msg_id) → APP
   const list = [{ role: 'user', ts: 100, content: 'ok', msg_id: 'A' }];
   const incoming = { role: 'user', ts: 105, content: 'ok', msg_id: 'B' };
   assert.equal(optimisticDupIndex(incoming, list), -1);
-  // Regression guard: the old content-only predicate WOULD have merged them.
-  assert.equal(findDuplicateIndex(incoming, list), 0);
+  // Plano 53: identity is authoritative in EVERY predicate now — the content-only
+  // fallback no longer applies when both sides carry a msg_id, so even the
+  // plain findDuplicateIndex keeps the two real "ok" rows apart.
+  assert.equal(findDuplicateIndex(incoming, list), -1);
 });
 
 test('optimisticDupIndex: operator echo collapses into its optimistic bubble (no msg_id)', () => {
@@ -117,4 +119,73 @@ test('optimisticDupIndex: does not match a settled message that has a msg_id', (
 test('optimisticDupIndex: non-array list → -1', () => {
   assert.equal(optimisticDupIndex({ role: 'user', ts: 1, content: 'x' }, undefined), -1);
   assert.equal(optimisticDupIndex({ role: 'user', ts: 1, content: 'x' }, null), -1);
+});
+
+// ── identidade estável `_id`/`msg_id` (plano 53) ──────────────────────────
+
+test('sameMessage: same _id → dup even hours apart with different content', () => {
+  // The clock-skew bug: optimistic bubble (client clock) vs WS copy (server ts)
+  // of the SAME private note row must collapse regardless of the 30s window.
+  assert.equal(sameMessage(
+    { role: 'private_note', ts: 100, content: 'teste', _id: 1425 },
+    { role: 'private_note', ts: 100 + 4 * 3600, content: 'teste (editado)', _id: 1425 },
+  ), true);
+});
+
+test('sameMessage: different _id → never dup, even identical content 1s apart', () => {
+  assert.equal(sameMessage(
+    { role: 'private_note', ts: 100, content: 'teste', _id: 1 },
+    { role: 'private_note', ts: 101, content: 'teste', _id: 2 },
+  ), false);
+});
+
+test('sameMessage: same msg_id → dup; msg_id wins over _id', () => {
+  assert.equal(sameMessage(
+    { role: 'private_note', ts: 100, content: 'a', msg_id: 'pn:x' },
+    { role: 'private_note', ts: 999, content: 'b', msg_id: 'pn:x' },
+  ), true);
+  // msg_id is checked first — a conflicting _id does not override it.
+  assert.equal(sameMessage(
+    { role: 'user', ts: 100, content: 'a', msg_id: 'M', _id: 1 },
+    { role: 'user', ts: 100, content: 'a', msg_id: 'M', _id: 2 },
+  ), true);
+});
+
+test('sameMessage: identity never crosses roles', () => {
+  assert.equal(sameMessage(
+    { role: 'user', ts: 100, content: 'a', _id: 7 },
+    { role: 'assistant', ts: 100, content: 'a', _id: 7 },
+  ), false);
+});
+
+test('sameMessage: one side without ids → legacy heuristic still applies', () => {
+  // Optimistic bubble (no ids) vs server copy (both ids): content within 30s.
+  assert.equal(sameMessage(
+    { role: 'private_note', ts: 100, content: 'oi' },
+    { role: 'private_note', ts: 110, content: 'oi', _id: 9, msg_id: 'pn:z' },
+  ), true);
+  // ...and outside the window it still fails (the reason F2/F3 exist).
+  assert.equal(sameMessage(
+    { role: 'private_note', ts: 100, content: 'oi' },
+    { role: 'private_note', ts: 400, content: 'oi', _id: 9, msg_id: 'pn:z' },
+  ), false);
+});
+
+test('optimisticDupIndex: WS copy folds into an _id-only bubble (post-POST)', () => {
+  // Bubble already reconciled by the POST response (_id set, no msg_id yet):
+  // the WS copy of the same row (same _id) must merge, not append.
+  const list = [
+    { role: 'private_note', ts: 100, content: 'teste', _id: 1425, _localId: 'local_1' },
+  ];
+  const wsCopy = { role: 'private_note', ts: 400, content: 'teste', _id: 1425 };
+  assert.equal(optimisticDupIndex(wsCopy, list), 0);
+});
+
+test('isDuplicateMessage: buffered WS copy vs DB-loaded row matches by _id', () => {
+  const loaded = [{ role: 'private_note', ts: 400, content: 'teste', _id: 1425, msg_id: 'pn:a' }];
+  const buffered = { role: 'private_note', ts: 400.5, content: 'teste', _id: 1425, msg_id: 'pn:a' };
+  assert.equal(isDuplicateMessage(buffered, loaded), true);
+  // Two DISTINCT notes with identical content seconds apart stay apart.
+  const other = { role: 'private_note', ts: 401, content: 'teste', _id: 1426, msg_id: 'pn:b' };
+  assert.equal(isDuplicateMessage(other, loaded), false);
 });

@@ -16,7 +16,10 @@
  * @property {string} [role] - 'user' | 'assistant' | panel-only roles…
  * @property {string|null} [content]
  * @property {number} [ts] - unix seconds (may be fractional).
- * @property {string} [msg_id] - GOWA message id (stable server identity).
+ * @property {string} [msg_id] - GOWA message id, or synthetic "pn:<uuid>" for
+ *   notified private notes (stable server identity).
+ * @property {number} [_id] - DB row id (`messages.id`) — universal identity,
+ *   present on detail reads, note broadcasts and POST responses.
  * @property {string} [media_type]
  */
 
@@ -26,13 +29,17 @@ export const DEDUP_WINDOW_S = 30;
 /**
  * Whether `a` and `b` are the "same" message for optimistic-send / WS dedup.
  *
- * Two messages match when they share a role AND either (a) the exact same
- * timestamp, or (b) identical content within {@link DEDUP_WINDOW_S} seconds.
- * This mirrors the legacy inline predicate so an optimistic bubble and the
- * server's broadcast copy (which may differ slightly in ts) collapse into one.
+ * Stable identity decides FIRST (plano 53): when both sides carry a `msg_id`
+ * (GOWA id, or the synthetic `pn:<uuid>` of a notified private note) that field
+ * is authoritative — equal means same message, different means two real rows.
+ * Same for the DB row id `_id`. Identity is immune to clock skew: the optimistic
+ * bubble stamps `ts` from the CLIENT clock while the server's broadcast copy
+ * carries the row's ts, so a skewed client (>30s) breaks the content window —
+ * the exact bug that duplicated private notes.
  *
- * Note: a stable `msg_id` match is handled separately by the caller (reconcile
- * in place) BEFORE falling back to this heuristic.
+ * Only when neither side settles identity do we fall back to the legacy
+ * heuristic: same role AND either (a) the exact same timestamp, or (b)
+ * identical content within {@link DEDUP_WINDOW_S} seconds.
  *
  * @param {ChatMessage} a
  * @param {ChatMessage} b
@@ -41,6 +48,9 @@ export const DEDUP_WINDOW_S = 30;
 export function sameMessage(a, b) {
   if (!a || !b) return false;
   if (a.role !== b.role) return false;
+  // Identity short-circuit — decides both ways (match AND mismatch).
+  if (a.msg_id && b.msg_id) return a.msg_id === b.msg_id;
+  if (a._id != null && b._id != null) return a._id === b._id;
   if (a.ts === b.ts) return true;
   return a.content === b.content
     && Math.abs((a.ts || 0) - (b.ts || 0)) < DEDUP_WINDOW_S;
