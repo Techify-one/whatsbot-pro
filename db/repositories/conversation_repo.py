@@ -122,7 +122,14 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
     opened = opened_at if opened_at is not None else now
     if ai_active is None:
         ai_active = 1 if _default_ai_enabled() else 0
-    if active_agent_key is None:
+    # Fix atribuição-IA-off (2026-07): o carimbo do agente segue o MESMO princípio
+    # do gate global abaixo — uma conversa que nasce com a IA desligada (seed
+    # per-canal/global de default_ai_enabled em 0) NÃO deve nascer "atribuída" a
+    # um agente de IA que nunca vai respondê-la; sem vínculo ela cai na fila "Não
+    # atribuídas". Religar a IA da conversa depois re-vincula o padrão
+    # (conversation_service.set_ai ON). Um active_agent_key EXPLÍCITO do caller
+    # continua respeitado independentemente do ai_active.
+    if active_agent_key is None and ai_active:
         active_agent_key = default_agent_key_for_inbox(inbox_id)
     # Global master gate: with the panel-wide ``auto_reply`` switch OFF, no channel
     # ever replies (webhook checks it first), so a fresh conversation must start with

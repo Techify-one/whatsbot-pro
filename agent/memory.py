@@ -171,6 +171,25 @@ class ContactMemory:
         self.updated_at: float = time.time()
         self._load()
 
+    def _resolve_ai_seed(self) -> bool:
+        """Whether a brand-new conversation on this channel is born AI-active.
+
+        Fix atribuição-IA-off (2026-07): exige o master do canal ("Ativar a IA
+        neste canal", ``ai_enabled``) E o "IA ativada por padrão para novos
+        contatos" (``default_ai_enabled``) — antes só o segundo contava, então um
+        canal com a IA desligada paria conversas "IA ON + agente" que nunca
+        seriam respondidas. Resolvido fresh via ``ai_settings`` (cache 30s) na
+        hora do CREATE; qualquer falha cai no valor congelado do construtor
+        (comportamento legado, fail-open)."""
+        try:
+            from channels import ai_settings
+            if not bool(ai_settings.value(self.channel_id, "ai_enabled", True)):
+                return False
+            return bool(ai_settings.value(
+                self.channel_id, "default_ai_enabled", self._default_ai_enabled))
+        except Exception:
+            return self._default_ai_enabled
+
     def _resolve_contact_type(self) -> str:
         """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
 
@@ -296,11 +315,12 @@ class ContactMemory:
             # (regra padrão) e reopen=True seguem criando aberta. Uma conversa já existente cai
             # no ramo de reabrir/manter do repo, então create_closed não a afeta.
             create_closed = (reopen is False)
-            # plano 38 F1: seed a brand-new conversation's ai_active from the
-            # PER-CHANNEL "IA padrão p/ novos contatos" toggle (self._default_ai_enabled,
-            # already resolved via ai_settings in handler._get_contact) instead of only
-            # the global default. Only applies on CREATE — a reopen never re-seeds.
-            seed = 1 if self._default_ai_enabled else 0
+            # plano 38 F1 + fix atribuição-IA-off (2026-07): seed a brand-new
+            # conversation's ai_active from the channel's CURRENT config, resolved
+            # na HORA do create (não mais o valor congelado no construtor — mudar a
+            # config do canal vale em ≤30s, o TTL do cache do ai_settings). Only
+            # applies on CREATE — a reopen never re-seeds.
+            seed = 1 if self._resolve_ai_seed() else 0
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._source_id(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,

@@ -23,12 +23,17 @@ from db.repositories import conversation_repo, config_repo, channel_repo, inbox_
 from channels import ai_settings
 
 
-def _mk_channel(channel_id: str, *, default_ai_enabled: bool | None):
-    """Cria (idempotente) um canal + inbox, opcionalmente com o override
-    ``config['ai']['default_ai_enabled']``. ``None`` = canal sem override."""
-    cfg = None
+def _mk_channel(channel_id: str, *, default_ai_enabled: bool | None,
+                ai_enabled: bool | None = None):
+    """Cria (idempotente) um canal + inbox, opcionalmente com os overrides
+    ``config['ai']['default_ai_enabled']`` / ``['ai_enabled']`` (master do canal).
+    ``None`` = sem aquele override."""
+    ai: dict = {}
     if default_ai_enabled is not None:
-        cfg = json.dumps({"ai": {"default_ai_enabled": default_ai_enabled}})
+        ai["default_ai_enabled"] = default_ai_enabled
+    if ai_enabled is not None:
+        ai["ai_enabled"] = ai_enabled
+    cfg = json.dumps({"ai": ai}) if ai else None
     if channel_repo.get(channel_id) is None:
         channel_repo.create(id=channel_id, provider="whatsapp_cloud",
                             display_name=channel_id, enabled=1, config=cfg)
@@ -43,26 +48,40 @@ def _set_global(built, enabled: bool) -> None:
     """Ajusta o default GLOBAL de "IA para novos contatos". O ``handler`` cacheia
     esse valor em ``default_ai_enabled`` (fallback do ``_get_contact`` quando o
     canal não overrida) — em produção sincronizado do config no save; no teste
-    setamos os dois."""
+    setamos os dois.
+
+    Hermeticidade: liga também o master GLOBAL ``auto_reply`` — o gate de criação
+    (``_insert_conversation``) zera ai_active+agente com ele off, mascarando o
+    seed per-canal que estes testes exercitam. O boot persiste ``auto_reply=False``
+    como default num banco fresco, então sem isto os testes só passavam quando
+    outro arquivo da sessão já tinha ligado o master (dependência de ordem)."""
+    config_repo.set("auto_reply", True)
     config_repo.set("default_ai_enabled", enabled)
     built.agent_handler.default_ai_enabled = enabled
+
+
+def _seed_conv(handler, phone: str, channel_id: str) -> dict:
+    """Cria uma conversa nova para ``phone`` no ``channel_id`` e devolve a row."""
+    mem = handler._get_contact(phone, channel_id=channel_id)
+    saved = mem.add_message("user", "oi")
+    return conversation_repo.get(saved["conversation_id"])
 
 
 def _seed_ai_active(handler, phone: str, channel_id: str) -> int:
     """Cria uma conversa nova para ``phone`` no ``channel_id`` e devolve o
     ``ai_active`` resultante."""
-    mem = handler._get_contact(phone, channel_id=channel_id)
-    saved = mem.add_message("user", "oi")
-    conv = conversation_repo.get(saved["conversation_id"])
-    return conv["ai_active"]
+    return _seed_conv(handler, phone, channel_id)["ai_active"]
 
 
 def test_global_off_channel_on_seeds_active(build_app):
-    """(global OFF × canal ON) ⇒ ai_active=1 — o bug original."""
+    """(global OFF × canal ON) ⇒ ai_active=1 — o bug original. Nascendo IA-ativa,
+    o agente padrão É carimbado (a conversa nasce "da IA")."""
     built = build_app(["gowa"])
     _set_global(built, False)
     _mk_channel("seed_ch_on", default_ai_enabled=True)
-    assert _seed_ai_active(built.agent_handler, "5511960000001", "seed_ch_on") == 1
+    conv = _seed_conv(built.agent_handler, "5511960000001", "seed_ch_on")
+    assert conv["ai_active"] == 1
+    assert conv["active_agent_key"] is not None
 
 
 def test_global_off_channel_absent_seeds_inactive(build_app):
@@ -74,11 +93,29 @@ def test_global_off_channel_absent_seeds_inactive(build_app):
 
 
 def test_global_on_channel_off_seeds_inactive(build_app):
-    """(global ON × canal OFF) ⇒ ai_active=0 — o canal desliga apesar da global."""
+    """(global ON × canal OFF) ⇒ ai_active=0 — o canal desliga apesar da global.
+    Fix atribuição-IA-off: nascer com IA desligada também NÃO carimba agente —
+    a conversa cai na fila "Não atribuídas" (sem humano e sem agente)."""
     built = build_app(["gowa"])
     _set_global(built, True)
     _mk_channel("seed_ch_off", default_ai_enabled=False)
-    assert _seed_ai_active(built.agent_handler, "5511960000003", "seed_ch_off") == 0
+    conv = _seed_conv(built.agent_handler, "5511960000003", "seed_ch_off")
+    assert conv["ai_active"] == 0
+    assert conv["active_agent_key"] is None
+    assert conv["assignee_user_id"] is None
+
+
+def test_channel_master_off_seeds_inactive_unassigned(build_app):
+    """(master "Ativar a IA neste canal" OFF) ⇒ ai_active=0 e sem agente, mesmo
+    com "IA por padrão para novos contatos" ligado — fix atribuição-IA-off (o
+    master não participava do seed e o canal desligado paria conversas
+    "IA ON + agente" que nunca seriam respondidas)."""
+    built = build_app(["gowa"])
+    _set_global(built, True)
+    _mk_channel("seed_ch_master_off", default_ai_enabled=True, ai_enabled=False)
+    conv = _seed_conv(built.agent_handler, "5511960000006", "seed_ch_master_off")
+    assert conv["ai_active"] == 0
+    assert conv["active_agent_key"] is None
 
 
 def test_global_on_channel_absent_seeds_active(build_app):

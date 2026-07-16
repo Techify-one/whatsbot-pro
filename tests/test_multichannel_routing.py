@@ -56,7 +56,16 @@ def _seed_two_inboxes(handler, phone: str, tg_channel: str):
     resolver channel-blind (``get_open_for_contact``, ordena por last_activity)
     devolve a conversa ERRADA (default) quando a ação parte do canal do Telegram.
     Retorna os ids das duas conversas + o ContactMemory escopado no Telegram.
+
+    Hermeticidade: liga o master global ``auto_reply`` antes de semear — o gate
+    de criação zera ai_active+agente com ele off (o boot persiste ``False`` num
+    banco fresco), e testes como o A6 (``ensure_ai_agent`` no-op com ai_active=0)
+    dependiam de outro arquivo da sessão ter ligado o master (ordem).
     """
+    from db.repositories import config_repo
+    config_repo.set("auto_reply", True)
+    config_repo.set("default_ai_enabled", True)
+    handler.default_ai_enabled = True  # o handler cacheia o global no boot
     _mk_channel_inbox(tg_channel)
     tg_mem = handler._get_contact(phone, channel_id=tg_channel)
     tg_saved = tg_mem.add_message("user", "oi pelo telegram")

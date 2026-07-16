@@ -206,6 +206,37 @@ def test_delete_unbinds_conversations(_engine_ready):
         conversation_repo.set_status(conv["id"], "closed")
 
 
+def test_ai_off_conversation_born_unassigned(_engine_ready):
+    """Fix atribuição-IA-off: conversa nascida com IA desligada NÃO carimba
+    agente — fica de fato "Não atribuída" (sem humano e sem agente)."""
+    _clear_defaults()
+    _seed_agent("p36_aioff", is_default=True)
+    contact, ci = _make_pair("5511990036004")
+    conv = conversation_repo.create(
+        inbox_id=INBOX_ID, contact_id=contact["id"], contact_inbox_id=ci["id"],
+        ai_active=0)
+    try:
+        assert conv["ai_active"] == 0
+        assert conv["active_agent_key"] is None
+        assert conv["assignee_user_id"] is None
+    finally:
+        conversation_repo.set_status(conv["id"], "closed")
+
+
+def test_ai_off_creation_respects_explicit_agent(_engine_ready):
+    """Um active_agent_key EXPLÍCITO do caller continua valendo com IA off."""
+    _clear_defaults()
+    _seed_agent("p36_explicit")
+    contact, ci = _make_pair("5511990036005")
+    conv = conversation_repo.create(
+        inbox_id=INBOX_ID, contact_id=contact["id"], contact_inbox_id=ci["id"],
+        ai_active=0, active_agent_key="p36_explicit")
+    try:
+        assert conv["active_agent_key"] == "p36_explicit"
+    finally:
+        conversation_repo.set_status(conv["id"], "closed")
+
+
 def test_stamp_and_fallback_none_when_floor_deleted(_engine_ready):
     _clear_defaults()
     _seed_agent("p36_crown2", is_default=True)
