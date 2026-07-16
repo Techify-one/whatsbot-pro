@@ -11,6 +11,8 @@
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
+import { AgenticChat } from '/plugins/melhorias/static/chat.js';
+import { ReloginModal } from '/plugins/melhorias/static/relogin.js';
 
 const html = htm.bind(h);
 
@@ -60,14 +62,15 @@ function writeUrlParam(key, val) {
   } catch (_) { /* ignore */ }
 }
 
-const STATUS_LABEL = { pendente: 'Pendente', aprovada: 'Aprovada', recusada: 'Recusada' };
+const STATUS_LABEL = { pendente: 'Pendente', em_chat: 'Em chat com a IA', aprovada: 'Aprovada', recusada: 'Recusada' };
 const STATUS_CLS = {
-  pendente: 'text-amber-600', aprovada: 'text-wa-teal', recusada: 'text-red-500',
+  pendente: 'text-amber-600', em_chat: 'text-blue-600', aprovada: 'text-wa-teal', recusada: 'text-red-500',
 };
 // Opções fixas do filtro multi-seleção de Status (o conjunto é conhecido — não
 // depende dos valores presentes nas linhas carregadas).
 const STATUS_OPTIONS = [
   { value: 'pendente', label: 'Pendente' },
+  { value: 'em_chat', label: 'Em chat com a IA' },
   { value: 'aprovada', label: 'Aprovada' },
   { value: 'recusada', label: 'Recusada' },
 ];
@@ -129,6 +132,16 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // plano 51: backend agêntico? (external ⇒ aprovar abre o CHAT, não gera inline)
+  const [backend, setBackend] = useState('direct');
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await apiJson(`${apiBase}/config`);
+        if (r.ok) setBackend((r.body.data || {}).generator_backend || 'direct');
+      } catch (_) { /* mantém direct */ }
+    })();
+  }, [apiBase]);
   const [filters, setFilters] = useState({});       // colKey -> texto (text) | array (multiselect)
   const [pageSize, setPageSize] = useState(10);      // itens por página (10/20/50/100)
   const [page, setPage] = useState(0);               // página atual (base 0)
@@ -338,11 +351,19 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
                     </td>`)}
                     ${canApprove ? html`<td class="py-2 px-2 whitespace-nowrap">
                       ${r.status === 'pendente' ? html`<div class="flex gap-1.5">
-                        <button onClick=${() => setConfirm({ row: r, action: 'approve' })}
-                          class="px-2 py-1 rounded border border-wa-teal text-wa-teal text-[11px] hover:bg-wa-teal/10">Aprovar</button>
+                        ${backend === 'external' ? html`
+                          <button onClick=${() => openDetail(r.id)}
+                            class="px-2 py-1 rounded border border-wa-teal text-wa-teal text-[11px] hover:bg-wa-teal/10">Abrir chat</button>
+                        ` : html`
+                          <button onClick=${() => setConfirm({ row: r, action: 'approve' })}
+                            class="px-2 py-1 rounded border border-wa-teal text-wa-teal text-[11px] hover:bg-wa-teal/10">Aprovar</button>
+                        `}
                         <button onClick=${() => setConfirm({ row: r, action: 'reject' })}
                           class="px-2 py-1 rounded border border-red-400 text-red-500 text-[11px] hover:bg-red-500/10">Recusar</button>
-                      </div>` : html`<span class="text-wa-secondary text-[11px]">—</span>`}
+                      </div>` : r.status === 'em_chat' ? html`
+                        <button onClick=${() => openDetail(r.id)}
+                          class="px-2 py-1 rounded border border-blue-400 text-blue-600 text-[11px] hover:bg-blue-500/10">Continuar chat</button>
+                      ` : html`<span class="text-wa-secondary text-[11px]">—</span>`}
                     </td>` : ''}
                   </tr>`)}
             </tbody>
@@ -367,6 +388,8 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         </div>`}
 
       ${detail ? html`<${DetailModal} detail=${detail} canApprove=${canApprove}
+        backend=${backend} apiBase=${apiBase}
+        onRefresh=${() => { load(); openDetail(detail.id); }}
         onClose=${() => { setDetail(null); writeUrlParam('detail', null); }}
         onDecide=${(action) => setConfirm({ row: detail, action })} />` : ''}
 
@@ -396,22 +419,106 @@ function GeneratingModal() {
     </div>`;
 }
 
-function DetailModal({ detail, canApprove, onClose, onDecide }) {
+function DetailModal({ detail, canApprove, backend = 'direct', apiBase = '/api/plugins/melhorias',
+                       onClose, onDecide, onRefresh = () => {} }) {
   const d = detail;
+  const agentic = backend === 'external';
+  // Mensagens marcadas: multi-seleção (d.messages) ou a âncora legada.
+  const targets = (d.messages && d.messages.length)
+    ? d.messages
+    : [{ content: d.message_content, ts: d.message_ts, _id: d.message_db_id }];
+
+  // Chat agêntico (plano 51 · 04 F3/F4): estado do gate (a) + conversa ativa.
+  const [observation, setObservation] = useState('');
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState('');
+  const [conversation, setConversation] = useState(null);
+  const [relogin, setRelogin] = useState(false);
+
+  // Sugestão em_chat: carrega a conversa mais recente ao abrir.
+  useEffect(() => {
+    if (!agentic || d.status !== 'em_chat') return;
+    (async () => {
+      try {
+        const r = await apiJson(`${apiBase}/suggestions/${d.id}/conversations`);
+        const list = (r.ok && Array.isArray(r.body.data)) ? r.body.data : [];
+        if (list.length) setConversation(list[0]);
+      } catch (_) { /* ignore */ }
+    })();
+  }, [agentic, d.id, d.status]);
+
+  async function startChat() {
+    if (starting) return;
+    setStarting(true); setStartError('');
+    try {
+      const r = await apiJson(`${apiBase}/suggestions/${d.id}/conversations`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ observation: (observation || '').trim() }),
+      });
+      if (r.ok && r.body.data && r.body.data.conversation) {
+        setConversation(r.body.data.conversation);
+        onRefresh();
+      } else {
+        setStartError((r.body && r.body.error) || 'Falha ao iniciar a conversa.');
+      }
+    } catch (e) { setStartError(String(e.message || e)); }
+    setStarting(false);
+  }
+
+  const showGateA = agentic && canApprove && d.status === 'pendente' && !conversation;
+  const showChat = agentic && conversation;
+
   return html`
     <div class="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4" onClick=${onClose}>
-      <div class="bg-wa-panel rounded-lg shadow-xl w-[640px] max-w-[94vw] max-h-[88vh] overflow-auto p-[22px]"
+      <div class="bg-wa-panel rounded-lg shadow-xl w-[720px] max-w-[94vw] max-h-[90vh] overflow-auto p-[22px]"
         onClick=${(e) => e.stopPropagation()}>
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-[16px] font-semibold text-wa-text">Sugestão #${d.id}</h2>
           <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-[18px]">✕</button>
         </div>
         <${Field} label="Status" value=${STATUS_LABEL[d.status] || d.status} />
-        <${Field} label="Mensagem da IA" value=${d.message_content || '—'} pre />
+        <div class="mb-3">
+          <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">
+            ${targets.length > 1 ? `Mensagens da IA marcadas (${targets.length})` : 'Mensagem da IA'}
+          </div>
+          <div class="flex flex-col gap-1 max-h-[160px] overflow-auto">
+            ${targets.map((t, i) => html`<div key=${t._id || i}
+              class="text-[13px] text-wa-text whitespace-pre-wrap bg-wa-bg border border-wa-border rounded p-2">${(t.content || '').trim() || '—'}</div>`)}
+          </div>
+        </div>
         <${Field} label="Solicitante" value=${d.requester_name || '—'} />
         <${Field} label="Melhoria solicitada (nota do operador)" value=${d.feedback || '—'} pre />
-        <${Field} label="Análise gerada pela IA"
-          value=${d.status === 'aprovada' ? (d.analysis || '—') : '(gerada apenas na aprovação)'} pre />
+
+        ${showGateA ? html`
+          <div class="border border-wa-teal/40 bg-wa-teal/5 rounded-lg p-3 mb-3">
+            <div class="text-[13px] font-medium text-wa-text mb-2">
+              Aprovar para a IA começar a analisar (você ainda aprova cada mudança que ela propuser)
+            </div>
+            <textarea class="wa-field w-full rounded p-2 text-[13px] mb-2" rows="2"
+              placeholder="Observação extra para a IA (opcional)…"
+              value=${observation} onInput=${(e) => setObservation(e.target.value)}></textarea>
+            ${startError ? html`<div class="text-[12px] text-red-500 mb-2">${startError}</div>` : ''}
+            <div class="flex justify-end">
+              <button onClick=${startChat} disabled=${starting}
+                class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50">
+                ${starting ? 'Iniciando…' : 'Aprovar p/ iniciar'}</button>
+            </div>
+          </div>` : ''}
+
+        ${showChat ? html`
+          <div class="mb-3">
+            <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">Chat com a IA de melhoria</div>
+            <${AgenticChat} apiJson=${apiJson} apiBase=${apiBase}
+              suggestion=${d} conversation=${conversation}
+              onAuthError=${() => setRelogin(true)}
+              onConversationEnd=${onRefresh} />
+          </div>` : ''}
+
+        ${!agentic || d.status !== 'pendente' ? html`
+          <${Field} label="Análise gerada pela IA"
+            value=${d.status === 'aprovada' ? (d.analysis || '—')
+                    : d.status === 'em_chat' ? '(em construção no chat acima)'
+                    : '(gerada apenas na aprovação)'} pre />` : ''}
         <${Field} label="Modelo" value=${d.model || '—'} />
         <${Field} label="Solicitado em" value=${fmtTs(d.requested_at)} />
         <${Field} label="Aprovado em" value=${d.status === 'aprovada' ? fmtTs(d.decided_at) : '—'} />
@@ -423,9 +530,12 @@ function DetailModal({ detail, canApprove, onClose, onDecide }) {
         ${canApprove && d.status === 'pendente' ? html`<div class="flex justify-end gap-2 mt-5">
           <button onClick=${() => onDecide('reject')}
             class="px-4 py-2 rounded-full border border-red-400 text-red-500 text-[13px] hover:bg-red-500/10">Recusar</button>
-          <button onClick=${() => onDecide('approve')}
-            class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90">Aprovar</button>
+          ${!agentic ? html`<button onClick=${() => onDecide('approve')}
+            class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90">Aprovar</button>` : ''}
         </div>` : ''}
+        ${relogin ? html`<${ReloginModal} apiJson=${apiJson} apiBase=${apiBase}
+          onClose=${() => setRelogin(false)}
+          onSuccess=${() => setConversation(null)} />` : ''}
       </div>
     </div>`;
 }

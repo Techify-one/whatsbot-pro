@@ -34,6 +34,12 @@ export function MelhoriaAiSection({ api, can }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
+  // plano 51: servidor agêntico (executor Claude Code externo).
+  const [backend, setBackend] = useState('direct');
+  const [aiUrl, setAiUrl] = useState('');
+  const [aiSecret, setAiSecret] = useState('');
+  const [aiModel, setAiModel] = useState('');
+  const [testResult, setTestResult] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -42,6 +48,10 @@ export function MelhoriaAiSection({ api, can }) {
         setModel(cfg.data.model || '');
         setPrompt(cfg.data.prompt || '');
         setPromptDefault(cfg.data.prompt_default || '');
+        setBackend(cfg.data.generator_backend || 'direct');
+        setAiUrl(cfg.data.ai_server_url || '');
+        setAiSecret(cfg.data.ai_server_secret || '');
+        setAiModel(cfg.data.ai_model || '');
       }
     } catch (_) { /* ignore */ }
     try {
@@ -60,11 +70,28 @@ export function MelhoriaAiSection({ api, can }) {
     if (saving || !canConfigure) return;
     setSaving(true); setError(''); setSaved(false);
     try {
-      const res = await api.http.put('/config', { model: model || '', prompt: prompt || '' });
-      if (res && res.ok) { setSaved(true); setTimeout(() => setSaved(false), 2000); }
-      else { setError((res && res.error) || 'Falha ao salvar.'); }
+      const res = await api.http.put('/config', {
+        model: model || '', prompt: prompt || '',
+        generator_backend: backend || 'direct',
+        ai_server_url: aiUrl || '',
+        ai_server_secret: aiSecret || '',
+        ai_model: aiModel || '',
+      });
+      if (res && res.ok) {
+        setSaved(true); setTimeout(() => setSaved(false), 2000);
+        if (res.data) setAiSecret(res.data.ai_server_secret || '');
+      } else { setError((res && res.error) || 'Falha ao salvar.'); }
     } catch (_) { setError('Erro de conexão.'); }
     setSaving(false);
+  }
+
+  async function testConnection() {
+    setTestResult('…');
+    try {
+      const res = await api.http.post('/admin/test-connection', {});
+      if (res && res.ok && res.data && res.data.ok) setTestResult('✓ Secret válido (auth-check 200)');
+      else setTestResult(`✕ ${(res && (res.error || (res.data && `HTTP ${res.data.status_code}`))) || 'falhou'}`);
+    } catch (_) { setTestResult('✕ Executor inalcançável'); }
   }
 
   return html`
@@ -97,6 +124,42 @@ export function MelhoriaAiSection({ api, can }) {
         disabled=${!canConfigure}
         placeholder=${promptDefault}
         value=${prompt} onInput=${(e) => setPrompt(e.target.value)}></textarea>
+
+      <div class="border border-wa-border rounded-lg p-3 mb-4">
+        <h4 class="text-[13px] font-semibold text-wa-text mb-2">Melhoria agêntica (plano 51)</h4>
+        <p class="text-[12px] text-wa-secondary mb-3">
+          Com o motor <strong>Agêntico (executor externo)</strong>, aprovar uma sugestão abre um
+          <strong>chat com a IA</strong> que analisa o atendimento e propõe mudanças em agentes,
+          prompts, tools e variáveis — cada mudança exige sua aprovação (✓/✕) e é versionada
+          (dá para reverter).
+        </p>
+        <label class="block text-[13px] text-wa-text mb-1">Motor da análise</label>
+        <select class="wa-field w-full rounded p-[8px] text-[13px] mb-3" value=${backend}
+          disabled=${!canConfigure} onChange=${(e) => setBackend(e.target.value)}>
+          <option value="direct">Direto (análise one-shot — padrão)</option>
+          <option value="external">Agêntico (chat com executor Claude Code externo)</option>
+          <option value="stub">Stub (testes)</option>
+        </select>
+        <label class="block text-[13px] text-wa-text mb-1">URL do executor</label>
+        <input class="wa-field w-full rounded p-[8px] text-[13px] mb-3" type="text"
+          placeholder="http://203.0.113.10:8015" disabled=${!canConfigure}
+          value=${aiUrl} onInput=${(e) => setAiUrl(e.target.value)} />
+        <label class="block text-[13px] text-wa-text mb-1">Secret compartilhado (≥32 caracteres)</label>
+        <input class="wa-field w-full rounded p-[8px] text-[13px] mb-1" type="password"
+          placeholder="cole o mesmo valor do .env do executor" disabled=${!canConfigure}
+          value=${aiSecret} onInput=${(e) => setAiSecret(e.target.value)} />
+        <div class="text-[11px] text-wa-secondary mb-3">Deixar como “***” mantém o secret atual.</div>
+        <label class="block text-[13px] text-wa-text mb-1">Modelo do executor (opcional)</label>
+        <input class="wa-field w-full rounded p-[8px] text-[13px] mb-3" type="text"
+          placeholder="(default do executor)" disabled=${!canConfigure}
+          value=${aiModel} onInput=${(e) => setAiModel(e.target.value)} />
+        ${canConfigure ? html`
+          <div class="flex items-center gap-3">
+            <button onClick=${testConnection}
+              class="px-3 py-1.5 rounded-md border border-wa-border text-wa-text text-[12px] hover:bg-wa-hover">Testar conexão</button>
+            ${testResult ? html`<span class="text-[12px] ${testResult.startsWith('✓') ? 'text-wa-teal' : 'text-red-500'}">${testResult}</span>` : ''}
+          </div>` : ''}
+      </div>
 
       ${error ? html`<div class="text-[12px] text-red-500 mb-2">${error}</div>` : ''}
       ${canConfigure ? html`

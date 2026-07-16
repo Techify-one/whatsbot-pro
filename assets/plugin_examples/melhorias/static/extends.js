@@ -49,7 +49,25 @@ export default function register(api) {
     }];
   });
 
-  // ── 2) Seção na aba "Configurações de IA" ─────────────────────────────────
+  // ── 2) Ação em LOTE na multi-seleção de mensagens (plano 51 · 04 F2) ──────
+  // O seam novo do core (`filter.selection.batchActions`) roda quando a seleção
+  // muda; devolvemos SEMPRE um array (null abortaria a barra). O item só existe
+  // quando TODAS as mensagens selecionadas são respostas da IA elegíveis.
+  api.addFilter('filter.selection.batchActions', async (ctx, items) => {
+    const messages = (ctx && ctx.messages) || [];
+    if (ctx.sandbox || !can('request') || messages.length === 0) return items;
+    const eligible = messages.every((m) => m
+      && m.role === 'assistant' && m.status !== 'operator' && !m.revoked);
+    if (!eligible) return items;
+    return [...items, {
+      label: `Gerar melhoria (${messages.length})`, icon: () => ImproveIcon,
+      onClick: () => api.ui.openModal((close) => html`<${ImproveDialog}
+        api=${api} ctx=${ctx} messages=${messages}
+        onClose=${(ok) => { close(ok); if (ok && ctx.clearSelection) ctx.clearSelection(); }} />`),
+    }];
+  });
+
+  // ── 3) Seção na aba "Configurações de IA" ─────────────────────────────────
   // Recebe `api` (registrada aqui) → tem api.http/api.ui, diferente do painel
   // (screen montada por PluginScreen, que não passa `api`).
   api.addSlot('ai.settings.sections', () => (can('view')
@@ -57,11 +75,13 @@ export default function register(api) {
     : null));
 }
 
-// Diálogo de solicitação: mostra a resposta marcada + textarea opcional
-// ("o que saiu errado?") e faz POST /suggestions. O aviso de sistema com o link
-// chega pela conversa via WS new_message (como antes) — aqui só fechamos.
-function ImproveDialog({ api, ctx, onClose }) {
-  const message = (ctx && ctx.message) || {};
+// Diálogo de solicitação: mostra a(s) resposta(s) marcada(s) + textarea opcional
+// ("o que saiu errado?") e faz POST /suggestions. Multi-seleção (plano 51) manda
+// `messages:[...]`; o caminho single continua `message:{...}` (compat). O aviso
+// de sistema com o link chega pela conversa via WS new_message — aqui só fechamos.
+function ImproveDialog({ api, ctx, messages = null, onClose }) {
+  const list = (messages && messages.length ? messages : [((ctx && ctx.message) || {})])
+    .filter((m) => m && (m.content || '').trim());
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -70,12 +90,21 @@ function ImproveDialog({ api, ctx, onClose }) {
     if (loading) return;
     setLoading(true); setError('');
     try {
-      const res = await api.http.post('/suggestions', {
-        message: { content: message.content, ts: message.ts, _id: message._id },
+      const payload = {
         feedback: (text || '').trim(),
         conversation_id: ctx.conversationId,
         phone: ctx.phone,
-      });
+      };
+      if (list.length > 1) {
+        payload.messages = list.map((m) => ({
+          content: m.content, ts: m.ts, _id: m._id,
+          media_type: m.media_type || null, media_path: m.media_path || null,
+        }));
+      } else {
+        const m = list[0] || {};
+        payload.message = { content: m.content, ts: m.ts, _id: m._id };
+      }
+      const res = await api.http.post('/suggestions', payload);
       if (res && res.ok) { onClose(true); }
       else { setError((res && res.error) || 'Falha ao enviar a solicitação.'); }
     } catch (_) { setError('Erro de conexão.'); }
@@ -89,11 +118,17 @@ function ImproveDialog({ api, ctx, onClose }) {
         onClick=${(e) => e.stopPropagation()}>
         <div class="flex items-center gap-2 text-[15px] font-semibold text-wa-text mb-[14px]">
           <span class="text-wa-teal">${ImproveIcon}</span>
-          Gerar melhoria
+          Gerar melhoria${list.length > 1 ? ` (${list.length} mensagens)` : ''}
         </div>
-        <div class="text-[12px] text-wa-secondary mb-[6px]">Resposta marcada:</div>
-        <div class="text-[13px] text-wa-text bg-wa-bg border border-wa-border rounded p-[10px] mb-[14px] max-h-[120px] overflow-auto whitespace-pre-wrap">
-          ${(message.content || '').trim() || '(sem conteúdo)'}
+        <div class="text-[12px] text-wa-secondary mb-[6px]">
+          ${list.length > 1 ? 'Respostas marcadas (na ordem da seleção):' : 'Resposta marcada:'}
+        </div>
+        <div class="mb-[14px] max-h-[180px] overflow-auto flex flex-col gap-[6px]">
+          ${list.map((m, i) => html`
+            <div key=${m._id || i}
+              class="text-[13px] text-wa-text bg-wa-bg border border-wa-border rounded p-[10px] whitespace-pre-wrap">
+              ${(m.content || '').trim() || '(sem conteúdo)'}
+            </div>`)}
         </div>
         <label class="block text-[12px] text-wa-secondary mb-[4px]">O que saiu errado? (opcional)</label>
         <textarea class="wa-field w-full rounded p-[8px] text-[13px] mb-[6px]" rows="3"
