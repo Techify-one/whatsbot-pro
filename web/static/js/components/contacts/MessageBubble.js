@@ -23,6 +23,9 @@ export function MessageBubble({
   isGroup, sandbox, displayName, fmt,
   findQuoted, quotedInfo, focusMessage, openMsgMenu, myReaction, handleRetry,
   showAgentName = true,
+  // plano 51 (04 F1): batch selection mode. Presentational only — the container
+  // owns the Set; here we just render the checkbox/realce and route the click.
+  selectionMode = false, selected = false, onToggleSelect = null,
 }) {
   const isUser = m.role === 'user';
   const isFailed = m._status === 'failed' || m.status === 'failed';
@@ -51,15 +54,22 @@ export function MessageBubble({
   const sColor = senderColor(isUser, isOperator);
 
   return html`
-    <div key=${m._localId || i} data-mid=${m._id} class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'} ${(m.reactions && Object.keys(m.reactions).length) ? 'mb-[14px]' : ''}">
+    <div key=${m._localId || i} data-mid=${m._id}
+      onClick=${(selectionMode && onToggleSelect) ? (() => onToggleSelect(m)) : null}
+      class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'} ${(m.reactions && Object.keys(m.reactions).length) ? 'mb-[14px]' : ''}${selectionMode ? ` relative pl-[34px] cursor-pointer rounded-[8px] ${selected ? 'bg-wa-teal/10' : 'hover:bg-wa-hover/60'}` : ''}">
+      ${selectionMode ? html`
+        <span class="absolute left-[6px] top-1/2 -translate-y-1/2 w-[20px] h-[20px] rounded-full border-2 flex items-center justify-center shrink-0 ${selected ? 'bg-wa-teal border-wa-teal' : 'border-wa-secondary bg-wa-panel'}">
+          ${selected ? html`<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="white" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>` : ''}
+        </span>
+      ` : ''}
       <div
-        onContextMenu=${(e) => openMsgMenu(e, m, isFromMe)}
+        onContextMenu=${selectionMode ? null : ((e) => openMsgMenu(e, m, isFromMe))}
         class="wa-bubble group max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
         !isFromMe
           ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
           : `${isFailed ? 'text-wa-text' : 'bg-wa-outgoing text-wa-text'} ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
       }" style="${isFailed ? 'background: #fce8e8;' : ''}">
-        <button
+        ${selectionMode ? '' : html`<button
           onClick=${(e) => openMsgMenu(e, m, isFromMe)}
           class="absolute top-[2px] right-[2px] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-full p-[1px] hover:bg-black/10"
           title="Opções da mensagem"
@@ -67,7 +77,7 @@ export function MessageBubble({
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="text-wa-secondary">
             <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
           </svg>
-        </button>
+        </button>`}
         <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${sColor};">${senderLabel}</span>
         ${(!m.revoked && m.reply_to_msg_id) ? (() => {
           const qmsg = findQuoted(m.reply_to_msg_id);

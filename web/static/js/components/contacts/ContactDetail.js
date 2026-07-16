@@ -9,7 +9,7 @@ import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon } from './
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { Slot } from '../../plugins/Slot.js';
-import { emit as emitClientEvent, applyFilter } from '../../plugins/registry.js';
+import { emit as emitClientEvent, applyFilter, getFilters } from '../../plugins/registry.js';
 import { MessageBubble } from './MessageBubble.js';
 import { SystemMessageCard, isSystemCardRole } from './SystemMessageCard.js';
 import { Composer } from './Composer.js';
@@ -17,7 +17,7 @@ import { useComposer } from './hooks/useComposer.js';
 import { useAudioRecorder } from './hooks/useAudioRecorder.js';
 import { useMediaUpload } from './hooks/useMediaUpload.js';
 import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
-import { useMessageActions, myReaction } from './hooks/useMessageActions.js';
+import { useMessageActions, myReaction, selectionKey } from './hooks/useMessageActions.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
 import { senderColor, quotedMediaText } from '../../services/messageView.js';
@@ -27,6 +27,12 @@ const html = htm.bind(h);
 
 // Quick-reaction emojis shown in the message context menu bar (WhatsApp-style).
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+// Ícone do item "Selecionar mensagens" (plano 51 · 04 F1).
+const SelectManyIcon = () => html`
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z"/>
+  </svg>`;
 
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 //
@@ -109,6 +115,33 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const audio = useAudioRecorder({
     onRecorded: (item) => media.setPendingAudio(item),
   });
+
+  // ── Seleção em lote (plano 51 · 04 F1) ─────────────────────────
+  // As mensagens completas resolvidas do Set de chaves + os itens de ação vindos
+  // do seam `filter.selection.batchActions` (async → resolvidos num efeito e
+  // guardados em estado; a barra só existe em selectionMode). Trocar de conversa
+  // sai do modo de seleção.
+  const [batchItems, setBatchItems] = useState([]);
+  const selectedMessages = actions.selectionMode
+    ? (messages || []).filter(m => actions.selection.has(selectionKey(m)))
+    : [];
+  useEffect(() => { actions.clearSelection(); }, [phone, conversationId]);
+  useEffect(() => {
+    if (!actions.selectionMode) { setBatchItems([]); return; }
+    let alive = true;
+    (async () => {
+      let items = [];
+      try {
+        const out = await applyFilter('filter.selection.batchActions', [], {
+          messages: selectedMessages, phone, conversationId, sandbox,
+          clearSelection: actions.clearSelection,
+        });
+        if (Array.isArray(out)) items = out;
+      } catch (_) { /* barra fica sem ações de plugin */ }
+      if (alive) setBatchItems(items);
+    })();
+    return () => { alive = false; };
+  }, [actions.selectionMode, actions.selection, messages]);
 
   // ── Scroll / search-hit jump ───────────────────────────────────
   // Remember a message to focus (e.g. opened from a search hit) until it renders,
@@ -247,6 +280,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       { label: 'Copiar link da mensagem', icon: LinkIcon,
         disabled: !actions.messagePermalink(message),
         onClick: () => actions.copyMessageLink(message) },
+      // plano 51 (04 F1): entra no modo de seleção em lote — só existe quando
+      // algum plugin registrou uma ação de lote (sem plugin, menu byte-idêntico).
+      ...(getFilters('filter.selection.batchActions').length ? [
+        { label: 'Selecionar mensagens', icon: SelectManyIcon,
+          onClick: () => actions.enterSelection(message) },
+      ] : []),
       ...((canReply && !message.revoked) ? [
         { label: 'Apagar', icon: TrashIcon, danger: true,
           onClick: () => actions.setDeleteDialog({ message, isFromMe }) },
@@ -363,10 +402,38 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 isGroup=${isGroup} sandbox=${sandbox} displayName=${displayName} fmt=${fmt}
                 findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${focusMessage}
                 openMsgMenu=${openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null}
-                showAgentName=${showAgentName} />`];
+                showAgentName=${showAgentName}
+                selectionMode=${actions.selectionMode}
+                selected=${actions.selectionMode && actions.selection.has(selectionKey(m))}
+                onToggleSelect=${actions.toggleSelect} />`];
             })
         }
       </div>
+
+      <!-- Barra de ação em lote (plano 51 · 04 F1): só existe em selectionMode. -->
+      ${actions.selectionMode ? html`
+        <div class="flex items-center gap-2 px-[4%] lg:px-[7%] py-2 bg-wa-panel border-t border-wa-border shrink-0">
+          <button
+            onClick=${actions.clearSelection}
+            class="text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
+            title="Cancelar seleção"
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+          </button>
+          <span class="text-wa-text text-[14px] font-medium flex-1">
+            ${selectedMessages.length} ${selectedMessages.length === 1 ? 'selecionada' : 'selecionadas'}
+          </span>
+          ${batchItems.map((item) => html`
+            <button
+              onClick=${item.onClick}
+              disabled=${!!item.disabled}
+              class="flex items-center gap-1.5 text-[13px] font-medium rounded-full px-3 py-1.5 transition-colors ${item.disabled ? 'text-wa-secondary bg-wa-hover cursor-not-allowed' : 'text-white bg-wa-teal hover:brightness-95'}"
+            >
+              ${item.icon ? html`<${item.icon} />` : ''}${item.label}
+            </button>
+          `)}
+        </div>
+      ` : ''}
 
       <!-- Composer: input bar (wires composer/autocomplete/media/audio hooks).
            P48: hidden entirely without conversation.reply — read-only banner. -->

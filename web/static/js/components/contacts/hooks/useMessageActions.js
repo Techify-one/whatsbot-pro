@@ -30,6 +30,13 @@ export function myReaction(message) {
  * @param {any} opts.conversationId
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  */
+// Stable selection key for a message: saved rows have `_id` (db id); optimistic
+// ones only `_localId` (plano 51 · 04 F1 — `_id ?? _localId`).
+export function selectionKey(m) {
+  if (!m) return null;
+  return m._id != null ? m._id : (m._localId != null ? m._localId : null);
+}
+
 export function useMessageActions({ phone, conversationId, setContactData }) {
   // Per-message context menu: { x, y, message, isFromMe, items } | null.
   // `items` is resolved by the caller (ContactDetail) when the menu opens — base
@@ -37,6 +44,33 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
   const [deleteDialog, setDeleteDialog] = useState(null);
+  // plano 51 (04 F1): batch message-selection mode. Off by default; entered via
+  // the "Selecionar mensagens" context-menu item (which only exists when some
+  // plugin registered `filter.selection.batchActions`). `selection` holds the
+  // stable keys (see selectionKey) of the marked messages.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selection, setSelection] = useState(() => new Set());
+
+  function enterSelection(firstMsg) {
+    const key = selectionKey(firstMsg);
+    setSelection(key != null ? new Set([key]) : new Set());
+    setSelectionMode(true);
+  }
+
+  function toggleSelect(message) {
+    const key = selectionKey(message);
+    if (key == null) return;
+    setSelection(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectionMode(false);
+    setSelection(new Set());
+  }
 
   // Helper to find and update a message by its local ID
   function updateMsgByLocalId(localId, updater) {
@@ -134,5 +168,6 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     msgMenu, setMsgMenu, deleteDialog, setDeleteDialog,
     updateMsgByLocalId, copyMessageText, messagePermalink, copyMessageLink,
     performDelete, performReact,
+    selectionMode, selection, enterSelection, toggleSelect, clearSelection,
   };
 }
