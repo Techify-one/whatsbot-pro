@@ -512,6 +512,16 @@ function DetailModal({ detail, canApprove, backend = 'direct', apiBase = '/api/p
               suggestion=${d} conversation=${conversation}
               onAuthError=${() => setRelogin(true)}
               onConversationEnd=${onRefresh} />
+            ${(conversation.status === 'ERRORED' || conversation.status === 'CANCELLED') ? html`
+              <div class="flex items-center justify-between mt-2">
+                <span class="text-[12px] text-wa-secondary">
+                  A conversa anterior não foi concluída — dá para reiniciar a análise do zero (novo contexto completo).
+                </span>
+                <button onClick=${startChat} disabled=${starting}
+                  class="px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90 disabled:opacity-50 shrink-0">
+                  ${starting ? 'Iniciando…' : 'Reiniciar análise'}</button>
+              </div>` : ''}
+            ${startError ? html`<div class="text-[12px] text-red-500 mt-1">${startError}</div>` : ''}
           </div>` : ''}
 
         ${!agentic || d.status !== 'pendente' ? html`
