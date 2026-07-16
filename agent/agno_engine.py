@@ -81,8 +81,9 @@ def _truncate_result(value, limit: int = TOOL_RESULT_MAX_CHARS):
 
 # plano 36 F3: capture of the FULL context sent to the LLM (system prompt +
 # message array) onto an ``llm_context`` step, gated by the ``execution_capture_context``
-# kill-switch (default OFF). Each message is truncated and base64 blobs are scrubbed
-# so a media-heavy turn does not bloat the DB.
+# kill-switch (default ON since plano 51 — the agentic improvement needs the EXACT
+# prompt/history the model saw; the switch remains to turn it off). Each message is
+# truncated and base64 blobs are scrubbed so a media-heavy turn does not bloat the DB.
 LLM_CONTEXT_MSG_MAX_CHARS = 2000
 LLM_CONTEXT_TOTAL_MAX_CHARS = 20000
 _BASE64_DATA_URI_RE = re.compile(r"data:[^;,\s]*;base64,[A-Za-z0-9+/=]+")
@@ -90,10 +91,15 @@ _LONG_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
 
 
 def _context_capture_enabled() -> bool:
-    """Read the ``execution_capture_context`` kill-switch (default OFF, best-effort)."""
+    """Read the ``execution_capture_context`` kill-switch (default ON, best-effort).
+
+    plano 51 (01 F2 · DL1): a captura exata passa a ser o default — a melhoria
+    agêntica reconstrói o que a IA viu a partir do step ``llm_context``. Um erro
+    de leitura da config continua fail-closed (não captura) para nunca quebrar o
+    turno."""
     try:
         from db.repositories import config_repo
-        return bool(config_repo.get("execution_capture_context", False))
+        return bool(config_repo.get("execution_capture_context", True))
     except Exception:
         return False
 

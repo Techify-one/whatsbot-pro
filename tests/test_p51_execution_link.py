@@ -124,6 +124,21 @@ def test_split_reply_parts_share_execution_id(build_app):
     assert found and found["id"] == exec_id
 
 
+# ── 01 F2 — captura de contexto exato: default ON, kill-switch intacto ───────
+
+def test_capture_context_default_on_when_key_absent(_engine_ready):
+    from db.repositories import config_repo
+    from agent import agno_engine
+
+    config_repo.delete_prefix("execution_capture_context")
+    try:
+        assert agno_engine._context_capture_enabled() is True
+        config_repo.set("execution_capture_context", False)
+        assert agno_engine._context_capture_enabled() is False
+    finally:
+        config_repo.delete_prefix("execution_capture_context")
+
+
 def test_find_execution_falls_back_to_none_for_legacy_rows(build_app):
     """Linha legada (execution_id NULL) não quebra: o helper devolve None e o
     consumidor (plugin) cai no fuzzy dele — DL2."""
