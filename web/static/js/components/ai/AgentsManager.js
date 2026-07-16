@@ -693,7 +693,7 @@ export default function AgentsManager({ initialEntity, currentUser }) {
   }
 
   async function handleDelete(a) {
-    if (a.agent_key === 'default') return;
+    if (a.agent_key === fallbackKey) return; // fallback atual — o backend também recusa
     if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Conversas vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
     setError('');
     const res = await deleteAgent(a.agent_key);
@@ -720,6 +720,14 @@ export default function AgentsManager({ initialEntity, currentUser }) {
     if (res && res.ok) { setHistoryFor(null); load(); }
     else setError((res && res.error) || 'Falha ao reverter a versão.');
   }
+
+  // Fallback atual do sistema (fix agente-padrão): o agente is_default habilitado,
+  // ou o "default" legado quando nenhum está marcado. É o único que não pode ser
+  // excluído — o botão some para ele (o backend recusa de qualquer forma) e o chip
+  // "padrão" marca o "default" legado apenas enquanto ele for de fato o fallback.
+  const fallbackAgent = agents.find(x => x.is_default && x.enabled)
+    || agents.find(x => x.agent_key === 'default');
+  const fallbackKey = fallbackAgent ? fallbackAgent.agent_key : null;
 
   const formOpen = !!editing || !!creating;
 
@@ -782,7 +790,7 @@ export default function AgentsManager({ initialEntity, currentUser }) {
                   : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>`}
                 ${a.is_router ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal">router</span>` : null}
                 ${a.is_default ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-500/10 text-blue-600">novas conversas</span>` : null}
-                ${a.agent_key === 'default' ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
+                ${a.agent_key === fallbackKey && !a.is_default ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
               </div>
               <div class="text-[12px] text-wa-secondary mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                 <span>modelo: <span class="font-mono">${(a.model_config && a.model_config.model) || 'padrão'}</span></span>
@@ -810,7 +818,7 @@ export default function AgentsManager({ initialEntity, currentUser }) {
                 <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                   onClick=${() => openHistory(a)}>Histórico</button>
               ` : null}
-              ${(a.agent_key !== 'default' && canConfig) ? html`
+              ${(a.agent_key !== fallbackKey && canConfig) ? html`
                 <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
                   onClick=${() => handleDelete(a)}>Excluir</button>
               ` : null}

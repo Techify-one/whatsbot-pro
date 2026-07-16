@@ -128,13 +128,18 @@ def render_template(body: str, variables: dict[str, str]) -> str:
 
 
 def seed_default_agent(settings=None) -> None:
-    """Create the default agent row if absent (idempotent).
+    """Create the default agent row if absent (idempotent "ensure").
 
     Seeds from the in-code constants (:data:`DEFAULT_SYSTEM_PROMPT` /
     :data:`DEFAULT_MODEL`) with the prompt stored inline on the agent. Never
     overwrites an existing row (no version bump), so user edits in the DB are
     preserved across boots. ``settings`` is accepted for backwards-compatible call
     sites but is no longer used.
+
+    Fix agente-padrão (2026-07): o BOOT só chama isto quando ``ai_agents`` está
+    vazia (instalação nova — gate em ``server/app.py``), senão um agente
+    ``default`` excluído pelo operador ressuscitaria a cada boot. O helper em si
+    continua "ensure" incondicional — testes e seeds pontuais dependem disso.
     """
     try:
         agent_repo.ensure(

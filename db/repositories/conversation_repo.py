@@ -55,16 +55,28 @@ def default_agent_key_for_inbox(inbox_id: int) -> str | None:
             return inbox["default_agent_key"]
     except Exception:
         logger.debug("conversation create: inbox default_agent_key lookup failed")
-    # plano 36: agente marcado como padrão de novas conversas (is_default=1) — só
-    # vale para o CARIMBO de criação; o runtime segue no piso "default". Conversas
-    # em andamento não mudam. Só adota se o agente existe e está habilitado.
+    # plano 36 + fix agente-padrão (2026-07): agente marcado como padrão de novas
+    # conversas (is_default=1). Desde o fix, o RUNTIME também honra a marcação
+    # (agent_repo.get_default), então carimbo e fallback são o mesmo agente.
+    # Conversas em andamento não mudam. Só adota se existe e está habilitado.
     try:
         entry = agent_repo.get_new_conversation_default()
         if entry and entry.get("enabled") and entry.get("agent_key"):
             return entry["agent_key"]
     except Exception:
         logger.debug("conversation create: is_default agent lookup failed")
-    return agent_repo.DEFAULT_AGENT_KEY
+    # Piso legado: a chave literal "default", só se a row ainda existe e está
+    # habilitada (pós-fix ela é excluível). Sem piso → None: a conversa nasce sem
+    # carimbo e o runtime resolve o fallback do momento (self-healing). Antes o
+    # retorno era o literal "default" incondicional — inclusive no ramo de exceção
+    # acima, o que gravava um vínculo errado quando a consulta falhava.
+    try:
+        legacy = agent_repo.get(agent_repo.DEFAULT_AGENT_KEY)
+        if legacy and legacy.get("enabled"):
+            return agent_repo.DEFAULT_AGENT_KEY
+    except Exception:
+        logger.debug("conversation create: legacy default agent lookup failed")
+    return None
 
 
 def _default_ai_enabled() -> bool:

@@ -47,6 +47,16 @@ def _clear_defaults():
                      .values(is_default=0))
 
 
+@pytest.fixture(autouse=True)
+def _floor_agent(_engine_ready):
+    """Garante a row do piso legado ('default') antes de cada teste.
+
+    Numa instalação real ela nasce no seed do boot; o banco de teste só roda as
+    migrations, e desde o fix agente-padrão o piso exige a ROW viva (antes o
+    código devolvia a string literal sem consultar o banco)."""
+    agent_repo.ensure(agent_repo.DEFAULT_AGENT_KEY, display_name="Agente padrão")
+
+
 # ---------------------------------------------------------------- F2: agent_repo
 
 def test_save_is_default_radio_demotes_previous(_engine_ready):
@@ -144,3 +154,66 @@ def test_existing_conversation_not_rebound(_engine_ready):
         assert again["active_agent_key"] == agent_repo.DEFAULT_AGENT_KEY
     finally:
         conversation_repo.set_status(conv["id"], "closed")
+
+
+# ------------------------------------------- fix agente-padrão (2026-07)
+# O fallback de RUNTIME passa a honrar o is_default (get_default resolve o
+# marcado primeiro), e o agente 'default' legado vira excluível assim que outro
+# carrega a marcação — a trava deixa de ser a chave e vira "é o fallback atual".
+
+def test_get_default_resolves_is_default_first(_engine_ready):
+    _clear_defaults()
+    _seed_agent("p36_fb")
+    # Sem marcação: piso legado.
+    assert agent_repo.get_default()["agent_key"] == agent_repo.DEFAULT_AGENT_KEY
+    # Marcado: o runtime cai NELE (era o bug — fechar+reabrir voltava ao 'default').
+    _seed_agent("p36_fb", is_default=True)
+    assert agent_repo.get_default()["agent_key"] == "p36_fb"
+    assert agent_repo.get_fallback_key() == "p36_fb"
+    # Marcado porém desabilitado não vale como fallback — volta ao piso legado.
+    _seed_agent("p36_fb", is_default=True, enabled=False)
+    assert agent_repo.get_default()["agent_key"] == agent_repo.DEFAULT_AGENT_KEY
+
+
+def test_delete_refuses_current_fallback(_engine_ready):
+    _clear_defaults()
+    # Sem marcação, o fallback é o 'default' legado — não sai.
+    assert agent_repo.delete(agent_repo.DEFAULT_AGENT_KEY) is False
+    # Com outro agente marcado, ELE vira o intocável e o 'default' é excluível.
+    _seed_agent("p36_crown", is_default=True)
+    assert agent_repo.delete("p36_crown") is False
+    assert agent_repo.delete(agent_repo.DEFAULT_AGENT_KEY) is True
+    assert agent_repo.get(agent_repo.DEFAULT_AGENT_KEY) is None
+    # Restaura o piso imediatamente (outros testes do processo assumem a row).
+    agent_repo.ensure(agent_repo.DEFAULT_AGENT_KEY, display_name="Agente padrão")
+
+
+def test_delete_unbinds_conversations(_engine_ready):
+    _clear_defaults()
+    _seed_agent("p36_gone")
+    contact, ci = _make_pair("5511990036003")
+    conv = conversation_repo.create(
+        inbox_id=INBOX_ID, contact_id=contact["id"], contact_inbox_id=ci["id"],
+        active_agent_key="p36_gone")
+    try:
+        assert conv["active_agent_key"] == "p36_gone"
+        assert agent_repo.delete("p36_gone") is True
+        # A exclusão limpa o vínculo na mesma transação → NULL (runtime resolve
+        # o fallback do momento), nunca uma chave pendurada.
+        again = conversation_repo.get(conv["id"])
+        assert again["active_agent_key"] is None
+    finally:
+        conversation_repo.set_status(conv["id"], "closed")
+
+
+def test_stamp_and_fallback_none_when_floor_deleted(_engine_ready):
+    _clear_defaults()
+    _seed_agent("p36_crown2", is_default=True)
+    assert agent_repo.delete(agent_repo.DEFAULT_AGENT_KEY) is True
+    _clear_defaults()  # desmarca tudo → sistema sem padrão marcado e sem piso
+    try:
+        assert conversation_repo.default_agent_key_for_inbox(INBOX_ID) is None
+        assert agent_repo.get_default() is None
+        assert agent_repo.get_fallback_key() is None
+    finally:
+        agent_repo.ensure(agent_repo.DEFAULT_AGENT_KEY, display_name="Agente padrão")

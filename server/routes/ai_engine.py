@@ -119,10 +119,34 @@ def register_routes(app, deps):
         version_mode = body.get("version_mode", "new")
         if version_mode not in ("new", "amend"):
             return _err("version_mode deve ser 'new' ou 'amend'.")
-        # Plano 22: the default agent is the engine's fallback (build_for_contact
-        # cascade always lands on it) — it must never be disabled.
-        if agent_key == agent_repo.DEFAULT_AGENT_KEY and not bool(body.get("enabled", True)):
-            return _err("O agente padrão não pode ser desativado.", status=400)
+        # Fix agente-padrão (2026-07, evolui o plano 22): a trava deixa de ser a
+        # CHAVE literal "default" e passa a ser SEMÂNTICA — o agente que é o
+        # FALLBACK atual do sistema (o is_default habilitado, ou o "default"
+        # legado sem marcação) não pode ser desativado; qualquer outro pode.
+        if not bool(body.get("enabled", True)):
+            fallback_key = await asyncio.to_thread(agent_repo.get_fallback_key)
+            if agent_key == fallback_key:
+                return _err(
+                    "Este agente é o padrão (fallback) atual do sistema e não pode "
+                    "ser desativado. Marque outro agente como 'Padrão para novas "
+                    "conversas' primeiro.", status=400)
+        # O padrão precisa estar vivo: marcar is_default num agente desativado
+        # deixaria o sistema sem fallback utilizável.
+        if bool(body.get("is_default", False)) and not bool(body.get("enabled", True)):
+            return _err("O agente padrão para novas conversas precisa estar "
+                        "habilitado.", status=400)
+        # Desmarcar o único padrão só é permitido enquanto o piso legado (agente
+        # de chave "default") existir habilitado para assumir o fallback.
+        if (existing is not None and existing.get("is_default")
+                and not bool(body.get("is_default", False))):
+            legacy = await asyncio.to_thread(agent_repo.get, agent_repo.DEFAULT_AGENT_KEY)
+            if agent_key != agent_repo.DEFAULT_AGENT_KEY \
+                    and not (legacy and legacy.get("enabled")):
+                return _err(
+                    "Este é o padrão atual e o agente 'default' legado não existe "
+                    "mais para assumir o fallback. Marque outro agente como "
+                    "'Padrão para novas conversas' antes de desmarcar este.",
+                    status=400)
         # Prompt é permissão separada (agent.prompts.edit). Quem só tem
         # agent.config.manage edita modelo/tools/roteamento mas NÃO altera o
         # prompt: preservamos o prompt atual (agente novo nasce sem prompt →
@@ -190,8 +214,15 @@ def register_routes(app, deps):
     @app.delete("/api/ai/agents/{agent_key}",
                 dependencies=[Depends(require_permission("agent.config.manage"))])
     async def delete_agent(agent_key: str):
-        if agent_key == agent_repo.DEFAULT_AGENT_KEY:
-            return _err("O agente padrão não pode ser excluído.", status=400)
+        # Fix agente-padrão (2026-07): a trava é semântica — o FALLBACK atual do
+        # sistema não pode ser excluído; o "default" legado passa a ser excluível
+        # assim que outro agente carrega a marcação de padrão.
+        fallback_key = await asyncio.to_thread(agent_repo.get_fallback_key)
+        if agent_key == fallback_key:
+            return _err(
+                "Este agente é o padrão (fallback) atual do sistema e não pode ser "
+                "excluído. Marque outro agente como 'Padrão para novas conversas' "
+                "primeiro.", status=400)
         # Refuse while the agent is still a routing target of some router, so a
         # router never points at a vanished agent. The user removes it there first.
         try:

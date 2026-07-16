@@ -3029,8 +3029,42 @@ client.put("/api/ai/agents/p36e_b/prompt", json={"prompt": "novo prompt"})
 check("P36 patch só-prompt preserva is_default",
       (_agent_repo.get("p36e_b") or {}).get("is_default") is True)
 client.delete("/api/ai/agents/p36e_a")
-client.delete("/api/ai/agents/p36e_b")
-# Invariante do agente default (Fase 5): não pode ser desativado nem excluído.
+# ── Fix agente-padrão (2026-07): a trava de excluir/desativar é SEMÂNTICA ──
+# O fallback atual do sistema (o is_default habilitado, ou o 'default' legado
+# sem marcação) é intocável; qualquer outro — inclusive o 'default' — sai.
+r = client.delete("/api/ai/agents/p36e_b")
+check("fix padrão: excluir o agente marcado (fallback atual) -> 400",
+      r.status_code == 400)
+r = client.put("/api/ai/agents/default", json={
+    "display_name": "Agente padrão", "prompt_key": "default",
+    "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": False})
+check("fix padrão: desativar 'default' com outro padrão marcado -> 200",
+      r.status_code == 200)
+check("fix padrão: 'default' ficou desabilitado",
+      not (_agent_repo.get("default") or {}).get("enabled"))
+r = client.put("/api/ai/agents/p36e_tmp_off", json={
+    "display_name": "Tmp", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": False, "is_default": True})
+check("fix padrão: marcar is_default num agente desabilitado -> 400",
+      r.status_code == 400)
+# Desmarcar o padrão exige o piso legado vivo: com 'default' desabilitado -> 400.
+r = client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": False})
+check("fix padrão: desmarcar sem piso legado habilitado -> 400",
+      r.status_code == 400)
+# Reabilita o 'default' → desmarcar passa a valer, e o ex-padrão vira excluível.
+client.put("/api/ai/agents/default", json={
+    "display_name": "Agente padrão", "prompt_key": "default",
+    "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": True})
+r = client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": False})
+check("fix padrão: desmarcar com piso legado vivo -> 200", r.status_code == 200)
+r = client.delete("/api/ai/agents/p36e_b")
+check("fix padrão: excluir o ex-padrão desmarcado -> 200", r.status_code == 200)
+# Invariante do agente default (Fase 5, agora semântico): sem nenhum is_default
+# marcado o 'default' legado É o fallback — não pode ser desativado nem excluído.
 r = client.put("/api/ai/agents/default", json={
     "display_name": "Agente padrão", "prompt_key": "default",
     "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": False})

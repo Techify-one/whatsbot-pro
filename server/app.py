@@ -214,7 +214,14 @@ def create_app(
     # registry's collision no-op gives precedence to code over the DB. Both
     # steps are best-effort: a failure never blocks the app from booting.
     try:
-        agent_factory.seed_default_agent(settings)
+        # Fix agente-padrão (2026-07): só semeia o agente "default" em instalação
+        # NOVA (tabela vazia). Antes o boot recriava a row sempre que ausente —
+        # o que ressuscitava um "default" que o operador tinha excluído (a
+        # exclusão só é permitida com outro agente marcado como padrão, então
+        # uma instalação com agentes nunca fica sem fallback).
+        from db.repositories import agent_repo as _agent_repo
+        if not _agent_repo.list_all():
+            agent_factory.seed_default_agent(settings)
         # Plano 22: preserve any legacy config.system_prompt/model into the
         # canonical default agent before those config keys are retired (idempotent).
         agent_factory.migrate_legacy_config_to_default_agent()

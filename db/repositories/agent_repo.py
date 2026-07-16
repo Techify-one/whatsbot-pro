@@ -21,7 +21,7 @@ from sqlalchemy import select
 from db.engine import get_engine
 from db.repositories import agent_prompt_repo
 from db.repositories._mapping import coerce_json
-from db.tables import ai_agents, ai_agents_history
+from db.tables import ai_agents, ai_agents_history, atendimentos, inboxes
 from db.upsert import upsert, upsert_ignore
 
 DEFAULT_AGENT_KEY = "default"
@@ -77,7 +77,33 @@ def get(agent_key: str) -> dict | None:
 
 
 def get_default() -> dict | None:
+    """The system's FALLBACK agent — the one the runtime cascade lands on.
+
+    Unifica os dois "padrões" (fix agente-padrão, 2026-07): o agente marcado
+    ``is_default=1`` (plano 36, "Padrão para novas conversas") é TAMBÉM o fallback
+    de runtime quando existe e está habilitado; só sem marcação o sistema cai no
+    piso legado — a row de chave literal ``"default"``. Retorna ``None`` quando
+    nenhum dos dois existe (caller degrada para o piso de emergência in-code).
+    Antes o runtime ignorava a marcação e caía SEMPRE na chave ``"default"`` —
+    era por isso que fechar+reabrir um atendimento voltava ao "Agente padrão"
+    mesmo com outro agente marcado.
+    """
+    entry = get_new_conversation_default()
+    if entry and entry.get("enabled"):
+        return entry
     return get(DEFAULT_AGENT_KEY)
+
+
+def get_fallback_key() -> str | None:
+    """Key do agente que :func:`get_default` resolve AGORA (``None`` se nenhum).
+
+    Usado pelos guards de exclusão/desativação: o fallback atual do sistema não
+    pode ser removido nem desativado — marque outro agente como padrão primeiro.
+    """
+    row = get_default()
+    if row and row.get("enabled"):
+        return row["agent_key"]
+    return None
 
 
 def display_name_for(agent_key: str | None) -> str | None:
@@ -304,9 +330,10 @@ def _demote_other_defaults(conn, agent_key: str, now: float) -> list[str]:
 def get_new_conversation_default() -> dict | None:
     """The agent marked as the default for NEW conversations (plano 36), or ``None``.
 
-    Distinct from :func:`get_default` (the literal ``"default"`` key — the emergency
-    floor used by the runtime). Only the creation stamp
-    (``conversation_repo.default_agent_key_for_inbox``) consults this.
+    Consulted by the creation stamp (``conversation_repo.default_agent_key_for_inbox``)
+    AND by :func:`get_default` (fix agente-padrão, 2026-07): the marked agent is also
+    the runtime fallback, so "novas conversas" e "padrão do sistema" são o MESMO
+    conceito. Retorna a row crua (sem filtrar ``enabled`` — cada caller decide).
     """
     with get_engine().connect() as conn:
         row = conn.execute(
@@ -394,13 +421,18 @@ def rollback(agent_key: str, version: int, preserve_prompt: bool = False,
 def delete(agent_key: str) -> bool:
     """Remove an agent and its version history. Returns ``True`` if a row went.
 
-    The ``default`` agent is the engine fallback (``_resolve_active_agent``) and
-    must never be removed — refuse defensively even though the route guards too.
-    Conversations/inboxes still pointing at the deleted key degrade gracefully to
-    the default; ``executions.agent_key`` is historical and intentionally left
-    untouched (no FK), so usage history survives.
+    O agente que é o FALLBACK atual do sistema (:func:`get_fallback_key` — o
+    marcado ``is_default``, ou a chave literal ``"default"`` sem marcação) nunca
+    pode ser removido: a cascata de runtime cai nele. Qualquer OUTRO agente —
+    inclusive o ``"default"`` legado, desde que outro carregue a marcação — é
+    removível (fix agente-padrão, 2026-07). Refuse defensively even though the
+    route guards too. Na MESMA transação, limpa as referências: atendimentos
+    vinculados e inboxes com ``default_agent_key`` apontando pro excluído voltam
+    a NULL (o runtime então resolve o fallback do momento).
+    ``executions.agent_key`` is historical and intentionally left untouched
+    (no FK), so usage history survives.
     """
-    if agent_key == DEFAULT_AGENT_KEY:
+    if agent_key == get_fallback_key():
         return False
     with get_engine().begin() as conn:
         conn.execute(
@@ -409,4 +441,15 @@ def delete(agent_key: str) -> bool:
         result = conn.execute(
             ai_agents.delete().where(ai_agents.c.agent_key == agent_key)
         )
+        if (result.rowcount or 0) > 0:
+            conn.execute(
+                atendimentos.update()
+                .where(atendimentos.c.active_agent_key == agent_key)
+                .values(active_agent_key=None)
+            )
+            conn.execute(
+                inboxes.update()
+                .where(inboxes.c.default_agent_key == agent_key)
+                .values(default_agent_key=None)
+            )
     return (result.rowcount or 0) > 0
