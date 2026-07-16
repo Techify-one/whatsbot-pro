@@ -207,6 +207,15 @@ async def send_agentic_message(cid: str, body: dict, request: Request):
         await ai_client.send(cid, user_id=uid, text=text, parts=parts)
     except Exception as e:  # noqa: BLE001
         return _err(f"Falha ao enviar ao executor: {e}", status=502)
+    # O executor só persiste as mensagens do ASSISTANT (write-through); a do
+    # humano é persistida AQUI (a mensagem inicial de contexto do start não é
+    # persistida de propósito — não polui a hidratação do chat).
+    try:
+        await asyncio.to_thread(
+            chat_logic.append_chat_message, cid, "user",
+            content=text.strip() or "[imagem enviada]")
+    except Exception:  # noqa: BLE001 — persistência best-effort
+        pass
     return {"ok": True, "data": {"sent": True}}
 
 
