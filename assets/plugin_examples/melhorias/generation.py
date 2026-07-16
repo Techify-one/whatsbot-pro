@@ -36,7 +36,7 @@ from typing import Protocol
 
 from agent import agent_factory, history_filter
 from ai_engine import dynamic_registry
-from db.repositories import agent_repo, config_repo, execution_repo, message_repo
+from db.repositories import agent_repo, config_repo, message_repo
 
 logger = logging.getLogger(__name__)
 
@@ -99,80 +99,15 @@ class SuggestionGenerator(Protocol):
     def generate(self, ctx: GenContext) -> GenResult: ...
 
 
-# ── Helpers (portados do improvement_service, intactos) ──────────────────────
+# ── Helpers de trace (plano 51 · 01 F4: fonte única no CORE) ─────────────────
+# Os helpers de reconstrução viraram ``app.services.execution_trace`` (mesmo
+# processo — import direto). Os aliases locais preservam a assinatura pública
+# deste módulo; o fuzzy continua sendo o plano B quando ``execution_id`` é NULL.
+from app.services import execution_trace as _trace
 
-def _find_execution_around(phone: str, ts: float) -> dict | None:
-    """Best-effort: a execução COMPLETA (steps + routing) que produziu ``ts``.
-
-    Encontra a execução cuja janela ``[started_at - 5s, completed_at + 15s]``
-    contém o ts da resposta marcada. Degrada para ``None`` quando nada casa ou o
-    tracking está indisponível — a análise ainda funciona, só sem as seções de
-    tools/cadeia."""
-    try:
-        executions = execution_repo.list_executions(limit=50, phone=phone)
-    except Exception as e:
-        logger.debug("list_executions failed for %s: %s", phone, e)
-        return None
-    target = None
-    for ex in executions:
-        started = ex.get("started_at")
-        if started is None:
-            continue
-        completed = ex.get("completed_at") or started
-        if (started - 5) <= ts <= (completed + 15):
-            target = ex
-            break
-    if not target:
-        return None
-    try:
-        return execution_repo.get_by_id(target["id"])
-    except Exception as e:
-        logger.debug("get_by_id failed for execution %s: %s", target.get("id"), e)
-        return None
-
-
-def _tools_used(execution: dict | None) -> list[dict]:
-    """Os steps ``tool_executed`` da execução como ``[{tool, args, agent_key}]``."""
-    tools: list[dict] = []
-    for step in (execution or {}).get("steps", []):
-        if step.get("step_type") == "tool_executed":
-            data = step.get("data") or {}
-            tools.append({"tool": data.get("tool"), "args": data.get("args"),
-                          "agent_key": step.get("agent_key")})
-    return tools
-
-
-def _agent_chain(execution: dict | None) -> list[str]:
-    """Chaves de agente do turno, ordenadas e dedupadas (roteador → spoke)."""
-    if not execution:
-        return []
-    raw = execution.get("routing_steps")
-    steps: list = []
-    if isinstance(raw, str):
-        try:
-            steps = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            steps = []
-    elif isinstance(raw, list):
-        steps = raw
-    chain: list[str] = []
-    if steps:
-        first = (steps[0] or {}).get("from")
-        if first:
-            chain.append(first)
-        for s in steps:
-            to = (s or {}).get("to")
-            if to:
-                chain.append(to)
-    elif execution.get("agent_key"):
-        chain.append(execution["agent_key"])
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for key in chain:
-        if key and key not in seen:
-            seen.add(key)
-            ordered.append(key)
-    return ordered
+_find_execution_around = _trace.find_execution_around
+_tools_used = _trace.tools_used
+_agent_chain = _trace.agent_chain
 
 
 def _format_tools_used(used: list[dict]) -> str:
