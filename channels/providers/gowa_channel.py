@@ -92,7 +92,22 @@ class GOWAChannel(Channel):
             "provider": "gowa",
             "label": "GOWA",
             "color": "green",
-            "credential_fields": [],
+            # Plano 52: outbound proxy per NUMBER. A non-empty proxy moves this
+            # channel to a DEDICATED GOWA process with WHATSAPP_PROXY set (the
+            # orchestration lives in the gowa plugin's processes.py). ``secret``
+            # type => password input + masked at the API edge + edit-placeholder
+            # semantics, all generic (channel_credentials).
+            "credential_fields": [{
+                "key": "proxy_url",
+                "label": "Proxy de saída (opcional)",
+                "type": "secret",
+                "required": False,
+                "placeholder": "socks5://usuario:senha@ip:porta",
+                "help": "IP FIXO e dedicado deste número (socks5:// ou http(s)://). "
+                        "Use 1 IP exclusivo por número — nunca proxy rotativo. "
+                        "Salvar/alterar o proxy reinicia a sessão deste número — "
+                        "será preciso ler o QR de novo.",
+            }],
             "config_fields": [
                 {"key": "gowa_device_id", "label": "GOWA Device ID",
                  "type": "generated", "prefix": "gowa_",
@@ -379,7 +394,20 @@ def build_gowa_channel(channel_id: str, row: dict | None, *,
     device_id = ((row or {}).get("gowa_device_id") or channel_id)
     # Import here to avoid a circular import at module load time.
     from gowa.client import GOWAClient
-    client = GOWAClient(port=getattr(gowa_client, "port", 3000))
+    # Plano 52: a channel with a DEDICATED (proxied) process keeps its allocated
+    # port in config["gowa_dedicated_port"] (persisted by the gowa plugin's
+    # reconcile). Absent/invalid ⇒ the shared process port — byte-identical to
+    # the pre-plano-52 behaviour.
+    port = getattr(gowa_client, "port", 3000)
+    try:
+        import json as _json
+        cfg = _json.loads((row or {}).get("config") or "{}") or {}
+        dedicated = int(cfg.get("gowa_dedicated_port") or 0)
+        if dedicated > 0:
+            port = dedicated
+    except Exception:  # noqa: BLE001 — malformed config must never block the build
+        pass
+    client = GOWAClient(port=port)
     client.device_id = device_id
     client.strict_device = True  # bind to its own device, never adopt another's
     return GOWAChannel(channel_id, client, gowa_manager)

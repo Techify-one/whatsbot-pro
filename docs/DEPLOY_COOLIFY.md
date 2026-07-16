@@ -43,7 +43,7 @@ Persistent Storage**, adicione dois mounts persistentes:
 
 | Mount no container | Cobre |
 |---|---|
-| `/app/storages` | código dos plugins (`storages/plugins/`) **+** sessão do WhatsApp/GOWA |
+| `/app/storages` | código dos plugins (`storages/plugins/`) **+** sessão do WhatsApp/GOWA **+** sessões dos números com proxy dedicado (`storages/gowa_ch_<canal>/` — plano 52) |
 | `/app/statics` (ou ao menos `/app/statics/senditems`) | mídia enviada pelo operador |
 
 Em qualquer dos casos, feito isso um redeploy passa a preservar tudo — o bootstrap

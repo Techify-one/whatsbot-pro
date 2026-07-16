@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-import sys
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +76,6 @@ async def setup(ctx) -> None:
                     "no-op (test harness or zero-channel boot)")
         return
 
-    from runtime.subprocess_service import SubprocessSpec
     from runtime.supervisor import RestartPolicy
     from server.background import (status_poll_loop, qr_poll_loop, avatar_fetch_task,
                                    channel_identity_sweep_loop)
@@ -106,7 +104,7 @@ async def setup(ctx) -> None:
         logger.error("gowa: _build_cmd() returned empty argv — sandbox-only mode")
         await _notify_degraded(deps, "GOWA indisponível — modo sandbox disponível")
         return
-    binary = cmd[0]  # _build_cmd() put the resolved binary path at argv[0]
+    # (signature = argv[0], the resolved binary path — derived inside build_spec)
 
     # Debug-log parity (WHATSBOT_GOWA_DEBUG): reuse the manager's helpers so
     # /api/gowa-logs keeps working; otherwise DEVNULL (no PIPE — deadlock guard).
@@ -127,19 +125,15 @@ async def setup(ctx) -> None:
         stdout_target = subprocess.DEVNULL
         stderr_target = subprocess.DEVNULL
 
-    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    spec = SubprocessSpec(
+    # Spec via the shared builder (plano 52 F2): env=None/cwd=None => inherit the
+    # parent — the SHARED process contract, byte-identical to the historical spec.
+    # Dedicated per-proxy processes go through the same builder in processes.py.
+    from . import processes as gowa_processes
+    spec = gowa_processes.build_spec(
         name="gowa",
         cmd=cmd,
-        signature=binary,            # stale-kill guard: a leftover GOWA is killed on respawn
-        readiness=None,              # readiness handled by _post_spawn_init (health_check loop)
-        readiness_timeout=15.0,
         stdout=stdout_target,
         stderr=stderr_target,
-        creationflags=creation_flags,
-        max_restarts=3,
-        window_sec=60.0,
-        restart_delay=5.0,
         on_restart=getattr(gm, "_on_restart", None),
     )
     try:
@@ -170,6 +164,12 @@ async def setup(ctx) -> None:
                        policy=RestartPolicy.PERMANENT)
         from . import alerts
         ctx.spawn_task("disconnect_alert", lambda: alerts.disconnect_alert_loop(deps),
+                       policy=RestartPolicy.PERMANENT)
+        # Plano 52: dedicated per-proxy GOWA processes — declarative reconcile
+        # (spawn/stop/restart) every ~15s; boot convergence happens on the first
+        # pass inside the loop.
+        ctx.spawn_task("process_reconcile",
+                       lambda: gowa_processes.reconcile_loop(ctx, deps),
                        policy=RestartPolicy.PERMANENT)
     except RuntimeError as e:  # supervisor not wired
         logger.warning("gowa: supervisor not wired (%s); polling loops not started", e)

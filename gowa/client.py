@@ -44,7 +44,7 @@ class GOWASendError(Exception):
 
 
 class GOWAClient:
-    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.8.0)."""
+    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.11.0)."""
 
     def __init__(self, port: int = 3000, timeout: float = 15.0):
         self.port = port
@@ -175,6 +175,19 @@ class GOWAClient:
         """Create a new device in GOWA."""
         payload = {"device_id": device_id} if device_id else {}
         return self._request("POST", "/devices", json=payload, skip_device_header=True)
+
+    def delete_device(self) -> bool:
+        """Full purge of THIS device's slot from the GOWA process.
+
+        ``DELETE /devices/{id}`` (GOWA ≥ 8.10: logout + WhatsApp unlink + registry
+        removal — unlike ``/app/logout``, which now keeps the slot). Used by the
+        plano-52 shared→dedicated transition so a number moving to a proxied
+        process never stays connected on the shared one.
+        """
+        result = self._request("DELETE", f"/devices/{self.device_id}",
+                               skip_device_header=True)
+        self._device_ready = False
+        return result is not None
 
     # ── Health / Status ──────────────────────────────────────────────
 

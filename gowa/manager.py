@@ -60,16 +60,30 @@ class GOWAManager:
     def is_running(self) -> bool:
         return self._managed is not None and self._managed.is_running()
 
-    def _build_cmd(self) -> list[str]:
+    def _build_cmd(self, port: int | None = None,
+                   webhook_url: str | None = None) -> list[str]:
+        """Argv for a GOWA process.
+
+        With no args this is the SHARED process (this manager's own
+        ``self.port``/``self.webhook_url``) — byte-identical to the historical
+        argv. ``port``/``webhook_url`` overrides build the argv of a DEDICATED
+        per-channel process (plano 52) while keeping the binary resolution and
+        the webhook-event list in ONE place. ⚠️ The outbound proxy is
+        deliberately NOT an argv flag — this cmd is logged below and shows in
+        ``ps``; the proxy travels via the ``WHATSAPP_PROXY`` env on the spec
+        (plano 52 D5).
+        """
         binary = _get_gowa_binary()
         if not binary.exists():
             raise FileNotFoundError(
                 f"GOWA binary not found at {binary}. "
                 "Place gowa.exe in the bin/ directory."
             )
-        cmd = [str(binary), "rest", "--port", str(self.port)]
-        if self.webhook_url:
-            cmd.extend(["--webhook", self.webhook_url])
+        port_val = self.port if port is None else port
+        hook = self.webhook_url if webhook_url is None else webhook_url
+        cmd = [str(binary), "rest", "--port", str(port_val)]
+        if hook:
+            cmd.extend(["--webhook", hook])
         # Forward every event the webhook handler knows how to process. GOWA
         # only delivers events listed here; omitting one (e.g. group.participants)
         # silently drops it even though webhook.py has a handler.

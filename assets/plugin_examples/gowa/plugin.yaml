@@ -1,6 +1,6 @@
 id: gowa
 name: WhatsApp (GOWA)
-version: 1.0.0
+version: 1.1.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada WhatsApp via GOWA (go-whatsapp-web-multidevice), conectada por

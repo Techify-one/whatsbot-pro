@@ -11,7 +11,7 @@
 
 # Version of the GOWA binary that matches the client in gowa/client.py and the
 # Dockerfile (ARG GOWA_VERSION). Overridable via the GOWA_VERSION env var.
-GOWA_VERSION="${GOWA_VERSION:-8.8.0}"
+GOWA_VERSION="${GOWA_VERSION:-8.11.0}"
 
 # Directories uvicorn watches for hot-reload (core + plugins). uvicorn validates
 # each --reload-dir before booting, so storages/plugins must exist (it is created

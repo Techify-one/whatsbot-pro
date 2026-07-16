@@ -113,8 +113,69 @@ def _enable_bundled_gowa(target: Path) -> None:
         logger.warning("Could not enable bundled gowa plugin: %s", e)
 
 
+def _semver_tuple(version) -> tuple:
+    """Lenient ``"1.2.3"`` → ``(1, 2, 3)``; unparseable parts count as 0."""
+    parts = []
+    for piece in str(version or "").strip().split(".")[:3]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def _upgrade_bundled_gowa_in_place(target: Path, src: Path) -> bool:
+    """Replace an INSTALLED ``storages/plugins/gowa`` with the bundled source when
+    the bundled manifest version is NEWER (plano 52 F4/P7).
+
+    Without this, a ``git pull``/redeploy delivers new core code but the stale
+    plugin copy keeps running (e.g. the per-proxy process orchestrator would
+    never activate). Version-gated so we never clobber on every boot; a user who
+    hand-edited the installed gowa plugin loses those edits on a version bump —
+    logged loudly. The swap is copy-to-temp + rename (never leaves a half-copied
+    plugin dir even if interrupted). The ``enabled`` flag is NOT touched — a
+    deliberately disabled gowa stays disabled (discover_and_load refreshes the
+    version row on load).
+    """
+    try:
+        bundled_ver = load_manifest(src).version
+        installed_ver = load_manifest(target).version
+    except Exception as e:  # noqa: BLE001 — an unreadable manifest must not brick boot
+        logger.warning("gowa upgrade check failed (%s); keeping installed copy", e)
+        return False
+    if _semver_tuple(bundled_ver) <= _semver_tuple(installed_ver):
+        return False
+    logger.warning(
+        "Upgrading bundled gowa plugin %s -> %s: storages/plugins/gowa is "
+        "REPLACED by the bundled source (local edits to this plugin, if any, "
+        "are overwritten)", installed_ver, bundled_ver)
+    tmp = target.parent / ".gowa_upgrade_tmp"
+    prev = target.parent / ".gowa_upgrade_prev"
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(prev, ignore_errors=True)
+        shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        target.rename(prev)
+        tmp.rename(target)
+        shutil.rmtree(prev, ignore_errors=True)
+        logger.info("Bundled gowa plugin upgraded to %s", bundled_ver)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("gowa in-place upgrade failed: %s", e)
+        # Roll back if the target vanished mid-swap.
+        if not target.exists() and prev.exists():
+            try:
+                prev.rename(target)
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+
 def bootstrap_gowa_upgrade(plugins_dir: Path, source_dir: Path) -> bool:
-    """Idempotently install + enable the bundled gowa plugin on EXISTING installs.
+    """Idempotently install + enable the bundled gowa plugin on EXISTING installs,
+    and (plano 52) upgrade an already-installed copy when the bundled version is
+    newer.
 
     Fresh installs get gowa via :func:`bootstrap_initial_plugins` (which only runs
     when ``plugins_dir`` is empty). An install that already had ``storages/plugins``
@@ -122,10 +183,12 @@ def bootstrap_gowa_upgrade(plugins_dir: Path, source_dir: Path) -> bool:
     if this install actually uses GOWA (a ``default`` channel with provider
     ``gowa`` exists) and ``storages/plugins/gowa`` is missing, copy it from the
     bundled source and enable it — exactly once (guarded by ``target.exists()``).
+    When the target EXISTS, delegate to the version-gated in-place upgrade.
 
-    Returns True iff it copied+enabled this call. Test-guarded: the suite's
-    Settings() data_dir is the repo root, so without ``WHATSBOT_TEST`` this would
-    mutate the real (git-ignored) ``storages/plugins`` and change create_app.
+    Returns True iff it copied (install or upgrade) this call. Test-guarded: the
+    suite's Settings() data_dir is the repo root, so without ``WHATSBOT_TEST``
+    this would mutate the real (git-ignored) ``storages/plugins`` and change
+    create_app.
     """
     if os.environ.get("WHATSBOT_TEST"):
         return False
@@ -134,12 +197,12 @@ def bootstrap_gowa_upgrade(plugins_dir: Path, source_dir: Path) -> bool:
     # guard below would otherwise resurrect GOWA on the very next boot.
     if _gowa_is_tombstoned():
         return False
-    target = plugins_dir / "gowa"
-    if target.exists():
-        return False
     src = source_dir / "gowa"
     if not src.is_dir():
         return False
+    target = plugins_dir / "gowa"
+    if target.exists():
+        return _upgrade_bundled_gowa_in_place(target, src)
     # Only for installs that actually use GOWA (don't resurrect it on a fresh
     # Cloud-only / Telegram-only setup that has no default gowa channel).
     try:
