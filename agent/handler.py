@@ -365,14 +365,17 @@ class AgentHandler:
                                msg_id: str | None = None,
                                status: str = "sent",
                                channel_id: str = "default",
-                               agent_key: str | None = None) -> dict:
+                               agent_key: str | None = None,
+                               execution_id: int | None = None) -> dict:
         """Save an assistant (bot) message to contact memory after successful send.
 
         ``agent_key`` atribui a mensagem ao agente que a produziu (do ProcessResult
-        do turno), para o painel exibir "IA - <NOME>"."""
+        do turno), para o painel exibir "IA - <NOME>". ``execution_id`` (plano 51)
+        liga a resposta à execução do turno (todas as partes de um split herdam o
+        mesmo id)."""
         contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, msg_id=msg_id, status=status,
-                            agent_key=agent_key)
+                            agent_key=agent_key, execution_id=execution_id)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def save_operator_message(self, phone: str, text: str, *,

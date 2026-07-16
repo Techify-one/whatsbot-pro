@@ -20,6 +20,7 @@ def add(contact_id: int, role: str, content: str, *,
         sent_by_user_id: int | None = None,
         sent_by_name: str | None = None,
         agent_key: str | None = None,
+        execution_id: int | None = None,
         ts: float | None = None) -> dict:
     """Insert a message and return it as a dict.
 
@@ -27,6 +28,8 @@ def add(contact_id: int, role: str, content: str, *,
     aditivo e nullable — contact_id permanece a chave de pertencimento.
     ``agent_key`` atribui a mensagem ao agente de IA que a produziu (resposta ou
     tool_call); NULL para mensagens não-IA.
+    ``execution_id`` (plano 51) liga a resposta da IA à execução que a produziu
+    (FK lógica, nullable) — link O(1) msg→execution; NULL cai no fuzzy legado.
     """
     ts = ts or time.time()
     with get_engine().begin() as conn:
@@ -44,6 +47,7 @@ def add(contact_id: int, role: str, content: str, *,
             sent_by_user_id=sent_by_user_id,
             sent_by_name=sent_by_name,
             agent_key=agent_key,
+            execution_id=execution_id,
         ))
         new_id = result.inserted_primary_key[0]
     return {
@@ -59,7 +63,26 @@ def add(contact_id: int, role: str, content: str, *,
         "conversation_id": conversation_id,
         "sent_by_name": sent_by_name,
         "agent_key": agent_key,
+        "execution_id": execution_id,
     }
+
+
+def find_execution_for_message(msg_row: dict) -> dict | None:
+    """Resolve a execução que produziu uma resposta da IA via o link preciso.
+
+    Usa ``messages.execution_id`` (plano 51 F1) → ``execution_repo.get_by_id``.
+    Devolve None quando a linha é legada (execution_id NULL) ou a execução foi
+    pruneada — o consumidor decide se cai no match fuzzy por janela de ts (DL2).
+    Nunca lança: degradar é o contrato.
+    """
+    exec_id = (msg_row or {}).get("execution_id")
+    if not exec_id:
+        return None
+    try:
+        from db.repositories import execution_repo
+        return execution_repo.get_by_id(int(exec_id))
+    except Exception:
+        return None
 
 
 def get_all(contact_id: int) -> list[dict]:
@@ -485,6 +508,10 @@ def _row_to_dict(row) -> dict:
     # aqui expõe a chave crua para quem quiser resolver por conta própria.
     if row.get("agent_key"):
         d["agent_key"] = row["agent_key"]
+    # Execução que produziu a resposta (plano 51 F1) — link O(1) msg→execution.
+    # Ausente em linhas legadas / mensagens fora de turno rastreado.
+    if row.get("execution_id"):
+        d["execution_id"] = row["execution_id"]
     d["_id"] = row["id"]
     # conversa-cêntrico (plano 11): expõe a thread de pertencimento ao frontend,
     # para montar permalink de mensagem (/conversations/<id>?message=<_id>) mesmo

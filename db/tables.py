@@ -137,10 +137,16 @@ messages = Table(
     # display_name e exibe "IA - <NOME>" / "Ferramenta IA - <NOME>". NULL em
     # mensagens não-IA (user/operator/private_note) e em linhas legadas.
     Column("agent_key", Text),
+    # plano 51 (01 F1): execução que produziu esta resposta da IA. FK LÓGICA para
+    # executions.id (sem constraint, igual sent_by_user_id) — execução é log
+    # histórico e não deve cascatear/travar o INSERT. NULL em linhas legadas /
+    # mensagens fora de um turno rastreado; o consumidor cai no fuzzy (DL2).
+    Column("execution_id", Integer),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
+Index("idx_msg_execution", messages.c.execution_id)
 
 
 usage = Table(

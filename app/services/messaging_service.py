@@ -431,11 +431,16 @@ class MessagingService:
             })
 
         # Save each part as a separate message to preserve split across page refresh
+        # plano 51 (01 F1): estampa a execução do turno em cada parte — o contextvar
+        # é lido AQUI (contexto async do ciclo) e passado por valor ao to_thread.
+        from agent.execution import get_current_execution_id
+        turn_execution_id = get_current_execution_id()
         for part, part_msg_id in sent_parts:
             try:
                 await asyncio.to_thread(agent_handler.save_assistant_message, phone, part,
                                         msg_id=part_msg_id, status="sent",
-                                        channel_id=channel_id, agent_key=agent_key)
+                                        channel_id=channel_id, agent_key=agent_key,
+                                        execution_id=turn_execution_id)
                 # Increment unread AI count (operator hasn't seen this reply yet)
                 contact = agent_handler._get_contact(phone, channel_id=channel_id)
                 if contact:
