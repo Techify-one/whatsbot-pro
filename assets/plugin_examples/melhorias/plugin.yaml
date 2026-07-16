@@ -1,6 +1,6 @@
 id: melhorias
 name: Sugestões de melhoria
-version: 1.0.0
+version: 1.1.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Move o antigo "Gerar melhoria" (análise de qualidade de uma resposta da IA) para um
