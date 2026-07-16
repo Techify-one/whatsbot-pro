@@ -226,7 +226,7 @@
 **Estado:** ✅ Concluída (2026-07-16, commit 0a1fdab)
 - **O que foi feito:** chat_core.js (reducer PURO dos eventos + isAuthError + persistedToItems) + chat.js (AgenticChat: hidrata do DB, useAiChatEvents escuta plugin_melhorias_ai_event no /ws filtrando conversation_id, cards Assistant/User/Tool/Approval/Error, gate D1-b com V/X + motivo opcional, dedupe por messageId/toolCallId, input Enter-envia, resume).
 - **Como foi feito / decisoes:** **caminho (a) do P2 implementado — WS reuso**; o parser SSE dedicado (fetch+ReadableStream) NÃO foi implementado (fica como upgrade documentado). Evento extra approval_registered (write-through) tratado com dedupe.
-- **Problemas / pendencias:** nenhum.
+- **Problemas / pendencias:** BUG achado no 1º uso real: o chat (e o listener legado da lista) abriam WebSocket CRU sem `?token=` — com RBAC ativo o `/ws` fecha com 4401 e nada chegava ao vivo (só no F5). Corrigido trocando para o `wsBus` compartilhado do core (`/static/js/services/wsBus.js` — token + reconexão + heartbeat, conexão única com o painel).
 - **Verificacao:** node --test chat_core.test.js — 7 casos verdes (start/chunk/end, chunk-sem-start, tool dedupe, approval→awaiting, done→idle, error, hidratação).
 ```
 

@@ -11,6 +11,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
+import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
 import { reduceAiEvent, isAuthError, persistedToItems } from './chat_core.js';
 
 const html = htm.bind(h);
@@ -24,21 +25,15 @@ export function useAiChatEvents(conversationId, onEvent) {
   cbRef.current = onEvent;
   useEffect(() => {
     if (!conversationId) return undefined;
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    let ws;
-    try {
-      ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onmessage = (m) => {
-        try {
-          const msg = JSON.parse(m.data);
-          if (msg.event !== 'plugin_melhorias_ai_event') return;
-          const d = msg.data || {};
-          if (d.conversation_id !== conversationId) return;
-          cbRef.current && cbRef.current({ event: d.event, data: d.data || {} });
-        } catch (_) { /* ignore */ }
-      };
-    } catch (_) { /* ignore */ }
-    return () => { try { ws && ws.close(); } catch (_) { /* ignore */ } };
+    // wsBus do core: conexão ÚNICA compartilhada com o painel, já autenticada
+    // (?token= do localStorage — com RBAC ativo um WebSocket cru sem token é
+    // fechado com 4401 e nenhum evento chega), com reconexão + heartbeat.
+    return subscribeWs({
+      plugin_melhorias_ai_event: (d) => {
+        if (!d || d.conversation_id !== conversationId) return;
+        cbRef.current && cbRef.current({ event: d.event, data: d.data || {} });
+      },
+    });
   }, [conversationId]);
 }
 

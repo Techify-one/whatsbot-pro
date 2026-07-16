@@ -11,6 +11,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
+import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
 import { AgenticChat } from '/plugins/melhorias/static/chat.js';
 import { ReloginModal } from '/plugins/melhorias/static/relogin.js';
 
@@ -180,16 +181,10 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
     return () => window.removeEventListener('popstate', onPop);
   }, [openDetail]);
 
-  // Live: recarrega no broadcast do plugin.
-  useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    let ws;
-    try {
-      ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_melhorias_changed') load(); } catch (_) { /* ignore */ } };
-    } catch (_) { /* ignore */ }
-    return () => { try { ws && ws.close(); } catch (_) { /* ignore */ } };
-  }, [load]);
+  // Live: recarrega no broadcast do plugin. Via wsBus do core (conexão única
+  // AUTENTICADA — WebSocket cru sem ?token= é fechado com 4401 sob RBAC e a
+  // lista só atualizava no F5).
+  useEffect(() => subscribeWs({ plugin_melhorias_changed: () => load() }), [load]);
 
   // Valores distintos p/ os filtros de seleção.
   function distinct(col) {
