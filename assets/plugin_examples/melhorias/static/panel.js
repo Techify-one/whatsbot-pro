@@ -133,14 +133,15 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  // plano 51: backend agêntico? (external ⇒ aprovar abre o CHAT, não gera inline)
-  const [backend, setBackend] = useState('direct');
+  // plano 51: backend agêntico? (external ⇒ aprovar abre o CHAT, não gera inline).
+  // Desde a 1.3.0 o agêntico é o motor padrão/único da UI — 'external' é o fallback.
+  const [backend, setBackend] = useState('external');
   useEffect(() => {
     (async () => {
       try {
         const r = await apiJson(`${apiBase}/config`);
-        if (r.ok) setBackend((r.body.data || {}).generator_backend || 'direct');
-      } catch (_) { /* mantém direct */ }
+        if (r.ok) setBackend((r.body.data || {}).generator_backend || 'external');
+      } catch (_) { /* mantém external */ }
     })();
   }, [apiBase]);
   const [filters, setFilters] = useState({});       // colKey -> texto (text) | array (multiselect)
@@ -414,7 +415,7 @@ function GeneratingModal() {
     </div>`;
 }
 
-function DetailModal({ detail, canApprove, backend = 'direct', apiBase = '/api/plugins/melhorias',
+function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api/plugins/melhorias',
                        onClose, onDecide, onRefresh = () => {} }) {
   const d = detail;
   const agentic = backend === 'external';

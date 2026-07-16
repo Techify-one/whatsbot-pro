@@ -71,6 +71,16 @@ def test_internal_is_404_when_backend_not_external(plugin_app):
     assert r.status_code == 404  # finge inexistência (D02-e)
 
 
+def test_internal_is_404_when_unconfigured_at_default(plugin_app):
+    """1.3.0: o default do backend virou 'external', mas sem URL+secret o gate
+    dormente (is_configured) ainda finge inexistência — HMAC nunca é validado
+    com secret vazio. Trava o caminho do NOVO default (config ausente)."""
+    built = plugin_app("melhorias")  # nenhum override: backend cai no default
+    r = built.client.post("/api/plugins/melhorias/public/_internal/messages",
+                          json={"conversation_id": "x", "role": "user"})
+    assert r.status_code == 404
+
+
 def test_internal_rejects_bad_signatures(plugin_app):
     built = plugin_app("melhorias", settings_overrides=_EXT)
     ai_client, _, _ = _mods()

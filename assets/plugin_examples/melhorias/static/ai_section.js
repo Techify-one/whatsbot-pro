@@ -1,6 +1,8 @@
 // Seção "Sugestão de melhoria" renderizada no slot ai.settings.sections da aba
 // "Configurações de IA". Recebe `api` (via extends.js) → usa api.http/api.services.
-// Config (modelo + prompt da análise) editável só com permissão `configure`.
+// Config editável só com permissão `configure`. Desde a 1.3.0 o motor é SEMPRE o
+// agêntico (executor Claude Code externo) — a análise one-shot "direta" saiu da
+// UI (o backend legado segue selecionável via config, p/ testes).
 // As análises geradas são consultadas no painel de aprovação (botão acima).
 //
 // Só substitui a antiga área de "sugestão de melhoria" que vivia no core: como é
@@ -20,15 +22,10 @@ function goToPanel(detailId) {
 
 export function MelhoriaAiSection({ api, can }) {
   const canConfigure = can('configure');
-  const [model, setModel] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [promptDefault, setPromptDefault] = useState('');
-  const [models, setModels] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   // plano 51: servidor agêntico (executor Claude Code externo).
-  const [backend, setBackend] = useState('direct');
   const [aiUrl, setAiUrl] = useState('');
   const [aiSecret, setAiSecret] = useState('');
   const [aiModel, setAiModel] = useState('');
@@ -40,20 +37,12 @@ export function MelhoriaAiSection({ api, can }) {
     try {
       const cfg = await api.http.get('/config');
       if (cfg && cfg.ok && cfg.data) {
-        setModel(cfg.data.model || '');
-        setPrompt(cfg.data.prompt || '');
-        setPromptDefault(cfg.data.prompt_default || '');
-        setBackend(cfg.data.generator_backend || 'direct');
         setAiUrl(cfg.data.ai_server_url || '');
         setAiSecret(cfg.data.ai_server_secret || '');
         setAiModel(cfg.data.ai_model || '');
         setCbUrl(cfg.data.callback_url || '');
         setCbUrlEffective(cfg.data.callback_url_effective || '');
       }
-    } catch (_) { /* ignore */ }
-    try {
-      const ms = api.services && api.services.getModels ? await api.services.getModels() : null;
-      if (ms && ms.ok && Array.isArray(ms.data)) setModels(ms.data);
     } catch (_) { /* ignore */ }
   }, [api]);
 
@@ -64,8 +53,9 @@ export function MelhoriaAiSection({ api, can }) {
     setSaving(true); setError(''); setSaved(false);
     try {
       const res = await api.http.put('/config', {
-        model: model || '', prompt: prompt || '',
-        generator_backend: backend || 'direct',
+        // Motor único: salvar reafirma o backend agêntico (cura instalações
+        // que ainda tenham "direct" salvo de versões antigas).
+        generator_backend: 'external',
         ai_server_url: aiUrl || '',
         ai_server_secret: aiSecret || '',
         ai_model: aiModel || '',
@@ -98,42 +88,14 @@ export function MelhoriaAiSection({ api, can }) {
         </button>
       </div>
       <p class="text-[12px] text-wa-secondary mb-4">
-        A análise é gerada por uma chamada direta ao modelo abaixo, quando um pedido é
-        <strong>aprovado</strong> no painel (botão-direito numa resposta da IA → "Gerar melhoria").
+        Aprovar uma sugestão (botão-direito numa resposta da IA → "Gerar melhoria")
+        abre um <strong>chat com a IA</strong> que analisa o atendimento e propõe mudanças em
+        agentes, prompts, tools e variáveis — cada mudança exige sua aprovação (✓/✕) e é
+        versionada (dá para reverter).
       </p>
 
-      <label class="block text-[13px] text-wa-text mb-1">Modelo da análise</label>
-      <select class="wa-field w-full rounded p-[8px] text-[13px] mb-4" value=${model}
-        disabled=${!canConfigure} onChange=${(e) => setModel(e.target.value)}>
-        <option value="">— Usar o mesmo modelo do agente —</option>
-        ${models.map((m) => html`<option key=${m.id} value=${m.id}>${m.name || m.id}</option>`)}
-      </select>
-
-      <div class="flex items-center justify-between mb-1">
-        <label class="block text-[13px] text-wa-text">Prompt da análise</label>
-        ${canConfigure ? html`<button onClick=${() => setPrompt(promptDefault)}
-          class="text-[12px] text-wa-teal hover:underline">Restaurar padrão</button>` : ''}
-      </div>
-      <textarea class="wa-field w-full rounded p-[8px] text-[13px] mb-2" rows="6"
-        disabled=${!canConfigure}
-        placeholder=${promptDefault}
-        value=${prompt} onInput=${(e) => setPrompt(e.target.value)}></textarea>
-
       <div class="border border-wa-border rounded-lg p-3 mb-4">
-        <h4 class="text-[13px] font-semibold text-wa-text mb-2">Melhoria agêntica (plano 51)</h4>
-        <p class="text-[12px] text-wa-secondary mb-3">
-          Com o motor <strong>Agêntico (executor externo)</strong>, aprovar uma sugestão abre um
-          <strong>chat com a IA</strong> que analisa o atendimento e propõe mudanças em agentes,
-          prompts, tools e variáveis — cada mudança exige sua aprovação (✓/✕) e é versionada
-          (dá para reverter).
-        </p>
-        <label class="block text-[13px] text-wa-text mb-1">Motor da análise</label>
-        <select class="wa-field w-full rounded p-[8px] text-[13px] mb-3" value=${backend}
-          disabled=${!canConfigure} onChange=${(e) => setBackend(e.target.value)}>
-          <option value="direct">Direto (análise one-shot — padrão)</option>
-          <option value="external">Agêntico (chat com executor Claude Code externo)</option>
-          <option value="stub">Stub (testes)</option>
-        </select>
+        <h4 class="text-[13px] font-semibold text-wa-text mb-2">Executor agêntico</h4>
         <label class="block text-[13px] text-wa-text mb-1">URL do executor</label>
         <input class="wa-field w-full rounded p-[8px] text-[13px] mb-3" type="text"
           placeholder="http://203.0.113.10:8015" disabled=${!canConfigure}
@@ -172,7 +134,7 @@ export function MelhoriaAiSection({ api, can }) {
             ${saving ? 'Salvando…' : 'Salvar'}</button>
           ${saved ? html`<span class="text-[13px] text-wa-teal">✓ Salvo</span>` : ''}
         </div>` : html`<div class="text-[12px] text-wa-secondary mb-6">
-          Você não tem permissão para editar o modelo/prompt.
+          Você não tem permissão para editar a configuração.
         </div>`}
     </div>`;
 }

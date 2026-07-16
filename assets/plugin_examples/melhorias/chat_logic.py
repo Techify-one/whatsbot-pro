@@ -229,7 +229,8 @@ async def start_conversation(sid: int, *, observation: str = "",
     from . import generation, logic
 
     if not ai_client.is_configured():
-        return None, "Servidor de IA não configurado (URL/secret)."
+        return None, ("Servidor de IA não configurado — defina a URL e o secret do "
+                      "executor em Configurações de IA → seção Sugestão de melhoria.")
     suggestion = logic.get_suggestion(sid)
     if not suggestion:
         return None, "Sugestão não encontrada."

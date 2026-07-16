@@ -117,7 +117,7 @@ async def approve_suggestion(sid: int, request: Request):
     # em vez de gerar a análise inline. O painel novo usa o endpoint dedicado
     # POST /suggestions/{sid}/conversations (com observação); este continua
     # funcionando para chamadas legadas.
-    if logic._setting("generator_backend", "direct") == "external":
+    if logic._setting("generator_backend", "external") == "external":
         conv, err = await chat_logic.start_conversation(
             sid, observation="", model="", user_id=uid, handler=_handler(request))
         if err:
@@ -348,7 +348,7 @@ async def get_config():
         "prompt": logic._setting("prompt"),
         "prompt_default": logic.generation.DEFAULT_IMPROVEMENT_PROMPT,
         # plano 51 — servidor agêntico. Secret NUNCA sai em claro.
-        "generator_backend": logic._setting("generator_backend", "direct") or "direct",
+        "generator_backend": logic._setting("generator_backend", "external") or "external",
         "ai_server_url": logic._setting("ai_server_url"),
         "ai_server_secret": "***" if ai_client.shared_secret() else "",
         "ai_model": logic._setting("ai_model"),
@@ -387,7 +387,7 @@ async def put_config(body: dict):
         return _err(str(e))
     return {"ok": True, "data": {
         "model": logic._setting("model"), "prompt": logic._setting("prompt"),
-        "generator_backend": logic._setting("generator_backend", "direct") or "direct",
+        "generator_backend": logic._setting("generator_backend", "external") or "external",
         "ai_server_url": logic._setting("ai_server_url"),
         "ai_server_secret": "***" if ai_client.shared_secret() else "",
         "ai_model": logic._setting("ai_model"),

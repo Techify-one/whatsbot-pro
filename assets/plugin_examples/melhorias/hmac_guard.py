@@ -52,7 +52,8 @@ def _nonce_seen(request_id: str) -> bool:
 
 
 def _feature_active() -> bool:
-    backend = str(config_repo.get("plugin.melhorias.generator_backend", "") or "")
+    backend = str(config_repo.get("plugin.melhorias.generator_backend", "external")
+                  or "external")
     return backend == "external" and ai_client.is_configured()
 
 

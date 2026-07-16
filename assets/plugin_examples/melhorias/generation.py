@@ -5,7 +5,7 @@ que uma futura implementação MULTI-AGENTE (um agente que orquestra sub-agentes
 possa substituir a atual chamada DIRETA a um modelo **sem reescrever os call
 sites** (``logic.decide_suggestion`` só chama ``get_generator().generate(ctx)``).
 
-- ``DirectApiGenerator`` (DEFAULT) — porta, intacto, o comportamento one-shot
+- ``DirectApiGenerator`` (legado, fora da UI desde a 1.3.0) — porta, intacto, o comportamento one-shot
   não-agentico do antigo ``app.services.improvement_service``: reconstrói a
   cadeia de agentes do turno (roteador → spoke) a partir de
   ``executions.routing_steps`` + ``execution_steps.agent_key``, mostra o prompt
@@ -19,7 +19,8 @@ sites** (``logic.decide_suggestion`` só chama ``get_generator().generate(ctx)``
 - ``StubGenerator`` — análise determinística p/ testes (sem LLM).
 
 O backend ativo vem da config ``plugin.melhorias.generator_backend`` (default
-``"direct"``), lida em ``get_generator()`` — trocar de backend é mudar essa chave
+``"external"`` — o motor agêntico é o único oferecido na UI desde a 1.3.0),
+lida em ``get_generator()`` — trocar de backend é mudar essa chave
 ou editar ``_BACKENDS``, sem tocar em ``logic``.
 
 Modelo/prompt vêm do ``GenContext`` (``model_override``/``prompt_override``,
@@ -370,7 +371,7 @@ class MultiAgentGenerator:
 
     def generate(self, ctx: GenContext) -> GenResult:
         raise NotImplementedError(
-            "MultiAgentGenerator ainda não implementado — use o backend 'direct'.")
+            "MultiAgentGenerator ainda não implementado — use o backend 'external'.")
 
 
 class ExternalAgentGenerator:
@@ -417,6 +418,7 @@ _BACKENDS = {
 
 def get_generator() -> SuggestionGenerator:
     """O gerador ativo, escolhido por ``plugin.melhorias.generator_backend``
-    (default ``"direct"``). Backend desconhecido cai no ``DirectApiGenerator``."""
-    backend = config_repo.get(_BACKEND_CONFIG_KEY, "direct") or "direct"
-    return _BACKENDS.get(backend, DirectApiGenerator)()
+    (default ``"external"`` — o motor agêntico é o único oferecido na UI; os
+    demais backends seguem selecionáveis via config, p/ testes e legado)."""
+    backend = config_repo.get(_BACKEND_CONFIG_KEY, "external") or "external"
+    return _BACKENDS.get(backend, ExternalAgentGenerator)()

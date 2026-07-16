@@ -6,7 +6,7 @@
 //   1. filter — filter.message.contextMenu.items → acrescenta "Gerar melhoria" no
 //               menu de botão-direito, só em respostas da IA e com permissão `request`.
 //   2. slot   — ai.settings.sections → seção "Sugestão de melhoria" na aba de IA
-//               (config de modelo/prompt + lista de análises geradas).
+//               (config do executor agêntico: URL/secret/modelo/callback).
 // (O painel de aprovação é uma screen config:false — aparece sozinho no menu da
 //  engrenagem via a lista de screens do plugin, filtrada por `requires: view`.)
 

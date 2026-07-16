@@ -43,6 +43,7 @@ def now() -> float:
 
 
 _CONFIG_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.config_backfilled"
+_BACKEND_MIGRATED_FLAG = f"plugin.{PLUGIN_ID}.backend_migrated_external"
 
 
 def backfill_core_config() -> None:
@@ -62,6 +63,25 @@ def backfill_core_config() -> None:
         config_repo.set(_CONFIG_BACKFILL_FLAG, True)
     except Exception as e:  # noqa: BLE001
         logger.debug("melhorias: backfill de config falhou: %s", e)
+    _migrate_backend_to_external()
+
+
+def _migrate_backend_to_external() -> None:
+    """One-time (1.3.0): a UI só oferece o motor agêntico. Instalações antigas
+    quase sempre têm ``generator_backend='direct'`` gravado (o form antigo sempre
+    persistia o valor), então o flip do default seria inócuo para elas. Cura o
+    valor legado ``direct`` → ``external`` uma única vez. ``stub``/``external``
+    ficam intactos. Idempotente via flag."""
+    try:
+        if config_repo.get(_BACKEND_MIGRATED_FLAG):
+            return
+        current = str(config_repo.get(f"plugin.{PLUGIN_ID}.generator_backend", "") or "")
+        if current == "direct":
+            config_repo.set(f"plugin.{PLUGIN_ID}.generator_backend", "external")
+            logger.info("melhorias: motor migrado de 'direct' para 'external' (1.3.0)")
+        config_repo.set(_BACKEND_MIGRATED_FLAG, True)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("melhorias: migração de backend falhou: %s", e)
 
 
 def _setting(name: str, default: str = "") -> str:
