@@ -1,7 +1,7 @@
 // Seção "Sugestão de melhoria" renderizada no slot ai.settings.sections da aba
 // "Configurações de IA". Recebe `api` (via extends.js) → usa api.http/api.services.
-// Config (modelo + prompt da análise) editável só com permissão `configure`; lista
-// das últimas análises geradas (aprovadas), cada uma linkando ao painel.
+// Config (modelo + prompt da análise) editável só com permissão `configure`.
+// As análises geradas são consultadas no painel de aprovação (botão acima).
 //
 // Só substitui a antiga área de "sugestão de melhoria" que vivia no core: como é
 // um slot, some por completo quando o plugin é desativado.
@@ -11,12 +11,6 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
-
-function fmtTs(ts) {
-  if (!ts) return '—';
-  try { return new Date(ts * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }); }
-  catch (_) { return '—'; }
-}
 
 function goToPanel(detailId) {
   const url = detailId != null ? `/melhorias?detail=${detailId}` : '/melhorias';
@@ -30,7 +24,6 @@ export function MelhoriaAiSection({ api, can }) {
   const [prompt, setPrompt] = useState('');
   const [promptDefault, setPromptDefault] = useState('');
   const [models, setModels] = useState([]);
-  const [recent, setRecent] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
@@ -39,6 +32,8 @@ export function MelhoriaAiSection({ api, can }) {
   const [aiUrl, setAiUrl] = useState('');
   const [aiSecret, setAiSecret] = useState('');
   const [aiModel, setAiModel] = useState('');
+  const [cbUrl, setCbUrl] = useState('');
+  const [cbUrlEffective, setCbUrlEffective] = useState('');
   const [testResult, setTestResult] = useState('');
 
   const load = useCallback(async () => {
@@ -52,15 +47,13 @@ export function MelhoriaAiSection({ api, can }) {
         setAiUrl(cfg.data.ai_server_url || '');
         setAiSecret(cfg.data.ai_server_secret || '');
         setAiModel(cfg.data.ai_model || '');
+        setCbUrl(cfg.data.callback_url || '');
+        setCbUrlEffective(cfg.data.callback_url_effective || '');
       }
     } catch (_) { /* ignore */ }
     try {
       const ms = api.services && api.services.getModels ? await api.services.getModels() : null;
       if (ms && ms.ok && Array.isArray(ms.data)) setModels(ms.data);
-    } catch (_) { /* ignore */ }
-    try {
-      const r = await api.http.get('/suggestions?status=aprovada&limit=20');
-      if (r && r.ok && Array.isArray(r.data)) setRecent(r.data);
     } catch (_) { /* ignore */ }
   }, [api]);
 
@@ -76,6 +69,7 @@ export function MelhoriaAiSection({ api, can }) {
         ai_server_url: aiUrl || '',
         ai_server_secret: aiSecret || '',
         ai_model: aiModel || '',
+        callback_url: cbUrl || '',
       });
       if (res && res.ok) {
         setSaved(true); setTimeout(() => setSaved(false), 2000);
@@ -153,6 +147,15 @@ export function MelhoriaAiSection({ api, can }) {
         <input class="wa-field w-full rounded p-[8px] text-[13px] mb-3" type="text"
           placeholder="(default do executor)" disabled=${!canConfigure}
           value=${aiModel} onInput=${(e) => setAiModel(e.target.value)} />
+        <label class="block text-[13px] text-wa-text mb-1">URL de callback (este WhatsBot, opcional)</label>
+        <input class="wa-field w-full rounded p-[8px] text-[13px] mb-1" type="text"
+          placeholder=${cbUrlEffective ? `(auto: ${cbUrlEffective})` : 'ex.: http://203.0.113.20:8090'}
+          disabled=${!canConfigure}
+          value=${cbUrl} onInput=${(e) => setCbUrl(e.target.value)} />
+        <div class="text-[11px] text-wa-secondary mb-3">
+          URL desta instância que o executor chama de volta. Vazio = usa a URL do painel
+          (public_base_url) automaticamente. Precisa ser alcançável a partir do servidor da IA.
+        </div>
         ${canConfigure ? html`
           <div class="flex items-center gap-3">
             <button onClick=${testConnection}
@@ -171,19 +174,6 @@ export function MelhoriaAiSection({ api, can }) {
         </div>` : html`<div class="text-[12px] text-wa-secondary mb-6">
           Você não tem permissão para editar o modelo/prompt.
         </div>`}
-
-      <h4 class="text-[13px] font-semibold text-wa-text mb-2">Análises geradas recentes</h4>
-      ${recent.length === 0
-        ? html`<div class="text-[12px] text-wa-secondary">Nenhuma análise aprovada ainda.</div>`
-        : html`<ul class="space-y-1">
-            ${recent.map((s) => html`<li key=${s.id}>
-              <button onClick=${() => goToPanel(s.id)}
-                class="w-full text-left text-[13px] text-wa-text hover:bg-wa-hover rounded px-2 py-1.5 flex items-center justify-between gap-2">
-                <span class="truncate">${(s.message_content || '').trim() || '(sem conteúdo)'}</span>
-                <span class="text-[11px] text-wa-secondary whitespace-nowrap">${fmtTs(s.decided_at)}</span>
-              </button>
-            </li>`)}
-          </ul>`}
     </div>`;
 }
 

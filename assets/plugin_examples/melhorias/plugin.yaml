@@ -1,6 +1,6 @@
 id: melhorias
 name: Sugestões de melhoria
-version: 1.1.0
+version: 1.2.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Move o antigo "Gerar melhoria" (análise de qualidade de uma resposta da IA) para um
@@ -13,8 +13,9 @@ description: >-
   Protocolos) lista conteúdo da mensagem, solicitante, melhoria solicitada, link para a
   conversa, horários de solicitação/aprovação, status e aprovador — todos filtráveis — e
   mostra botões Aprovar/Recusar por linha só para quem tem permissão. O modelo/prompt da
-  análise e a lista de análises geradas ficam numa seção da aba "Configurações de IA"
-  (preenchida via slot). Desative o plugin e tudo some (opção do menu, painel, seção de IA
+  análise e o motor agêntico (executor externo, com URL de callback por instância)
+  ficam numa seção da aba "Configurações de IA" (preenchida via slot); as análises
+  geradas são consultadas no próprio painel. Desative o plugin e tudo some (opção do menu, painel, seção de IA
   e endpoints); os dados ficam nas tabelas do plugin.
 short_description: >-
   Fluxo de aprovação para sugestões de melhoria de respostas da IA (painel + permissões).

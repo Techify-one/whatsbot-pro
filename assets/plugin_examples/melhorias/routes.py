@@ -337,7 +337,8 @@ async def test_connection(request: Request):
 
 # ── Config (modelo/prompt da análise + servidor agêntico) ────────────────────
 
-_AI_CFG_KEYS = ("ai_server_url", "ai_model", "ai_timeout_ms", "generator_backend")
+_AI_CFG_KEYS = ("ai_server_url", "ai_model", "ai_timeout_ms", "generator_backend",
+                "callback_url")
 
 
 @router.get("/config", dependencies=[plugin_permission("view")])
@@ -352,6 +353,8 @@ async def get_config():
         "ai_server_secret": "***" if ai_client.shared_secret() else "",
         "ai_model": logic._setting("ai_model"),
         "ai_timeout_ms": logic._setting("ai_timeout_ms", "30000"),
+        "callback_url": logic._setting("callback_url"),
+        "callback_url_effective": ai_client.callback_url(),
     }}
 
 
@@ -389,4 +392,6 @@ async def put_config(body: dict):
         "ai_server_secret": "***" if ai_client.shared_secret() else "",
         "ai_model": logic._setting("ai_model"),
         "ai_timeout_ms": logic._setting("ai_timeout_ms", "30000"),
+        "callback_url": logic._setting("callback_url"),
+        "callback_url_effective": ai_client.callback_url(),
     }}

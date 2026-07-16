@@ -10,6 +10,10 @@ Config resolvida DB > env > default (molde ``settings.service.ts``):
 - ``plugin.melhorias.ai_server_secret`` (env ``WHATSBOT_MELHORIAS_AI_SECRET``, ≥32 chars)
 - ``plugin.melhorias.ai_model``         (modelo pedido ao executor; vazio = default dele)
 - ``plugin.melhorias.ai_timeout_ms``    (timeout por request não-stream; default 30000)
+- ``plugin.melhorias.callback_url``     (env ``WHATSBOT_MELHORIAS_CALLBACK_URL`` —
+  URL base DESTA instância, que o executor chama de volta nos ``_internal/*``;
+  vazio = usa a config global ``public_base_url``. Torna o executor
+  multi-instância: cada conversa leva o próprio ``callbackUrl``)
 
 O segredo NUNCA aparece em log/URL; o GET /config o mascara (``***``).
 """
@@ -69,6 +73,29 @@ def is_configured() -> bool:
     return bool(server_url()) and len(shared_secret()) >= SECRET_MIN_LEN
 
 
+def callback_url() -> str:
+    """URL base desta instância para os callbacks ``_internal/*`` do executor.
+
+    Override explícito (``plugin.melhorias.callback_url``) > ``public_base_url``
+    global (auto-capturada no 1º acesso ao painel). Vazio ⇒ o start falha com
+    mensagem acionável (o executor não tem mais fallback fixo)."""
+    explicit = _cfg("callback_url", "WHATSBOT_MELHORIAS_CALLBACK_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    return str(config_repo.get("public_base_url", "") or "").strip().rstrip("/")
+
+
+def _require_callback_url() -> str:
+    url = callback_url()
+    if not url:
+        raise RuntimeError(
+            "URL de callback indisponível: configure a 'URL de callback (este "
+            "WhatsBot)' na seção Melhoria agêntica (ou acesse o painel uma vez "
+            "para capturar a public_base_url)."
+        )
+    return url
+
+
 # ── Assinatura ───────────────────────────────────────────────────────────────
 
 def sign(secret: str, method: str, path: str, ts: str, request_id: str,
@@ -122,6 +149,7 @@ async def start(conversation_id: str, *, user_id, target: dict,
         "userId": str(user_id if user_id is not None else ""),
         "target": target,
         "model": model or default_model() or None,
+        "callbackUrl": _require_callback_url(),
     }, on_behalf_of=user_id)
 
 
@@ -156,6 +184,7 @@ async def resume(conversation_id: str, *, user_id, target: dict,
         "target": target,
         "history": history,
         "model": model or default_model() or None,
+        "callbackUrl": _require_callback_url(),
     }, on_behalf_of=user_id)
 
 
