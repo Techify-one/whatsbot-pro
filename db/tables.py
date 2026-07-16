@@ -695,6 +695,9 @@ ai_variables = Table(
     # Global values referenceable by prompts via ``{name}``.
     Column("name", Text, primary_key=True),
     Column("value", Text, nullable=False, server_default=""),
+    # plano 51 (01 F3): versionamento no molde de ai_tools — bump por edição
+    # real (dedup no repo), snapshot em ai_variables_history, rollback forward.
+    Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
 
@@ -761,6 +764,21 @@ ai_tools_history = Table(
     Column("created_at", Float, nullable=False),
 )
 Index("idx_ai_tools_hist", ai_tools_history.c.name, ai_tools_history.c.version)
+
+
+# plano 51 (01 F3): trilha de versão de ai_variables (era o único ponto cego de
+# revert). snapshot = JSON {"name": ..., "value": ...} — molde de ai_tools_history.
+ai_variables_history = Table(
+    "ai_variables_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("snapshot", Text, nullable=False),
+    Column("created_at", Float, nullable=False),
+)
+Index("idx_ai_variables_hist",
+      ai_variables_history.c.name, ai_variables_history.c.version)
 
 
 # Dedicated, git-like version trail for an agent's INLINE prompt only. Each row is

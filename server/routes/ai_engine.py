@@ -380,6 +380,33 @@ def register_routes(app, deps):
         _emit_changed("variable", name)
         return _ok({"deleted": True})
 
+    # plano 51 (01 F3): history + rollback de variável — paridade de revert com
+    # agentes/tools (a melhoria agêntica precisa reverter qualquer edição).
+    @app.get("/api/ai/variables/{name}/history",
+             dependencies=[Depends(require_permission("agent.variables.manage"))])
+    async def variable_history(name: str):
+        rows = await asyncio.to_thread(variable_repo.list_history, name)
+        return _ok(rows)
+
+    @app.get("/api/ai/variables/{name}/history/{version}",
+             dependencies=[Depends(require_permission("agent.variables.manage"))])
+    async def variable_snapshot(name: str, version: int):
+        snap = await asyncio.to_thread(variable_repo.get_snapshot, name, version)
+        if snap is None:
+            return _err("Versão não encontrada.", status=404)
+        return _ok(snap)
+
+    @app.post("/api/ai/variables/{name}/rollback/{version}",
+              dependencies=[Depends(require_permission("agent.variables.manage"))])
+    async def rollback_variable(name: str, version: int):
+        row = await asyncio.to_thread(variable_repo.rollback, name, version)
+        if row is None:
+            return _err("Versão não encontrada.", status=404)
+        _emit_changed("variable", name)
+        logger.info("AI variable rollback: %s → v%s (nova v%s)",
+                    name, version, row.get("version"))
+        return _ok(row)
+
     # ── Tools (code-in-DB) ──────────────────────────────────────────────
     @app.get("/api/ai/tools",
              dependencies=[Depends(require_permission("agent.tools.manage"))])
