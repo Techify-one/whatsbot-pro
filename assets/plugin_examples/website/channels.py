@@ -74,6 +74,12 @@ class WebsiteChannel(Channel):
                  "help": "Segredo para validar a identidade de um usuário logado "
                          "(setUser). Só é necessário se você for identificar "
                          "visitantes pelo seu backend. Clique em Sugerir para gerar."},
+                {"key": "ingest_secret", "label": "Segredo de ingestão (server-to-server)",
+                 "type": "token_suggest", "required": False,
+                 "help": "Segredo do endpoint /public/ingest — usado por integrações "
+                         "server-to-server (ex.: Windmill) para postar mensagens "
+                         "com identidade e nome estáveis, sem passar pelo navegador. "
+                         "Clique em Sugerir para gerar."},
             ],
             "config_fields": [
                 {"key": "widget_token", "label": "Token do widget", "type": "generated",
