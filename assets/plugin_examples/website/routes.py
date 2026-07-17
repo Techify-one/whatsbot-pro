@@ -22,7 +22,6 @@ visitor sockets.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import secrets
 import time
@@ -34,7 +33,6 @@ from db.repositories import (channel_repo, channel_credential_repo, config_repo,
                              contact_repo, conversation_repo, inbox_repo,
                              message_repo)
 from plugins.context import broadcast, get_channel_runtime
-from plugins.events import emit_with_filter
 
 from whatsbot_plugins.website import sessions
 from whatsbot_plugins.website.bridge import hub
@@ -128,148 +126,6 @@ async def _ingest_browser_message(channel_id: str, chat_id: str, text: str,
     for ev in events or []:
         await ingest(ev)
     return msg_id
-
-
-def _message_exists(msg_id: str) -> bool:
-    """Durable idempotency check for server-side ingest: has this ``msg_id`` (the
-    caller's stable ``dedup_id``) already been persisted? Mirrors the pattern the
-    curseduca_forum plugin used — survives restarts (unlike the funnel's in-memory
-    dedup set), so a webhook re-delivery becomes a no-op."""
-    if not msg_id:
-        return False
-    from sqlalchemy import select
-    from db.engine import get_engine
-    from db.tables import messages
-    with get_engine().connect() as conn:
-        row = conn.execute(
-            select(messages.c.id).where(messages.c.msg_id == msg_id).limit(1)).first()
-    return row is not None
-
-
-def _server_ingest_sync(*, channel_id: str, external_id: str, name: str,
-                        email: str, text: str, msg_id: str, reopen: bool):
-    """Persist ONE server-pushed message synchronously (no batching, no AI).
-
-    Why NOT the browser funnel (``parse_inbound`` → ``ctx.ingest_event``): that path
-    batches inbound by ``message_batch_delay`` and, when it flushes, MERGES the
-    batch into a single row keeping only the LAST ``msg_id`` — which would collapse
-    two distinct forum dúvidas into one message and drop the earlier ``dedup_id``,
-    breaking idempotency. A forum notice is one discrete post, so we save it directly
-    (mirrors the proven curseduca_forum ingest) but target the WEBSITE channel so the
-    conversation lands in that inbox and is typed by its provider.
-
-    Returns ``(mem, saved)`` so the async caller can broadcast + emit ``message.saved``
-    (which is what protocolos listens on to open the protocol)."""
-    from agent.memory import ContactMemory
-    # channel_id here → ContactMemory resolves the website provider's contact_type
-    # and routes the conversation to the "Avisos Curseduca" inbox. Creates on first
-    # touch; an existing student contact is reused (stable identity ⇒ same protocol).
-    mem = ContactMemory(external_id, default_ai_enabled=False, channel_id=channel_id)
-    if name and not (mem.info.get("name") or "").strip():
-        mem.info["name"] = name          # conversation name = the student's name
-    if email and not (mem.info.get("email") or "").strip():
-        mem.info["email"] = email
-    # Panel-only: never auto-reply, never send anything back to the student. The
-    # atendente reads the dúvida and answers in the forum (via the link in the text).
-    mem.ai_enabled = False
-    mem.can_send = False
-    mem.save()
-    saved = mem.add_message("user", text, msg_id=msg_id,
-                            reopen=(None if reopen else False))
-    mem.increment_unread(saved.get("msg_id"))
-    return mem, saved
-
-
-def _email_from_external_id(external_id: str) -> str:
-    """Best-effort e-mail extraction from ``cursos:aluno@ex.com`` style ids (so the
-    panel shows the student's e-mail). Returns "" when there's no ``@`` part."""
-    tail = external_id.split(":", 1)[1] if ":" in external_id else external_id
-    return tail.strip() if "@" in tail else ""
-
-
-# ── PUBLIC: server-to-server ingest (Windmill / backend integrations) ─────
-
-@router.post("/public/ingest")
-async def public_ingest(body: dict, request: Request):
-    """Post a message into a website channel from a TRUSTED backend (no browser).
-
-    Unlike ``/public/messages`` (browser: sorted session id, HMAC identify), this
-    endpoint accepts a caller-chosen STABLE identity + display name + text in one
-    call, authenticated by the channel's ``ingest_secret`` credential. Built for
-    integrations like the Windmill Curseduca-fórum automation:
-
-        {"widget_token": "wgt_…", "secret": "<ingest_secret>",
-         "external_id": "cursos:aluno@ex.com",   # stable conversation identity
-         "name": "Nome do Aluno",                 # becomes the conversation name
-         "text": "<mensagem já formatada>",
-         "dedup_id": "curseduca:post:123"}        # idempotency key (→ messages.msg_id)
-
-    Stable ``external_id`` means repeat dúvidas of the same person reuse the same
-    contact (so protocolos keeps ONE open protocol per person, reopening on return);
-    ``dedup_id`` makes a webhook re-delivery a no-op. Auth-exempt by path
-    (``/public/``); the ``secret`` is the actual gate."""
-    body = body or {}
-    widget_token = str(body.get("widget_token") or "").strip()
-    secret = str(body.get("secret") or "").strip()
-    external_id = str(body.get("external_id") or "").strip()
-    name = str(body.get("name") or "").strip()
-    email = str(body.get("email") or "").strip()
-    text = str(body.get("text") or "").strip()
-    dedup_id = str(body.get("dedup_id") or "").strip()
-    reopen = body.get("reopen", True)
-    reopen = True if reopen is None else bool(reopen)
-
-    if not widget_token or not external_id or not text:
-        return {"ok": False, "error": "widget_token, external_id e text são obrigatórios"}
-
-    row = await asyncio.to_thread(sessions.find_channel_by_widget_token, widget_token)
-    if row is None:
-        return {"ok": False, "error": "widget_token inválido"}
-    channel_id = row["id"]
-
-    # Auth: constant-time compare against the channel's ingest_secret credential.
-    ingest_secret = await asyncio.to_thread(
-        channel_credential_repo.get, channel_id, "ingest_secret")
-    if not ingest_secret:
-        logger.warning("[website] /public/ingest called but channel %s has no "
-                       "ingest_secret set", channel_id)
-        return {"ok": False, "error": "canal sem ingest_secret configurado"}
-    if not secret or not hmac.compare_digest(str(secret), str(ingest_secret)):
-        return {"ok": False, "error": "unauthorized"}
-
-    # Durable dedup (survives restarts) — a webhook re-delivery is a no-op. The
-    # direct save persists synchronously, so a repeat call always sees the prior row.
-    if dedup_id and await asyncio.to_thread(_message_exists, dedup_id):
-        return {"ok": True, "data": {"skipped": True, "msg_id": dedup_id}}
-
-    if not email:
-        email = _email_from_external_id(external_id)
-    msg_id = dedup_id or ("wing_" + secrets.token_hex(8))
-    try:
-        mem, saved = await asyncio.to_thread(
-            _server_ingest_sync, channel_id=channel_id, external_id=external_id,
-            name=name, email=email, text=text, msg_id=msg_id, reopen=reopen)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[website] server ingest failed: %s", e, exc_info=True)
-        return {"ok": False, "error": "falha ao processar"}
-
-    # Live panel update + the bus event protocolos consumes to open the protocol.
-    try:
-        broadcast("new_message", {"phone": mem.phone, "channel_id": channel_id,
-                                  "message": saved})
-        await emit_with_filter("message.saved", {
-            "phone": mem.phone, "channel_id": channel_id, "text": text,
-            "msg_id": saved.get("msg_id"), "media_type": None, "media_path": None,
-            "media_extras": None, "is_group": False, "group_jid": None,
-            "source": "website_ingest", "ts": time.time(),
-        })
-    except Exception:  # noqa: BLE001 — a failed broadcast/emit must not fail the ingest
-        logger.warning("[website] post-ingest broadcast/emit failed", exc_info=True)
-
-    return {"ok": True, "data": {"msg_id": saved.get("msg_id"),
-                                 "conversation_id": saved.get("conversation_id"),
-                                 "contact_id": mem.id, "channel_id": channel_id,
-                                 "skipped": False}}
 
 
 # ── PUBLIC: embeddable widget page (per-channel frame-ancestors CSP) ──────
