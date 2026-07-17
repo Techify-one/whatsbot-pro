@@ -29,9 +29,8 @@ import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
-// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 15→3 p/ testar o scroll infinito com
-// poucos contatos (lote fixo carregado a cada rolagem). REVERTER para 15 depois.
-const PAGE_SIZE = 3;
+// Lote fixo carregado a cada rolagem (scroll infinito).
+const PAGE_SIZE = 15;
 
 // Casefold + strip accents (espelha o `_fold` do backend) para a busca casar
 // independente de acento/caixa.

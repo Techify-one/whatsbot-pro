@@ -3469,6 +3469,26 @@ r = client.post("/api/conversations/filter", json={
     "filters": [{"attribute_key": "status", "filter_operator": "equal_to", "values": ["open"]}]})
 check("POST filter (Chatwoot payload) == GET", r.json()["data"]["count"] == _open_get)
 
+# Paginação (plano 50 D) — o filtro devolve has_more e caminha por offset sem dup/gap.
+_all = client.get("/api/conversations/filter?limit=200").json()["data"]["conversations"]
+_all_ids = [c["id"] for c in _all]
+if 2 <= len(_all_ids) < 200:
+    _p1 = client.get("/api/conversations/filter?limit=1&offset=0").json()["data"]
+    check("filter?limit=1 -> has_more True", _p1.get("has_more") is True)
+    check("filter?limit=1 -> 1 item", len(_p1["conversations"]) == 1)
+    # Caminha todas as páginas de 1 em 1 e reconstrói o universo sem duplicar.
+    _walked, _off = [], 0
+    while True:
+        _pg = client.get(f"/api/conversations/filter?limit=1&offset={_off}").json()["data"]
+        _rows = _pg["conversations"]
+        _walked += [c["id"] for c in _rows]
+        if not _pg.get("has_more") or not _rows:
+            break
+        _off += len(_rows)
+    check("filter offset walk cobre o universo (ordem/sem dup)", _walked == _all_ids)
+_big = client.get("/api/conversations/filter?limit=99999").json()["data"]
+check("filter?limit=99999 -> capado (<=200)", len(_big["conversations"]) <= 200)
+
 # Adversariais → 400
 check("filter?drop_table=1 -> 400 (dim desconhecida)",
       client.get("/api/conversations/filter?drop_table=1").status_code == 400)

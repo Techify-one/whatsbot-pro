@@ -14,6 +14,7 @@ import { MessageBubble } from './MessageBubble.js';
 import { MessageEditDialog } from './MessageEditDialog.js';
 import { SystemMessageCard, isSystemCardRole } from './SystemMessageCard.js';
 import { Composer } from './Composer.js';
+import { useReverseInfiniteScroll } from '../../hooks/useInfiniteScroll.js';
 import { useComposer } from './hooks/useComposer.js';
 import { useAudioRecorder } from './hooks/useAudioRecorder.js';
 import { useMediaUpload } from './hooks/useMediaUpload.js';
@@ -51,23 +52,16 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   };
 
   const chatRef = useRef(null);
-  // Scroll-up (plano 50 F4): sentinela no topo + âncora de scroll. `prependingRef`
-  // sinaliza que a próxima atualização de `messages` veio de "carregar anteriores"
-  // (prepend) — o efeito de scroll então RESTAURA a posição em vez de rolar pro fim.
-  const topSentinelRef = useRef(null);
-  const prependingRef = useRef(false);
-  const anchorRef = useRef({ height: 0, top: 0 });
-
-  // Dispara loadOlder ancorando a viewport: guarda scrollHeight/scrollTop ANTES do
-  // prepend p/ compensar depois (o conteúdo entra ACIMA, empurraria a lista pra baixo).
-  function handleLoadOlder() {
-    if (!loadOlder || !hasMore || loadingOlder) return;
-    if (chatRef.current) {
-      anchorRef.current = { height: chatRef.current.scrollHeight, top: chatRef.current.scrollTop };
-    }
-    prependingRef.current = true;
-    loadOlder();
-  }
+  // Scroll-up (plano 50 F4): sentinela no topo + âncora de scroll, centralizados no hook
+  // reutilizável `useReverseInfiniteScroll`. Ele liga o IntersectionObserver ao topo,
+  // captura a âncora e restaura a posição visual após o prepend (a viewport não salta),
+  // e só dispara quando há o que rolar (evita o auto-load em cascata que empurrava as
+  // mensagens novas pra fora da viewport — o bug "as anteriores não aparecem").
+  // `justPrependedRef` sinaliza que a atualização de `messages` veio de "carregar
+  // anteriores" → o efeito de scroll NÃO rola pro fim nessa atualização.
+  const { sentinelRef: topSentinelRef, justPrependedRef } = useReverseInfiniteScroll({
+    scrollRef: chatRef, items: messages, hasMore, loadOlder, loadingOlder,
+  });
 
   // Header subtitle (line under the name): raw phone by default, but a plugin may
   // rewrite it via `filter.contact.headerSubtitle` — e.g. the website widget maps
@@ -161,15 +155,11 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   }
 
   useEffect(() => {
-    // Prepend de "carregar anteriores" (F4): restaura a posição visual — o novo bloco
-    // entrou ACIMA, então soma o delta de altura ao scrollTop guardado. NÃO rola pro
-    // fim (senão a viewport saltaria). Só vale para ESTA atualização.
-    if (prependingRef.current) {
-      prependingRef.current = false;
-      if (chatRef.current) {
-        const delta = chatRef.current.scrollHeight - anchorRef.current.height;
-        chatRef.current.scrollTop = anchorRef.current.top + delta;
-      }
+    // Prepend de "carregar anteriores" (F4): a posição visual já foi RESTAURADA pelo
+    // useReverseInfiniteScroll (useLayoutEffect, antes do paint). Aqui só não rolamos
+    // pro fim nessa atualização (senão a viewport saltaria).
+    if (justPrependedRef.current) {
+      justPrependedRef.current = false;
       return;
     }
     const target = pendingScrollRef.current;
@@ -184,19 +174,6 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     }
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
-
-  // IntersectionObserver no sentinela do topo (F4): ao chegar perto do topo com
-  // has_more, carrega a página anterior. Recriado quando has_more/thread muda.
-  useEffect(() => {
-    const sentinel = topSentinelRef.current;
-    const root = chatRef.current;
-    if (!sentinel || !root || !hasMore || !loadOlder) return;
-    const obs = new IntersectionObserver((entries) => {
-      if (entries[0] && entries[0].isIntersecting) handleLoadOlder();
-    }, { root, rootMargin: '120px 0px 0px 0px' });
-    obs.observe(sentinel);
-    return () => obs.disconnect();
-  }, [hasMore, loadOlder, phone, conversationId]);
 
   // Client-side plugin lifecycle (plano 23 §3.4): emit `ui.conversation.opened`
   // when this chat view mounts/changes and `ui.conversation.closed` on teardown.

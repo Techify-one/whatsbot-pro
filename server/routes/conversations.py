@@ -153,12 +153,17 @@ def register_routes(app, deps):
             logger.warning("Filtro inválido: %s", e)
             return _err("Filtro inválido.", status=400)
         _u = current_user(request)
+        # Over-fetch por 1 p/ saber se há próxima página (scroll infinito), sem 2ª query
+        # nem COUNT — mesmo padrão do endpoint de mensagens. Dropa a linha extra.
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where,
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
-            limit=spec.limit, offset=spec.offset)
-        return _ok({"conversations": rows, "count": len(rows)})
+            limit=spec.limit + 1, offset=spec.offset)
+        has_more = len(rows) > spec.limit
+        if has_more:
+            rows = rows[:spec.limit]
+        return _ok({"conversations": rows, "count": len(rows), "has_more": has_more})
 
     @app.get("/api/atendimentos/assignable-agents")
     async def assignable_agents(request: Request):

@@ -12,7 +12,7 @@
 // - `keyOf(item)`: chave de dedup ao anexar (evita duplicar na virada de página).
 //
 // Devolve a lista ACUMULADA + `loadMore` (chame no sentinela de fim de lista) + flags.
-import { useState, useRef, useCallback, useEffect } from 'preact/hooks';
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'preact/hooks';
 
 /**
  * @param {Object} opts
@@ -74,12 +74,16 @@ export function useInfiniteScroll({ fetchPage, pageSize, resetKey, keyOf = (x) =
  * Efeito utilitário: liga um IntersectionObserver a um sentinela de fim de lista.
  * `onHit` dispara quando o sentinela entra na viewport (rolagem do mouse inclusive).
  * `root` = container de scroll (ou null p/ a viewport da página). `active` liga/desliga.
+ * `rootMargin` pré-carrega antes do sentinela aparecer — default expande o BAIXO
+ * (listas que anexam pra baixo). Para um sentinela de TOPO (scroll-up), passe algo
+ * como '120px 0px 0px 0px'.
  * @param {{current:any}} sentinelRef
  * @param {()=>void} onHit
  * @param {boolean} active
  * @param {{current:any}} [rootRef]
+ * @param {string} [rootMargin]
  */
-export function useScrollSentinel(sentinelRef, onHit, active, rootRef) {
+export function useScrollSentinel(sentinelRef, onHit, active, rootRef, rootMargin = '0px 0px 300px 0px') {
   const cbRef = useRef(onHit);
   useEffect(() => { cbRef.current = onHit; });
   useEffect(() => {
@@ -88,8 +92,60 @@ export function useScrollSentinel(sentinelRef, onHit, active, rootRef) {
     const root = rootRef && rootRef.current ? rootRef.current : null;
     const obs = new IntersectionObserver((entries) => {
       if (entries[0] && entries[0].isIntersecting) cbRef.current();
-    }, { root, rootMargin: '0px 0px 300px 0px' });
+    }, { root, rootMargin });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [active, sentinelRef, rootRef]);
+  }, [active, sentinelRef, rootRef, rootMargin]);
+}
+
+/**
+ * Scroll infinito REVERSO (keyset / prepend) — para o histórico do chat, que rola pra
+ * CIMA e carrega mensagens ANTERIORES via cursor (`before_id`). Enquanto o hook acima
+ * anexa páginas por offset PARA BAIXO, este:
+ *  - liga um sentinela no TOPO do container de scroll (via `useScrollSentinel`);
+ *  - ao ser atingido, captura a âncora (scrollHeight/scrollTop) e chama `loadOlder`;
+ *  - após o prepend, RESTAURA a posição visual num `useLayoutEffect` (antes do paint,
+ *    sem flicker) somando o delta de altura — a viewport não salta;
+ *  - só dispara quando há o que rolar (`scrollHeight > clientHeight`), evitando o
+ *    auto-load em cascata quando a lista não transborda (que empurraria as mensagens
+ *    novas pra fora da viewport — o bug "as anteriores não aparecem").
+ *
+ * A busca/prepend em si continua no dono dos dados (`loadOlder`); o hook cuida só do
+ * gatilho por rolagem + ancoragem. Devolve `sentinelRef` (ponha no elemento do topo) e
+ * `justPrependedRef` (o consumidor checa p/ NÃO rolar pro fim na atualização do prepend).
+ *
+ * @param {Object} opts
+ * @param {{current:any}} opts.scrollRef  container de scroll
+ * @param {any[]} opts.items              lista renderizada (dispara a restauração ao mudar)
+ * @param {boolean} opts.hasMore
+ * @param {(()=>void)|null} opts.loadOlder
+ * @param {boolean} opts.loadingOlder
+ */
+export function useReverseInfiniteScroll({ scrollRef, items, hasMore, loadOlder, loadingOlder }) {
+  const sentinelRef = useRef(null);
+  const anchorRef = useRef(null);          // {height, top} pré-prepend, ou null
+  const justPrependedRef = useRef(false);
+
+  const trigger = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || !hasMore || loadingOlder || !loadOlder) return;
+    if (el.scrollHeight - el.clientHeight <= 4) return;  // nada a rolar → não dispara
+    anchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
+    loadOlder();
+  }, [scrollRef, hasMore, loadingOlder, loadOlder]);
+
+  useScrollSentinel(sentinelRef, trigger, !!(hasMore && loadOlder), scrollRef, '120px 0px 0px 0px');
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && anchorRef.current) {
+      const delta = el.scrollHeight - anchorRef.current.height;
+      el.scrollTop = anchorRef.current.top + delta;
+      anchorRef.current = null;
+      justPrependedRef.current = true;
+    }
+    // eslint-disable-next-line
+  }, [items]);
+
+  return { sentinelRef, justPrependedRef };
 }

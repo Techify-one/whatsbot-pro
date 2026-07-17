@@ -22,9 +22,7 @@ import { buildRows, convRowToSidebarRow, sortContacts } from '../../../services/
  * @param {(...args:any[])=>void} [opts.onUnreadChange] - app-shell unread refresh.
  */
 // Tamanho de página da sidebar conversa-first (plano 50 F8).
-// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 50→3 p/ disparar o scroll infinito com
-// poucas conversas. REVERTER para 50 depois dos testes.
-const SIDEBAR_PAGE = 3;
+const SIDEBAR_PAGE = 50;
 
 export function useConversationList({ onUnreadChange }) {
   const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)

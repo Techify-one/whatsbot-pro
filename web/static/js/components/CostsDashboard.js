@@ -9,9 +9,7 @@ import { readParams, writeParams, enumStr, str } from '../services/urlState.js';
 const html = htm.bind(h);
 
 // Tamanho de página da paginação server-side (plano 50 F10) — top gastadores.
-// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 25→3 p/ testar o scroll infinito com
-// poucos contatos. REVERTER para 25 depois dos testes.
-const PAGE_SIZE = 3;
+const PAGE_SIZE = 25;
 
 // Deep-link do estado da tela de custos (Plano 24): período/ordenação/busca na
 // query-string. `start`/`end` (formato YYYY-MM-DDTHH:mm) só saem no período custom

@@ -3,6 +3,7 @@ import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime, avatarUrl } from './utils.js';
+import { useScrollSentinel } from '../../hooks/useInfiniteScroll.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
@@ -132,19 +133,17 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
-  // há próxima página (modo conversa-first, sem busca). Observer recriado quando muda.
+  // há próxima página (modo conversa-first, sem busca). Usa o mesmo primitivo
+  // reutilizável `useScrollSentinel` das demais listas.
   const bottomSentinelRef = useRef(null);
   const listScrollRef = useRef(null);
-  useEffect(() => {
-    const sentinel = bottomSentinelRef.current;
-    const root = listScrollRef.current;
-    if (!sentinel || !root || !hasMore || !loadMore) return;
-    const obs = new IntersectionObserver((entries) => {
-      if (entries[0] && entries[0].isIntersecting && !loadingMore) loadMore();
-    }, { root, rootMargin: '0px 0px 200px 0px' });
-    obs.observe(sentinel);
-    return () => obs.disconnect();
-  }, [hasMore, loadMore, loadingMore]);
+  useScrollSentinel(
+    bottomSentinelRef,
+    () => { if (!loadingMore) loadMore && loadMore(); },
+    !!(hasMore && loadMore),
+    listScrollRef,
+    '0px 0px 200px 0px',
+  );
   const selCount = (selectedKeys || []).length;
   // Selection is keyed per CONVERSATION row (rowKeyFor), not by phone — so the two
   // channels of the same number are selectable independently.
