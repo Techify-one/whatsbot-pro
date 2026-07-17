@@ -348,6 +348,52 @@ non_archived = [c for c in contacts_data if not c.get("is_archived")]
 check("GET /api/contacts -> has non-archived contacts", len(non_archived) >= 1)
 check("GET /api/contacts -> exposes avatar_v (cache-busting)", all("avatar_v" in c for c in contacts_data))
 
+# plano 50 F5 — paginação server-side (só quando `limit` é passado; sem ele = legado).
+# Semear contatos suficientes p/ ter mais de uma página.
+for _i in range(8):
+    _seed = contact_repo.get_or_create(f"55000512{_i:04d}")
+    contact_repo.update(_seed["id"], name=f"Seed Pag {_i}")
+r = client.get("/api/contacts?limit=3&offset=0")
+check("GET /api/contacts?limit=3 -> 200", r.status_code == 200)
+_pg = r.json()["data"]
+check("F5: com limit -> envelope {items,total,has_more}",
+      isinstance(_pg, dict) and "items" in _pg and "total" in _pg and "has_more" in _pg)
+check("F5: página respeita limit (<=3 itens)", len(_pg["items"]) <= 3)
+check("F5: total >= itens da página e has_more coerente",
+      _pg["total"] >= len(_pg["items"]) and _pg["has_more"] is (0 + len(_pg["items"]) < _pg["total"]))
+check("F5: itens da página expõem avatar_v", all("avatar_v" in c for c in _pg["items"]))
+# Caminhar as páginas reconstrói o universo sem dup (mesmo total).
+_seen_ids, _off, _guard = set(), 0, 0
+while _guard < 500:
+    _guard += 1
+    _p = client.get(f"/api/contacts?limit=25&offset={_off}").json()["data"]
+    for _c in _p["items"]:
+        _seen_ids.add(_c["id"])
+    if not _p["has_more"]:
+        break
+    _off += 25
+check("F5: paginação cobre todos os contatos (sem dup)", len(_seen_ids) == _p["total"],
+      f"vistos={len(_seen_ids)} total={_p['total']}")
+# limit gigante é capado (não estoura), offset negativo vira 0.
+_r_cap = client.get("/api/contacts?limit=99999").json()["data"]
+check("F5: limit=99999 capado por CAP_LIST (<=200)", len(_r_cap["items"]) <= 200)
+# Busca + paginação: envelope também, e a página é subconjunto do filtro.
+_r_qp = client.get("/api/contacts?q=Seed+Pag&limit=5&offset=0").json()["data"]
+check("F5: busca paginada -> envelope", isinstance(_r_qp, dict) and "items" in _r_qp)
+check("F5: busca paginada respeita limit", len(_r_qp["items"]) <= 5)
+check("F5: sem limit continua lista legada (retrocompat)",
+      isinstance(client.get("/api/contacts").json()["data"], list))
+
+# plano 50 F7 — sort=name devolve a página em ordem alfabética (tela /contacts).
+_r_sort = client.get("/api/contacts?limit=50&offset=0&sort=name").json()["data"]
+_names = [(c.get("name") or c.get("phone") or "") for c in _r_sort["items"]]
+check("F7: sort=name -> página em ordem alfabética",
+      _names == sorted(_names, key=lambda s: s.lower()))
+# default (recency) difere de name (ordenações distintas) — sanity de que o param pega.
+_r_rec = client.get("/api/contacts?limit=50&offset=0").json()["data"]
+check("F7: sort default é recência (envelope válido)",
+      isinstance(_r_rec.get("items"), list))
+
 # Search
 r = client.get("/api/contacts?q=Alice")
 check("GET /api/contacts?q=Alice -> finds Alice", len(r.json()["data"]) >= 1)
@@ -387,6 +433,23 @@ check("GET /api/contacts?q=remarcada -> matches by transcription",
 r = client.get("/api/contacts?q=conteudoinexistente123")
 check("GET /api/contacts?q=conteudoinexistente123 -> empty",
       not any(c["phone"] == "5511999990010" for c in r.json()["data"]))
+
+# plano 50 F6 — o scan de conteúdo é bounded (só as N recentes) + guarda de >=2 chars.
+# Match por conteúdo com 2+ chars ainda funciona (regressão coberta acima); uma busca de
+# 1 caractere NÃO aciona o scan (não traz o contato que só casa por mensagem).
+_r1 = client.get("/api/contacts?q=ç").json()["data"]  # 1 char: só nome/telefone/tag
+check("F6: busca de 1 char não casa por conteúdo de mensagem",
+      not any(c["phone"] == "5511999990010" for c in _r1))
+from db.search.contact_search import (MESSAGE_SCAN_CAP as _SCAN_CAP,
+                                      MIN_SCAN_QUERY_LEN as _MINLEN,
+                                      contact_ids_matching_message as _cimm)
+from db.engine import get_engine as _f6_get_engine
+check("F6: guarda de comprimento mínimo do scan (>=2)", _MINLEN >= 2)
+check("F6: scan cap é um teto positivo", _SCAN_CAP > 0)
+# O scan de 1 char retorna vazio direto (nem toca no banco).
+with _f6_get_engine().connect() as _c6:
+    check("F6: contact_ids_matching_message('a') -> {} (abaixo do mínimo)",
+          _cimm(_c6, "a", False) == {})
 
 # Bot @mention flag: surfaces in the list and clears when the chat is read
 _mc = contact_repo.get_or_create("5511999990011")
@@ -435,6 +498,47 @@ check("POST /pin (no field) -> 400", r.status_code == 400)
 r = client.post("/api/contacts/5511999999999/pin", json={"pinned": True})
 check("POST /pin (unknown contact) -> 404", r.status_code == 404)
 
+# ═══════════════════════════════════════════════════════════════════
+#  plano 50 F11 — Export CSV: streaming, sem N+1 de tags, íntegro
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Export (plano 50 F11)")
+# Contato com tags, para validar que o batch de tags carrega certo no export.
+_exp_c = contact_repo.get_or_create("5500051100001")
+contact_repo.update(_exp_c["id"], name="Export Zeca")
+tag_repo.create("vip-export", "#ff0000")
+tag_repo.set_contact_tags(_exp_c["id"], ["vip-export"])  # set_contact_tags usa NOMES
+r = client.get("/api/contacts/export")
+check("F11: GET /contacts/export -> 200", r.status_code == 200)
+check("F11: export content-type é CSV", "text/csv" in r.headers.get("content-type", ""))
+check("F11: export é attachment (contatos.csv)",
+      "contatos.csv" in r.headers.get("content-disposition", ""))
+_lines = r.text.splitlines()
+check("F11: CSV tem header com phone/name/tags", bool(_lines) and "phone" in _lines[0] and "tags" in _lines[0])
+check("F11: BOM no início (Excel UTF-8)", r.text[:1] == "﻿")
+# A linha do Zeca traz a tag (batch de tags funcionou; sem N+1).
+_zeca = [ln for ln in _lines if "5500051100001" in ln]
+check("F11: contato exportado aparece no CSV", len(_zeca) == 1)
+check("F11: tag do contato vem na linha (batch, sem N+1)",
+      bool(_zeca) and "vip-export" in _zeca[0])
+# iter_for_export em chunks cobre todos os contatos (paridade com list_for_export).
+from db.repositories import contact_query as _cq
+_all_export = list(_cq.iter_for_export(None))
+_chunked = list(_cq.iter_for_export(None, chunk=2))
+check("F11: iter_for_export chunk=2 == chunk padrão (mesma cobertura)",
+      [c["phone"] for c in _all_export] == [c["phone"] for c in _chunked])
+check("F11: list_for_export delega ao gerador (mesmo total)",
+      len(contact_repo.list_for_export(None)) == len(_all_export))
+
+# plano 50 F12 — defesa em profundidade: a lista de atendimentos também capa o limit
+# (já tinha min(limit,200); confirma que ?limit gigante nunca estoura). Os demais list
+# endpoints admin (agents/tools/users/roles/channels/quick-replies/custom-attributes)
+# não recebem `limit` — dataset naturalmente pequeno (1 linha por entidade).
+_r_atd = client.get("/api/atendimentos?limit=99999")
+check("F12: /api/atendimentos?limit=99999 -> 200", _r_atd.status_code == 200)
+_atd_data = _r_atd.json()["data"]
+_atd_items = _atd_data.get("conversations") if isinstance(_atd_data, dict) else _atd_data
+check("F12: lista de atendimentos capa o limit (<=200)",
+      not isinstance(_atd_items, list) or len(_atd_items) <= 200)
 # ═══════════════════════════════════════════════════════════════════
 #  6. Contact detail
 # ═══════════════════════════════════════════════════════════════════
@@ -561,6 +665,62 @@ check("POST /messages/delete (me) -> scope me", bool(_kept) and _kept[0].get("re
 # missing identifiers -> 400
 r = client.post("/api/contacts/5511999990001/messages/delete", json={"scope": "me"})
 check("POST /messages/delete (no id) -> 400", r.status_code == 400)
+
+# ── Edit message (plano — editar mensagem) ──────────────────────────
+# Provider capabilities: GOWA revokes + edits; WhatsApp Cloud edits but does NOT
+# revoke (so the panel hides "Apagar" there). Drives the UI by capability.
+from channels.providers.gowa_channel import GOWAChannel as _GC
+_gc = _GC("default")
+check("cap: GOWA revoke", _gc.capabilities.revoke is True)
+check("cap: GOWA edit_message", _gc.capabilities.edit_message is True)
+import importlib.util as _ilu
+def _load_provider(_name, _path):
+    _s = _ilu.spec_from_file_location(_name, _path)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m); return _m
+_wac = _load_provider("wac_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
+_cc = _wac.WhatsAppCloudChannel("c_test", credentials={
+    "access_token": "x", "phone_number_id": "y", "verify_token": "z"})
+# WhatsApp Cloud é o único canal sem apagar NEM editar (ambas as capabilities off).
+check("cap: Cloud revoke=False (hides Apagar)", _cc.capabilities.revoke is False)
+check("cap: Cloud edit_message=False (hides Editar)", _cc.capabilities.edit_message is False)
+# Telegram suporta apagar E editar (deleteMessage / editMessageText).
+_tg = _load_provider("tg_test", "assets/plugin_examples/telegram/channels.py")
+_tc = _tg.TelegramChannel("t_test", credentials={"bot_token": "123:abc"})
+check("cap: Telegram revoke=True", _tc.capabilities.revoke is True)
+check("cap: Telegram edit_message=True", _tc.capabilities.edit_message is True)
+check("cap: Telegram has edit_text override", "edit_text" in type(_tc).__dict__)
+check("cap: Telegram has revoke override", "revoke" in type(_tc).__dict__)
+
+# Edit an outgoing (assistant) text message on the default (GOWA) channel -> 200
+message_repo.add(_del_cid, "assistant", "Texto original", msg_id="WAMID_EDIT_1", status="operator")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "Texto editado"})
+check("POST /messages/edit -> 200", r.status_code == 200)
+_e = message_repo.get_by_msg_id("WAMID_EDIT_1")
+check("POST /messages/edit -> content updated", bool(_e) and _e.get("content") == "Texto editado")
+check("POST /messages/edit -> edited_ts set", bool(_e) and _e.get("edited_ts"))
+
+# Edit a contact (user) message -> rejected
+message_repo.add(_del_cid, "user", "Msg do contato", msg_id="WAMID_EDIT_USER")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_USER", "text": "hack"})
+check("POST /messages/edit (user msg) -> 400", r.status_code == 400)
+
+# Edit a media message -> rejected (text only)
+message_repo.add(_del_cid, "assistant", "", msg_id="WAMID_EDIT_MEDIA",
+                 status="operator", media_type="image", media_path="/x.jpg")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_MEDIA", "text": "legenda nova"})
+check("POST /messages/edit (media) -> 400", r.status_code == 400)
+
+# Missing msg_id -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit", json={"text": "x"})
+check("POST /messages/edit (no msg_id) -> 400", r.status_code == 400)
+
+# Empty text -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "   "})
+check("POST /messages/edit (empty text) -> 400", r.status_code == 400)
 
 # ═══════════════════════════════════════════════════════════════════
 #  8b. React to message
@@ -1164,6 +1324,15 @@ check("GET /channels/default -> 200", r.status_code == 200)
 
 r = client.get("/api/channels/inexistente")
 check("GET /channels/{unknown} -> 404", r.status_code == 404)
+
+# plano 50 F13 — status-batch: UMA request cobre N canais.
+r = client.post("/api/channels/status-batch", json={"ids": ["default", "inexistente"]})
+check("F13: channels status-batch -> 200", r.status_code == 200)
+_sb = r.json()["data"]["status_by_id"]
+check("F13: status-batch traz o canal existente", "default" in _sb)
+check("F13: status-batch ignora canal inexistente", "inexistente" not in _sb)
+check("F13: status-batch ids não-lista -> erro",
+      client.post("/api/channels/status-batch", json={"ids": 5}).json().get("ok") is False)
 
 # Credential masking (P15): set a secret via repo, ensure the API masks it.
 from db.repositories import channel_credential_repo as _ccrepo
@@ -2518,6 +2687,14 @@ _convs = r.json()["data"]["conversations"]
 check("list -> includes created convs + contact_name join",
       len(_convs) >= 2 and "contact_name" in _convs[0])
 
+# plano 50 F8 — o row enriquecido carrega tags + atributos + avatar do CONTATO, para o
+# sidebar conversa-first filtrar/renderizar sem um fetch de contatos à parte + has_more.
+check("F8: row enriquecido traz contact_tags", "contact_tags" in _convs[0])
+check("F8: row enriquecido traz contact_custom_attributes (dict)",
+      isinstance(_convs[0].get("contact_custom_attributes"), dict))
+check("F8: row enriquecido traz avatar_v", "avatar_v" in _convs[0])
+check("F8: lista de atendimentos devolve has_more", "has_more" in r.json()["data"])
+
 r = client.get(f"/api/conversations/{_conv1['id']}")
 check("GET /api/conversations/{id} -> 200", r.status_code == 200)
 check("detail -> right conversation", r.json()["data"]["conversation"]["id"] == _conv1["id"])
@@ -2939,6 +3116,106 @@ check("config show_agent_name persiste False",
       client.get("/api/config").json()["data"].get("show_agent_name") is False)
 client.put("/api/config", json={"show_agent_name": True})  # restaura o default
 
+# ══════════════════════════════════════════════════════════════════════
+#  Caracterização do fluxo de chat (plano 50 F2) — fixa o comportamento
+#  ATUAL antes de paginar (F3/F4). O baseline "traz tudo" é a asserção que
+#  a F3 vai mudar de forma CONSCIENTE.
+# ══════════════════════════════════════════════════════════════════════
+section("Chat: caracterização pré-paginação (plano 50 F2)")
+
+from server.pagination import PAGE_MSGS as _PAGE_MSGS  # cap de página do chat (50)
+
+_pg_cm = _CM("5500050000001")
+_pg_conv = _pg_cm.ensure_conversation_live("user", None)
+# >120 mensagens nesta conversa (alterna user/assistant p/ ter ambos os papéis).
+# ts realista/crescente a partir de agora: em produção id e ts crescem juntos (msgs
+# inseridas em ordem temporal) — o keyset (cursor por id, order by ts,id) DEPENDE disso.
+_PG_TOTAL = 130
+_pg_base = time.time()
+for _i in range(_PG_TOTAL):
+    _role = "user" if _i % 2 == 0 else "assistant"
+    message_repo.add(_pg_cm.id, _role, f"msg-{_i:03d}",
+                     conversation_id=_pg_conv, ts=_pg_base + _i)
+# O repo com limit=None traz TUDO (caminho legado byte-idêntico p/ callers internos):
+# minhas 130 + o card conversation_event 'created' emitido na criação.
+_pg_rows = message_repo.get_by_conversation(_pg_conv)
+_pg_repo_total = len(_pg_rows)
+check("F2: repo com limit=None traz TUDO (caminho legado intacto)",
+      _pg_repo_total >= _PG_TOTAL, f"esperava >= {_PG_TOTAL}, veio {_pg_repo_total}")
+
+# F3: o ENDPOINT agora pagina — devolve a PÁGINA mais recente (PAGE_MSGS) + has_more.
+r = client.get(f"/api/atendimentos/{_pg_conv}/messages?mark_read=false")
+check("F3: GET /messages -> 200", r.status_code == 200)
+_pg_data = r.json()["data"]
+# Shape: `messages` na raiz do data + `has_more` (novo).
+check("F3: shape -> `messages` na raiz do data", isinstance(_pg_data.get("messages"), list))
+check("F3: shape -> `has_more` presente", "has_more" in _pg_data)
+_pg_msgs = _pg_data["messages"]
+check("F3: página recente tem PAGE_MSGS msgs (não a thread inteira)",
+      len(_pg_msgs) == _PAGE_MSGS, f"esperava {_PAGE_MSGS}, veio {len(_pg_msgs)}")
+check("F3: conversa longa -> has_more=True", _pg_data["has_more"] is True)
+# Ordem cronológica (ts crescente) DENTRO da página — invariante preservada.
+_pg_ts = [m.get("ts") or 0 for m in _pg_msgs]
+check("F3: página em ordem cronológica (ts crescente)", _pg_ts == sorted(_pg_ts))
+check("F3: session_open presente na resposta", "session_open" in _pg_data)
+
+# Caminhada keyset (F3 "Pronto quando"): before_id = menor id da página → anteriores.
+# Reconstrói a thread inteira sem duplicar nem pular.
+_pg_collected = list(_pg_msgs)
+_pg_before = min(m["_id"] for m in _pg_msgs)
+_pg_guard = 0
+# Guarda proporcional ao total (cada página traz >=1 msg): sobrevive a PAGE_MSGS pequeno
+# (ex.: valor de QA temporário) sem estourar antes de reconstruir a thread inteira.
+while _pg_data["has_more"] and _pg_guard < _pg_repo_total + 5:
+    _pg_guard += 1
+    r = client.get(f"/api/atendimentos/{_pg_conv}/messages"
+                   f"?mark_read=false&limit={_PAGE_MSGS}&before_id={_pg_before}")
+    _pg_data = r.json()["data"]
+    _page = _pg_data["messages"]
+    check(f"F3 keyset: página before_id={_pg_before} não-vazia", len(_page) > 0)
+    _pg_collected = _page + _pg_collected  # prepend (mais antigas na frente)
+    if _page:
+        _pg_before = min(m["_id"] for m in _page)
+_pg_ids = [m["_id"] for m in _pg_collected]
+check("F3 keyset: reconstruiu a thread inteira (sem dup/gap)",
+      len(_pg_ids) == _pg_repo_total and len(set(_pg_ids)) == _pg_repo_total,
+      f"coletado={len(_pg_ids)} unico={len(set(_pg_ids))} repo={_pg_repo_total}")
+check("F3 keyset: última página -> has_more=False", _pg_data["has_more"] is False)
+_pg_all_mine = [m["content"] for m in _pg_collected if str(m.get("content", "")).startswith("msg-")]
+check("F3 keyset: minhas 130 msgs todas presentes e em ordem",
+      _pg_all_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
+      f"veio {len(_pg_all_mine)} msgs minhas")
+
+# Conversa CURTA (< PAGE_MSGS): devolve tudo + has_more=False. Nº de msgs proporcional
+# ao PAGE_MSGS (deixa folga p/ o card conversation_event caber na mesma página) —
+# robusto a um PAGE_MSGS pequeno (valor de QA temporário).
+_pg_short_n = max(1, _PAGE_MSGS - 2)
+_pg_short_cm = _CM("5500050000003")
+_pg_short_conv = _pg_short_cm.ensure_conversation_live("user", None)
+for _i in range(_pg_short_n):
+    message_repo.add(_pg_short_cm.id, "user", f"s-{_i}",
+                     conversation_id=_pg_short_conv, ts=time.time() + _i)
+_r_short = client.get(f"/api/atendimentos/{_pg_short_conv}/messages?mark_read=false").json()["data"]
+check("F3: conversa curta -> has_more=False", _r_short["has_more"] is False)
+check("F3: conversa curta -> devolve todas (<= PAGE_MSGS)",
+      len(_r_short["messages"]) <= _PAGE_MSGS and len(_r_short["messages"]) >= _pg_short_n)
+
+# Caminho legado GET /api/contacts/{phone} também pagina (all-channels merge).
+_r_cpath = client.get("/api/contacts/5500050000001?mark_read=false").json()["data"]
+check("F3: /api/contacts/{phone} pagina (página recente <= PAGE_MSGS)",
+      len(_r_cpath["messages"]) == _PAGE_MSGS)
+check("F3: /api/contacts/{phone} devolve has_more", _r_cpath.get("has_more") is True)
+
+# mark_read=false não zera o badge de não-lidas (comportamento preservado por F3).
+_pg_cm2 = _CM("5500050000002")
+_pg_conv2 = _pg_cm2.ensure_conversation_live("user", None)
+message_repo.add(_pg_cm2.id, "user", "oi", conversation_id=_pg_conv2, ts=2_000_000)
+_before = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+client.get(f"/api/atendimentos/{_pg_conv2}/messages?mark_read=false")
+_after = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+check("F2: mark_read=false NÃO altera unread_count", _before == _after,
+      f"antes={_before} depois={_after}")
+
 # ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
 _cmdel = _CM("5500077766655")
 _cmdel.add_message("user", "primeira conversa")
@@ -3305,6 +3582,26 @@ r = client.post("/api/conversations/filter", json={
     "filters": [{"attribute_key": "status", "filter_operator": "equal_to", "values": ["open"]}]})
 check("POST filter (Chatwoot payload) == GET", r.json()["data"]["count"] == _open_get)
 
+# Paginação (plano 50 D) — o filtro devolve has_more e caminha por offset sem dup/gap.
+_all = client.get("/api/conversations/filter?limit=200").json()["data"]["conversations"]
+_all_ids = [c["id"] for c in _all]
+if 2 <= len(_all_ids) < 200:
+    _p1 = client.get("/api/conversations/filter?limit=1&offset=0").json()["data"]
+    check("filter?limit=1 -> has_more True", _p1.get("has_more") is True)
+    check("filter?limit=1 -> 1 item", len(_p1["conversations"]) == 1)
+    # Caminha todas as páginas de 1 em 1 e reconstrói o universo sem duplicar.
+    _walked, _off = [], 0
+    while True:
+        _pg = client.get(f"/api/conversations/filter?limit=1&offset={_off}").json()["data"]
+        _rows = _pg["conversations"]
+        _walked += [c["id"] for c in _rows]
+        if not _pg.get("has_more") or not _rows:
+            break
+        _off += len(_rows)
+    check("filter offset walk cobre o universo (ordem/sem dup)", _walked == _all_ids)
+_big = client.get("/api/conversations/filter?limit=99999").json()["data"]
+check("filter?limit=99999 -> capado (<=200)", len(_big["conversations"]) <= 200)
+
 # Adversariais → 400
 check("filter?drop_table=1 -> 400 (dim desconhecida)",
       client.get("/api/conversations/filter?drop_table=1").status_code == 400)
@@ -3567,6 +3864,44 @@ check("GET /usage/contact -> has records", len(detail) >= 2)
 r = client.get("/api/usage/contact/0000000000")
 check("GET /usage/contact/0000 -> empty", r.json()["data"] == [])
 
+# plano 50 F9 — paginação de usage (envelope só com `limit`; sem ele = lista legada).
+r = client.get("/api/usage/by-contact?limit=1&offset=0")
+_ub = r.json()["data"]
+check("F9: by-contact?limit -> envelope {items,total,has_more}",
+      isinstance(_ub, dict) and "items" in _ub and "total" in _ub and "has_more" in _ub)
+check("F9: by-contact página respeita limit", len(_ub["items"]) <= 1)
+check("F9: by-contact ordenado por custo desc (top gastadores)",
+      _ub["total"] >= 1)
+# by_type da página vem preenchido (não perdido pela paginação).
+if _ub["items"]:
+    check("F9: by-contact item da página traz by_type", "by_type" in _ub["items"][0])
+# Caminhar as páginas cobre o total sem dup.
+_seen, _o, _g = set(), 0, 0
+while _g < 200:
+    _g += 1
+    _p = client.get(f"/api/usage/by-contact?limit=2&offset={_o}").json()["data"]
+    for _it in _p["items"]:
+        _seen.add(_it["phone"])
+    if not _p["has_more"]:
+        break
+    _o += 2
+check("F9: by-contact paginação cobre o total", len(_seen) == _p["total"],
+      f"vistos={len(_seen)} total={_p['total']}")
+# detail paginado
+r = client.get("/api/usage/contact/5511999990001?limit=1&offset=0")
+_ud = r.json()["data"]
+check("F9: contact/{phone}?limit -> envelope", isinstance(_ud, dict) and "items" in _ud)
+check("F9: contact detail respeita limit", len(_ud["items"]) <= 1)
+check("F9: contact detail total >= 2", _ud["total"] >= 2)
+# sem limit -> lista legada (retrocompat)
+check("F9: by-contact sem limit continua lista",
+      isinstance(client.get("/api/usage/by-contact").json()["data"], list))
+check("F9: contact detail sem limit continua lista",
+      isinstance(client.get("/api/usage/contact/5511999990001").json()["data"], list))
+# summary global intacto (não paginado)
+check("F9: summary segue com total_tokens (agregado intacto)",
+      "total_tokens" in client.get("/api/usage/summary").json()["data"])
+
 # Executions writer (Onda 0): agent_key/total_tokens/total_cost_usd were created
 # in migration 0007 but never populated. Verify the new writer accumulates them.
 _exec_id = execution_repo.create("5511999990001", "test")
@@ -3607,6 +3942,15 @@ r = client.get("/api/webhook-payloads")
 check("GET /api/webhook-payloads -> 200", r.status_code == 200)
 check("GET /api/webhook-payloads -> is list", isinstance(r.json()["data"], list))
 
+# plano 50 F1 — limit livre é capado por clamp_limit (?limit=99999 nunca > cap 200)
+r = client.get("/api/webhook-payloads?limit=99999")
+check("GET /api/webhook-payloads?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/webhook-payloads?limit=99999 -> <= cap 200", len(r.json()["data"]) <= 200)
+r = client.get("/api/executions?limit=99999")
+check("GET /api/executions?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/executions?limit=99999 -> items <= cap 200",
+      len(r.json()["data"]["items"]) <= 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  19. Webhook (incoming message simulation)
 # ═══════════════════════════════════════════════════════════════════
@@ -3638,6 +3982,36 @@ r = client.post("/api/webhook/gowa/default", json={
                 "receipt_type": "read"},
 })
 check("POST /webhook (ack) -> 200", r.status_code == 200)
+
+# Inbound edit (cliente edita a própria mensagem): reflete no DB + broadcast.
+_inb_cid = contact_repo.get_full_contact("5511999990001")["id"]
+message_repo.add(_inb_cid, "user", "texto do cliente", msg_id="WAMID_INB_EDIT_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.edited",
+    "payload": {
+        "id": "WAMID_INB_EDIT_1",
+        "original_message_id": "WAMID_INB_EDIT_1",
+        "from": "5511999990001@s.whatsapp.net",
+        "chat_id": "5511999990001@s.whatsapp.net",
+        "body": "texto editado pelo cliente",
+    },
+})
+check("POST /webhook (edited) -> 200", r.status_code == 200)
+_ie = message_repo.get_by_msg_id("WAMID_INB_EDIT_1")
+check("webhook edited -> content atualizado no DB",
+      bool(_ie) and _ie.get("content") == "texto editado pelo cliente")
+check("webhook edited -> edited_ts setado", bool(_ie) and _ie.get("edited_ts"))
+
+# Inbound revoke (cliente apaga pra todos): mensagem fica flagged revoked.
+message_repo.add(_inb_cid, "user", "vou apagar", msg_id="WAMID_INB_REV_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.revoked",
+    "payload": {"revoked_message_id": "WAMID_INB_REV_1",
+                "chat_id": "5511999990001@s.whatsapp.net"},
+})
+check("POST /webhook (revoked) -> 200", r.status_code == 200)
+_ir = message_repo.get_by_msg_id("WAMID_INB_REV_1")
+check("webhook revoked -> flagged revoked no DB", bool(_ir) and bool(_ir.get("revoked")))
 
 # Reply-quote extraction from inbound payloads (GOWA nests this inconsistently).
 from server.routes.webhook import _extract_reply_to as _ext_reply
@@ -4114,7 +4488,29 @@ check("gowa parse: ack normalizado -> 1 receipt por id, status=read",
       len(_acks) == 2 and all(a.kind == "receipt" and a.media_extras.get("status") == "read" for a in _acks))
 check("gowa parse: revoked", _pgi({"event": "message.revoked", "payload": {
     "revoked_message_id": "v1", "chat_id": "5511@s.whatsapp.net"}})[0].kind == "revoked")
+_ged = _pgi({"event": "message.edited", "payload": {
+    "id": "e1", "original_message_id": "e1", "body": "novo texto",
+    "chat_id": "5511@s.whatsapp.net"}})[0]
+check("gowa parse: edited -> kind edited",
+      _ged.kind == "edited" and _ged.text == "novo texto"
+      and _ged.media_extras.get("original_message_id") == "e1")
 check("gowa parse: evento desconhecido -> []", _pgi({"event": "nope", "payload": {}}) == [])
+
+# Telegram: edited_message vira um evento "edited" (não uma msg nova).
+_tg_mod = _load_provider("tg_edit_test", "assets/plugin_examples/telegram/channels.py")
+_tg_ch = _tg_mod.TelegramChannel("t_edit", credentials={"bot_token": "1:x"})
+_tg_new = _tg_ch.parse_inbound({"message": {
+    "message_id": 55, "date": 1, "text": "original",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: message normal -> kind message",
+      len(_tg_new) == 1 and _tg_new[0].kind == "message")
+_tg_ed = _tg_ch.parse_inbound({"edited_message": {
+    "message_id": 55, "date": 2, "text": "editado",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: edited_message -> kind edited",
+      len(_tg_ed) == 1 and _tg_ed[0].kind == "edited"
+      and _tg_ed[0].text == "editado"
+      and _tg_ed[0].media_extras.get("original_message_id") == "55")
 
 # ── ingest_event honra os campos GOWA (via fake_ch, channel-agnostic) ──
 settings.set("message_batch_delay", 0)
@@ -4625,6 +5021,66 @@ check("assign-agent kind=user sem user_id -> 400", r.status_code == 400)
 r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "bogus"})
 check("assign-agent kind inválido -> 400", r.status_code == 400)
 
+# ── Alerta sonoro de transferência ENTRE atendentes (agent_transfer_alert) ──────
+# O backend emite `agent_transfer_alert` numa reatribuição PARA OUTRO humano; o
+# frontend filtra pelo usuário logado para tocar só na aba de quem recebeu. Config
+# global própria (agent_transfer_alert_enabled/_duration), independente do
+# alerta IA→humano.
+_deps_ata = app.state.deps
+_orig_ata_bcast = _deps_ata.ws_manager.broadcast
+_ata_events = []
+async def _capture_ata(event, data):
+    if event == "agent_transfer_alert":
+        _ata_events.append(data)
+    return await _orig_ata_bcast(event, data)
+
+# GET /api/config expõe as duas chaves novas com defaults.
+_cfg_ata = client.get("/api/config").json()["data"]
+check("config -> agent_transfer_alert_enabled default True",
+      _cfg_ata.get("agent_transfer_alert_enabled") is True)
+check("config -> agent_transfer_alert_duration default 5",
+      _cfg_ata.get("agent_transfer_alert_duration") == 5)
+
+# Transferência para OUTRO atendente (via assign) → dispara o alerta direcionado.
+config_repo.set("agent_transfer_alert_enabled", True)
+config_repo.set("agent_transfer_alert_duration", 7)
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    r = client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+check("assign p/ outro atendente -> 200", r.status_code == 200)
+check("assign p/ outro atendente -> agent_transfer_alert emitido",
+      any(e.get("assignee_user_id") == _admin_id for e in _ata_events))
+check("agent_transfer_alert -> carrega duration da config global",
+      any(e.get("duration") == 7 for e in _ata_events))
+
+# Auto-atribuição NÃO dispara o alerta (não é "de um atendente para outro"). Testado
+# no serviço: (a) assign_me sempre é auto-atribuição; (b) assign com actor==assignee.
+from app.services import conversation_service as _conv_svc
+_ata_events.clear()
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    _conv_me = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign_me(_deps_ata, _conv_me, _admin_id))
+    check("assign_me -> sem agent_transfer_alert", len(_ata_events) == 0)
+    _conv_self = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign(_deps_ata, _conv_self, _admin_id, actor_id=_admin_id))
+    check("assign com actor==assignee -> sem agent_transfer_alert", len(_ata_events) == 0)
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+# Toggle desligado → nenhum alerta, mesmo transferindo para outro atendente.
+config_repo.set("agent_transfer_alert_enabled", False)
+_ata_events.clear()
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+check("agent_transfer_alert desligado -> sem broadcast", len(_ata_events) == 0)
+config_repo.set("agent_transfer_alert_enabled", True)
+
 # The enriched contact list now reflects Alice's open conversation.
 _alice_row = next((c for c in client.get("/api/contacts").json()["data"]
                    if c["phone"] == "5511999990001"), None)
@@ -4725,6 +5181,19 @@ check("PUT conv labels -> 200 + snapshot",
       r.status_code == 200 and set(r.json()["data"]["labels"]) == {"Urgente", "VIP"})
 r = client.get(f"/api/conversations/{_conv2['id']}/labels")
 check("GET conv labels -> 2 etiquetas", r.status_code == 200 and len(r.json()["data"]["labels"]) == 2)
+
+# plano 50 F13 — batch de etiquetas: UMA request cobre N conversas.
+r = client.post("/api/atendimentos/labels-batch", json={"ids": [_conv2["id"], 999999]})
+check("F13: labels-batch -> 200", r.status_code == 200)
+_lb = r.json()["data"]["labels_by_conv"]
+check("F13: labels-batch traz as etiquetas da conversa",
+      {l["name"] for l in _lb.get(str(_conv2["id"]), [])} == {"Urgente", "VIP"})
+check("F13: labels-batch ids desconhecidos -> lista vazia",
+      _lb.get(str(999999), []) == [])
+check("F13: labels-batch ids não-lista -> erro",
+      client.post("/api/atendimentos/labels-batch", json={"ids": "x"}).json().get("ok") is False)
+check("F13: labels-batch sem ids -> vazio ok",
+      client.post("/api/atendimentos/labels-batch", json={}).json().get("ok") is True)
 check("PUT conv labels remove p/ snapshot menor",
       client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["VIP"]}).json()["data"]["labels"] == ["VIP"])
 check("PUT conv labels ignora nome inexistente",

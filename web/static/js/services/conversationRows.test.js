@@ -104,6 +104,12 @@ test('shapeConvData: defaults for a sparse payload', () => {
   assert.equal(d.channel_id, 'default');
   assert.equal(d.conversation, null);
   assert.equal(d.templates_supported, false);
+  assert.equal(d.has_more, false);   // plano 50 F4: default sem mais páginas
+});
+
+test('shapeConvData: passa has_more do payload (keyset scroll-up)', () => {
+  assert.equal(shapeConvData({ has_more: true }).has_more, true);
+  assert.equal(shapeConvData({ has_more: false }).has_more, false);
 });
 
 // ── clauseMatches ──────────────────────────────────────────────────

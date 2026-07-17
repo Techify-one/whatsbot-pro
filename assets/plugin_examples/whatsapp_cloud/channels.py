@@ -62,6 +62,13 @@ class WhatsAppCloudChannel(Channel):
                 presence=False,
                 reactions=True,
                 media=True,
+                # WhatsApp Cloud é o único canal SEM apagar nem editar no painel: o
+                # Graph API não tem endpoint de revoke, e a edição via messages
+                # endpoint exige permissões/janela que não valem a pena expor (dava
+                # OAuthException na prática). Ambas as capabilities ficam False → o
+                # menu de contexto esconde "Apagar" e "Editar" para Cloud.
+                revoke=False,
+                edit_message=False,
                 inbound_route="path",
                 session_window_hours=24,  # free text only within 24h of last inbound
                 # No QR / connect step: a channel missing these can never connect,
@@ -240,6 +247,11 @@ class WhatsAppCloudChannel(Channel):
         if reply_to:
             payload["context"] = {"message_id": reply_to}
         return self._post_message(payload)
+
+    # edit_text: NOT implemented on purpose — WhatsApp Cloud edits require Graph
+    # permissions/window that yield OAuthException in practice, so ``edit_message``
+    # is False and the panel never offers "Editar" for Cloud. Inherits Channel's
+    # refusing default as a belt-and-suspenders guard.
 
     def upload_media(self, path: str, *, mime_type: Optional[str] = None) -> Optional[str]:
         """Upload a LOCAL file to the Graph API and return its media id.

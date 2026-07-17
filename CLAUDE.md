@@ -107,7 +107,7 @@ O banco é **exclusivamente PostgreSQL** e a URL vem **exclusivamente da env `DA
 | `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
 | `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo), `has_unread_mention` (@menção não lida em grupo) e `contact_type` (tipo herdado do canal de origem — `whatsapp`/`telegram`/`outros`; ver "Tipo de contato por canal") |
 | `observations` | Notas/observações por contato (texto livre) |
-| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`), `reply_to_msg_id` (msg_id GOWA da mensagem citada) e `edited_ts` (epoch da última edição de uma msg de saída; NULL = nunca editada → o painel mostra "editada"). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
 | `usage` | Registros de uso da API (tokens, custo, modelo) |
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
@@ -329,7 +329,8 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 | POST | `/api/contacts/mark-all-read` | Zera não lidas de todas as conversas |
 | POST | `/api/contacts/mark-all-unread` | Marca todas as conversas como não lidas |
 | POST | `/api/contacts/{phone}/messages/react` | Reage a uma mensagem com emoji (string vazia remove). WS `message_reaction` |
-| POST | `/api/contacts/{phone}/messages/delete` | Apaga mensagem (revoke pra todos). WS `message_revoked`/`message_deleted` |
+| POST | `/api/contacts/{phone}/messages/delete` | Apaga mensagem (revoke pra todos). WS `message_revoked`/`message_deleted`. Só aparece na UI em canais com a capability `revoke` (GOWA + Telegram sim; WhatsApp Cloud não) |
+| POST | `/api/contacts/{phone}/messages/edit` | Edita o texto de uma mensagem de SAÍDA (operador/IA) já enviada. Body `{msg_id, text, conversation_id?}`. Só texto, roteado pelo canal via `outbound.edit_text` (capability `edit_message`); grava `edited_ts` + WS `message_edited`. Suportado em GOWA (`/message/{id}/update`) + Telegram (`editMessageText`); **WhatsApp Cloud NÃO** edita nem apaga (ambas as capabilities off — único canal sem as duas opções no menu) |
 | GET | `/api/contacts/{phone}/members` | Lista participantes do grupo com nomes resolvidos (autocomplete de @menção) |
 | GET | `/api/webhook-payloads?limit=N` | Últimos N payloads raw do webhook (debug, max 50) |
 | GET | `/api/gowa-logs?limit=N` | Tail do `logs/gowa.log` (stdout/stderr do subprocess GOWA, só populado com `WHATSBOT_GOWA_DEBUG=1`) |
@@ -351,7 +352,7 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
-Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga), `ai_typing` (`{phone, channel_id, active}` — a IA está processando uma resposta para a conversa; o painel mostra "IA respondendo…" no header para o operador não responder por cima).
+Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `message_edited` (`{phone, msg_id, db_id, content, edited_ts}` — mensagem editada, seja de SAÍDA pelo operador/IA OU INBOUND quando o cliente edita a própria mensagem no WhatsApp/Telegram; o painel troca o conteúdo in-place e mostra "editada". WhatsApp Cloud não emite edição inbound), `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga), `ai_typing` (`{phone, channel_id, active}` — a IA está processando uma resposta para a conversa; o painel mostra "IA respondendo…" no header para o operador não responder por cima).
 
 ## GOWA REST API (endpoints reais — v8.11.0 multi-device)
 
@@ -529,7 +530,7 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `message.sent` | Resposta IA, operator send, image/audio panel, retry, private @ia, echo do próprio celular | `phone, text, msg_id, media_type, media_path, media_extras, source, status` — `source ∈ {ai, operator, private_ai, retry, echo}` |
 | `message.any` *(alias)* | Re-dispatch de `received` + `sent` com `direction: "in"\|"out"` | igual ao original + `direction` |
 | `message.reaction` | Reação emoji em mensagem | `id, phone, reaction, reacted_message_id, is_from_me` |
-| `message.edited` | Mensagem editada | `id, phone, original_message_id, body` |
+| `message.edited` | Mensagem editada (inbound: cliente editou a própria) — o core JÁ atualiza `messages.content` + `edited_ts` e faz broadcast `message_edited` (GOWA/Telegram; Cloud não emite) | `id, phone, original_message_id, body` |
 | `message.revoked` | Mensagem apagada pra todos | `id, phone, revoked_message_id, revoked_from_me, revoked_chat` |
 | `message.deleted` | Mensagem deletada do histórico | `deleted_message_id, original_content, original_sender, was_from_me` |
 | `presence.changed` | Digitando / gravando | `phone, state` (`composing`/`paused`), `media` (`text`/`audio`) |

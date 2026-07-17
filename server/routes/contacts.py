@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from fastapi import Body, File, Form, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
@@ -25,6 +25,8 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
+from server.pagination import (CAP_LIST, CAP_MSGS, PAGE_LIST, PAGE_MSGS,
+                               clamp_limit, clamp_offset)
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 # ``app.services.messaging_service`` is imported INSIDE ``register_routes`` (not
@@ -245,21 +247,41 @@ def register_routes(app, deps):
                 logger.warning("[ReadReceipt] Failed for %s msg %s: %s", phone, mid, e)
 
     @app.get("/api/contacts")
-    async def list_contacts(request: Request, q: str = "", archived: bool = False):
-        """List all contacts with summary info."""
+    async def list_contacts(request: Request, q: str = "", archived: bool = False,
+                            limit: int | None = None, offset: int = 0,
+                            sort: str = "recency"):
+        """List all contacts with summary info.
+
+        Paginação (plano 50 F5): quando ``limit`` é informado, devolve o envelope
+        ``{items, total, has_more}`` (cap ``CAP_LIST``). SEM ``limit`` mantém o shape
+        legado (``data`` = lista). ``sort`` (F7): ``name`` = alfabético (tela /contacts),
+        default ``recency`` (sidebar). ``offset`` ≥ 0."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        sort = "name" if sort == "name" else "recency"
         # Inbox-membership scoping (plano inboxes/canais §4.7): a sidebar
         # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
         # caixas que o usuário não acessa. Espelha GET /api/conversations.
-        results = await asyncio.to_thread(
-            contact_repo.list_contacts, q, archived, visible_inbox_ids(request))
+        inbox_ids = visible_inbox_ids(request)
+        if limit is None:
+            # Caminho legado: lista completa (retrocompatível).
+            results = await asyncio.to_thread(
+                contact_repo.list_contacts, q, archived, inbox_ids)
+            for c in results:
+                c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
+            return _ok(results)
+        # Caminho paginado: envelope {items, total, has_more}.
+        lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
+        off = clamp_offset(offset)
+        page = await asyncio.to_thread(
+            contact_repo.list_contacts_page, q, archived, inbox_ids,
+            limit=lim, offset=off, sort=sort)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
-        for c in results:
+        for c in page["items"]:
             c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
-        return _ok(results)
+        return _ok(page)
 
     @app.post("/api/contacts/check-phone")
     async def check_phone(request: Request):
@@ -356,8 +378,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
-        rows = await asyncio.to_thread(
-            contact_repo.list_for_export, visible_inbox_ids(request))
+        inbox_ids = visible_inbox_ids(request)
         # Custom attribute definitions (plano 05) become extra CSV columns,
         # dynamically — a newly created attribute shows up here automatically.
         attr_defs = await asyncio.to_thread(ca_repo.list_definitions, "contact")
@@ -370,32 +391,38 @@ def register_routes(app, deps):
         _CORE_ATTR_KEYS = {"email", "profession", "company", "address", "type"}
         extra_defs = [d for d in attr_defs if d["attribute_key"] not in _CORE_ATTR_KEYS]
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        header = ["phone", "name", "email", "profession", "company",
-                  "address", "ai_enabled", "tags", "type"]
-        header.extend(d["attribute_key"] for d in extra_defs)
-        writer.writerow(header)
-        for r in rows:
-            custom = r.get("custom_attributes") or {}
-            row_out = [
-                r["phone"], r["name"],
-                _format_attr_cell(custom.get("email")),
-                _format_attr_cell(custom.get("profession")),
-                _format_attr_cell(custom.get("company")),
-                _format_attr_cell(custom.get("address")),
-                "1" if r["ai_enabled"] else "0",
-                ", ".join(r["tags"]),
-                # Tipo do contato herdado do canal de origem (whatsapp/telegram/outros).
-                r.get("contact_type") or "outros",
-            ]
-            for d in extra_defs:
-                row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
-            writer.writerow(row_out)
-        # BOM (﻿) so Excel opens the UTF-8 file with the right encoding.
-        content = "﻿" + output.getvalue()
-        return Response(
-            content=content,
+        def _format_line(cells: list) -> str:
+            buf = io.StringIO()
+            csv.writer(buf).writerow(cells)
+            return buf.getvalue()
+
+        def _rows():
+            # Streaming (plano 50 F11): BOM + header, depois cada contato formatado em
+            # chunks pelo gerador (memória constante, sem N+1 de tags). Gerador SÍNCRONO
+            # → Starlette o itera num threadpool, então as queries de DB não bloqueiam.
+            header = ["phone", "name", "email", "profession", "company",
+                      "address", "ai_enabled", "tags", "type"]
+            header.extend(d["attribute_key"] for d in extra_defs)
+            yield "﻿" + _format_line(header)   # BOM p/ o Excel abrir UTF-8
+            for r in contact_repo.iter_for_export(inbox_ids):
+                custom = r.get("custom_attributes") or {}
+                row_out = [
+                    r["phone"], r["name"],
+                    _format_attr_cell(custom.get("email")),
+                    _format_attr_cell(custom.get("profession")),
+                    _format_attr_cell(custom.get("company")),
+                    _format_attr_cell(custom.get("address")),
+                    "1" if r["ai_enabled"] else "0",
+                    ", ".join(r["tags"]),
+                    # Tipo do contato herdado do canal de origem (whatsapp/telegram/outros).
+                    r.get("contact_type") or "outros",
+                ]
+                for d in extra_defs:
+                    row_out.append(_format_attr_cell(custom.get(d["attribute_key"])))
+                yield _format_line(row_out)
+
+        return StreamingResponse(
+            _rows(),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="contatos.csv"'},
         )
@@ -561,7 +588,8 @@ def register_routes(app, deps):
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, request: Request, mark_read: bool = True,
-                          channel_id: str = ""):
+                          channel_id: str = "", limit: int = PAGE_MSGS,
+                          before_id: int | None = None):
         """Return full contact data including conversation history.
 
         Quando ``channel_id`` é informado (multicanal — abrir uma conversa NOVA pela
@@ -569,10 +597,16 @@ def register_routes(app, deps):
         thread é escopado ao canal: carrega só as mensagens da conversa daquele canal
         (vazio se ainda não houver). Sem ``channel_id`` o comportamento legado é
         mantido (funde as mensagens de todos os canais do mesmo número). NUNCA cair na
-        conversa de OUTRO canal — caixas de entrada não se confundem."""
+        conversa de OUTRO canal — caixas de entrada não se confundem.
+
+        Paginação keyset (plano 50 F3): ``limit`` (cap ``CAP_MSGS``) + ``before_id``
+        — mesma semântica de ``/api/atendimentos/{id}/messages``; devolve a página mais
+        recente e ``has_more``. Vale para os dois ramos (multicanal e legado all-channels).
+        """
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
         channel = (channel_id or "").strip()
         def _load():
@@ -619,8 +653,14 @@ def register_routes(app, deps):
             if channel:
                 data["channel_id"] = channel
                 data["conversation_id"] = scoped_conv["id"] if scoped_conv else None
-                data["messages"] = (message_repo.get_by_conversation(scoped_conv["id"])
-                                    if scoped_conv else [])
+                if scoped_conv:
+                    _page = message_repo.get_by_conversation(
+                        scoped_conv["id"], limit=page_limit + 1, before_id=before_id)
+                    data["has_more"] = len(_page) > page_limit
+                    data["messages"] = _page[1:] if data["has_more"] else _page
+                else:
+                    data["messages"] = []
+                    data["has_more"] = False
                 # Compositor hints (Frente C / plano 21): mesmo SEM conversa ainda, o
                 # canal escolhido define se aceita template e se a janela de texto livre
                 # está aberta. Sem isso, abrir um canal Cloud (windowed) sem conversa não
@@ -629,8 +669,16 @@ def register_routes(app, deps):
                     conversation_id=scoped_conv["id"]) if scoped_conv else None)
                 data["templates_supported"] = outbound.supports(channel, "templates")
                 data["session_open"] = outbound.session_open(channel, last_ts)
+                # Capability hints p/ o menu de contexto da mensagem: esconder
+                # "Apagar" onde o canal não revoga (Cloud), mostrar "Editar" só onde
+                # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
+                data["revoke_supported"] = outbound.supports(channel, "revoke")
+                data["edit_supported"] = outbound.supports(channel, "edit_message")
             else:
-                data["messages"] = message_repo.get_all(contact_id)
+                _page = message_repo.get_all(
+                    contact_id, limit=page_limit + 1, before_id=before_id)
+                data["has_more"] = len(_page) > page_limit
+                data["messages"] = _page[1:] if data["has_more"] else _page
             # Load usage for the full response
             data["usage"] = []
             return data, msg_ids
@@ -940,6 +988,62 @@ def register_routes(app, deps):
         })
         logger.info("[Delete] Revoked (me, kept in DB) msg %s/db %s for %s", msg_id, db_id, phone)
         return _ok({"message": "Mensagem apagada para você.", "msg_id": msg_id or None})
+
+    @app.post("/api/contacts/{phone}/messages/edit")
+    async def edit_message(phone: str, body: dict, request: Request):
+        """Edit the text of an already-sent OUTGOING message (operator or AI).
+
+        Identifies the message by its provider ``msg_id`` (required — editing happens
+        on the provider). Only text messages sent by us can be edited: inbound
+        (``role='user'``) and media messages are refused. The edit is pushed to the
+        conversation's channel via the capability-gated ``outbound.edit_text``; on
+        success the DB content is updated + ``edited_ts`` stamped, and the panel is
+        notified via the ``message_edited`` WS event. Providers that can't edit
+        (capability off) yield a clean error instead of a silent no-op.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        msg_id = (body.get("msg_id") or "").strip()
+        text = (body.get("text") or "").strip()
+        if not msg_id:
+            return _err("Editar exige uma mensagem já enviada.", status=400)
+        if not text:
+            return _err("O texto da mensagem não pode ficar vazio.", status=400)
+
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"))
+        if denied_inbox:
+            return denied_inbox
+
+        msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+        if not msg:
+            return _err("Mensagem não encontrada.", status=404)
+        if msg.get("role") == "user":
+            return _err("Só é possível editar as suas próprias mensagens.", status=400)
+        if msg.get("media_type"):
+            return _err("Só é possível editar mensagens de texto.", status=400)
+
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        if not is_sandbox:
+            channel_id = _channel_for(phone, body.get("conversation_id"))
+            res = await asyncio.to_thread(outbound.edit_text, channel_id, phone, msg_id, text)
+            if not res.ok:
+                return _err(f"Não foi possível editar a mensagem: {res.error}", status=400)
+
+        db_id = msg.get("_id") or body.get("db_id")
+        edited_ts = await asyncio.to_thread(message_repo.mark_edited, int(db_id), text) if db_id else None
+        await ws_manager.broadcast("message_edited", {
+            "phone": phone, "msg_id": msg_id, "db_id": db_id,
+            "content": text, "edited_ts": edited_ts,
+            "conversation_id": body.get("conversation_id"),
+        })
+        await emit_with_filter("message.edited", {
+            "id": msg_id, "phone": phone, "original_message_id": msg_id,
+            "body": text, "ts": time.time(),
+        })
+        logger.info("[Edit] Edited msg %s for %s", msg_id, phone)
+        return _ok({"message": "Mensagem editada.", "msg_id": msg_id, "edited_ts": edited_ts})
 
     @app.post("/api/contacts/{phone}/messages/react")
     async def react_to_message(phone: str, body: dict, request: Request):

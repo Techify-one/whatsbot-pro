@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import and_, func, insert as sa_insert, select
+from sqlalchemy import and_, false, func, insert as sa_insert, select
 
 from db.engine import get_engine
 from db.tables import contacts, usage
@@ -119,8 +119,14 @@ def global_summary(start_ts: float | None = None,
 
 
 def by_contact(start_ts: float | None = None,
-               end_ts: float | None = None) -> list[dict]:
-    """Return usage breakdown per contact (for the by-contact endpoint)."""
+               end_ts: float | None = None, *,
+               limit: int | None = None, offset: int = 0) -> list[dict]:
+    """Return usage breakdown per contact (for the by-contact endpoint).
+
+    Já ordena por custo desc = "top-N gastadores". ``limit``/``offset`` (plano 50 F9)
+    paginam essa lista (top-N + páginas); ``limit=None`` ⇒ tudo (byte-idêntico legado).
+    Com paginação, o agregado ``by_type`` é restringido aos contatos DA PÁGINA (não
+    reagrega a base inteira)."""
     time_clauses = _time_clauses(start_ts, end_ts)
     agg = _aggregate_columns()
     base_stmt = (
@@ -137,20 +143,26 @@ def by_contact(start_ts: float | None = None,
     )
     if time_clauses:
         base_stmt = base_stmt.where(and_(*time_clauses))
-
-    # Single aggregate of by_type for ALL contacts in one GROUP BY (fixes the
-    # per-contact N+1: previously one query per contact row). Same per-call_type
-    # shape via the shared ``_by_type_entry``.
-    by_type_stmt = (
-        select(usage.c.contact_id, usage.c.call_type, *_aggregate_columns())
-        .group_by(usage.c.contact_id, usage.c.call_type)
-    )
-    if time_clauses:
-        by_type_stmt = by_type_stmt.where(and_(*time_clauses))
+    if limit is not None:
+        base_stmt = base_stmt.limit(limit).offset(offset)
 
     results: list[dict] = []
     with get_engine().connect() as conn:
         rows = conn.execute(base_stmt).mappings().all()
+        # by_type em UMA query (fixes o N+1 por contato). Com paginação, restringe aos
+        # contatos da página; sem paginação agrega todos (comportamento legado).
+        by_type_stmt = (
+            select(usage.c.contact_id, usage.c.call_type, *_aggregate_columns())
+            .group_by(usage.c.contact_id, usage.c.call_type)
+        )
+        if time_clauses:
+            by_type_stmt = by_type_stmt.where(and_(*time_clauses))
+        if limit is not None:
+            page_ids = [row["contact_id"] for row in rows]
+            if page_ids:
+                by_type_stmt = by_type_stmt.where(usage.c.contact_id.in_(page_ids))
+            else:
+                by_type_stmt = by_type_stmt.where(false())
         by_type_by_contact: dict = {}
         for r in conn.execute(by_type_stmt).mappings().all():
             by_type_by_contact.setdefault(r["contact_id"], {})[r["call_type"]] = \
@@ -169,18 +181,53 @@ def by_contact(start_ts: float | None = None,
     return results
 
 
+def count_by_contact(start_ts: float | None = None,
+                     end_ts: float | None = None) -> int:
+    """Número de contatos com uso na janela (o ``total`` da paginação de :func:`by_contact`)."""
+    time_clauses = _time_clauses(start_ts, end_ts)
+    grouped = (
+        select(usage.c.contact_id)
+        .join(contacts, contacts.c.id == usage.c.contact_id)
+        .group_by(usage.c.contact_id)
+        .having(func.count() > 0)
+    )
+    if time_clauses:
+        grouped = grouped.where(and_(*time_clauses))
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(func.count()).select_from(grouped.subquery())
+        ).scalar() or 0
+
+
 def detail(contact_id: int, start_ts: float | None = None,
-           end_ts: float | None = None) -> list[dict]:
-    """Return raw usage records for a specific contact."""
+           end_ts: float | None = None, *,
+           limit: int | None = None, offset: int = 0) -> list[dict]:
+    """Return raw usage records for a specific contact.
+
+    ``limit``/``offset`` (plano 50 F9) paginam os registros brutos (crescem por contato);
+    ``limit=None`` ⇒ todos (byte-idêntico legado)."""
+    where_clauses = [usage.c.contact_id == contact_id, *_time_clauses(start_ts, end_ts)]
+    stmt = (
+        select(
+            usage.c.call_type, usage.c.model, usage.c.prompt_tokens,
+            usage.c.completion_tokens, usage.c.total_tokens,
+            usage.c.cost_usd, usage.c.ts,
+        )
+        .where(and_(*where_clauses))
+        .order_by(usage.c.ts)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def count_detail(contact_id: int, start_ts: float | None = None,
+                 end_ts: float | None = None) -> int:
+    """Número de registros brutos do contato na janela (``total`` de :func:`detail`)."""
     where_clauses = [usage.c.contact_id == contact_id, *_time_clauses(start_ts, end_ts)]
     with get_engine().connect() as conn:
-        rows = conn.execute(
-            select(
-                usage.c.call_type, usage.c.model, usage.c.prompt_tokens,
-                usage.c.completion_tokens, usage.c.total_tokens,
-                usage.c.cost_usd, usage.c.ts,
-            )
-            .where(and_(*where_clauses))
-            .order_by(usage.c.ts)
-        ).mappings().all()
-    return [dict(r) for r in rows]
+        return conn.execute(
+            select(func.count()).select_from(usage).where(and_(*where_clauses))
+        ).scalar() or 0
