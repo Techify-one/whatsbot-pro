@@ -384,11 +384,29 @@ export function useConversationWsEvents(opts) {
     }
   }, [messageStatus]);
 
-  // Handle message deletions/revocations (from this panel, the phone, or the contact)
+  // Handle message deletions/revocations/edits (from this panel, the phone, or the contact)
   useEffect(() => {
     if (!messageAction) return;
     const { action, phone, msg_id, db_id } = messageAction;
     if (phone && phone !== selectedRef.current) return;
+    const matches = (m) => (msg_id && m.msg_id === msg_id) || (db_id && (m._id === db_id || m.id === db_id));
+    // Edit: swap the content in place + mark edited (no revoke).
+    if (action === 'edited') {
+      const { content, edited_ts } = messageAction;
+      setContactData(prev => {
+        if (!prev || !prev.messages) return prev;
+        let changed = false;
+        const updated = prev.messages.map(m => {
+          if (matches(m) && (m.content !== content || m.edited_ts !== edited_ts)) {
+            changed = true;
+            return { ...m, content, edited_ts: edited_ts || (Date.now() / 1000) };
+          }
+          return m;
+        });
+        return changed ? { ...prev, messages: updated } : prev;
+      });
+      return;
+    }
     // Both revoke and "delete for me" keep the message in the list (and its content);
     // we only flag it as revoked so it renders with a scope-specific 'deleted'
     // indicator. action 'deleted' => "para mim"; 'revoked' => "para todos".
@@ -397,7 +415,7 @@ export function useConversationWsEvents(opts) {
       if (!prev || !prev.messages) return prev;
       let changed = false;
       const updated = prev.messages.map(m => {
-        if (((msg_id && m.msg_id === msg_id) || (db_id && (m._id === db_id || m.id === db_id))) && !m.revoked) {
+        if (matches(m) && !m.revoked) {
           changed = true;
           return { ...m, revoked: true, revoke_scope: scope };
         }

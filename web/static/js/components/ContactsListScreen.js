@@ -15,6 +15,7 @@ import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
 import { useContactSubtitle } from './contacts/hooks/useContactSubtitle.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
+import { useInfiniteScroll, useScrollSentinel } from '../hooks/useInfiniteScroll.js';
 import { readParams, writeParams, str, json } from '../services/urlState.js';
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
@@ -28,8 +29,8 @@ import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
-// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 15→3 p/ testar Anterior/Próxima com
-// poucos contatos. REVERTER para 15 depois dos testes.
+// ⚠️ TESTE TEMPORÁRIO (plano 50 QA): baixado de 15→3 p/ testar o scroll infinito com
+// poucos contatos (lote fixo carregado a cada rolagem). REVERTER para 15 depois.
 const PAGE_SIZE = 3;
 
 // Casefold + strip accents (espelha o `_fold` do backend) para a busca casar
@@ -296,13 +297,9 @@ const CONTACTS_URL_SCHEMA = [
 // ── Tela principal ───────────────────────────────────────────────────────
 export default function ContactsListScreen({ initialEntity = null, currentUser = null }) {
   const canImport = hasPermission(currentUser, 'contact.import');
-  const [contacts, setContacts] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [total, setTotal] = useState(0);        // plano 50 F7: total do modo servidor
-  const [hasMore, setHasMore] = useState(false); // plano 50 F7: há próxima página (servidor)
+  const [reloadTick, setReloadTick] = useState(0);  // plano 50: força refetch (delete/import)
   const [detail, setDetail] = useState(null); // contato aberto no painel
   const [showCreate, setShowCreate] = useState(false);
   const [globalTags, setGlobalTags] = useState({});
@@ -332,45 +329,26 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     deps: [search, advFilters],
   });
 
-  // plano 50 F7 — modo SERVIDOR (browse puro: sem busca e sem filtros): pagina no
-  // servidor (limit/offset, ordem alfabética) — o DOM fica com uma página só, sem
-  // trazer 100k contatos. QUALQUER busca ou filtro cai no modo CLIENTE: carrega tudo
-  // uma vez e ordena/filtra/pagina no cliente (comportamento preservado, semântica de
-  // busca/filtro idêntica). serverMode é derivado de search+advFilters.
-  const serverMode = !search.trim() && advFilters.length === 0;
-
-  const loadContacts = useCallback(() => {
-    setLoading(true);
-    const req = serverMode
-      ? getContacts('', false, { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE, sort: 'name' })
-      : getContacts('', false);  // modo cliente: lista completa (filtra no cliente)
-    return req
+  // plano 50 — SCROLL INFINITO com LOTE FIXO. A busca vai pro servidor (q + paginação
+  // + ordem alfabética via sort=name); o servidor SEMPRE devolve um lote de PAGE_SIZE,
+  // nunca a tabela inteira. Os filtros avançados (atributos/etiquetas) são aplicados no
+  // cliente sobre os itens JÁ carregados — rolar carrega o próximo lote e filtra também.
+  const fetchPage = useCallback((offset) =>
+    getContacts(search, false, { limit: PAGE_SIZE, offset, sort: 'name' })
       .then((res) => {
-        if (res && res.ok) {
-          if (serverMode) {
-            const env = res.data || {};
-            setContacts(env.items || []);
-            setTotal(env.total || 0);
-            setHasMore(!!env.has_more);
-          } else {
-            setContacts(res.data || []);
-            setHasMore(false);
-          }
-          setError(null);
-        } else {
-          setError((res && res.error) || 'Falha ao carregar contatos');
-        }
-        return res;
+        if (res && res.ok) { setError(null); return { items: (res.data && res.data.items) || [], hasMore: !!(res.data && res.data.has_more) }; }
+        setError((res && res.error) || 'Falha ao carregar contatos');
+        return { items: [], hasMore: false };
       })
-      .catch((e) => { setError(String(e)); })
-      .finally(() => setLoading(false));
-  }, [serverMode, page]);
+      .catch((e) => { setError(String(e)); return { items: [], hasMore: false }; }),
+    [search]);
 
-  // reload após ações (delete/import) reusa o loader do modo atual.
-  const reload = loadContacts;
+  const {
+    items: contacts, setItems: setContacts, loading, loadingMore, hasMore, loadMore,
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${search}|${reloadTick}`, keyOf: (c) => c.id });
 
-  // Carrega/recarrega ao (re)entrar num modo ou mudar de página no modo servidor.
-  useEffect(() => { loadContacts(); }, [loadContacts]);
+  // reload após ações (delete/import) força a 1ª página de novo.
+  const reload = useCallback(() => setReloadTick((t) => t + 1), []);
 
   // Tags globais — carregadas uma vez no mount (independente do modo).
   useEffect(() => {
@@ -493,50 +471,18 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     push(null);
   }
 
-  // Ordem alfabética por nome (cai no telefone quando não há nome). No modo servidor
-  // a página já vem ordenada (sort=name) — não reordena (só bagunçaria a página).
-  const sorted = useMemo(() => {
-    if (serverMode) return contacts;
-    const arr = [...contacts];
-    arr.sort((a, b) => {
-      const an = (a.name || a.phone || '').trim();
-      const bn = (b.name || b.phone || '').trim();
-      return an.localeCompare(bn, 'pt-BR', { sensitivity: 'base' });
-    });
-    return arr;
-  }, [contacts, serverMode]);
-
-  // Busca client-side (nome, telefone, tags) + filtros avançados (etiqueta/atributos
-  // personalizados do contato). A avaliação reusa matchesAdvFilters: cada contato
-  // carrega `tags` e `custom_attributes`, então `tag`/`cattr:contact:*` casam direto.
-  // No modo servidor não há busca/filtro client (o browse puro já veio paginado).
-  const filtered = useMemo(() => {
-    if (serverMode) return sorted;
-    const q = foldStr(search.trim());
-    const digits = search.replace(/\D/g, '');
+  // Filtros avançados (etiqueta/atributos personalizados) aplicados no CLIENTE sobre os
+  // itens já carregados. A busca por texto é server-side (`q`), então aqui só os filtros.
+  // `matchesAdvFilters` lê `tags`/`custom_attributes` de cada contato (vêm no payload).
+  const pageItems = useMemo(() => {
+    if (!advFilters.length) return contacts;
     const now = Math.floor(Date.now() / 1000);
-    // Busca por nome / telefone / tags. Email NÃO entra na busca (a pedido) — para
-    // filtrar por email use o filtro (é um atributo personalizado).
-    const bySearch = (!q && !digits) ? sorted : sorted.filter((c) => {
-      if (q && foldStr(c.name).includes(q)) return true;
-      if (digits && (c.phone || '').includes(digits)) return true;
-      if (q && (c.tags || []).some((t) => foldStr(t).includes(q))) return true;
-      return false;
-    });
-    if (!advFilters.length) return bySearch;
-    return bySearch.filter((c) => matchesAdvFilters(c, advFilters, now));
-  }, [sorted, search, advFilters, serverMode]);
+    return contacts.filter((c) => matchesAdvFilters(c, advFilters, now));
+  }, [contacts, advFilters]);
 
-  // Reseta a página quando a busca ou os filtros mudam o conjunto.
-  useEffect(() => { setPage(1); }, [search, advFilters]);
-
-  // Paginação: no modo servidor o total vem do envelope; no cliente, do filtrado.
-  const totalCount = serverMode ? total : filtered.length;
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const start = (safePage - 1) * PAGE_SIZE;
-  // Modo servidor: `filtered` já é a página (não fatia de novo). Cliente: fatia local.
-  const pageItems = serverMode ? filtered : filtered.slice(start, start + PAGE_SIZE);
+  // Sentinela de fim de lista: rolar até o fim carrega o próximo LOTE (scroll infinito).
+  const sentinelRef = useRef(null);
+  useScrollSentinel(sentinelRef, loadMore, hasMore);
 
   // Abre o chat do contato no hub. Resolve o atendimento ativo (se houver) e navega
   // por /conversations/{id}; sem atendimento ainda, cai na raiz do hub.
@@ -677,7 +623,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
         <div class="text-center text-red-400 py-8 text-[14px]">${error}</div>
       ` : loading ? html`
         <div class="text-center text-wa-secondary py-12 animate-pulse-slow text-[14px]">Carregando contatos...</div>
-      ` : filtered.length === 0 ? html`
+      ` : pageItems.length === 0 ? html`
         <div class="text-center text-wa-secondary py-12 text-[14px]">
           ${(search || advFilters.length) ? 'Nenhum contato encontrado.' : 'Nenhum contato ainda.'}
         </div>
@@ -694,25 +640,11 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
           `)}
         </div>
 
-        <!-- Paginação -->
-        <div class="flex items-center justify-between mt-4 text-[13px] text-wa-secondary">
-          <span>Exibindo ${start + 1} - ${start + pageItems.length} de ${totalCount} contatos</span>
-          ${totalPages > 1 ? html`
-            <div class="flex items-center gap-1">
-              <button
-                onClick=${() => setPage((p) => Math.max(1, p - 1))}
-                disabled=${safePage <= 1}
-                class="px-3 py-[6px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >Anterior</button>
-              <span class="px-2">${safePage} de ${totalPages}</span>
-              <button
-                onClick=${() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled=${safePage >= totalPages}
-                class="px-3 py-[6px] rounded-lg border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >Próxima</button>
-            </div>
-          ` : null}
-        </div>
+        <!-- Scroll infinito (plano 50): sentinela carrega o próximo lote ao rolar até o fim. -->
+        ${hasMore ? html`
+          <div ref=${sentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
+            ${loadingMore ? 'Carregando mais…' : ''}
+          </div>` : null}
       `}
 
       ${detail ? html`

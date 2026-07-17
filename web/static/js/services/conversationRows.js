@@ -423,6 +423,12 @@ export function shapeConvData(d) {
     // Compositor hints (Frente C): template capability + 24h session window.
     templates_supported: !!d.templates_supported,
     session_open: d.session_open,
+    // Message context-menu capability hints: hide "Apagar" where the channel can't
+    // revoke (Cloud), show "Editar" only where it can edit. Preserved as-is (a real
+    // `false` from the backend must survive so the gate can distinguish it from
+    // "unknown/legacy" → shows).
+    revoke_supported: d.revoke_supported,
+    edit_supported: d.edit_supported,
   };
 }
 

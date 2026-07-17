@@ -157,6 +157,27 @@ def register_routes(app, deps):
                                         "messages_read", {"phone": phone_key})
                     handled += 1
                 elif kind == "edited":
+                    # A counterpart edited a message on their side: mirror it into
+                    # the panel — update the stored content + stamp edited_ts, then
+                    # broadcast so the open thread swaps the bubble in place (same
+                    # contract as the operator edit endpoint). Keyed by the provider
+                    # msg_id of the ORIGINAL message. Falls back to plugin-only when
+                    # the message isn't in our DB (matched is None).
+                    orig_id = extras.get("original_message_id", "") or ev.external_msg_id
+                    new_text = ev.text or ""
+                    edited_ts = None
+                    db_id = None
+                    if orig_id and new_text:
+                        row = await asyncio.to_thread(message_repo.get_by_msg_id, orig_id)
+                        if row:
+                            db_id = row.get("_id")
+                            edited_ts = await asyncio.to_thread(
+                                message_repo.mark_edited, int(db_id), new_text)
+                            if edited_ts and ws_manager is not None:
+                                await ws_manager.broadcast("message_edited", {
+                                    "phone": ev.chat_id, "msg_id": orig_id, "db_id": db_id,
+                                    "content": new_text, "edited_ts": edited_ts,
+                                    "conversation_id": row.get("conversation_id")})
                     await emit_with_filter("message.edited", {
                         "id": ev.external_msg_id, "phone": ev.chat_id, "from": ev.sender_id,
                         "original_message_id": extras.get("original_message_id", ""),

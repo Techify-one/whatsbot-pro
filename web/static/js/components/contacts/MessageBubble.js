@@ -97,6 +97,7 @@ export function MessageBubble({
           </span>
         ` : ''}
         <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
+          ${(!m.revoked && m.edited_ts) ? html`<span class="italic mr-[3px]">editada</span>` : ''}
           ${(!isUser && !sandbox) ? (() => {
             if (isFailed) return html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}`;
             if (isSending) return html`<${ClockIcon} />`;

@@ -23,6 +23,15 @@ class ChannelCapabilities:
     presence: bool = False
     reactions: bool = False
     media: bool = False
+    # Whether the provider can delete-for-everyone (revoke) a sent message. GOWA
+    # can (``POST /message/{id}/revoke``); WhatsApp Cloud CANNOT (no Graph endpoint)
+    # so it leaves this False and the panel hides "Apagar". Drives the UI by
+    # CAPABILITY, never provider name.
+    revoke: bool = False
+    # Whether the provider can edit the text of an already-sent message. Both
+    # WhatsApp providers can (GOWA ``/message/{id}/update``, Cloud messages endpoint
+    # with ``message_id``); gates the "Editar" menu item.
+    edit_message: bool = False
     inbound_route: str = "path"           # "path" | "poll" | "none"
     # Customer-care session window in hours (plano 11 Fase 6). 0 = always-open
     # (GOWA/linked-device): free text any time. >0 = providers like the WhatsApp
@@ -304,6 +313,16 @@ class Channel(ABC):
     def send_presence(self, chat_id: str, state: str) -> None: ...
     def react(self, chat_id: str, msg_id: str, emoji: str) -> None: ...
     def revoke(self, chat_id: str, msg_id: str) -> None: ...
+
+    def edit_text(self, chat_id: str, msg_id: str, text: str) -> SendResult:
+        """Edit the text of an already-sent message (plano — editar mensagem).
+
+        Optional, capability-gated (``ChannelCapabilities.edit_message``). The
+        default refuses so a provider that can't edit degrades cleanly instead of
+        pretending to succeed. Providers that CAN edit (GOWA via
+        ``/message/{id}/update``, WhatsApp Cloud via the messages endpoint with
+        ``message_id``) override this. Driven by CAPABILITY, never provider name."""
+        return SendResult(ok=False, error="edit_not_supported")
 
     def fetch_avatar(self, chat_id: str) -> Optional[bytes]:
         """Current profile photo bytes for ``chat_id`` (plano 38 F5), or ``None``.

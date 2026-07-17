@@ -230,3 +230,21 @@ class OutboundRouter:
         except Exception:  # noqa: BLE001
             logger.debug("revoke failed on %s", channel_id, exc_info=True)
             return False
+
+    def edit_text(self, channel_id: str, chat_id: str, msg_id: str,
+                  text: str) -> SendResult:
+        """Edit a sent message's text via the conversation's channel (capability-gated).
+
+        Returns ``SendResult(ok=False, error="edit_not_supported")`` when the channel
+        doesn't declare ``edit_message`` or isn't live, so the caller maps it to a
+        clean API error. Driven by CAPABILITY, never provider name.
+        """
+        if not self.supports(channel_id, "edit_message"):
+            return SendResult(ok=False, error="edit_not_supported")
+        inst = self.get(channel_id)
+        if inst is None or not msg_id:
+            return SendResult(ok=False, error="channel_not_registered")
+        try:
+            return inst.edit_text(chat_id, msg_id, text)
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e))

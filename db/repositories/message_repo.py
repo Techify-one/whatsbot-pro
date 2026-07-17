@@ -296,6 +296,22 @@ def update_content(message_id: int, content: str) -> None:
         conn.execute(sa_update(messages).where(messages.c.id == message_id).values(content=content))
 
 
+def mark_edited(message_id: int, content: str) -> float | None:
+    """Edit a sent message: update its content and stamp ``edited_ts`` (epoch now).
+
+    Used by the operator/AI message-edit flow. Returns the new ``edited_ts`` on a
+    matched row (so the caller can broadcast it), or ``None`` if nothing matched."""
+    if not message_id:
+        return None
+    ts = time.time()
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_update(messages).where(messages.c.id == message_id)
+            .values(content=content, edited_ts=ts)
+        )
+    return ts if (result.rowcount or 0) > 0 else None
+
+
 def update_status(contact_id: int, content: str, new_status: str | None,
                    msg_id: str | None = None) -> None:
     """Update status of the most recent message matching content (for retry-send)."""
@@ -503,6 +519,10 @@ def _row_to_dict(row) -> dict:
     # `reply_to_msg_id` may be absent on old rows read before the column existed.
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]
+    # Timestamp da última edição (operador/IA). Ausente/NULL em mensagens nunca
+    # editadas → o painel só mostra "editada" quando presente.
+    if row.get("edited_ts"):
+        d["edited_ts"] = row["edited_ts"]
     # Nome (snapshot) do operador que enviou a mensagem manual. Ausente em linhas
     # legadas / echo / IA → o frontend cai em "Manual". Só expõe o nome (o
     # sent_by_user_id é interno e não vai ao cliente).

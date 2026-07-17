@@ -264,6 +264,14 @@ export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, body);
 }
 
+// Edit the text of an already-sent outgoing message (operator/AI). Requires msgId
+// (the provider message id); text-only messages, within the provider's edit window.
+export async function editMessage(phone, { msgId = null, dbId = null, text = '', conversationId = null } = {}) {
+  const body = { msg_id: msgId, db_id: dbId, text };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/edit`, body);
+}
+
 // React to a message with an emoji. Empty emoji removes the operator's reaction.
 export async function reactToMessage(phone, msgId, emoji, conversationId = null) {
   const body = { msg_id: msgId, emoji };

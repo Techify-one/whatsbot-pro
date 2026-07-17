@@ -61,7 +61,8 @@ class GOWAChannel(Channel):
     def __init__(self, channel_id: str, gowa_client=None, gowa_manager=None):
         super().__init__(channel_id, ChannelCapabilities(
             qr=True, templates=False, groups=True, presence=True,
-            reactions=True, media=True, inbound_route="path",
+            reactions=True, media=True, revoke=True, edit_message=True,
+            inbound_route="path",
         ))
         self._client = gowa_client
         self._manager = gowa_manager
@@ -324,6 +325,14 @@ class GOWAChannel(Channel):
             self._client.revoke_message(msg_id, chat_id)
         except Exception:  # noqa: BLE001
             logger.debug("gowa revoke failed", exc_info=True)
+
+    def edit_text(self, chat_id: str, msg_id: str, text: str) -> SendResult:
+        """Edit a sent message via GOWA ``POST /message/{id}/update``."""
+        try:
+            self._client.update_message(msg_id, chat_id, text)
+            return SendResult(ok=True, external_msg_id=msg_id)
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e))
 
     def fetch_avatar(self, chat_id: str) -> bytes | None:
         """Profile photo bytes via this device's GOWA ``/user/avatar`` (plano 38 F5)."""

@@ -313,6 +313,8 @@ def register_routes(app, deps):
             "avatar_v": avatar_version(settings, phone) if can_read_contact else None,
             "templates_supported": outbound.supports(channel_id, "templates"),
             "session_open": outbound.session_open(channel_id, last_inbound_ts),
+            "revoke_supported": outbound.supports(channel_id, "revoke"),
+            "edit_supported": outbound.supports(channel_id, "edit_message"),
         })
 
     @app.post("/api/atendimentos/{conv_id}/status")

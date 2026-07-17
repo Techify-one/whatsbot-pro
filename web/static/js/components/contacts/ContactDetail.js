@@ -5,12 +5,13 @@ import { sendMessage, sendImage, sendAudio, sendDocument } from '../../services/
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon } from './MessageContextMenu.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { Slot } from '../../plugins/Slot.js';
 import { emit as emitClientEvent, applyFilter } from '../../plugins/registry.js';
 import { MessageBubble } from './MessageBubble.js';
+import { MessageEditDialog } from './MessageEditDialog.js';
 import { SystemMessageCard, isSystemCardRole } from './SystemMessageCard.js';
 import { Composer } from './Composer.js';
 import { useComposer } from './hooks/useComposer.js';
@@ -89,6 +90,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // um número novo no Cloud), então só um template pode sair.
   const templatesSupported = !sandbox && !!(contact && contact.templates_supported);
   const sessionClosed = templatesSupported && contact && contact.session_open === false;
+  // Message context-menu capability gates (plano — editar/apagar mensagem):
+  //  • revokeSupported: default TRUE — só esconde "Apagar" quando o canal declara
+  //    explicitamente que NÃO revoga (WhatsApp Cloud). GOWA e a visão legada
+  //    all-channels (sem flag) continuam mostrando Apagar.
+  //  • editSupported: só mostra "Editar" quando o canal edita e não é sandbox.
+  const revokeSupported = sandbox || !(contact && contact.revoke_supported === false);
+  const editSupported = !sandbox && !!(contact && contact.edit_supported);
 
   // ── Hooks ──────────────────────────────────────────────────────
   // Message actions own `updateMsgByLocalId` (shared by composer + media).
@@ -285,11 +293,18 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           onClick: () => { composer.setMode('reply'); composer.setReplyingTo(message);
                            setTimeout(() => composer.inputRef.current?.focus(), 0); } },
       ] : []),
+      // Editar: só mensagens de SAÍDA (isFromMe), de texto, já enviadas (msg_id),
+      // em canais que suportam edição. Não em revogadas / notas privadas / mídia.
+      ...((canReply && editSupported && isFromMe && !message.revoked && message.msg_id
+           && !message.media_type && message.role !== 'private_note') ? [
+        { label: 'Editar', icon: EditIcon,
+          onClick: () => actions.setEditDialog({ message }) },
+      ] : []),
       { label: 'Copiar', icon: CopyIcon, onClick: () => actions.copyMessageText(message) },
       { label: 'Copiar link da mensagem', icon: LinkIcon,
         disabled: !actions.messagePermalink(message),
         onClick: () => actions.copyMessageLink(message) },
-      ...((canReply && !message.revoked) ? [
+      ...((canReply && !message.revoked && revokeSupported) ? [
         { label: 'Apagar', icon: TrashIcon, danger: true,
           onClick: () => actions.setDeleteDialog({ message, isFromMe }) },
       ] : []),
@@ -373,16 +388,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
       <!-- Chat area with doodle pattern -->
       <div ref=${chatRef} class="flex-1 min-h-0 overflow-y-auto overscroll-contain wa-scrollbar wa-chat-pattern py-2 px-[4%] lg:px-[7%]">
-        <!-- Sentinela do topo (F4): dispara "carregar anteriores" ao entrar na viewport.
-             Fallback acessível: botão explícito quando há mais e nada carregando. -->
+        <!-- Sentinela do topo (F4): dispara "carregar anteriores" AUTOMÁTICO ao entrar na
+             viewport (rolar até o topo). Sem botão manual — só o indicador de carregando. -->
         ${hasMore ? html`
-          <div ref=${topSentinelRef} class="flex justify-center py-2">
+          <div ref=${topSentinelRef} class="flex justify-center py-2 min-h-[8px]">
             ${loadingOlder
               ? html`<span class="bg-wa-bg/80 text-wa-secondary rounded-lg px-3 py-1.5 text-[12px] shadow-sm">Carregando anteriores…</span>`
-              : html`<button type="button" onClick=${handleLoadOlder}
-                  class="bg-wa-bg/80 text-wa-secondary hover:text-wa-text rounded-lg px-3 py-1.5 text-[12px] shadow-sm">
-                  Carregar mensagens anteriores
-                </button>`}
+              : null}
           </div>` : null}
         ${!messages || messages.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 text-[14px]">
@@ -484,6 +496,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             </div>
           </div>
         </div>
+      ` : ''}
+      ${actions.editDialog ? html`
+        <${MessageEditDialog}
+          message=${actions.editDialog.message}
+          onSave=${(msg, text) => actions.performEdit(msg, text)}
+          onCancel=${() => actions.setEditDialog(null)}
+        />
       ` : ''}
     </div>
   `;

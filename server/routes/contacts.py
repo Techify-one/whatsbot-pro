@@ -669,6 +669,11 @@ def register_routes(app, deps):
                     conversation_id=scoped_conv["id"]) if scoped_conv else None)
                 data["templates_supported"] = outbound.supports(channel, "templates")
                 data["session_open"] = outbound.session_open(channel, last_ts)
+                # Capability hints p/ o menu de contexto da mensagem: esconder
+                # "Apagar" onde o canal não revoga (Cloud), mostrar "Editar" só onde
+                # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
+                data["revoke_supported"] = outbound.supports(channel, "revoke")
+                data["edit_supported"] = outbound.supports(channel, "edit_message")
             else:
                 _page = message_repo.get_all(
                     contact_id, limit=page_limit + 1, before_id=before_id)
@@ -983,6 +988,62 @@ def register_routes(app, deps):
         })
         logger.info("[Delete] Revoked (me, kept in DB) msg %s/db %s for %s", msg_id, db_id, phone)
         return _ok({"message": "Mensagem apagada para você.", "msg_id": msg_id or None})
+
+    @app.post("/api/contacts/{phone}/messages/edit")
+    async def edit_message(phone: str, body: dict, request: Request):
+        """Edit the text of an already-sent OUTGOING message (operator or AI).
+
+        Identifies the message by its provider ``msg_id`` (required — editing happens
+        on the provider). Only text messages sent by us can be edited: inbound
+        (``role='user'``) and media messages are refused. The edit is pushed to the
+        conversation's channel via the capability-gated ``outbound.edit_text``; on
+        success the DB content is updated + ``edited_ts`` stamped, and the panel is
+        notified via the ``message_edited`` WS event. Providers that can't edit
+        (capability off) yield a clean error instead of a silent no-op.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        msg_id = (body.get("msg_id") or "").strip()
+        text = (body.get("text") or "").strip()
+        if not msg_id:
+            return _err("Editar exige uma mensagem já enviada.", status=400)
+        if not text:
+            return _err("O texto da mensagem não pode ficar vazio.", status=400)
+
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=body.get("conversation_id"))
+        if denied_inbox:
+            return denied_inbox
+
+        msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+        if not msg:
+            return _err("Mensagem não encontrada.", status=404)
+        if msg.get("role") == "user":
+            return _err("Só é possível editar as suas próprias mensagens.", status=400)
+        if msg.get("media_type"):
+            return _err("Só é possível editar mensagens de texto.", status=400)
+
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        if not is_sandbox:
+            channel_id = _channel_for(phone, body.get("conversation_id"))
+            res = await asyncio.to_thread(outbound.edit_text, channel_id, phone, msg_id, text)
+            if not res.ok:
+                return _err(f"Não foi possível editar a mensagem: {res.error}", status=400)
+
+        db_id = msg.get("_id") or body.get("db_id")
+        edited_ts = await asyncio.to_thread(message_repo.mark_edited, int(db_id), text) if db_id else None
+        await ws_manager.broadcast("message_edited", {
+            "phone": phone, "msg_id": msg_id, "db_id": db_id,
+            "content": text, "edited_ts": edited_ts,
+            "conversation_id": body.get("conversation_id"),
+        })
+        await emit_with_filter("message.edited", {
+            "id": msg_id, "phone": phone, "original_message_id": msg_id,
+            "body": text, "ts": time.time(),
+        })
+        logger.info("[Edit] Edited msg %s for %s", msg_id, phone)
+        return _ok({"message": "Mensagem editada.", "msg_id": msg_id, "edited_ts": edited_ts})
 
     @app.post("/api/contacts/{phone}/messages/react")
     async def react_to_message(phone: str, body: dict, request: Request):

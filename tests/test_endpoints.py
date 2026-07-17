@@ -640,6 +640,62 @@ check("POST /messages/delete (me) -> scope me", bool(_kept) and _kept[0].get("re
 r = client.post("/api/contacts/5511999990001/messages/delete", json={"scope": "me"})
 check("POST /messages/delete (no id) -> 400", r.status_code == 400)
 
+# ── Edit message (plano — editar mensagem) ──────────────────────────
+# Provider capabilities: GOWA revokes + edits; WhatsApp Cloud edits but does NOT
+# revoke (so the panel hides "Apagar" there). Drives the UI by capability.
+from channels.providers.gowa_channel import GOWAChannel as _GC
+_gc = _GC("default")
+check("cap: GOWA revoke", _gc.capabilities.revoke is True)
+check("cap: GOWA edit_message", _gc.capabilities.edit_message is True)
+import importlib.util as _ilu
+def _load_provider(_name, _path):
+    _s = _ilu.spec_from_file_location(_name, _path)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m); return _m
+_wac = _load_provider("wac_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
+_cc = _wac.WhatsAppCloudChannel("c_test", credentials={
+    "access_token": "x", "phone_number_id": "y", "verify_token": "z"})
+# WhatsApp Cloud é o único canal sem apagar NEM editar (ambas as capabilities off).
+check("cap: Cloud revoke=False (hides Apagar)", _cc.capabilities.revoke is False)
+check("cap: Cloud edit_message=False (hides Editar)", _cc.capabilities.edit_message is False)
+# Telegram suporta apagar E editar (deleteMessage / editMessageText).
+_tg = _load_provider("tg_test", "assets/plugin_examples/telegram/channels.py")
+_tc = _tg.TelegramChannel("t_test", credentials={"bot_token": "123:abc"})
+check("cap: Telegram revoke=True", _tc.capabilities.revoke is True)
+check("cap: Telegram edit_message=True", _tc.capabilities.edit_message is True)
+check("cap: Telegram has edit_text override", "edit_text" in type(_tc).__dict__)
+check("cap: Telegram has revoke override", "revoke" in type(_tc).__dict__)
+
+# Edit an outgoing (assistant) text message on the default (GOWA) channel -> 200
+message_repo.add(_del_cid, "assistant", "Texto original", msg_id="WAMID_EDIT_1", status="operator")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "Texto editado"})
+check("POST /messages/edit -> 200", r.status_code == 200)
+_e = message_repo.get_by_msg_id("WAMID_EDIT_1")
+check("POST /messages/edit -> content updated", bool(_e) and _e.get("content") == "Texto editado")
+check("POST /messages/edit -> edited_ts set", bool(_e) and _e.get("edited_ts"))
+
+# Edit a contact (user) message -> rejected
+message_repo.add(_del_cid, "user", "Msg do contato", msg_id="WAMID_EDIT_USER")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_USER", "text": "hack"})
+check("POST /messages/edit (user msg) -> 400", r.status_code == 400)
+
+# Edit a media message -> rejected (text only)
+message_repo.add(_del_cid, "assistant", "", msg_id="WAMID_EDIT_MEDIA",
+                 status="operator", media_type="image", media_path="/x.jpg")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_MEDIA", "text": "legenda nova"})
+check("POST /messages/edit (media) -> 400", r.status_code == 400)
+
+# Missing msg_id -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit", json={"text": "x"})
+check("POST /messages/edit (no msg_id) -> 400", r.status_code == 400)
+
+# Empty text -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "   "})
+check("POST /messages/edit (empty text) -> 400", r.status_code == 400)
+
 # ═══════════════════════════════════════════════════════════════════
 #  8b. React to message
 # ═══════════════════════════════════════════════════════════════════
@@ -3029,7 +3085,9 @@ check("F3: session_open presente na resposta", "session_open" in _pg_data)
 _pg_collected = list(_pg_msgs)
 _pg_before = min(m["_id"] for m in _pg_msgs)
 _pg_guard = 0
-while _pg_data["has_more"] and _pg_guard < 20:
+# Guarda proporcional ao total (cada página traz >=1 msg): sobrevive a PAGE_MSGS pequeno
+# (ex.: valor de QA temporário) sem estourar antes de reconstruir a thread inteira.
+while _pg_data["has_more"] and _pg_guard < _pg_repo_total + 5:
     _pg_guard += 1
     r = client.get(f"/api/atendimentos/{_pg_conv}/messages"
                    f"?mark_read=false&limit={_PAGE_MSGS}&before_id={_pg_before}")
@@ -3049,16 +3107,19 @@ check("F3 keyset: minhas 130 msgs todas presentes e em ordem",
       _pg_all_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
       f"veio {len(_pg_all_mine)} msgs minhas")
 
-# Conversa CURTA (< PAGE_MSGS): devolve tudo + has_more=False.
+# Conversa CURTA (< PAGE_MSGS): devolve tudo + has_more=False. Nº de msgs proporcional
+# ao PAGE_MSGS (deixa folga p/ o card conversation_event caber na mesma página) —
+# robusto a um PAGE_MSGS pequeno (valor de QA temporário).
+_pg_short_n = max(1, _PAGE_MSGS - 2)
 _pg_short_cm = _CM("5500050000003")
 _pg_short_conv = _pg_short_cm.ensure_conversation_live("user", None)
-for _i in range(5):
+for _i in range(_pg_short_n):
     message_repo.add(_pg_short_cm.id, "user", f"s-{_i}",
                      conversation_id=_pg_short_conv, ts=time.time() + _i)
 _r_short = client.get(f"/api/atendimentos/{_pg_short_conv}/messages?mark_read=false").json()["data"]
 check("F3: conversa curta -> has_more=False", _r_short["has_more"] is False)
 check("F3: conversa curta -> devolve todas (<= PAGE_MSGS)",
-      len(_r_short["messages"]) <= _PAGE_MSGS and len(_r_short["messages"]) >= 5)
+      len(_r_short["messages"]) <= _PAGE_MSGS and len(_r_short["messages"]) >= _pg_short_n)
 
 # Caminho legado GET /api/contacts/{phone} também pagina (all-channels merge).
 _r_cpath = client.get("/api/contacts/5500050000001?mark_read=false").json()["data"]
@@ -3789,6 +3850,36 @@ r = client.post("/api/webhook/gowa/default", json={
 })
 check("POST /webhook (ack) -> 200", r.status_code == 200)
 
+# Inbound edit (cliente edita a própria mensagem): reflete no DB + broadcast.
+_inb_cid = contact_repo.get_full_contact("5511999990001")["id"]
+message_repo.add(_inb_cid, "user", "texto do cliente", msg_id="WAMID_INB_EDIT_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.edited",
+    "payload": {
+        "id": "WAMID_INB_EDIT_1",
+        "original_message_id": "WAMID_INB_EDIT_1",
+        "from": "5511999990001@s.whatsapp.net",
+        "chat_id": "5511999990001@s.whatsapp.net",
+        "body": "texto editado pelo cliente",
+    },
+})
+check("POST /webhook (edited) -> 200", r.status_code == 200)
+_ie = message_repo.get_by_msg_id("WAMID_INB_EDIT_1")
+check("webhook edited -> content atualizado no DB",
+      bool(_ie) and _ie.get("content") == "texto editado pelo cliente")
+check("webhook edited -> edited_ts setado", bool(_ie) and _ie.get("edited_ts"))
+
+# Inbound revoke (cliente apaga pra todos): mensagem fica flagged revoked.
+message_repo.add(_inb_cid, "user", "vou apagar", msg_id="WAMID_INB_REV_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.revoked",
+    "payload": {"revoked_message_id": "WAMID_INB_REV_1",
+                "chat_id": "5511999990001@s.whatsapp.net"},
+})
+check("POST /webhook (revoked) -> 200", r.status_code == 200)
+_ir = message_repo.get_by_msg_id("WAMID_INB_REV_1")
+check("webhook revoked -> flagged revoked no DB", bool(_ir) and bool(_ir.get("revoked")))
+
 # Reply-quote extraction from inbound payloads (GOWA nests this inconsistently).
 from server.routes.webhook import _extract_reply_to as _ext_reply
 check("reply extract: flat replied_id", _ext_reply({"replied_id": "Q1"}) == "Q1")
@@ -4264,7 +4355,29 @@ check("gowa parse: ack normalizado -> 1 receipt por id, status=read",
       len(_acks) == 2 and all(a.kind == "receipt" and a.media_extras.get("status") == "read" for a in _acks))
 check("gowa parse: revoked", _pgi({"event": "message.revoked", "payload": {
     "revoked_message_id": "v1", "chat_id": "5511@s.whatsapp.net"}})[0].kind == "revoked")
+_ged = _pgi({"event": "message.edited", "payload": {
+    "id": "e1", "original_message_id": "e1", "body": "novo texto",
+    "chat_id": "5511@s.whatsapp.net"}})[0]
+check("gowa parse: edited -> kind edited",
+      _ged.kind == "edited" and _ged.text == "novo texto"
+      and _ged.media_extras.get("original_message_id") == "e1")
 check("gowa parse: evento desconhecido -> []", _pgi({"event": "nope", "payload": {}}) == [])
+
+# Telegram: edited_message vira um evento "edited" (não uma msg nova).
+_tg_mod = _load_provider("tg_edit_test", "assets/plugin_examples/telegram/channels.py")
+_tg_ch = _tg_mod.TelegramChannel("t_edit", credentials={"bot_token": "1:x"})
+_tg_new = _tg_ch.parse_inbound({"message": {
+    "message_id": 55, "date": 1, "text": "original",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: message normal -> kind message",
+      len(_tg_new) == 1 and _tg_new[0].kind == "message")
+_tg_ed = _tg_ch.parse_inbound({"edited_message": {
+    "message_id": 55, "date": 2, "text": "editado",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: edited_message -> kind edited",
+      len(_tg_ed) == 1 and _tg_ed[0].kind == "edited"
+      and _tg_ed[0].text == "editado"
+      and _tg_ed[0].media_extras.get("original_message_id") == "55")
 
 # ── ingest_event honra os campos GOWA (via fake_ch, channel-agnostic) ──
 settings.set("message_batch_delay", 0)

@@ -120,6 +120,9 @@ messages = Table(
     Column("revoked", Integer, nullable=False, server_default="0"),
     Column("reactions", Text),  # JSON: {emoji: [reactor, ...]}
     Column("reply_to_msg_id", Text),  # GOWA msg_id of the quoted message (reply)
+    # Timestamp (epoch) da última edição de uma mensagem de saída (operador/IA).
+    # NULL = nunca editada. O painel mostra "editada" quando setado.
+    Column("edited_ts", Float),
     # plano 01: thread de atendimento. Aditivo e nullable (contact_id permanece).
     # FK por nome (conversations é definida adiante).
     Column("conversation_id", Integer,

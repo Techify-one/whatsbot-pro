@@ -10,9 +10,10 @@
 // Behavior-preserving: same optimistic update shapes, same best-effort error
 // handling (WS reconciles), same permalink format, same group-prefix stripping.
 import { useState } from 'preact/hooks';
-import { deleteMessage, reactToMessage } from '../../../services/api.js';
+import { deleteMessage, editMessage, reactToMessage } from '../../../services/api.js';
 import { copyToClipboard } from '../MessageContextMenu.js';
 import { deepLinkUrl } from '../../../utils/copyDeepLink.js';
+import { notify } from '../../../services/notify.js';
 
 // The operator's own current reaction on a message (stored under reactor "me").
 export function myReaction(message) {
@@ -37,6 +38,8 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
   const [deleteDialog, setDeleteDialog] = useState(null);
+  // Edit dialog: { message } | null
+  const [editDialog, setEditDialog] = useState(null);
 
   // Helper to find and update a message by its local ID
   function updateMsgByLocalId(localId, updater) {
@@ -104,6 +107,51 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     } catch (_) { /* best-effort; WS will reconcile if it succeeded */ }
   }
 
+  // Edit an outgoing message's text. Optimistically swaps the content in place
+  // (and marks it edited); on failure reverts to the previous content and toasts.
+  // The WS `message_edited` broadcast reconciles other clients.
+  async function performEdit(message, newText) {
+    const text = (newText || '').trim();
+    setEditDialog(null);
+    if (!text || text === message.content) return;
+    const msgId = message.msg_id || null;
+    const dbId = message._id || message.id || null;
+    const localId = message._localId || null;
+    const prevContent = message.content;
+    const matches = (m) => (msgId && m.msg_id === msgId)
+      || (dbId && (m._id === dbId || m.id === dbId))
+      || (localId && m._localId === localId);
+    const nowTs = Date.now() / 1000;
+    // Optimistic content swap.
+    setContactData(prev => {
+      if (!prev || !prev.messages) return prev;
+      const updated = prev.messages.map(m =>
+        matches(m) ? { ...m, content: text, edited_ts: nowTs } : m);
+      return { ...prev, messages: updated };
+    });
+    try {
+      const res = await editMessage(phone, { msgId, dbId, text, conversationId });
+      if (!res || res.ok === false) {
+        // Revert and inform the operator (e.g. edit window expired at the provider).
+        setContactData(prev => {
+          if (!prev || !prev.messages) return prev;
+          const reverted = prev.messages.map(m =>
+            matches(m) ? { ...m, content: prevContent, edited_ts: message.edited_ts } : m);
+          return { ...prev, messages: reverted };
+        });
+        notify((res && res.error) || 'Não foi possível editar a mensagem.', { kind: 'error' });
+      }
+    } catch (_) {
+      setContactData(prev => {
+        if (!prev || !prev.messages) return prev;
+        const reverted = prev.messages.map(m =>
+          matches(m) ? { ...m, content: prevContent, edited_ts: message.edited_ts } : m);
+        return { ...prev, messages: reverted };
+      });
+      notify('Não foi possível editar a mensagem.', { kind: 'error' });
+    }
+  }
+
   // React (or toggle off) on a message. Clicking the current emoji removes it.
   async function performReact(message, emoji) {
     const msgId = message.msg_id;
@@ -132,7 +180,8 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
 
   return {
     msgMenu, setMsgMenu, deleteDialog, setDeleteDialog,
+    editDialog, setEditDialog,
     updateMsgByLocalId, copyMessageText, messagePermalink, copyMessageLink,
-    performDelete, performReact,
+    performDelete, performEdit, performReact,
   };
 }
