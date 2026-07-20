@@ -202,6 +202,21 @@ async def archive(deps, conv: dict, archived: int, *, actor_name: str | None = N
     return updated
 
 
+async def pin(deps, conv: dict, pinned: int) -> dict | None:
+    """Fixar/desafixar uma conversa no topo da sidebar (plano 54 — por atendimento).
+
+    Ação cosmética de ordenação: escreve ``is_pinned`` e emite ``conversation.pinned``
+    (WS ``conversation_pinned``, carregando ``is_pinned``) pra sincronizar outros
+    clientes. NÃO grava card de sistema (o pin por contato também não gravava)."""
+    updated = await asyncio.to_thread(
+        conversation_repo.set_pinned, conv["id"], pinned)
+    if not updated:
+        return None
+    await _broadcast(deps, "conversation_pinned", "conversation.pinned", updated,
+                     is_pinned=updated.get("is_pinned"))
+    return updated
+
+
 async def set_attributes(deps, conv: dict, merged: dict | None, changed: dict,
                          defs: dict, *, actor_id=None,
                          actor_name: str | None = None) -> dict | None:

@@ -46,6 +46,7 @@ from server.execution import (
 from server.helpers import parse_split_reply
 from server.transcription import maybe_transcribe, format_media_content
 from plugins.events import apply_filter, emit_with_filter
+from app.services.realtime_broadcast import build_inbound_saved_message
 
 logger = logging.getLogger(__name__)
 
@@ -880,9 +881,22 @@ class MessagingService:
                     _allow_reopen = await apply_filter(
                         "filter.conversation.before_reopen", True,
                         {"phone": phone, "role": "user", "text": combined})
-                    contact.add_message("user", combined, msg_id=last_msg_id,
+                    saved = contact.add_message("user", combined, msg_id=last_msg_id,
                                         reply_to_msg_id=text_reply_to,
                                         reopen=(False if not _allow_reopen else None))
+                    # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
+                    # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
+                    # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
+                    # renderiza ao vivo. `supersedes` = os msg_ids que o batch combinou nesta
+                    # única linha, p/ o front colapsar as bolhas otimistas das anteriores.
+                    # Defensivo: nunca quebra o save/IA.
+                    try:
+                        await ws_manager.broadcast("new_message", {
+                            "phone": phone, "channel_id": channel_id,
+                            "message": build_inbound_saved_message(saved, supersedes=text_msg_ids),
+                        })
+                    except Exception:
+                        logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
                     await emit_with_filter("message.saved", {
                         "phone": phone, "text": combined, "msg_id": last_msg_id,
                         "media_type": None, "media_path": None,
@@ -966,13 +980,22 @@ class MessagingService:
                 _saved_text = text or ("[Áudio recebido]" if audio_path else "")
                 _saved_media_type = item.get("media_type") or ("image" if image_path else "audio")
                 _saved_media_path = item.get("media_path") or image_path or audio_path
-                contact.add_message(
+                saved = contact.add_message(
                     "user", _saved_text,
                     media_type=_saved_media_type,
                     media_path=_saved_media_path,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
                 )
+                # plano 57: new_message autoritativo pós-save (cada mídia é 1 linha própria,
+                # com seu próprio msg_id → reconcilia no lugar; sem supersedes).
+                try:
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone, "channel_id": channel_id,
+                        "message": build_inbound_saved_message(saved),
+                    })
+                except Exception:
+                    logger.exception("[Batch] falha ao re-emitir new_message (mídia) pós-save para %s", phone)
                 await emit_with_filter("message.saved", {
                     "phone": phone, "text": _saved_text,
                     "msg_id": item.get("msg_id"),

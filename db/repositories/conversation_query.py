@@ -77,9 +77,12 @@ def enriched_columns(include_private_note: bool = False,
         contacts.c.is_group.label("contact_is_group"),
         # Tipo do contato (plano tipos-de-contato): carregado no row enriquecido para
         # o conversation_upsert (WS) já nascer filtrável por tipo, sem esperar o
-        # reconcile — igual a is_pinned/unread_ai_count (nível-contato).
+        # reconcile — igual a unread_ai_count (nível-contato).
         contacts.c.contact_type.label("contact_type"),
-        contacts.c.is_pinned.label("is_pinned"),
+        # ``is_pinned`` vem do ATENDIMENTO (plano 54 — fixar por conversa), não do
+        # contato: a coluna ``atendimentos.is_pinned`` já entra no row via o
+        # ``conversations`` selecionado inteiro acima, então NÃO se re-rotula o do
+        # contato aqui (colidiria a chave). ``finalize_conv`` lê essa mesma chave.
         contacts.c.has_unread_mention.label("has_unread_mention"),
         # Contact-level AI-unread count (plano 28): carried so a conversation_upsert
         # keeps the "IA respondeu" badge live (contact-level, like in buildRows).

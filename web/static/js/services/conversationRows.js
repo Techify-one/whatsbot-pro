@@ -328,6 +328,24 @@ export function sortContacts(list) {
   });
 }
 
+/**
+ * Count the distinct channels (by `channel_provider`) present across a row list.
+ * Drives the sidebar's per-row channel badge gate: with a single channel the badge
+ * is noise, so it stays hidden until ≥2 distinct providers exist.
+ *
+ * PURE and view-independent by design — the caller latches the MAX count ever seen
+ * so a narrowing search (which can collapse the visible set to one provider) never
+ * makes the badge disappear list-wide (plano 56). Rows without a provider (legacy
+ * phone-only rows) are ignored.
+ * @param {Array<{ channel_provider?: string|null }>} rows
+ * @returns {number}
+ */
+export function distinctChannelCount(rows) {
+  const seen = new Set();
+  for (const c of (rows || [])) if (c.channel_provider) seen.add(c.channel_provider);
+  return seen.size;
+}
+
 // ── Atendimento-cêntrico (plano 11 D1) ──────────────────────────────
 // Cada linha da sidebar é um ATENDIMENTO (uma por canal), não um contato. Um número
 // presente em 2 canais vira 2 linhas distintas — em vez de fundir tudo numa só.
@@ -340,11 +358,25 @@ export function sortContacts(list) {
  * per conversation (per channel), plus a single legacy phone row for contacts
  * with no conversation yet. Per-conversation preview/unread override the
  * contact-level aggregates.
+ *
+ * Plano 54 — arquivo por CONVERSA. `conversations` já vem filtrado pela view atual
+ * (aberta OU arquivada, via `listConversations({archived})`); cada linha carrega o
+ * `is_archived` do ATENDIMENTO (não mais do contato). Dois ajustes fecham os buracos
+ * do modelo contact-driven quando o arquivo migra pra conversa:
+ *   • `opts.archivedView` — na aba Arquivadas NÃO se emite linha-fantasma "Novo
+ *     atendimento" (ela só faz sentido na caixa de entrada).
+ *   • `c.conversation_id` (id do atendimento MAIS RECENTE do contato, QUALQUER estado —
+ *     `list_contacts` o expõe assim; é o MAX(id) sem filtro de arquivo) — um contato
+ *     cujo ÚNICO atendimento está arquivado tem `conversation_id != null` e some da view
+ *     aberta sem virar linha-fantasma. A linha legada só nasce pra contato SEM nenhum
+ *     atendimento (`conversation_id == null`).
  * @param {Record<string, any>[]} contacts
  * @param {Record<string, any>[]} conversations
+ * @param {{ archivedView?: boolean }} [opts]
  * @returns {Record<string, any>[]}
  */
-export function buildRows(contacts, conversations) {
+export function buildRows(contacts, conversations, opts = {}) {
+  const archivedView = !!(opts && opts.archivedView);
   const byContact = new Map();
   for (const cv of conversations) {
     if (cv.contact_id == null) continue;
@@ -355,12 +387,18 @@ export function buildRows(contacts, conversations) {
   for (const c of contacts) {
     const convs = byContact.get(c.id) || [];
     if (convs.length === 0) {
-      // Contato sem atendimento (ex: recém-iniciado pelo "Novo atendimento") — linha única
-      // que cai no caminho legado por telefone (channel 'default').
+      // Sem atendimento NESTA view. Na aba Arquivadas, nada a mostrar. Na caixa de
+      // entrada, só vira linha legada "Novo atendimento" se o contato não tem NENHUM
+      // atendimento (conversation_id == null); ter um atendimento arquivado
+      // (conversation_id != null) apenas o esconde da caixa — sem linha-fantasma.
+      // `c.conversation_id` aqui = o atendimento mais recente do CONTATO vindo de
+      // `list_contacts` (só é lido neste ramo, antes de a linha sobrescrevê-lo).
+      if (archivedView) continue;
+      if (c.conversation_id != null) continue;
       rows.push({
         ...c, contact_id: c.id, conversation_id: null,
         channel_id: 'default', channel_provider: null, channel_name: null,
-        conv_custom_attributes: {}, conv_labels: [],
+        conv_custom_attributes: {}, conv_labels: [], is_archived: 0, is_pinned: 0,
       });
     } else {
       for (const cv of convs) {
@@ -372,6 +410,11 @@ export function buildRows(contacts, conversations) {
           channel_provider: cv.channel_provider || null,
           channel_name: cv.channel_name || null,
           conv_status: cv.status,
+          // Arquivo E fixação por CONVERSA (plano 54): a linha herda is_archived/is_pinned
+          // do ATENDIMENTO, não do contato. Alimentam o menu (Arquivar/Fixar), o gate de
+          // view (arquivadas) e a ordenação (fixadas ao topo).
+          is_archived: cv.is_archived ? 1 : 0,
+          is_pinned: cv.is_pinned ? 1 : 0,
           // Per-conversation AI gate (plano 17) — drives the "IA OFF" badge and the
           // right-click toggle. WS patches keep this in sync as `conv_ai_active`.
           conv_ai_active: cv.ai_active,

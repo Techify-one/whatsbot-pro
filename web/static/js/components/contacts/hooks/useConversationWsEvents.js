@@ -21,7 +21,8 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
 import { showBrowserNotification, playNotificationSound, getNotifPref } from '../../../utils/notifications.js';
-import { optimisticDupIndex } from '../../../services/messages.js';
+import { optimisticDupIndex, dropSuperseded } from '../../../services/messages.js';
+import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
@@ -46,6 +47,7 @@ export function useConversationWsEvents(opts) {
     messageAction, messageReaction, avatarUpdated, conversationCreated,
     // list
     setContacts, contactsRef, fetchContacts, fetchContactsRef, searchRef, search, sortContacts,
+    showArchivedRef,
     // selection
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
@@ -85,6 +87,38 @@ export function useConversationWsEvents(opts) {
     listRefetchTimer.current = setTimeout(() => {
       if (fetchContactsRef.current) fetchContactsRef.current(searchRef.current);
     }, 250);
+  }, []);
+
+  // plano 57 (F3) — rede de segurança contra `new_message` perdido (socket podado na
+  // janela t=0↔save, ou abertura nessa janela). `openThreadMsgIdsRef` espelha os
+  // msg_ids da thread aberta; um `conversation_upsert` da conversa aberta cuja última
+  // mensagem NÃO está na thread agenda um reload de fundo COM RE-CHECK (idempotente por
+  // dedup, só recarrega se a msg AINDA faltar após a folga — nunca por foco/rajada, p/
+  // não resetar a posição de rolagem da leitura). Reconexão de socket já é coberta pelo
+  // onWsConnect (heartbeat do wsBus detecta half-open).
+  const openThreadMsgIdsRef = useRef(new Set());
+  const openThreadResyncTimer = useRef(null);
+  useEffect(() => {
+    const s = new Set();
+    for (const m of (contactData && contactData.messages) || []) {
+      if (m && m.msg_id) s.add(m.msg_id);
+    }
+    openThreadMsgIdsRef.current = s;
+  }, [contactData]);
+
+  // Re-check DEBOUNCED: só recarrega se, após a folga, a thread aberta AINDA não tem
+  // `lastMsgId` — o `new_message` autoritativo (plano 57 F1) normalmente chega ~ms
+  // depois do upsert e o anexa, tornando isto um no-op. Evita um refetch por mensagem.
+  const scheduleOpenThreadResync = useCallback((convId, lastMsgId) => {
+    if (!lastMsgId) return;
+    if (openThreadResyncTimer.current) clearTimeout(openThreadResyncTimer.current);
+    openThreadResyncTimer.current = setTimeout(() => {
+      if (selectedConvIdRef.current === convId
+          && !openThreadMsgIdsRef.current.has(lastMsgId)
+          && reloadOpenThreadRef.current) {
+        reloadOpenThreadRef.current();
+      }
+    }, 900);
   }, []);
 
   // Resync after a dropped WS connection: events that arrived during the gap are
@@ -135,6 +169,17 @@ export function useConversationWsEvents(opts) {
     if (name === 'conversation_upsert') {
       if (data == null || data.id == null) return;
       const row = convRowToSidebarRow(data);
+      // Anti-reinjeção do arquivo por conversa (plano 54): o upsert é emitido a cada
+      // mensagem visível. Se o estado de arquivo da linha diverge da view atual (conversa
+      // arquivada na caixa de entrada, ou aberta na aba Arquivadas), NÃO a insere — e a
+      // remove caso ainda esteja na lista (acabou de ser arquivada em outro cliente). Sem
+      // isso, a próxima mensagem de uma conversa arquivada a traria de volta pra caixa.
+      if (!!row.is_archived !== !!showArchivedRef.current) {
+        setContacts(prev => prev.some(c => c.conversation_id === row.conversation_id)
+          ? prev.filter(c => c.conversation_id !== row.conversation_id)
+          : prev);
+        return;
+      }
       // Se a conversa está ABERTA e a aba visível, o operador já está vendo tudo →
       // considerar lida: zera o badge LOCALMENTE (sem flash verde de nota privada
       // própria). NÃO chama markAsRead por-evento: durante um envio em rajada isso
@@ -160,6 +205,15 @@ export function useConversationWsEvents(opts) {
             }
           }, 500);
         }
+      }
+      // plano 57 (F3): se este upsert é da conversa ABERTA e traz uma última mensagem
+      // que a thread aberta ainda NÃO tem (new_message perdido / aberto na janela
+      // t=0↔save), agenda o reload de fundo com re-check.
+      if (row.conversation_id != null
+          && selectedConvIdRef.current === row.conversation_id
+          && row.last_message_msg_id
+          && !openThreadMsgIdsRef.current.has(row.last_message_msg_id)) {
+        scheduleOpenThreadResync(row.conversation_id, row.last_message_msg_id);
       }
       setContacts(prev => upsertConversationRow(prev, row));
       return;
@@ -195,6 +249,36 @@ export function useConversationWsEvents(opts) {
         setSelectedConvId(null);
         setContactData(null);
         history.pushState(null, '', '/');
+      }
+      return;
+    }
+    // Conversa fixada/desafixada (plano 54): atualiza is_pinned da linha e re-ordena
+    // (fixadas ao topo). Cosmético — não mexe em preview/unread.
+    if (name === 'conversation_pinned') {
+      if (convId == null) return;
+      const pinned = data.is_pinned ? 1 : 0;
+      setContacts(prev => sortContacts(prev.map(c =>
+        c.conversation_id === convId ? { ...c, is_pinned: pinned } : c)));
+      return;
+    }
+    // Conversa arquivada/desarquivada (plano 54). O payload é a projeção mínima do
+    // conversation_service (sem preview enriquecido), então: se saiu da view atual,
+    // remove a linha (e limpa a thread aberta se for ela); se ENTROU na view e ainda
+    // não está na lista, um refetch debounced a materializa com o preview correto.
+    if (name === 'conversation_archived') {
+      if (convId == null) return;
+      const nowArchived = !!data.is_archived;
+      if (nowArchived === !!showArchivedRef.current) {
+        const present = contactsRef.current.some(c => c.conversation_id === convId);
+        if (!present) scheduleListRefetch();
+      } else {
+        setContacts(prev => prev.filter(c => c.conversation_id !== convId));
+        if (selectedConvIdRef.current === convId) {
+          setSelected(null);
+          setSelectedConvId(null);
+          setContactData(null);
+          history.pushState(null, '', '/');
+        }
       }
       return;
     }
@@ -471,7 +555,9 @@ export function useConversationWsEvents(opts) {
         belongsToOpen = true;
       } else if (msgConvId == null) {
         // Sem conversation_id no payload — comportamento clássico (phone, channel).
-        belongsToOpen = (phone === selectedRef.current
+        // plano 57: compara phone por dígitos (samePhone) p/ tolerar divergência de
+        // formato (só ALARGA p/ dígito-igual; nunca cruza números, e o canal ainda casa).
+        belongsToOpen = (samePhone(phone, selectedRef.current)
           && msgChannel === selectedChannelIdRef.current);
       } else {
         // conversation_id DIVERGENTE da thread aberta. Rede de segurança
@@ -482,32 +568,41 @@ export function useConversationWsEvents(opts) {
         // dispararia markAsRead da conversa errada.
         belongsToOpen = PANEL_CARD_ROLES.has(message.role)
           && explicitChannel != null
-          && phone === selectedRef.current
+          && samePhone(phone, selectedRef.current)
           && explicitChannel === selectedChannelIdRef.current;
       }
     } else {
       // Legacy contact-only open thread (no conversation) — route by phone.
-      belongsToOpen = (phone === selectedRef.current);
+      belongsToOpen = samePhone(phone, selectedRef.current);
     }
 
     if (belongsToOpen) {
       setContactData(prev => {
         if (!prev) {
-          // Detail still loading — buffer under the open thread's phone key
-          const buf = pendingWsMessages.current[phone] || [];
+          // Detail still loading — buffer under the SAME key the loader will drain
+          // (plano 57). Deep-link `/conversations/:id` (row not in the sidebar) has
+          // `selected==null`, so the loader reads `conv:<id>` while this used to write
+          // under `phone` → the message was lost until reload. Mirror the loader's bufKey.
+          const bufKey = selectedRef.current
+            || (selectedConvIdRef.current != null ? `conv:${selectedConvIdRef.current}` : phone);
+          const buf = pendingWsMessages.current[bufKey] || [];
           if (optimisticDupIndex(message, buf) === -1) {
-            pendingWsMessages.current[phone] = [...buf, message];
+            pendingWsMessages.current[bufKey] = [...buf, message];
           }
           return prev;
         }
+        // plano 57: an authoritative combined row (batch) collapses the individual
+        // optimistic bubbles it superseded BEFORE we reconcile/append. Returns the
+        // SAME ref when `supersedes` is absent → byte-identical to the legacy path.
+        const base = dropSuperseded(prev.messages, message.supersedes);
         // Reconcile by GOWA msg_id first: a plugin may have rewritten the text
         // (e.g. appended a signature), so an optimistic/prior copy with the same
         // msg_id won't match by content — adopt the server's text in place
         // instead of appending a duplicate.
-        if (message.msg_id && prev.messages) {
-          const byId = prev.messages.findIndex(m => m.msg_id === message.msg_id);
+        if (message.msg_id && base) {
+          const byId = base.findIndex(m => m.msg_id === message.msg_id);
           if (byId !== -1) {
-            const updated = [...prev.messages];
+            const updated = [...base];
             updated[byId] = {
               ...updated[byId],
               content: message.content != null ? message.content : updated[byId].content,
@@ -524,10 +619,10 @@ export function useConversationWsEvents(opts) {
         // content/ts/author — the bubble's ts came from the CLIENT clock, which
         // may be skewed (the very bug this fixes). `media_path` is deliberately
         // NOT adopted: an optimistic media bubble keeps its local blob preview.
-        if (message._id != null && prev.messages) {
-          const byDbId = prev.messages.findIndex(m => m._id === message._id);
+        if (message._id != null && base) {
+          const byDbId = base.findIndex(m => m._id === message._id);
           if (byDbId !== -1) {
-            const updated = [...prev.messages];
+            const updated = [...base];
             updated[byDbId] = {
               ...updated[byDbId],
               content: message.content != null ? message.content : updated[byDbId].content,
@@ -542,13 +637,13 @@ export function useConversationWsEvents(opts) {
         }
         // Collapse only an OPTIMISTIC bubble (no msg_id) into its server echo —
         // NOT two distinct inbound rows of identical content (plano 33 F4).
-        const dupIdx = optimisticDupIndex(message, prev.messages);
+        const dupIdx = optimisticDupIndex(message, base);
         if (dupIdx !== -1) {
           // Merge ids/status from server into existing (optimistic) message.
           // Server ts/author are adopted too (plano 53): the bubble's ts came
           // from the client clock and private-note bubbles may lack the author.
           if (message.msg_id || message.status || message._id) {
-            const updated = [...prev.messages];
+            const updated = [...base];
             updated[dupIdx] = { ...updated[dupIdx],
               ...(message.msg_id ? { msg_id: message.msg_id } : {}),
               ...(message._id && !updated[dupIdx]._id ? { _id: message._id } : {}),
@@ -558,11 +653,12 @@ export function useConversationWsEvents(opts) {
             };
             return { ...prev, messages: updated };
           }
-          return prev;
+          // Nothing to merge; but if `supersedes` removed bubbles, still commit `base`.
+          return base === prev.messages ? prev : { ...prev, messages: base };
         }
         return {
           ...prev,
-          messages: [...(prev.messages || []), message],
+          messages: [...base, message],
           updated_at: message.ts,
         };
       });

@@ -101,6 +101,75 @@ export function optimisticDupIndex(message, list) {
 }
 
 /**
+ * Drop, from `messages`, the optimistic bubbles that an authoritative combined
+ * row supersedes (plano 57). A batch joins N inbound messages into ONE row under
+ * the LAST message's `msg_id`; the earlier per-message `msg_id`s arrive in
+ * `supersedes`, so their individual t=0 bubbles are collapsed into the combined
+ * row (which then reconciles in place by its own `msg_id`). Returns the SAME
+ * array reference when nothing is removed (cheap no-op for the common case).
+ *
+ * @param {ChatMessage[]} messages
+ * @param {string[]|undefined} supersedes
+ * @returns {ChatMessage[]}
+ */
+export function dropSuperseded(messages, supersedes) {
+  if (!Array.isArray(messages) || !Array.isArray(supersedes) || !supersedes.length) {
+    return Array.isArray(messages) ? messages : [];
+  }
+  const sup = new Set(supersedes.filter(Boolean));
+  if (!sup.size) return messages;
+  const filtered = messages.filter(m => !(m && m.msg_id && sup.has(m.msg_id)));
+  return filtered.length === messages.length ? messages : filtered;
+}
+
+/**
+ * Merge WS-buffered messages into the freshly-fetched history (plano 57). Used by
+ * the detail loader and the background thread reload, both of which drain the
+ * pre-fetch/during-fetch buffers into the REST result. Beyond the legacy dedup it
+ * honors `supersedes`: any buffered authoritative combined row collapses the
+ * individual optimistic bubbles (in `existing` AND in the buffer) whose `msg_id`
+ * it superseded — so a conversation opened mid-batch never shows an orphan bubble
+ * alongside the DB's combined row. Order preserved: history first, then the
+ * surviving buffered messages.
+ *
+ * @param {ChatMessage[]} existing - messages from the REST fetch.
+ * @param {ChatMessage[]} pending - buffered WS messages (pre + during fetch).
+ * @returns {ChatMessage[]}
+ */
+export function mergeBufferedMessages(existing, pending) {
+  const base0 = Array.isArray(existing) ? existing : [];
+  const buf = Array.isArray(pending) ? pending : [];
+  if (!buf.length) return base0;
+  const superseded = new Set();
+  for (const m of buf) {
+    if (m && Array.isArray(m.supersedes)) {
+      for (const s of m.supersedes) if (s) superseded.add(s);
+    }
+  }
+  const base = superseded.size
+    ? base0.filter(m => !(m && m.msg_id && superseded.has(m.msg_id)))
+    : base0;
+  const add = [];
+  for (const m of buf) {
+    if (m && m.msg_id && superseded.has(m.msg_id)) continue;  // a collapsed bubble
+    // msg_id collision WITHIN the buffer (e.g. the t=0 optimistic copy AND its
+    // post-save authoritative copy — or a per-message bubble AND the combined row —
+    // both share the last msg_id): keep the AUTHORITATIVE/richest copy instead of
+    // first-seen. Arrival order puts the optimistic (stale, single-fragment) copy
+    // first; without this the combined content would be dropped (live != reload).
+    if (m && m.msg_id) {
+      const j = add.findIndex(x => x.msg_id === m.msg_id);
+      if (j !== -1) {
+        if (m.authoritative || (m._id != null && add[j]._id == null)) add[j] = m;
+        continue;
+      }
+    }
+    if (!isDuplicateMessage(m, base) && !isDuplicateMessage(m, add)) add.push(m);
+  }
+  return add.length ? [...base, ...add] : base;
+}
+
+/**
  * Default sidebar preview labels per media type (Portuguese, with emoji).
  * @type {Record<string, string>}
  */

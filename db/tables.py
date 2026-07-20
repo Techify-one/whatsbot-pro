@@ -434,6 +434,7 @@ atendimentos = Table(
            ForeignKey("contact_inboxes.id", ondelete="CASCADE"), nullable=False),
     Column("status", Text, nullable=False, server_default="open"),  # open|closed (P3)
     Column("is_archived", Integer, nullable=False, server_default="0"),  # ortogonal (P10)
+    Column("is_pinned", Integer, nullable=False, server_default="0"),    # fixar no topo por CONVERSA (plano 54)
     Column("assignee_user_id", Integer),                        # NULLABLE sem FK (P1)
     Column("team_id", Integer),                                 # NULLABLE sem FK
     Column("priority", Text),

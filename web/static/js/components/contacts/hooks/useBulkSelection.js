@@ -11,7 +11,7 @@
 // `applyTagResults` are passed in.
 import { useState, useCallback } from 'preact/hooks';
 import {
-  setConversationAi, archiveContact, pinContact,
+  setConversationAi, archiveConversation, pinConversation,
   markAsRead, markAsUnread, markConversationRead, markConversationUnread,
   updateContactTags, assignAgent,
 } from '../../../services/api.js';
@@ -33,7 +33,7 @@ import { rowKeyFor } from '../ContactList.js';
 export function useBulkSelection({
   contactsRef, displayedRef, showArchivedRef,
   setContacts, sortContacts, setContactData,
-  setSelected, setSelectedConvId, selectedRef, applyTagResults,
+  setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
 }) {
   const [selectionMode, setSelectionMode] = useState(false);
   // Selection keyed per CONVERSATION row (rowKeyFor), so two conversations of the
@@ -118,20 +118,24 @@ export function useBulkSelection({
   }, [_selectedRows, setContacts]);
 
   const handleBulkArchive = useCallback(async () => {
-    // Archive is chat-level (per phone) — dedupe across channels.
-    const phones = [...new Set(_selectedRows().map(c => c.phone))];
-    if (!phones.length) return;
+    // Arquivo por CONVERSA (plano 54): uma chamada por conversation_id selecionado.
+    // Linhas legadas sem atendimento (conversation_id == null) são puladas.
+    const convIds = _selectedRows()
+      .filter(c => c.conversation_id != null)
+      .map(c => c.conversation_id);
+    if (!convIds.length) return;
     const archived = !showArchivedRef.current; // archive when viewing inbox, unarchive when viewing archived
-    await Promise.all(phones.map(p => archiveContact(p, archived).catch(() => null)));
-    setContacts(prev => prev.filter(c => !phones.includes(c.phone)));
-    if (phones.includes(selectedRef.current)) {
+    await Promise.all(convIds.map(id => archiveConversation(id, archived).catch(() => null)));
+    const idSet = new Set(convIds);
+    setContacts(prev => prev.filter(c => !idSet.has(c.conversation_id)));
+    if (selectedConvIdRef && idSet.has(selectedConvIdRef.current)) {
       setSelected(null);
       setSelectedConvId(null);
       setContactData(null);
       history.pushState(null, '', '/');
     }
     exitSelection();
-  }, [_selectedRows, exitSelection, showArchivedRef, setContacts, selectedRef, setSelected, setSelectedConvId, setContactData]);
+  }, [_selectedRows, exitSelection, showArchivedRef, setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
   const _selectedTargets = useCallback(() => {
     // Tags are contact-level (per phone) — dedupe the selected rows by phone so each
@@ -173,14 +177,17 @@ export function useBulkSelection({
     applyTagResults(results);
   }, [_selectedTargets, applyTagResults]);
 
-  // Pin/unpin all selected at once (pinned ones sort to the top).
+  // Pin/unpin all selected at once (pinned ones sort to the top). Plano 54: por
+  // CONVERSA (uma chamada por conversation_id); linhas legadas sem atendimento pulam.
   const handleBulkPin = useCallback(async (pinned) => {
-    // Pin is contact-level (per phone) — dedupe across channels.
-    const phones = [...new Set(_selectedRows().map(c => c.phone))];
-    if (!phones.length) return;
-    await Promise.all(phones.map(p => pinContact(p, pinned).catch(() => null)));
+    const convIds = _selectedRows()
+      .filter(c => c.conversation_id != null)
+      .map(c => c.conversation_id);
+    if (!convIds.length) return;
+    await Promise.all(convIds.map(id => pinConversation(id, pinned).catch(() => null)));
+    const idSet = new Set(convIds);
     setContacts(prev => sortContacts(prev.map(c =>
-      phones.includes(c.phone) ? { ...c, is_pinned: pinned } : c
+      idSet.has(c.conversation_id) ? { ...c, is_pinned: pinned ? 1 : 0 } : c
     )));
   }, [_selectedRows, sortContacts, setContacts]);
 

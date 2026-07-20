@@ -17,7 +17,7 @@
 // from the selection refs and consumed by the list/WS optimistic patches.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { getContact, getConversationMessages } from '../../../services/api.js';
-import { isDuplicateMessage } from '../../../services/messages.js';
+import { mergeBufferedMessages } from '../../../services/messages.js';
 import { shapeConvData } from '../../../services/conversationRows.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
 
@@ -199,15 +199,14 @@ export function useConversationSelection({
         // Opened by conversation id alone (row not in the sidebar) — adopt the
         // phone from the response so contact-level handlers key correctly.
         if (!selectedRef.current && data.phone) setSelected(data.phone);
-        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch (arrived during loading)
+        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch
+        // (arrived during loading). plano 57: mergeBufferedMessages honra `supersedes`
+        // (colapsa as bolhas otimistas que uma linha combinada do batch substituiu)
+        // além do dedup R12.
         const duringFetch = pendingWsMessages.current[bufKey] || [];
         const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
-          const existing = data.messages || [];
-          const newMsgs = pending.filter(m => !isDuplicateMessage(m, existing));
-          if (newMsgs.length > 0) {
-            data.messages = [...(data.messages || []), ...newMsgs];
-          }
+          data.messages = mergeBufferedMessages(data.messages || [], pending);
         }
         // Hydrate failed messages with _localId so retry button works after reload
         data.messages = (data.messages || []).map(m => {
@@ -253,9 +252,7 @@ export function useConversationSelection({
       const duringFetch = pendingWsMessages.current[bufKey] || [];
       const pending = [...preFetchBuffer, ...duringFetch];
       if (pending.length > 0) {
-        const existing = data.messages || [];
-        const newMsgs = pending.filter(m => !isDuplicateMessage(m, existing));
-        if (newMsgs.length > 0) data.messages = [...(data.messages || []), ...newMsgs];
+        data.messages = mergeBufferedMessages(data.messages || [], pending);  // plano 57
       }
       data.messages = (data.messages || []).map(m =>
         m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);

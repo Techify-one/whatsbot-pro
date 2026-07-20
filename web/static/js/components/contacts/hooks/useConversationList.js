@@ -14,8 +14,8 @@
 // orchestrated by the container (it owns those setters), so this hook exposes
 // `setShowArchived` and reloads on the change without reaching into other hooks.
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
-import { getContacts, listConversations } from '../../../services/api.js';
-import { buildRows, convRowToSidebarRow, sortContacts } from '../../../services/conversationRows.js';
+import { getContacts, listConversations, listChannelsForFilter } from '../../../services/api.js';
+import { buildRows, convRowToSidebarRow, sortContacts, distinctChannelCount } from '../../../services/conversationRows.js';
 
 /**
  * @param {Object} opts
@@ -43,40 +43,57 @@ export function useConversationList({ onUnreadChange }) {
   // operator opening a chat on this same client).
   useEffect(() => { if (onUnreadChange) onUnreadChange(); }, [contacts]);
 
-  // Show the per-row channel badge only when ≥2 distinct channels exist (with a
-  // single channel it would be noise) — mirrors the Conversations screen (FQ1).
+  // Show the per-row channel badge only when the ACCOUNT uses ≥2 distinct channels
+  // (with a single channel it would be noise) — mirrors the Conversations screen (FQ1).
+  // Plano 56: latch the MAX diversity ever seen this session instead of reading the
+  // CURRENT (post-search) rows. The initial load is unfiltered and captures the real
+  // count, so a narrowing search — which often collapses the visible set to a single
+  // provider — never makes the badge vanish list-wide. A single-channel account never
+  // reaches >1, so the badge stays hidden as intended.
+  const maxChannelsSeenRef = useRef(0);
   const showChannel = useMemo(() => {
-    const seen = new Set();
-    for (const c of contacts) if (c.channel_provider) seen.add(c.channel_provider);
-    return seen.size > 1;
+    maxChannelsSeenRef.current = Math.max(maxChannelsSeenRef.current, distinctChannelCount(contacts));
+    return maxChannelsSeenRef.current > 1;
   }, [contacts]);
 
-  // Canais presentes nos atendimentos carregadas → opções do filtro "Canais". Derivado
-  // das próprias linhas (mostra exatamente os canais em uso, sem fetch extra).
-  const channelOptions = useMemo(() => {
-    const map = new Map();
-    for (const c of contacts) {
-      const id = c.channel_id || 'default';
-      if (!map.has(id)) {
-        const label = c.channel_name
-          || c.channel_provider
-          || (id === 'default' ? 'Padrão' : id);
-        map.set(id, label);
-      }
-    }
-    return Array.from(map, ([id, label]) => ({ id, label }));
-  }, [contacts]);
+  // Opções do filtro "Canais" — vêm do BANCO, não das linhas carregadas (plano 59).
+  // Antes eram derivadas de `contacts`, que é capado em 200 conversas mais recentes
+  // pelo backend, então canais fora dessa janela (ou só na outra view de arquivo)
+  // sumiam do filtro. Agora um fetch único no mount lista TODOS os canais (incl.
+  // desabilitados/arquivados). Fetch falho degrada silencioso (filtro vazio). O
+  // casamento continua por `id` textual (= `conversations.channel_id`); o label
+  // preserva a regra antiga (display_name → provider → 'Padrão'/id).
+  const [channelOptions, setChannelOptions] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    listChannelsForFilter().then((res) => {
+      if (!alive || !res || !res.ok) return;
+      const rows = res.data || [];
+      setChannelOptions(rows.map((c) => ({
+        id: c.id,
+        label: c.display_name
+          || c.provider
+          || (c.id === 'default' ? 'Padrão' : c.id),
+      })));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   const fetchContacts = useCallback((q = '') => {
     setLoading(true);
+    const archivedView = showArchivedRef.current;
     Promise.all([
-      getContacts(q, showArchivedRef.current),
-      listConversations({ archived: showArchivedRef.current, limit: 200 }),
+      // Plano 54: o arquivo agora é por CONVERSA, não por contato — a sidebar SEMPRE
+      // busca os contatos não-arquivados (universo de riqueza: nome/avatar/tags + os
+      // contatos sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
+      // ATENDIMENTOS abaixo; `buildRows` cruza os dois honrando `archivedView`.
+      getContacts(q, false),
+      listConversations({ archived: archivedView, limit: 200 }),
     ]).then(([cRes, vRes]) => {
       if (vRes && vRes.ok) {
         const convs = (vRes.data && vRes.data.conversations) || [];
         const rows = sortContacts(cRes && cRes.ok
-          ? buildRows(cRes.data || [], convs)
+          ? buildRows(cRes.data || [], convs, { archivedView })
           : convs.map(convRowToSidebarRow));
         setContacts(rows);
         contactsRef.current = rows;

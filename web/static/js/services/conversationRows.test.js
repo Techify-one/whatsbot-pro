@@ -11,7 +11,7 @@ import {
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
   isUnassigned, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
-  convRowToSidebarRow, upsertConversationRow,
+  convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
 } from './conversationRows.js';
 
 // ── buildRows ──────────────────────────────────────────────────────
@@ -80,6 +80,65 @@ test('buildRows: conversation with null contact_id is skipped (no orphan rows)',
   assert.equal(rows[0].conversation_id, null);  // contact still gets its legacy row
 });
 
+// ── plano 54: arquivo por CONVERSA ─────────────────────────────────
+test('buildRows: row carries the CONVERSATION is_archived (not the contact)', () => {
+  const contacts = [{ id: 1, phone: '5511', is_archived: 0 }];
+  const conversations = [{ id: 10, contact_id: 1, channel_id: 'wa', is_archived: 1 }];
+  assert.equal(buildRows(contacts, conversations)[0].is_archived, 1);
+});
+
+test('buildRows: contact whose only conversation is archived → NO ghost legacy row in inbox view', () => {
+  // Inbox view: the archived conversation is NOT in `conversations`, but the contact
+  // carries conversation_id (list_contacts = its most-recent conversation, any state) →
+  // it must NOT resurface as a "Novo atendimento" legacy row.
+  const contacts = [{ id: 1, phone: '5511', conversation_id: 10 }];
+  const rows = buildRows(contacts, [], { archivedView: false });
+  assert.equal(rows.length, 0);
+});
+
+test('buildRows: archived view shows archived conversation rows, no legacy rows', () => {
+  const contacts = [
+    { id: 1, phone: '5511', conversation_id: 10 },   // has an archived conversation
+    { id: 2, phone: '5522', conversation_id: null }, // no conversation at all
+  ];
+  const conversations = [{ id: 10, contact_id: 1, channel_id: 'wa', is_archived: 1 }];
+  const rows = buildRows(contacts, conversations, { archivedView: true });
+  assert.equal(rows.length, 1);                  // only the archived conversation row
+  assert.equal(rows[0].conversation_id, 10);
+  assert.equal(rows[0].is_archived, 1);
+});
+
+test('buildRows: contact with no conversation (conversation_id null) still gets a legacy row in inbox view', () => {
+  const rows = buildRows([{ id: 1, phone: '5511', conversation_id: null }], [], { archivedView: false });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].conversation_id, null);
+  assert.equal(rows[0].is_archived, 0);
+});
+
+// ── distinctChannelCount (plano 56: gate do badge de canal) ────────
+test('distinctChannelCount: empty / null → 0', () => {
+  assert.equal(distinctChannelCount([]), 0);
+  assert.equal(distinctChannelCount(null), 0);
+});
+
+test('distinctChannelCount: same provider repeated → 1', () => {
+  assert.equal(distinctChannelCount([
+    { channel_provider: 'gowa' }, { channel_provider: 'gowa' },
+  ]), 1);
+});
+
+test('distinctChannelCount: two distinct providers → 2', () => {
+  assert.equal(distinctChannelCount([
+    { channel_provider: 'gowa' }, { channel_provider: 'telegram' }, { channel_provider: 'gowa' },
+  ]), 2);
+});
+
+test('distinctChannelCount: rows without provider (legacy phone rows) are ignored', () => {
+  assert.equal(distinctChannelCount([
+    { channel_provider: null }, { channel_provider: '' }, { channel_provider: 'gowa' }, {},
+  ]), 1);
+});
+
 // ── shapeConvData ──────────────────────────────────────────────────
 test('shapeConvData: spreads contact + messages + channel + hints', () => {
   const d = shapeConvData({
@@ -117,6 +176,20 @@ test('clauseMatches: incomplete clause (empty/null value) is ignored → true', 
 test('clauseMatches: channel eq/ne (default fallback)', () => {
   assert.equal(clauseMatches({ channel_id: 'wa' }, { dim: 'channel', op: 'eq', value: 'wa' }, NOW), true);
   assert.equal(clauseMatches({ channel_id: 'wa' }, { dim: 'channel', op: 'ne', value: 'wa' }, NOW), false);
+  assert.equal(clauseMatches({}, { dim: 'channel', op: 'eq', value: 'default' }, NOW), true);
+});
+
+// Plano 59: as opções do filtro "Canais" vêm do banco (GET /api/channels/for-filter,
+// itens {id, provider, display_name}), não das linhas carregadas. O valor da opção
+// é o `id` textual do canal — que TEM que casar com o `channel_id` da conversa. Este
+// teste fixa esse contrato: uma opção construída a partir de uma linha de canal do
+// endpoint casa a conversa daquele canal, mesmo que a conversa não esteja "carregada".
+test('clauseMatches: opção de canal do banco casa por `id` (contrato plano 59)', () => {
+  const channelRow = { id: 'tg-2', provider: 'telegram', display_name: 'Suporte TG' };
+  const optionValue = channelRow.id;  // é o que o frontend usa como value da opção
+  assert.equal(clauseMatches({ channel_id: 'tg-2' }, { dim: 'channel', op: 'eq', value: optionValue }, NOW), true);
+  assert.equal(clauseMatches({ channel_id: 'wa' }, { dim: 'channel', op: 'eq', value: optionValue }, NOW), false);
+  // canal 'default' (linha sem channel_id) casa a opção cujo id é 'default'
   assert.equal(clauseMatches({}, { dim: 'channel', op: 'eq', value: 'default' }, NOW), true);
 });
 
