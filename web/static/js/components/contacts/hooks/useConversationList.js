@@ -154,6 +154,15 @@ export function useConversationList({ onUnreadChange }) {
         // `items` só existe no envelope paginado; sem ele (falha do request) o cruzamento
         // é pulado e a janela de atendimentos das 200 mais recentes vira a lista (fallback).
         const contactList = env ? (env.items || []) : null;
+        // Busca OK que casa ZERO contatos → lista vazia direto, sem o 2º roundtrip (evita
+        // buscar 200 atendimentos que `buildRows([], …)` descartaria — caso comum: typo).
+        if (contactList && contactList.length === 0) {
+          loadedQueryRef.current = q;
+          setContacts([]); contactsRef.current = [];
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
         const ids = contactList ? contactList.map(c => c.id).filter(id => id != null) : [];
         const convsP = ids.length
           ? listConversations({ archived: archivedView, contact_ids: ids.join(','), limit: 500 },
