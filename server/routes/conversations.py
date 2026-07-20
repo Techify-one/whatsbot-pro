@@ -37,6 +37,32 @@ def _filter_context(request: Request) -> FilterContext:
         user_id=(user or {}).get("id"), now=time.time(), cattr_keys=cattr_keys)
 
 
+# Teto de ids no CSV de `contact_ids`. A busca da barra lateral manda os contatos que
+# casaram o termo; um termo curto pode casar muita gente e o `IN` não deve crescer sem
+# limite. Cortar aqui é seguro: quem sobra continua vindo pelo cruzamento client-side.
+MAX_CONTACT_IDS = 200
+
+
+def _parse_contact_ids(raw: str | None) -> list[int] | None:
+    """CSV de ids de contato → lista de ints (``None`` quando o parâmetro não veio).
+
+    Defensivo por design: tokens não-numéricos são descartados em silêncio, então uma
+    query malformada vira lista vazia (= nenhum resultado) em vez de 500. Distinguir
+    ``None`` de ``[]`` importa — ``None`` significa "sem restrição"."""
+    if raw is None:
+        return None
+    ids = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            continue
+    return ids[:MAX_CONTACT_IDS]
+
+
 def _actor(request: Request) -> tuple[object, str | None]:
     """Resolve the (actor_id, actor_name) pair the service needs for events +
     notices, so the service stays free of the ``Request`` object. ``actor_name``
@@ -98,11 +124,17 @@ def register_routes(app, deps):
                                  inbox_id: int | None = None,
                                  assignee_user_id: int | None = None,
                                  archived: bool = False, limit: int = 100,
-                                 offset: int = 0):
+                                 offset: int = 0, contact_ids: str | None = None):
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
-        limit = max(1, min(limit, 200))
+        # `contact_ids` (CSV) restringe a um conjunto de contatos — é como a BUSCA da
+        # barra lateral pede os atendimentos dos contatos que casaram o termo. Como o
+        # IN já delimita o conjunto, o teto de `limit` sobe (a janela de 200 escondia
+        # da busca o contato cujo atendimento fosse mais antigo). Parse defensivo:
+        # entrada inválida vira lista vazia (= nenhum resultado), nunca 500.
+        cids = _parse_contact_ids(contact_ids)
+        limit = max(1, min(limit, 500 if cids is not None else 200))
         _u = current_user(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_conversations,
@@ -110,6 +142,7 @@ def register_routes(app, deps):
             is_archived=1 if archived else 0,
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
+            contact_ids=cids,
             limit=limit, offset=offset)
         # avatar_v por row (plano 50 F8): o sidebar conversa-first monta a foto sem um
         # fetch de contatos à parte. has_more = veio a página cheia (há próxima).

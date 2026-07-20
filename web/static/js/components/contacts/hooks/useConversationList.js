@@ -39,6 +39,10 @@ export function useConversationList({ onUnreadChange }) {
   const showArchivedRef = useRef(false);
   const offsetRef = useRef(0);                  // plano 50 F8: cursor de paginação
   const loadingMoreRef = useRef(false);         // guarda contra loadMore concorrente
+  // Geração do fetch: a busca faz 2 roundtrips em SEQUÊNCIA (contatos → atendimentos
+  // daqueles contatos), então uma resposta lenta de um termo antigo pode chegar depois
+  // da de um termo novo. Só a geração mais recente pode escrever no estado.
+  const fetchGenRef = useRef(0);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -95,28 +99,50 @@ export function useConversationList({ onUnreadChange }) {
     offsetRef.current = 0;
     setLoading(true);
     const archivedView = showArchivedRef.current;
+    const gen = ++fetchGenRef.current;
+    const stale = () => gen !== fetchGenRef.current;
     if (q) {
       // Modo busca (legado): lista completa filtrada × conversas.
       // Plano 54: o arquivo é por CONVERSA, não por contato — a busca SEMPRE pede os
       // contatos não-arquivados (universo de riqueza: nome/avatar/tags + os contatos
       // sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
       // ATENDIMENTOS; `buildRows` cruza os dois honrando `archivedView`.
-      Promise.all([
-        getContacts(q, false),
-        listConversations({ archived: archivedView, limit: 200 }),
-      ]).then(([cRes, vRes]) => {
-        if (vRes && vRes.ok) {
-          const convs = (vRes.data && vRes.data.conversations) || [];
-          const rows = sortContacts(cRes && cRes.ok
-            ? buildRows(cRes.data || [], convs, { archivedView })
-            : convs.map(convRowToSidebarRow));
-          setContacts(rows);
-          contactsRef.current = rows;
-        } else {
-          setContacts([]); contactsRef.current = [];
+      //
+      // SEQUENCIAL (não mais em paralelo): os contatos vêm primeiro para que a 2ª
+      // chamada peça só os atendimentos DELES (`contact_ids`). Em paralelo a busca
+      // pedia as 200 conversas mais recentes e o `buildRows` descartava em silêncio o
+      // contato cujo atendimento estivesse fora dessa janela. O roundtrip extra é
+      // absorvido pelo debounce de 300ms.
+      getContacts(q, false).then((cRes) => {
+        if (!cRes || !cRes.ok) {
+          // Fallback: sem os contatos não há `contact_ids`, então mantém o
+          // comportamento antigo (janela das 200 mais recentes, só conversas).
+          return listConversations({ archived: archivedView, limit: 200 })
+            .then((vRes) => {
+              if (!vRes || !vRes.ok) return [];
+              return ((vRes.data && vRes.data.conversations) || []).map(convRowToSidebarRow);
+            });
         }
+        const matched = cRes.data || [];
+        if (!matched.length) return [];
+        const ids = matched.map(c => c.id).filter(id => id != null);
+        return listConversations({
+          archived: archivedView, contact_ids: ids.join(','), limit: 500,
+        }).then((vRes) => {
+          const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
+          return buildRows(matched, convs, { archivedView });
+        });
+      }).then((rows) => {
+        if (stale()) return;
+        const sorted = sortContacts(rows);
+        setContacts(sorted);
+        contactsRef.current = sorted;
         setHasMore(false);
         setLoading(false);
+      }).catch(() => {
+        if (stale()) return;
+        setContacts([]); contactsRef.current = [];
+        setHasMore(false); setLoading(false);
       });
       return;
     }
@@ -124,6 +150,7 @@ export function useConversationList({ onUnreadChange }) {
     // a view (caixa × arquivadas) já é decidida no servidor pelo filtro `archived`.
     listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 })
       .then((vRes) => {
+        if (stale()) return;
         if (vRes && vRes.ok) {
           const convs = (vRes.data && vRes.data.conversations) || [];
           const rows = sortContacts(convs.map(convRowToSidebarRow));

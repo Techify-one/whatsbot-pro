@@ -429,6 +429,7 @@ def _attach_contact_tags(rows: list[dict]) -> list[dict]:
 def list_conversations(*, status: str | None = None, inbox_id: int | None = None,
                        assignee_user_id: int | None = None, is_archived: int | None = None,
                        inbox_ids: list[int] | None = None, current_user_id: int | None = None,
+                       contact_ids: list[int] | None = None,
                        limit: int = 100, offset: int = 0) -> list[dict]:
     """List conversations with contact + channel info + last-message preview +
     per-conversation unread, pinned-first then newest. Feeds the conversa-cêntrica
@@ -436,7 +437,12 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
 
     ``inbox_ids`` scopes visibility to a set of inboxes (inbox membership): ``None``
     means no scoping (sees all); an empty list means the user is a member of no
-    inbox and sees nothing."""
+    inbox and sees nothing.
+
+    ``contact_ids`` restringe aos atendimentos de um conjunto de contatos (mesma
+    semântica de ``inbox_ids``: ``None`` = sem restrição, lista vazia = nada). É o
+    que a BUSCA da barra lateral usa: sem ele, ela pedia as 200 conversas mais
+    recentes e descartava o contato cujo atendimento fosse mais antigo que a janela."""
     stmt = select(*_enriched_columns(_notify_private_enabled(), current_user_id)).select_from(_enriched_from())
     if status is not None:
         stmt = stmt.where(conversations.c.status == status)
@@ -448,6 +454,9 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
         stmt = stmt.where(conversations.c.is_archived == is_archived)
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
+                          else sa_false())
+    if contact_ids is not None:
+        stmt = stmt.where(conversations.c.contact_id.in_(contact_ids) if contact_ids
                           else sa_false())
     stmt = (stmt.order_by(conversations.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())

@@ -47,6 +47,30 @@ export function matchesAssignment(c, tab, uid) {
   return true;  // 'all'
 }
 
+/**
+ * Se a linha entra na barra lateral (plano 28). O sinal de visibilidade é a
+ * provenância EXPLÍCITA `origin`, não o proxy racy `last_message_ts>0`:
+ *  • `origin==='inbound'`  → conversa que o CLIENTE iniciou. Aparece em t=0, mesmo
+ *    antes da 1ª mensagem ser persistida pelo batch.
+ *  • `last_message_ts>0`   → qualquer conversa com mensagem visível (cobre saída do
+ *    operador/IA e todo o histórico legado).
+ * Contato importado (GOWA) / criado pelo modal (sem mensagem) não satisfaz nenhum
+ * termo → fica oculto (não polui a lista). O atendimento atualmente ABERTO fica
+ * visível mesmo sem mensagem (não sumir enquanto o operador digita a 1ª).
+ *
+ * NÃO se aplica ao modo BUSCA: um termo digitado é intenção explícita, então quem
+ * casa aparece mesmo sem mensagem (ver `searching` em `useConversationFilters`).
+ * @param {Record<string, any>} c
+ * @param {string|null} selKey - chave da conversa aberta (`conv:<id>` ou `phone:<phone>`).
+ * @returns {boolean}
+ */
+export function isVisibleInSidebar(c, selKey) {
+  if (c.last_message_ts && c.last_message_ts > 0) return true;
+  if (c.origin === 'inbound') return true;
+  const key = c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
+  return key === selKey;
+}
+
 // ── Filtros avançados (Chatwoot-style: Canais / Agente / Etiqueta / Última atividade) ──
 // Cláusula: { dim, op, value }. Avaliadas client-side em AND sobre as linhas já
 // carregadas. Cada linha carrega channel_id, assignee_user_id, active_agent_key,

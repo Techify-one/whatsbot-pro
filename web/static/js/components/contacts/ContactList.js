@@ -567,9 +567,15 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`
                           : null
                         }
-                        ${(!autoReply || c.conv_ai_active === 0 || c.conv_ai_active === false)
-                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
-                          : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
+                        ${c.conversation_id == null
+                          // O badge descreve o gate de IA do ATENDIMENTO. Linha sem atendimento
+                          // (contato que só aparece na busca) não tem estado de IA a mostrar —
+                          // sem este guard cairia no ramo verde, porque `conv_ai_active` vem
+                          // NULL do banco e `_shape_contact_row` defaulta para true.
+                          ? null
+                          : (!autoReply || c.conv_ai_active === 0 || c.conv_ai_active === false)
+                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
+                            : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
                         ${showChannel ? html`<${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} />` : null}
                       </span>

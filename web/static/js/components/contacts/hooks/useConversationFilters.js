@@ -16,7 +16,7 @@ import {
 } from '../../../services/api.js';
 import {
   isUnassigned, matchesStatus, matchesAssignment, matchesAdvFilters, matchesTags,
-  sortContactsBy, normalizeSpec, specsEqual, isDefaultSpec,
+  isVisibleInSidebar, sortContactsBy, normalizeSpec, specsEqual, isDefaultSpec,
 } from '../../../services/conversationRows.js';
 
 // Persists which saved conversation-filter preset is applied, so it survives a
@@ -30,8 +30,9 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
  * @param {number|null} opts.selectedConvId
  * @param {number|null} opts.currentUserId
  * @param {{ current: Record<string, any>[] }} opts.displayedRef
+ * @param {boolean} [opts.searching] - há um termo de busca ativo na barra lateral.
  */
-export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef, skipStoredPreset = false }) {
+export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef, searching = false, skipStoredPreset = false }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
@@ -45,26 +46,17 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
 
-  // Quais atendimentos entram na sidebar (plano 28). O sinal de visibilidade é a
-  // provenância EXPLÍCITA `origin`, não mais o proxy racy `last_message_ts>0`:
-  //  • `origin==='inbound'`  → conversa que o CLIENTE iniciou. Aparece em t=0, mesmo
-  //    antes da 1ª mensagem ser persistida pelo batch (é o fix do "conversa nova só
-  //    aparece após F5"). O backend materializa em t=0 e emite `conversation_upsert`.
-  //  • `last_message_ts>0`   → qualquer conversa com mensagem visível (cobre saída do
-  //    operador/IA, que nasce já com mensagem, e todo o histórico legado).
-  // Contato importado (GOWA) / rascunho de modal (origin 'imported'/'manual', sem
-  // mensagem) NÃO satisfaz nenhum termo → fica oculto (não polui a lista). O
-  // atendimento atualmente ABERTO fica visível mesmo sem mensagem (não sumir enquanto
-  // o operador digita a 1ª).
+  // Quais atendimentos entram na sidebar (plano 28) — regra em `isVisibleInSidebar`.
+  //
+  // COM BUSCA o gate é DESLIGADO: digitar um termo é intenção explícita, então tudo
+  // que casa aparece — inclusive contato recém-criado, que não tem mensagem nem
+  // `origin` (o payload de `list_contacts` nem carrega a coluna) e por isso sumia da
+  // busca embora aparecesse na tela Contatos.
   const activeContacts = useMemo(() => {
+    if (searching) return contacts;
     const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
-    return contacts.filter(c => {
-      if (c.last_message_ts && c.last_message_ts > 0) return true;
-      if (c.origin === 'inbound') return true;
-      const key = c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
-      return key === selKey;
-    });
-  }, [contacts, selected, selectedConvId]);
+    return contacts.filter(c => isVisibleInSidebar(c, selKey));
+  }, [contacts, selected, selectedConvId, searching]);
 
   // Derived list: status + tag filter feed the tab counts; the active assignment
   // tab + sort produce what's actually rendered.
@@ -74,11 +66,14 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
     // never AND into an empty list (e.g. chip "Abertas" + cláusula "Fechada").
     const hasStatusClause = (advFilters || []).some(
       cl => cl.dim === 'status' && cl.value !== '' && cl.value != null);
+    // Com busca ativa o chip de status também é ignorado (default 'open' escondia da
+    // busca todo atendimento fechado). Tag/filtro avançado continuam valendo — são
+    // seleções deliberadas do usuário e nascem vazias, ao contrário do chip.
     return activeContacts.filter(c =>
-      (hasStatusClause || matchesStatus(c, statusFilter))
+      (searching || hasStatusClause || matchesStatus(c, statusFilter))
       && matchesTags(c, tagFilter)
       && matchesAdvFilters(c, advFilters, now));
-  }, [activeContacts, statusFilter, tagFilter, advFilters]);
+  }, [activeContacts, statusFilter, tagFilter, advFilters, searching]);
 
   const tabCounts = useMemo(() => ({
     all: statusTagFiltered.length,
@@ -87,9 +82,15 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
     mentions: statusTagFiltered.filter(c => c.has_user_mention).length,
   }), [statusTagFiltered, currentUserId]);
 
+  // Com busca ativa a aba de atribuição também não corta (buscar é procurar em tudo,
+  // não só no que está atribuído a mim). As abas seguem visíveis com os contadores
+  // do resultado bruto — clicar numa delas não muda a lista enquanto a busca durar.
   const displayedContacts = useMemo(
-    () => sortContactsBy(statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)), sortBy),
-    [statusTagFiltered, assignmentTab, currentUserId, sortBy],
+    () => sortContactsBy(
+      searching ? statusTagFiltered
+                : statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)),
+      sortBy),
+    [statusTagFiltered, assignmentTab, currentUserId, sortBy, searching],
   );
   useEffect(() => { displayedRef.current = displayedContacts; }, [displayedContacts]);
 

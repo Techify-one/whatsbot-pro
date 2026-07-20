@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   buildRows, shapeConvData,
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
-  isUnassigned, sortContactsBy, sortContacts, splitSort, combineSort,
+  isUnassigned, isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
 } from './conversationRows.js';
@@ -586,4 +586,31 @@ test('upsertConversationRow: t=0 seed (ts=0) inserts, then real preview (ts>0) m
   assert.equal(rows.length, 1, 'same conversation, no duplicate');
   assert.equal(rows[0].last_message, 'oi');     // existing (ts 0) accepts the first real preview
   assert.equal(rows[0].last_message_ts, 1000);
+});
+
+// ── isVisibleInSidebar (gate de visibilidade da lista SEM busca) ────
+// O modo BUSCA desliga este gate em useConversationFilters (`searching`) — era o
+// motivo de um contato recém-criado sumir da barra de busca embora aparecesse na
+// tela Contatos.
+test('isVisibleInSidebar: contato recém-criado (sem mensagem, sem origin) fica oculto', () => {
+  assert.equal(isVisibleInSidebar({ phone: '5511', last_message_ts: 0 }, null), false);
+  assert.equal(isVisibleInSidebar({ phone: '5511' }, null), false);
+});
+
+test('isVisibleInSidebar: mensagem visível OU origin inbound tornam a linha visível', () => {
+  assert.equal(isVisibleInSidebar({ phone: '5511', last_message_ts: 1000 }, null), true);
+  // conversa que o cliente iniciou aparece em t=0, antes de a 1ª msg ser persistida
+  assert.equal(isVisibleInSidebar({ phone: '5511', last_message_ts: 0, origin: 'inbound' }, null), true);
+  // origin de importação/manual NÃO conta
+  assert.equal(isVisibleInSidebar({ phone: '5511', last_message_ts: 0, origin: 'imported' }, null), false);
+});
+
+test('isVisibleInSidebar: a conversa ABERTA fica visível mesmo sem mensagem', () => {
+  const byConv = { phone: '5511', conversation_id: 42, last_message_ts: 0 };
+  assert.equal(isVisibleInSidebar(byConv, 'conv:42'), true);
+  assert.equal(isVisibleInSidebar(byConv, 'conv:99'), false);
+  // linha-fantasma (sem atendimento) casa por telefone
+  const byPhone = { phone: '5511', conversation_id: null, last_message_ts: 0 };
+  assert.equal(isVisibleInSidebar(byPhone, 'phone:5511'), true);
+  assert.equal(isVisibleInSidebar(byPhone, 'phone:5522'), false);
 });
