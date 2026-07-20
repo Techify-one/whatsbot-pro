@@ -254,7 +254,8 @@ async def start_conversation(sid: int, *, observation: str = "",
             generation.ExternalAgentGenerator.build_initial_message, ctx)
     except Exception as e:  # noqa: BLE001 — contexto degradado ainda permite o chat
         logger.warning("melhorias: build_analysis_payload falhou: %s", e)
-        initial = (f"## Resposta marcada como incorreta\n"
+        initial = (f"{generation.COMMUNICATION_STYLE_PREAMBLE}\n\n"
+                   f"## Resposta marcada como incorreta\n"
                    f"{suggestion.get('message_content') or ''}\n\n"
                    f"## O que o operador disse que saiu errado\n"
                    f"{suggestion.get('feedback') or '(vazio)'}")
@@ -444,6 +445,14 @@ def stop_consumer(cid: str) -> None:
 
 # ── Callbacks do executor (chamados pelas rotas _internal) ───────────────────
 
+def _last_assistant_content(cid: str) -> str:
+    """Artefato final da conversa = última mensagem assistant com texto."""
+    for m in reversed(list_chat_messages(cid)):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            return m["content"].strip()
+    return ""
+
+
 def on_conversation_status(cid: str, status: str) -> dict | None:
     """Write-through de status + fechamento da sugestão no COMPLETED (02 F6)."""
     from . import logic
@@ -453,19 +462,35 @@ def on_conversation_status(cid: str, status: str) -> dict | None:
         return None
     sid = conv.get("suggestion_id")
     if status == "COMPLETED":
-        # Artefato final = última mensagem assistant com texto.
-        analysis = ""
-        for m in reversed(list_chat_messages(cid)):
-            if m.get("role") == "assistant" and (m.get("content") or "").strip():
-                analysis = m["content"].strip()
-                break
-        logic.finalize_agentic_suggestion(sid, analysis=analysis,
-                                          model=conv.get("model") or "")
+        logic.finalize_agentic_suggestion(
+            sid, analysis=_last_assistant_content(cid), model=conv.get("model") or "")
     if status in ("COMPLETED", "CANCELLED", "ERRORED"):
         stop_consumer(cid)
     try:
         broadcast("plugin_melhorias_changed",
                   {"id": sid, "action": f"conversation_{status.lower()}"})
+    except Exception:  # noqa: BLE001
+        pass
+    return conv
+
+
+def conclude_conversation(cid: str) -> dict | None:
+    """Encerramento MANUAL pelo operador (plano 58): fecha a conversa (COMPLETED)
+    e finaliza a sugestão como ``concluida`` (artefato final = última resposta da
+    IA). Espelha ``on_conversation_status`` mas usa o terminal manual; NÃO chama o
+    executor (o caller já dispara ``ai_client.cancel``) nem para o consumidor
+    (o caller faz ``stop_consumer``, como no cancel)."""
+    from . import logic
+
+    conv = set_conversation_status(cid, "COMPLETED")
+    if not conv:
+        return None
+    sid = conv.get("suggestion_id")
+    logic.conclude_agentic_suggestion(
+        sid, analysis=_last_assistant_content(cid), model=conv.get("model") or "")
+    try:
+        broadcast("plugin_melhorias_changed",
+                  {"id": sid, "action": "conversation_completed"})
     except Exception:  # noqa: BLE001
         pass
     return conv

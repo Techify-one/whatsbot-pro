@@ -273,6 +273,25 @@ async def cancel_agentic_conversation(cid: str, request: Request):
     return {"ok": True, "data": conv}
 
 
+@router.post("/conversations/{cid}/complete",
+             dependencies=[plugin_permission("approve")])
+async def complete_agentic_conversation(cid: str, request: Request):
+    """Encerramento MANUAL (plano 58): para o runner do executor, fecha a conversa
+    (COMPLETED) e finaliza a sugestão como ``concluida`` (distinto do auto-COMPLETED
+    do executor, que marca ``aprovada``)."""
+    uid, _name = _actor(request)
+    conv = await asyncio.to_thread(chat_logic.get_conversation, cid)
+    if not conv:
+        return _err("Conversa não encontrada.", status=404)
+    try:
+        await ai_client.cancel(cid, user_id=uid)
+    except Exception:  # noqa: BLE001 — executor fora do ar não impede o encerramento local
+        pass
+    conv = await asyncio.to_thread(chat_logic.conclude_conversation, cid)
+    chat_logic.stop_consumer(cid)
+    return {"ok": True, "data": conv}
+
+
 @router.post("/conversations/{cid}/resume",
              dependencies=[plugin_permission("approve")])
 async def resume_agentic_conversation(cid: str, request: Request):
@@ -355,7 +374,28 @@ async def get_config():
         "ai_timeout_ms": logic._setting("ai_timeout_ms", "30000"),
         "callback_url": logic._setting("callback_url"),
         "callback_url_effective": ai_client.callback_url(),
+        # plano 58: filtro padrão compartilhado do painel (objeto ou null).
+        "default_filter": logic.get_default_filter(),
     }}
+
+
+@router.put("/default-filter", dependencies=[plugin_permission("approve")])
+async def put_default_filter(body: dict):
+    """Salva o filtro padrão compartilhado do painel (plano 58). Decisão do produto:
+    qualquer usuário com ``approve`` (não só ``configure``) pode redefini-lo, pois é
+    a ferramenta de trabalho dele. ``filter`` ausente/vazio limpa o padrão."""
+    from db.repositories import config_repo
+    body = body or {}
+    flt = body.get("filter")
+    if flt is not None and not isinstance(flt, dict):
+        return _err("filter deve ser um objeto ou nulo.")
+
+    def _save():
+        val = json.dumps(flt, ensure_ascii=False) if flt else ""
+        config_repo.set(f"plugin.{logic.PLUGIN_ID}.default_filter", val)
+
+    await asyncio.to_thread(_save)
+    return {"ok": True, "data": {"default_filter": flt or None}}
 
 
 @router.put("/config", dependencies=[plugin_permission("configure")])

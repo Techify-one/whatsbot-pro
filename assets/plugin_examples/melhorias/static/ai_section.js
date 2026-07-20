@@ -28,7 +28,6 @@ export function MelhoriaAiSection({ api, can }) {
   // plano 51: servidor agêntico (executor Claude Code externo).
   const [aiUrl, setAiUrl] = useState('');
   const [aiSecret, setAiSecret] = useState('');
-  const [aiModel, setAiModel] = useState('');
   const [cbUrl, setCbUrl] = useState('');
   const [cbUrlEffective, setCbUrlEffective] = useState('');
   const [testResult, setTestResult] = useState('');
@@ -39,7 +38,6 @@ export function MelhoriaAiSection({ api, can }) {
       if (cfg && cfg.ok && cfg.data) {
         setAiUrl(cfg.data.ai_server_url || '');
         setAiSecret(cfg.data.ai_server_secret || '');
-        setAiModel(cfg.data.ai_model || '');
         setCbUrl(cfg.data.callback_url || '');
         setCbUrlEffective(cfg.data.callback_url_effective || '');
       }
@@ -58,7 +56,6 @@ export function MelhoriaAiSection({ api, can }) {
         generator_backend: 'external',
         ai_server_url: aiUrl || '',
         ai_server_secret: aiSecret || '',
-        ai_model: aiModel || '',
         callback_url: cbUrl || '',
       });
       if (res && res.ok) {
@@ -105,10 +102,6 @@ export function MelhoriaAiSection({ api, can }) {
           placeholder="cole o mesmo valor do .env do executor" disabled=${!canConfigure}
           value=${aiSecret} onInput=${(e) => setAiSecret(e.target.value)} />
         <div class="text-[11px] text-wa-secondary mb-3">Deixar como “***” mantém o secret atual.</div>
-        <label class="block text-[13px] text-wa-text mb-1">Modelo do executor (opcional)</label>
-        <input class="wa-field w-full rounded p-[8px] text-[13px] mb-3" type="text"
-          placeholder="(default do executor)" disabled=${!canConfigure}
-          value=${aiModel} onInput=${(e) => setAiModel(e.target.value)} />
         <label class="block text-[13px] text-wa-text mb-1">URL de callback (este WhatsBot, opcional)</label>
         <input class="wa-field w-full rounded p-[8px] text-[13px] mb-1" type="text"
           placeholder=${cbUrlEffective ? `(auto: ${cbUrlEffective})` : 'ex.: http://203.0.113.20:8090'}

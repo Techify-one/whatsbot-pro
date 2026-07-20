@@ -15,6 +15,7 @@ Fluxo (decisão do produto — geração NA APROVAÇÃO):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -35,7 +36,11 @@ _MSGS_TABLE = "plugin_melhorias_suggestion_messages"
 # plano 51: "em_chat" = conversa agêntica aberta (backend external). O filtro do
 # painel usa esta tupla (_str_list(status, allowed=_STATUSES)) — estender aqui
 # mantém as pendências agênticas filtráveis.
-_STATUSES = ("pendente", "em_chat", "aprovada", "recusada")
+# "concluida" (plano 58) = encerramento MANUAL do chat agêntico pelo operador
+# (botão "Encerrar melhoria"); distinto de "aprovada" (terminal do auto-COMPLETED
+# do executor e do backend direto legado).
+_STATUSES = ("pendente", "em_chat", "aprovada", "recusada", "concluida")
+_TERMINAL_STATUSES = ("aprovada", "recusada", "concluida")
 
 
 def now() -> float:
@@ -334,23 +339,54 @@ def mark_suggestion_in_chat(sid: int) -> dict | None:
     return get_suggestion(sid)
 
 
-def finalize_agentic_suggestion(sid: int, *, analysis: str = "",
-                                model: str = "") -> dict | None:
-    """Fecha a sugestão quando o executor conclui a conversa (COMPLETED).
-    Grava o artefato final (última resposta da IA) como ``analysis``."""
+def _finalize_suggestion(sid: int, status: str, *, analysis: str = "",
+                         model: str = "") -> dict | None:
+    """Fecha a sugestão num status terminal, gravando o artefato final (última
+    resposta da IA) como ``analysis``.
+
+    Defensivo: uma sugestão JÁ terminal é no-op — um COMPLETED tardio do executor
+    não pode reverter um encerramento manual ``concluida`` para ``aprovada``."""
     row = get_suggestion(sid)
     if not row:
         return None
+    if row.get("status") in _TERMINAL_STATUSES:
+        return row
     ts = now()
     with make_plugin_db() as conn:
         conn.execute(text(
-            f"UPDATE {_TABLE} SET status = 'aprovada', analysis = :analysis, "
+            f"UPDATE {_TABLE} SET status = :status, analysis = :analysis, "
             "model = :model, decided_at = COALESCE(decided_at, :ts), "
             "updated_at = :ts WHERE id = :id"), {
-                "analysis": analysis or "", "model": model or "",
+                "status": status, "analysis": analysis or "", "model": model or "",
                 "ts": ts, "id": sid})
-    broadcast("plugin_melhorias_changed", {"id": sid, "action": "aprovada"})
+    broadcast("plugin_melhorias_changed", {"id": sid, "action": status})
     return get_suggestion(sid)
+
+
+def finalize_agentic_suggestion(sid: int, *, analysis: str = "",
+                                model: str = "") -> dict | None:
+    """O EXECUTOR concluiu a conversa (callback COMPLETED) → sugestão ``aprovada``."""
+    return _finalize_suggestion(sid, "aprovada", analysis=analysis, model=model)
+
+
+def conclude_agentic_suggestion(sid: int, *, analysis: str = "",
+                                model: str = "") -> dict | None:
+    """O OPERADOR encerrou a melhoria manualmente (botão "Encerrar melhoria",
+    plano 58) → sugestão ``concluida``."""
+    return _finalize_suggestion(sid, "concluida", analysis=analysis, model=model)
+
+
+def get_default_filter() -> dict | None:
+    """Filtro padrão do painel salvo no servidor (plano 58), ou ``None``.
+    Compartilhado por instalação (config ``plugin.melhorias.default_filter``)."""
+    raw = _setting("default_filter")
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return v if isinstance(v, dict) else None
 
 
 def refresh_contact_snapshot(phone: str) -> int:

@@ -13,6 +13,7 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
 import { reduceAiEvent, isAuthError, persistedToItems } from './chat_core.js';
+import { renderMarkdown } from './markdown.js';
 
 const html = htm.bind(h);
 
@@ -40,10 +41,11 @@ export function useAiChatEvents(conversationId, onEvent) {
 // ── Cards ────────────────────────────────────────────────────────────────────
 
 function AssistantCard({ item }) {
+  const text = item.content || (item.streaming ? '…' : '');
   return html`
     <div class="flex justify-start">
-      <div class="bg-wa-incoming text-wa-text rounded-[7.5px] px-3 py-2 max-w-[85%] text-[13px] whitespace-pre-wrap">
-        ${item.content || (item.streaming ? '…' : '')}
+      <div class="bg-wa-incoming text-wa-text rounded-[7.5px] px-3 py-2 max-w-[92%] text-[13px]">
+        <div class="markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(text) }}></div>
         ${item.streaming ? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse ml-1"></span>` : ''}
       </div>
     </div>`;
@@ -176,6 +178,32 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
     if (el) el.scrollTop = el.scrollHeight;
   }, [items]);
 
+  // Quiescence fallback: the `done` event that clears the "IA pensando…"
+  // indicator can be lost. When we are `streaming` but nothing is actually in
+  // flight — no text streaming, no tool running, no undecided approval — arm a
+  // timer to drop back to idle. Every ws event mutates items/status and re-runs
+  // this effect, so the cleanup re-arms the timer; a live stream/tool/approval
+  // keeps a marker present and prevents the timer from firing.
+  useEffect(() => {
+    if (status !== 'streaming') return undefined;
+    const inFlight = items.some((c) => c.streaming)
+      || items.some((c) => c.kind === 'tool' && c.status === 'running')
+      || items.some((c) => c.kind === 'approval' && c.decided == null);
+    if (inFlight) return undefined;
+    // Only arm once the assistant actually produced and SETTLED a reply this
+    // turn (last item is a finished assistant message). send()/decide() flip
+    // status to 'streaming' optimistically before any event arrives; without
+    // this gate the timer would hide "IA pensando…" during the initial wait
+    // before the first token — the executor (a Claude Code agent) often takes
+    // more than 4s to start streaming.
+    const last = items[items.length - 1];
+    const settledReply = last && last.kind === 'text'
+      && last.role === 'assistant' && !last.streaming;
+    if (!settledReply) return undefined;
+    const t = setTimeout(() => setStatus('idle'), 4000);
+    return () => clearTimeout(t);
+  }, [status, items]);
+
   const send = useCallback(async () => {
     const text = (input || '').trim();
     if ((!text && !pendingImage) || busy || !cid) return;
@@ -247,7 +275,7 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   const convStatus = (conv || {}).status || 'ACTIVE';
 
   return html`
-    <div class="flex flex-col border border-wa-border rounded-lg overflow-hidden" style="height: 420px;">
+    <div class="flex flex-col border border-wa-border rounded-lg overflow-hidden flex-1 min-h-[360px]">
       <div ref=${scrollRef} class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg p-3 flex flex-col gap-2">
         ${items.length === 0 ? html`
           <div class="text-center text-wa-secondary text-[12px] py-6">
@@ -266,7 +294,7 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
           }
           return html`<${ErrorCard} key=${item.id} item=${item} />`;
         })}
-        ${status === 'streaming' && !items.some((c) => c.streaming) ? html`
+        ${convStatus === 'ACTIVE' && status === 'streaming' && !items.some((c) => c.streaming) ? html`
           <div class="flex justify-start">
             <div class="text-[12px] text-wa-secondary flex items-center gap-1.5 px-2">
               <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse"></span>

@@ -14,6 +14,7 @@ import htm from 'htm';
 import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
 import { AgenticChat } from '/plugins/melhorias/static/chat.js';
 import { ReloginModal } from '/plugins/melhorias/static/relogin.js';
+import { renderMarkdown } from '/plugins/melhorias/static/markdown.js';
 
 const html = htm.bind(h);
 
@@ -63,9 +64,11 @@ function writeUrlParam(key, val) {
   } catch (_) { /* ignore */ }
 }
 
-const STATUS_LABEL = { pendente: 'Pendente', em_chat: 'Em chat com a IA', aprovada: 'Aprovada', recusada: 'Recusada' };
+// 'concluida' (plano 58) = encerramento MANUAL do chat pelo operador; verde-claro
+// para distinguir do teal de 'aprovada' (auto-COMPLETED do executor).
+const STATUS_LABEL = { pendente: 'Pendente', em_chat: 'Em chat com a IA', aprovada: 'Aprovada', recusada: 'Recusada', concluida: 'Concluída' };
 const STATUS_CLS = {
-  pendente: 'text-amber-600', em_chat: 'text-blue-600', aprovada: 'text-wa-teal', recusada: 'text-red-500',
+  pendente: 'text-amber-600', em_chat: 'text-blue-600', aprovada: 'text-wa-teal', recusada: 'text-red-500', concluida: 'text-green-600',
 };
 // Opções fixas do filtro multi-seleção de Status (o conjunto é conhecido — não
 // depende dos valores presentes nas linhas carregadas).
@@ -74,7 +77,15 @@ const STATUS_OPTIONS = [
   { value: 'em_chat', label: 'Em chat com a IA' },
   { value: 'aprovada', label: 'Aprovada' },
   { value: 'recusada', label: 'Recusada' },
+  { value: 'concluida', label: 'Concluída' },
 ];
+
+// Filtro padrão embutido (plano 58): usado no 1º render e quando não há padrão
+// salvo no servidor. "Sempre as pendentes", sem restrição de data.
+const BUILTIN_DEFAULT = {
+  filters: { status: ['pendente'] }, dateFilters: {},
+  sort: { key: 'requested_at', dir: -1 }, pageSize: 10,
+};
 
 // Colunas: {key, label, nowrap, get(r) -> valor p/ filtro/sort, render(r) -> markup}.
 function buildCols() {
@@ -110,9 +121,6 @@ function buildCols() {
     { key: 'approver_name', label: 'Aprovador', filter: 'multiselect',
       get: (r) => (r.status === 'aprovada' ? (r.approver_name || '') : ''),
       render: (r) => (r.status === 'aprovada' ? (r.approver_name || '—') : '—') },
-    { key: 'model', label: 'Modelo', filter: 'multiselect', nowrap: true,
-      get: (r) => r.model || '',
-      render: (r) => html`<span class="text-[11px] text-wa-secondary">${r.model || '—'}</span>` },
   ];
 }
 
@@ -136,23 +144,42 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   // plano 51: backend agêntico? (external ⇒ aprovar abre o CHAT, não gera inline).
   // Desde a 1.3.0 o agêntico é o motor padrão/único da UI — 'external' é o fallback.
   const [backend, setBackend] = useState('external');
+  const [filters, setFilters] = useState(() => ({ ...BUILTIN_DEFAULT.filters }));   // colKey -> texto | array
+  const [pageSize, setPageSize] = useState(BUILTIN_DEFAULT.pageSize);               // itens por página
+  const [page, setPage] = useState(0);               // página atual (base 0)
+  const [dateFilters, setDateFilters] = useState(() => ({ ...BUILTIN_DEFAULT.dateFilters })); // colKey -> {from, to}
+  const [sort, setSort] = useState(() => ({ ...BUILTIN_DEFAULT.sort }));
+  const [savedDefault, setSavedDefault] = useState(null);   // plano 58: filtro padrão salvo no servidor
+  const [savingDefault, setSavingDefault] = useState(false);
+  const [detail, setDetail] = useState(null);        // suggestion dict | null
+  const [confirm, setConfirm] = useState(null);      // {row, action} | null
+  const [generating, setGenerating] = useState(false); // aprovando: IA gerando a análise inline (backend direto legado)
+
+  // Aplica um conjunto de filtro (do servidor ou o embutido) ao estado da UI.
+  const applyDefaultFilter = useCallback((def) => {
+    const d = def || BUILTIN_DEFAULT;
+    setFilters(d.filters && typeof d.filters === 'object' ? { ...d.filters } : {});
+    setDateFilters(d.dateFilters && typeof d.dateFilters === 'object' ? { ...d.dateFilters } : {});
+    setSort(d.sort && d.sort.key ? { key: d.sort.key, dir: d.sort.dir === 1 ? 1 : -1 } : { ...BUILTIN_DEFAULT.sort });
+    setPageSize(d.pageSize ? (Number(d.pageSize) || BUILTIN_DEFAULT.pageSize) : BUILTIN_DEFAULT.pageSize);
+  }, []);
+
+  // Backend agêntico + filtro padrão salvo no servidor (plano 58). Sem padrão
+  // salvo, fica o embutido (pendentes) já semeado nos states acima.
   useEffect(() => {
     (async () => {
       try {
         const r = await apiJson(`${apiBase}/config`);
-        if (r.ok) setBackend((r.body.data || {}).generator_backend || 'external');
-      } catch (_) { /* mantém external */ }
+        if (r.ok) {
+          const data = r.body.data || {};
+          setBackend(data.generator_backend || 'external');
+          const def = (data.default_filter && typeof data.default_filter === 'object') ? data.default_filter : null;
+          setSavedDefault(def);
+          if (def) applyDefaultFilter(def);
+        }
+      } catch (_) { /* mantém external + default embutido */ }
     })();
-  }, [apiBase]);
-  const [filters, setFilters] = useState({});       // colKey -> texto (text) | array (multiselect)
-  const [pageSize, setPageSize] = useState(10);      // itens por página (10/20/50/100)
-  const [page, setPage] = useState(0);               // página atual (base 0)
-  // Padrão ao montar/F5: "Solicitado em" começa nos últimos 7 dias (de = hoje-7).
-  const [dateFilters, setDateFilters] = useState(() => ({ requested_at: { from: ymdDaysAgo(7) } })); // colKey -> {from, to}
-  const [sort, setSort] = useState({ key: 'requested_at', dir: -1 });
-  const [detail, setDetail] = useState(null);        // suggestion dict | null
-  const [confirm, setConfirm] = useState(null);      // {row, action} | null
-  const [generating, setGenerating] = useState(false); // aprovando: IA gerando a análise (backend gera a análise dentro do próprio request de approve)
+  }, [apiBase, applyDefaultFilter]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -204,6 +231,22 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   function setTextFilter(key, v) { setFilters((f) => ({ ...f, [key]: v })); }
   function setMultiFilter(key, arr) { setFilters((f) => ({ ...f, [key]: arr })); }
   function clearFilters() { setFilters({}); setDateFilters({}); }
+  // plano 58: filtro padrão compartilhado (servidor). "Padrão" reaplica o salvo
+  // (ou o embutido); "Salvar filtro padrão" persiste o conjunto atual p/ todos.
+  function restoreDefault() { applyDefaultFilter(savedDefault); }
+  async function saveDefaultFilter() {
+    if (savingDefault) return;
+    setSavingDefault(true); setError('');
+    try {
+      const filter = { filters, dateFilters, sort, pageSize };
+      const r = await apiJson(`${apiBase}/default-filter`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter }) });
+      if (r.ok) setSavedDefault(filter);
+      else setError((r.body && r.body.error) || 'Falha ao salvar o filtro padrão.');
+    } catch (e) { setError(String(e.message || e)); }
+    setSavingDefault(false);
+  }
   function setDateF(key, part, v) {
     setDateFilters((f) => ({ ...f, [key]: { ...(f[key] || {}), [part]: v } }));
   }
@@ -281,6 +324,23 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
     finally { if (isApprove) setGenerating(false); } // rede de segurança: fecha também em erro
   }
 
+  // plano 58: encerrar manualmente a melhoria — fecha a conversa mais recente
+  // (COMPLETED) e marca a sugestão como 'concluida'.
+  async function concludeSuggestion(row) {
+    setConfirm(null); setError('');
+    try {
+      const rc = await apiJson(`${apiBase}/suggestions/${row.id}/conversations`);
+      const list = (rc.ok && Array.isArray(rc.body.data)) ? rc.body.data : [];
+      const cid = (list[0] || {}).id;
+      if (!cid) { setError('Não há conversa para encerrar.'); return; }
+      const r = await apiJson(`${apiBase}/conversations/${cid}/complete`, { method: 'POST' });
+      if (!r.ok) { setError((r.body && r.body.error) || 'Falha ao encerrar a melhoria.'); return; }
+      // Encerrada: fecha o modal (evita chat com estado defasado) e recarrega.
+      if (detail && detail.id === row.id) { setDetail(null); writeUrlParam('detail', null); }
+      await load();
+    } catch (e) { setError(String(e.message || e)); }
+  }
+
   return html`
     <div class="w-full px-5 py-4">
       <div class="flex items-center justify-between gap-2 mb-3">
@@ -288,6 +348,11 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         <div class="flex items-center gap-2">
           ${hasActiveFilters ? html`<button onClick=${clearFilters}
             class="text-[13px] px-3 py-1.5 rounded-md border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">Limpar filtros</button>` : ''}
+          <button onClick=${restoreDefault}
+            class="text-[13px] px-3 py-1.5 rounded-md border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">Padrão</button>
+          ${canApprove ? html`<button onClick=${saveDefaultFilter} disabled=${savingDefault}
+            class="text-[13px] px-3 py-1.5 rounded-md border border-wa-teal text-wa-teal hover:bg-wa-teal/10 transition-colors disabled:opacity-50">
+            ${savingDefault ? 'Salvando…' : 'Salvar filtro padrão'}</button>` : ''}
           <button onClick=${load} class="text-[13px] px-3 py-1.5 rounded-md border border-wa-border text-wa-text hover:bg-wa-hover transition-colors">Recarregar</button>
         </div>
       </div>
@@ -356,10 +421,12 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
                         `}
                         <button onClick=${() => setConfirm({ row: r, action: 'reject' })}
                           class="px-2 py-1 rounded border border-red-400 text-red-500 text-[11px] hover:bg-red-500/10">Recusar</button>
-                      </div>` : r.status === 'em_chat' ? html`
+                      </div>` : r.status === 'em_chat' ? html`<div class="flex gap-1.5">
                         <button onClick=${() => openDetail(r.id)}
                           class="px-2 py-1 rounded border border-blue-400 text-blue-600 text-[11px] hover:bg-blue-500/10">Continuar chat</button>
-                      ` : html`<span class="text-wa-secondary text-[11px]">—</span>`}
+                        <button onClick=${() => setConfirm({ row: r, action: 'conclude' })}
+                          class="px-2 py-1 rounded border border-wa-teal text-wa-teal text-[11px] hover:bg-wa-teal/10">Encerrar</button>
+                      </div>` : html`<span class="text-wa-secondary text-[11px]">—</span>`}
                     </td>` : ''}
                   </tr>`)}
             </tbody>
@@ -392,8 +459,12 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
       ${confirm ? html`<${ConfirmDialog}
         message=${confirm.action === 'approve'
           ? 'Aprovar esta sugestão? A análise da IA será gerada agora.'
+          : confirm.action === 'conclude'
+          ? 'Encerrar esta melhoria? A conversa com a IA será fechada e a sugestão marcada como concluída.'
           : 'Recusar esta sugestão?'}
-        onOk=${() => doDecide(confirm.row, confirm.action)}
+        onOk=${() => (confirm.action === 'conclude'
+          ? concludeSuggestion(confirm.row)
+          : doDecide(confirm.row, confirm.action))}
         onCancel=${() => setConfirm(null)} />` : ''}
 
       ${generating ? html`<${GeneratingModal} />` : ''}
@@ -466,79 +537,89 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
 
   return html`
     <div class="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4" onClick=${onClose}>
-      <div class="bg-wa-panel rounded-lg shadow-xl w-[720px] max-w-[94vw] max-h-[90vh] overflow-auto p-[22px]"
+      <div class="bg-wa-panel rounded-lg shadow-xl w-[min(1200px,96vw)] h-[92vh] flex flex-col overflow-hidden p-0"
         onClick=${(e) => e.stopPropagation()}>
-        <div class="flex items-center justify-between mb-3">
+        <div class="px-[22px] py-3 border-b border-wa-border flex items-center justify-between shrink-0">
           <h2 class="text-[16px] font-semibold text-wa-text">Sugestão #${d.id}</h2>
           <button onClick=${onClose} class="text-wa-secondary hover:text-wa-text text-[18px]">✕</button>
         </div>
-        <${Field} label="Status" value=${STATUS_LABEL[d.status] || d.status} />
-        <div class="mb-3">
-          <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">
-            ${targets.length > 1 ? `Mensagens da IA marcadas (${targets.length})` : 'Mensagem da IA'}
-          </div>
-          <div class="flex flex-col gap-1 max-h-[160px] overflow-auto">
-            ${targets.map((t, i) => html`<div key=${t._id || i}
-              class="text-[13px] text-wa-text whitespace-pre-wrap bg-wa-bg border border-wa-border rounded p-2">${(t.content || '').trim() || '—'}</div>`)}
-          </div>
-        </div>
-        <${Field} label="Solicitante" value=${d.requester_name || '—'} />
-        <${Field} label="Melhoria solicitada (nota do operador)" value=${d.feedback || '—'} pre />
 
-        ${showGateA ? html`
-          <div class="border border-wa-teal/40 bg-wa-teal/5 rounded-lg p-3 mb-3">
-            <div class="text-[13px] font-medium text-wa-text mb-2">
-              Aprovar para a IA começar a analisar (você ainda aprova cada mudança que ela propuser)
+        <div class="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
+          <div class="${showChat ? 'lg:w-[380px] lg:shrink-0 lg:border-r border-wa-border lg:overflow-y-auto' : 'flex-1 lg:overflow-y-auto'} p-[22px]">
+            <${Field} label="Status" value=${STATUS_LABEL[d.status] || d.status} />
+            <div class="mb-3">
+              <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">
+                ${targets.length > 1 ? `Mensagens da IA marcadas (${targets.length})` : 'Mensagem da IA'}
+              </div>
+              <div class="flex flex-col gap-1 max-h-[160px] overflow-auto">
+                ${targets.map((t, i) => html`<div key=${t._id || i}
+                  class="text-[13px] text-wa-text whitespace-pre-wrap bg-wa-bg border border-wa-border rounded p-2">${(t.content || '').trim() || '—'}</div>`)}
+              </div>
             </div>
-            <textarea class="wa-field w-full rounded p-2 text-[13px] mb-2" rows="2"
-              placeholder="Observação extra para a IA (opcional)…"
-              value=${observation} onInput=${(e) => setObservation(e.target.value)}></textarea>
-            ${startError ? html`<div class="text-[12px] text-red-500 mb-2">${startError}</div>` : ''}
-            <div class="flex justify-end">
-              <button onClick=${startChat} disabled=${starting}
-                class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50">
-                ${starting ? 'Iniciando…' : 'Aprovar p/ iniciar'}</button>
-            </div>
-          </div>` : ''}
+            <${Field} label="Solicitante" value=${d.requester_name || '—'} />
+            <${Field} label="Melhoria solicitada (nota do operador)" value=${d.feedback || '—'} pre />
 
-        ${showChat ? html`
-          <div class="mb-3">
-            <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">Chat com a IA de melhoria</div>
-            <${AgenticChat} apiJson=${apiJson} apiBase=${apiBase}
-              suggestion=${d} conversation=${conversation}
-              onAuthError=${() => setRelogin(true)}
-              onConversationEnd=${onRefresh} />
-            ${(conversation.status === 'ERRORED' || conversation.status === 'CANCELLED') ? html`
-              <div class="flex items-center justify-between mt-2">
-                <span class="text-[12px] text-wa-secondary">
-                  A conversa anterior não foi concluída — dá para reiniciar a análise do zero (novo contexto completo).
-                </span>
-                <button onClick=${startChat} disabled=${starting}
-                  class="px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90 disabled:opacity-50 shrink-0">
-                  ${starting ? 'Iniciando…' : 'Reiniciar análise'}</button>
+            ${showGateA ? html`
+              <div class="border border-wa-teal/40 bg-wa-teal/5 rounded-lg p-3 mb-3">
+                <div class="text-[13px] font-medium text-wa-text mb-2">
+                  Aprovar para a IA começar a analisar (você ainda aprova cada mudança que ela propuser)
+                </div>
+                <textarea class="wa-field w-full rounded p-2 text-[13px] mb-2" rows="2"
+                  placeholder="Observação extra para a IA (opcional)…"
+                  value=${observation} onInput=${(e) => setObservation(e.target.value)}></textarea>
+                ${startError ? html`<div class="text-[12px] text-red-500 mb-2">${startError}</div>` : ''}
+                <div class="flex justify-end">
+                  <button onClick=${startChat} disabled=${starting}
+                    class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50">
+                    ${starting ? 'Iniciando…' : 'Aprovar p/ iniciar'}</button>
+                </div>
               </div>` : ''}
-            ${startError ? html`<div class="text-[12px] text-red-500 mt-1">${startError}</div>` : ''}
-          </div>` : ''}
 
-        ${!agentic || d.status !== 'pendente' ? html`
-          <${Field} label="Análise gerada pela IA"
-            value=${d.status === 'aprovada' ? (d.analysis || '—')
-                    : d.status === 'em_chat' ? '(em construção no chat acima)'
-                    : '(gerada apenas na aprovação)'} pre />` : ''}
-        <${Field} label="Modelo" value=${d.model || '—'} />
-        <${Field} label="Solicitado em" value=${fmtTs(d.requested_at)} />
-        <${Field} label="Aprovado em" value=${d.status === 'aprovada' ? fmtTs(d.decided_at) : '—'} />
-        <${Field} label="Aprovador" value=${d.status === 'aprovada' ? (d.approver_name || '—') : '—'} />
-        ${d.conversation_url ? html`<div class="mt-2">
-          <a href=${d.conversation_url} onClick=${(e) => navConversation(e, d)}
-            class="text-wa-teal hover:underline text-[13px]">Abrir conversa nesta mensagem ↗</a>
-        </div>` : ''}
-        ${canApprove && d.status === 'pendente' ? html`<div class="flex justify-end gap-2 mt-5">
-          <button onClick=${() => onDecide('reject')}
-            class="px-4 py-2 rounded-full border border-red-400 text-red-500 text-[13px] hover:bg-red-500/10">Recusar</button>
-          ${!agentic ? html`<button onClick=${() => onDecide('approve')}
-            class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90">Aprovar</button>` : ''}
-        </div>` : ''}
+            ${!agentic || d.status !== 'pendente' ? ((d.status === 'aprovada' || d.status === 'concluida')
+              ? html`<${Field} label="Análise gerada pela IA" value=${d.analysis || '—'} pre html />`
+              : html`<${Field} label="Análise gerada pela IA"
+                  value=${d.status === 'em_chat' ? '(em construção no chat)' : '(gerada apenas na aprovação)'} pre />`) : ''}
+            <${Field} label="Solicitado em" value=${fmtTs(d.requested_at)} />
+            <${Field} label="Aprovado em" value=${d.status === 'aprovada' ? fmtTs(d.decided_at) : '—'} />
+            <${Field} label="Aprovador" value=${d.status === 'aprovada' ? (d.approver_name || '—') : '—'} />
+            ${d.conversation_url ? html`<div class="mt-2">
+              <a href=${d.conversation_url} onClick=${(e) => navConversation(e, d)}
+                class="text-wa-teal hover:underline text-[13px]">Abrir conversa nesta mensagem ↗</a>
+            </div>` : ''}
+            ${canApprove && d.status === 'pendente' ? html`<div class="flex justify-end gap-2 mt-5">
+              <button onClick=${() => onDecide('reject')}
+                class="px-4 py-2 rounded-full border border-red-400 text-red-500 text-[13px] hover:bg-red-500/10">Recusar</button>
+              ${!agentic ? html`<button onClick=${() => onDecide('approve')}
+                class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90">Aprovar</button>` : ''}
+            </div>` : ''}
+          </div>
+
+          ${showChat ? html`
+            <div class="flex-1 min-h-0 flex flex-col p-[22px]">
+              <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1 shrink-0">Chat com a IA de melhoria</div>
+              <${AgenticChat} apiJson=${apiJson} apiBase=${apiBase}
+                suggestion=${d} conversation=${conversation}
+                onAuthError=${() => setRelogin(true)}
+                onConversationEnd=${onRefresh} />
+              ${(conversation.status === 'ERRORED' || conversation.status === 'CANCELLED') ? html`
+                <div class="flex items-center justify-between gap-2 mt-2 shrink-0">
+                  <span class="text-[12px] text-wa-secondary">
+                    A conversa anterior não foi concluída — dá para reiniciar a análise do zero (novo contexto completo).
+                  </span>
+                  <button onClick=${startChat} disabled=${starting}
+                    class="px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90 disabled:opacity-50 shrink-0">
+                    ${starting ? 'Iniciando…' : 'Reiniciar análise'}</button>
+                </div>` : ''}
+              ${startError ? html`<div class="text-[12px] text-red-500 mt-1 shrink-0">${startError}</div>` : ''}
+              ${conversation.status === 'ACTIVE' && canApprove ? html`
+                <div class="flex justify-end mt-2 shrink-0">
+                  <button onClick=${() => onDecide('conclude')}
+                    class="px-3 py-1.5 rounded-full border border-wa-teal text-wa-teal text-[12px] font-medium hover:bg-wa-teal/10">
+                    Encerrar melhoria</button>
+                </div>` : ''}
+            </div>` : ''}
+        </div>
+
         ${relogin ? html`<${ReloginModal} apiJson=${apiJson} apiBase=${apiBase}
           onClose=${() => setRelogin(false)}
           onSuccess=${() => setConversation(null)} />` : ''}
@@ -546,10 +627,14 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
     </div>`;
 }
 
-function Field({ label, value, pre }) {
+function Field({ label, value, pre, html: asHtml }) {
+  const boxCls = pre ? 'bg-wa-bg border border-wa-border rounded p-2 max-h-[220px] overflow-auto' : '';
   return html`<div class="mb-3">
     <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">${label}</div>
-    <div class="text-[13px] text-wa-text ${pre ? 'whitespace-pre-wrap bg-wa-bg border border-wa-border rounded p-2 max-h-[220px] overflow-auto' : ''}">${value}</div>
+    ${asHtml
+      ? html`<div class="markdown-body text-[13px] text-wa-text ${boxCls}"
+          dangerouslySetInnerHTML=${{ __html: renderMarkdown(String(value || '')) }}></div>`
+      : html`<div class="text-[13px] text-wa-text ${pre ? `whitespace-pre-wrap ${boxCls}` : ''}">${value}</div>`}
   </div>`;
 }
 
