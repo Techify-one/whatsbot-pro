@@ -19,6 +19,7 @@
 // hook calls `updateMenus(el, val)` on input and `closeMentionMenu()` on send.
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { sendPresence, sendPrivateMessage, retrySend } from '../../../services/api.js';
+import { toWhatsAppMarkup } from '../../../utils/formatWhatsApp.js';
 
 const INPUT_MAX_HEIGHT = 120;
 
@@ -147,7 +148,9 @@ export function useComposer({
   async function handleSend(e) {
     e.preventDefault();
     closeMentionMenu();
-    const text = input.trim();
+    // Collapse the composer's **bold** authoring markup to WhatsApp's *bold*
+    // wire format so the recipient (and the stored/rendered copy) sees clean bold.
+    const text = toWhatsAppMarkup(input.trim());
     if (!text) return;
 
     // 24h window closed (WhatsApp Cloud): free text can't be sent — steer the
