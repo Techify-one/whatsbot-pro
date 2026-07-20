@@ -510,6 +510,7 @@ function ProtocolosList({ api, mode }) {
     try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); } catch (e) { return null; }
   });
   const [assigneeFilter, setAssigneeFilter] = useState([]);  // filtro por atendente — LISTA (multi) de ids (string)
+  const [notaFilter, setNotaFilter] = useState([]);   // filtro por nota de avaliação (1..5)
   const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
@@ -625,9 +626,13 @@ function ProtocolosList({ api, mode }) {
     if (of != null) params.set('opened_from', String(of));
     if (ot != null) params.set('opened_to', String(ot));
     if (assigneeFilter.length) params.set('assignee_user_id', JSON.stringify(assigneeFilter));
+    // Nota de avaliação: fica AQUI (e não só na lista) porque `listParams` também alimenta
+    // `groupParams` — as rotas /grouped/* precisam do mesmo recorte, senão as contagens
+    // por coluna do Kanban ignorariam o filtro que a lista aplica.
+    if (notaFilter.length) params.set('nota', JSON.stringify(notaFilter));
     if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
     return params;
-  }, [status, q, dateFrom, dateTo, assigneeFilter, attrFilters]);
+  }, [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters]);
 
   // Bump manual → re-busca da 1ª página (botão Atualizar, WS, pós-ação no detalhe).
   const [reloadTick, setReloadTick] = useState(0);
@@ -652,8 +657,8 @@ function ProtocolosList({ api, mode }) {
 
   // resetKey: qualquer mudança de filtro / permissão / modo / reload volta à 1ª página.
   const resetKey = useMemo(
-    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, mode, reloadTick]),
-    [status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, mode, reloadTick]);
+    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]),
+    [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]);
 
   const { items: rows, loading, loadingMore, hasMore, loadMore } =
     useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey, keyOf: (r) => r.id });
@@ -695,12 +700,12 @@ function ProtocolosList({ api, mode }) {
 
   // Muda ⇒ recarrega colunas e reinicia a paginação de TODAS as colunas.
   const groupResetKey = useMemo(() => JSON.stringify([
-    status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, reloadTick,
+    status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick,
     (activeView || {}).group_by, (activeView || {}).group_attr_key,
     (activeView || {}).group_field_scope, (activeView || {}).group_date_mode,
     (activeView || {}).group_date_grain, (activeView || {}).group_date_from,
     (activeView || {}).group_date_to,
-  ]), [status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, reloadTick, activeView]);
+  ]), [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick, activeView]);
 
   useEffect(() => {
     if (!canView || mode !== 'kanban') return undefined;
@@ -757,6 +762,7 @@ function ProtocolosList({ api, mode }) {
     setStatus(availFilter('status') ? asFilterList(f.status) : []);
     setQ(availFilter('q') && f.q != null ? f.q : '');
     setAssigneeFilter(availFilter('atendente') ? asFilterList(f.assignee_user_id).map(String) : []);
+    setNotaFilter(availFilter('nota') && f.nota != null ? asFilterList(f.nota).map(String) : []);
     setAttrFilters(f.attrs && typeof f.attrs === 'object'
       ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => availFilter(k))) : {});
     const df = (availFilter('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
@@ -826,10 +832,10 @@ function ProtocolosList({ api, mode }) {
   // Algum filtro (visível ou pré-determinado da aba) ativo? Usado p/ mostrar "Limpar
   // filtros" — assim uma aba com filtro pré-determinado que zera o resultado nunca é um
   // mistério: o usuário vê os controles e limpa para ver todos.
-  const hasViewFilters = !!(status.length || (q && q.trim()) || assigneeFilter.length
+  const hasViewFilters = !!(status.length || (q && q.trim()) || notaFilter.length || assigneeFilter.length
     || Object.keys(attrFilters).length || dateTo || (datePreset && datePreset !== null));
   const clearFilters = () => {
-    setStatus([]); setQ(''); setAssigneeFilter([]); setAttrFilters({});
+    setStatus([]); setQ(''); setNotaFilter([]); setAssigneeFilter([]); setAttrFilters({});
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
@@ -841,6 +847,7 @@ function ProtocolosList({ api, mode }) {
     if (availFilter('status') && status.length) f.status = status;
     if (availFilter('q') && q.trim()) f.q = q.trim();
     if (availFilter('atendente') && assigneeFilter.length) f.assignee_user_id = assigneeFilter;
+    if (availFilter('nota') && notaFilter.length) f.nota = notaFilter;
     if (availFilter('periodo')) {
       if (datePreset && datePreset !== 'tudo') f.date = { preset: datePreset, from: '', to: '' };
       else if (datePreset === 'tudo') f.date = { preset: 'tudo', from: '', to: '' };
@@ -1300,11 +1307,18 @@ function ProtocolosList({ api, mode }) {
           onChange=${(v) => setAttrFilters((s) => { const n = { ...s }; if (v && v.length) n['canal'] = v; else delete n['canal']; return n; })}
           placeholder="Todos" float=${true} />
       </div>` } : null,
+    availFilter('nota') ? { key: 'nota', el: html`
+      <div key="nota" class="w-[150px]">
+        <label class="block text-[12px] text-wa-secondary mb-1">Avaliação</label>
+        <${OptionListSelect} options=${[5, 4, 3, 2, 1].map((n) => ({ value: String(n), label: `${'★'.repeat(n)} ${n}` }))}
+          multiple=${true} value=${asFilterList(notaFilter).map(String)}
+          onChange=${(v) => setNotaFilter(v)} placeholder="Todas" float=${true} />
+      </div>` } : null,
     availFilter('q') ? { key: 'q', el: html`
       <div key="q" class="flex-1 min-w-[180px]">
-        <label class="block text-[12px] text-wa-secondary mb-1">Buscar cliente</label>
+        <label class="block text-[12px] text-wa-secondary mb-1">Buscar</label>
         <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
-          placeholder="nome ou telefone" onInput=${(e) => setQ(e.target.value)} />
+          placeholder="nome, telefone ou nº do protocolo" onInput=${(e) => setQ(e.target.value)} />
       </div>` } : null,
     availFilter('periodo') ? { key: 'periodo', el: html`
       <div key="periodo">
@@ -1399,7 +1413,11 @@ function ProtocolosList({ api, mode }) {
           </div>` : null}
         <!-- Linha de ação final: Atualizar + Limpar filtros -->
         <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-wa-border">
-          <button onClick=${reload} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
+          <!-- Atualiza lista E metadados: depois do split reload()/loadMeta(), só o reload
+               traria as linhas e deixaria defs/atendentes/canais parados na tela.
+               NOTA: nada de crase neste comentário — ele vive DENTRO do template literal
+               do htm, e uma crase aqui encerra o template (foi o bug da 1.15.0). -->
+          <button onClick=${() => { loadMeta(); reload(); }} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
           ${hasViewFilters ? html`<button onClick=${clearFilters}
             class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
           ${(mode === 'kanban' ? !kanbanLoading : !loading) ? html`<span class="ml-auto text-[12px] text-wa-secondary">${shownTotal} protocolo${shownTotal === 1 ? '' : 's'}${shownPartial ? '+' : ''}</span>` : null}
@@ -1458,7 +1476,10 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
       ${row.closed_at ? html`<div class="text-[12px] text-wa-secondary">Fim: ${fmtTs(row.closed_at)}</div>` : null}
       <div class="flex items-center justify-between gap-2 mt-1">
         <span class="text-[12px] ${row.assignee_name ? 'text-wa-text' : 'text-wa-secondary'} truncate">${row.assignee_name || 'Não atribuído'}</span>
-        <span class="px-1.5 py-0.5 rounded-full text-[10px] ${row.status === 'aberto' ? 'bg-wa-teal/15 text-wa-teal' : 'bg-wa-hover text-wa-secondary'}">${row.status === 'aberto' ? 'Aberto' : 'Fechado'}</span>
+        <div class="flex items-center gap-1 shrink-0">
+          ${row.avaliacao ? html`<span class="px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-600" title="Avaliação do cliente">★ ${row.avaliacao.nota}</span>` : null}
+          <span class="px-1.5 py-0.5 rounded-full text-[10px] ${row.status === 'aberto' ? 'bg-wa-teal/15 text-wa-teal' : 'bg-wa-hover text-wa-secondary'}">${row.status === 'aberto' ? 'Aberto' : 'Fechado'}</span>
+        </div>
       </div>
     </div>`;
 }
@@ -1480,6 +1501,8 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   // at.fields; o rótulo Atendente vem do assignee nativo). Editável enquanto aberto; serve
   // de fonte também p/ a visão read-only.
   const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
+  const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
+  const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
   const [vals, setVals] = useState(() => {
     const init = {};
     for (const d of protoDefs) {
@@ -1598,6 +1621,10 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
+            ${showAssigneeSeedNotice ? html`
+              <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
+                Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?
+              </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {
                 const def = (d.type === 'atendente' && hasSavedAssignee)
@@ -1623,6 +1650,18 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
                 ${finalizing ? 'Finalizando…' : 'Finalizar protocolo'}</button>
             </div>
           </div>`}
+
+        ${at.avaliacao ? html`
+          <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
+            <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Avaliação do cliente</div>
+            <div class="flex items-center gap-2 text-[13px]">
+              <span class="text-amber-500 text-[15px] tracking-wide">${'★'.repeat(at.avaliacao.nota || 0)}${'☆'.repeat(Math.max(0, 5 - (at.avaliacao.nota || 0)))}</span>
+              <span class="text-wa-text font-medium">${at.avaliacao.nota}/5</span>
+              ${at.avaliacao.answered_at ? html`<span class="text-wa-secondary text-[12px]">· ${fmtTs(at.avaliacao.answered_at)}</span>` : null}
+            </div>
+            ${at.avaliacao.sugestao ? html`
+              <div class="mt-2 text-[13px] text-wa-text whitespace-pre-wrap"><span class="text-wa-secondary">Sugestão:</span> ${at.avaliacao.sugestao}</div>` : null}
+          </div>` : null}
 
         <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Atendimentos</div>
         <div class="text-[12px] text-wa-secondary mb-2">Clique num atendimento para abri-lo no chat.</div>
@@ -1662,7 +1701,7 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   // Chaves nativas do checklist (lista fixa — a barra ao vivo renderiza widgets próprios p/ elas).
   const NATIVE_ITEMS = [
     ['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
-    ['canal', 'Canal'],
+    ['canal', 'Canal'], ['nota', 'Avaliação'],
   ];
   // Derivado da fonte única filterCategories() → pares [key,label] que o `cbox` espera
   // (`pf:${scope}:${key}` p/ campos, `cattr:${key}` p/ contato). Comportamento inalterado.

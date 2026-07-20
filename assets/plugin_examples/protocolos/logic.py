@@ -10,9 +10,10 @@ Conceito:
   (aberto/fechado), independente do status da atendimento.
 - **Vínculo / atendimento-ciclo** (``plugin_protocolos_atendimentos``) liga uma atendimento
   do core ao protocolo — é o "informações_atendimento_protocolo" do diagrama.
-- **Rótulo FIXO** (OBS) + Início/Fim/Atendente/ID: Início/Fim/Atendente/ID vêm das
-  colunas (``started_at``/``ended_at``/``assignee_name``/``protocolo_id``); OBS é um
-  rótulo semeado no core (is_system) cujo VALOR é roteado para a coluna ``obs``.
+- **Rótulo FIXO** (Atendente): único rótulo fixo (não-criável/removível), presente nos 2
+  escopos, sempre OBRIGATÓRIO e escondido da tela de Configurações — só aparece em
+  "Resolver atendimento"/"Finalizar protocolo". Seu VALOR liga ao assignee NATIVO. Início/
+  Fim/ID vêm das colunas (``started_at``/``ended_at``/``protocolo_id``); OBS é EXTRA default.
 - **DEFINIÇÕES dos rótulos** (atendimento + protocolo): vivem no CORE, em
   ``custom_attribute_definitions`` (escopos ``conversation``/``attendance``) — criadas/
   editadas na tela "Atributos Personalizados". O plugin só CONSOME via ``get_field_defs``
@@ -30,14 +31,15 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import IntegrityError
 
 from plugins.context import broadcast, make_plugin_db
-from db.repositories import (config_repo, contact_repo, conversation_repo,
-                             custom_attribute_repo, user_repo)
+from db.repositories import (channel_repo, config_repo, contact_repo,
+                             conversation_repo, custom_attribute_repo, user_repo)
 from db.tables import conversations as _conversations_tbl
 from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
@@ -48,6 +50,8 @@ SCOPES = ("protocolo", "atendimento")
 EXTRA_SCOPES = ("protocolo", "atendimento")  # ambos têm rótulos extras
 FIELD_TYPES = {"text", "textarea", "number", "date", "select", "checkboxes", "radio", "checkbox",
                "atendente"}
+# Tipos de campo com OPÇÕES fixas — os únicos que viram colunas de Kanban / filtro dropdown.
+_OPTION_FIELD_TYPES = {"select", "radio", "checkboxes"}
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,48}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
@@ -65,7 +69,7 @@ _VIEWS_TABLE = "plugin_protocolos_kanban_views"
 _PREFS_TABLE = "plugin_protocolos_user_view_prefs"
 # Sentinela p/ "não informado" no update (distingue de None=todos os filtros, []=nenhum).
 _UNSET = object()
-_VIEW_GROUP_BY = {"status", "atendente", "data", "attr"}
+_VIEW_GROUP_BY = {"status", "atendente", "data", "pfield"}
 _VIEW_SCOPES = {"personal", "team"}
 # Sub-modos do agrupamento por Data. "personalizado" = janela (from/to) + granularidade.
 _VIEW_DATE_MODES = {"dia", "faixas", "mes", "semana", "personalizado"}
@@ -206,6 +210,17 @@ def get_field_defs(scope: str) -> list[dict]:
     if scope not in SCOPES:
         return []
     return get_fixed_defs(scope) + get_extra_defs(scope)
+
+
+def _option_field_def(scope: str, key: str) -> dict | None:
+    """Def de um campo de OPÇÃO (select/radio/checkboxes) do escopo, por key. None se a def
+    não existe ou não é de opção. Usado pelo agrupamento/filtro do Kanban por campo de protocolo."""
+    if scope not in SCOPES or not _KEY_RE.match(key or ""):
+        return None
+    for d in get_field_defs(scope):
+        if d.get("key") == key and d.get("type") in _OPTION_FIELD_TYPES:
+            return d
+    return None
 
 
 def _normalize_extra_def(d: dict) -> dict:
@@ -572,6 +587,31 @@ def get_open_protocolo_for_contact(contact_id: int) -> dict | None:
     return _select_open_protocolo(contact_id)
 
 
+def get_last_closed_protocolo_for_contact(contact_id: int) -> dict | None:
+    """Protocolo FECHADO mais recente do contato (mais novo por ``closed_at``). Base da
+    detecção "acabou de fechar e o cliente voltou" (plano 49). ``NULLS LAST`` protege
+    contra linhas legadas sem ``closed_at`` (nunca escolhidas na frente de uma fechada
+    com timestamp)."""
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT * FROM plugin_protocolos_protocolos "
+                 "WHERE contact_id = :cid AND status = 'fechado' "
+                 "ORDER BY closed_at DESC NULLS LAST, id DESC LIMIT 1"),
+            {"cid": contact_id},
+        ).mappings().first()
+    return _proto_dict(row) if row else None
+
+
+def _count_atendimentos_of_protocolo(atid: int) -> int:
+    """Nº de atendimentos (ciclos) vinculados ao protocolo — mostrado no popup de vínculo."""
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT COUNT(*) FROM plugin_protocolos_atendimentos WHERE protocolo_id = :id"),
+            {"id": atid},
+        ).first()
+    return int(row[0]) if row else 0
+
+
 def get_protocolo(atid: int) -> dict | None:
     with make_plugin_db() as conn:
         row = conn.execute(
@@ -675,6 +715,11 @@ def _f_protocolo_closed(actor=None, **_) -> str:
     return f"🏁 {actor} finalizou o protocolo." if actor else "🏁 Protocolo finalizado."
 
 
+def _f_protocolo_relinked(actor=None, **_) -> str:
+    return (f"🔗 {actor} vinculou este atendimento ao protocolo anterior." if actor
+            else "🔗 Atendimento vinculado ao protocolo anterior.")
+
+
 # ── Redação "atendimento" dos avisos de STATUS do core (só enquanto o plugin ativo) ──
 # O core, por padrão, chama a entidade de "conversa". Enquanto o plugin de protocolos
 # está ATIVO, a entidade passa a ser um "atendimento" — então sobrescrevemos (no registry
@@ -706,6 +751,7 @@ def register_system_notices() -> None:
                               config_key=_NOTICE_CONFIG_KEY, default=True)
         register_notice("protocolo_opened", _NOTICE_GROUP, _f_protocolo_opened)
         register_notice("protocolo_closed", _NOTICE_GROUP, _f_protocolo_closed)
+        register_notice("protocolo_relinked", _NOTICE_GROUP, _f_protocolo_relinked)
         # Reusa o grupo "status" do core (mantém o mesmo toggle system_notice_status).
         register_notice("status_closed", "status", _f_atend_status_closed)
         register_notice("status_open", "status", _f_atend_status_open)
@@ -914,6 +960,104 @@ def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
     return get_protocolo(atid), None
 
 
+def _discard_protocolo(atid: int) -> None:
+    """Descarta um protocolo TRANSITÓRIO (recém-criado, ``status='aberto'``) + seus extras.
+    Usado no vínculo ao anterior: o protocolo novo é absorvido pelo anterior e some.
+    Só apaga se estiver ABERTO (nunca destrói um fechado com histórico)."""
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("DELETE FROM plugin_protocolos_protocolo_extras WHERE protocolo_id = :id"),
+            {"id": atid},
+        )
+        conn.execute(
+            text("DELETE FROM plugin_protocolos_protocolos "
+                 "WHERE id = :id AND status = 'aberto'"),
+            {"id": atid},
+        )
+
+
+def relink_to_previous(previous_id: int, current_open_id: int | None = None,
+                        actor: str | None = None) -> tuple[dict | None, str | None]:
+    """Vincula o atendimento atual ao protocolo ANTERIOR (plano 49): move os ciclos do
+    protocolo novo para o anterior, descarta o novo e reabre o anterior.
+
+    Ordem OBRIGATÓRIA por causa do índice único "1 aberto por contato": mover ciclos →
+    descartar o novo (``_discard_protocolo``) → ``reopen_protocolo`` — reabrir antes de
+    descartar colidiria (``IntegrityError``). Emite o aviso ``protocolo_relinked`` +
+    ``_broadcast_changed``.
+
+    Convenção de erro (o route mapeia): "não encontrado" → 404; demais → 409."""
+    prev = get_protocolo(previous_id)
+    if not prev:
+        return None, "Protocolo não encontrado."
+    if prev["status"] != "fechado":
+        return None, "O protocolo anterior não está fechado."
+    contact_id = prev["contact_id"]
+    if current_open_id is not None and current_open_id != previous_id:
+        cur = get_protocolo(current_open_id)
+        if not cur:
+            return None, "Protocolo a absorver não encontrado."
+        if cur["contact_id"] != contact_id:
+            return None, "O protocolo anterior não pertence a este contato."
+        if cur["status"] != "aberto":
+            return None, "O protocolo a absorver não está aberto."
+        ts = now()
+        with make_plugin_db() as conn:
+            conn.execute(
+                text("UPDATE plugin_protocolos_atendimentos "
+                     "SET protocolo_id = :prev, updated_at = :ts "
+                     "WHERE protocolo_id = :cur"),
+                {"prev": previous_id, "cur": current_open_id, "ts": ts},
+            )
+        _discard_protocolo(current_open_id)
+    at, err = reopen_protocolo(previous_id)
+    if err:
+        return None, err
+    _emit_proto_notice("protocolo_relinked",
+                       conversation_id=_latest_conversation_of_protocolo(previous_id),
+                       contact_id=contact_id,
+                       phone=prev.get("contact_phone") or None, actor=actor)
+    _broadcast_changed(contact_id, previous_id)
+    return at, None
+
+
+def relink_suggestion_for_contact(contact_id: int) -> dict:
+    """Contrato §4 do plano 49: há protocolo FECHADO dentro da janela p/ este contato?
+
+    Devolve ``suggest`` (mostrar o popup?), a janela, o tempo desde o fechamento e um
+    resumo do protocolo anterior + do protocolo novo já aberto (se houver). ``suggest``
+    só é ``True`` com o toggle ligado E dentro da janela."""
+    enabled = relink_prompt_enabled()
+    window_min = relink_window_minutes()
+    out: dict = {
+        "suggest": False,
+        "enabled": enabled,
+        "window_minutes": window_min,
+        "seconds_since_close": None,
+        "previous": None,
+        "current_open": None,
+    }
+    current = _select_open_protocolo(contact_id)
+    if current:
+        out["current_open"] = {"id": current["id"], "opened_at": current.get("opened_at")}
+    if not enabled:
+        return out
+    prev = get_last_closed_protocolo_for_contact(contact_id)
+    if not prev or prev.get("closed_at") is None:
+        return out
+    secs = now() - float(prev["closed_at"])
+    out["seconds_since_close"] = secs
+    out["previous"] = {
+        "id": prev["id"],
+        "closed_at": prev.get("closed_at"),
+        "opened_at": prev.get("opened_at"),
+        "assignee_name": prev.get("assignee_name") or "",
+        "atendimentos_count": _count_atendimentos_of_protocolo(prev["id"]),
+    }
+    out["suggest"] = bool(0 <= secs <= window_min * 60)
+    return out
+
+
 def _conversation_ids_of_protocolo(atid: int) -> list[int]:
     """conversation_ids (distintos) das atendimentos-ciclo deste protocolo."""
     with make_plugin_db() as conn:
@@ -971,8 +1115,7 @@ def assign_protocolo(atid: int, assignee_user_id: int | None,
                  "assignee_name = :aname, updated_at = :ts WHERE id = :id"),
             {"auid": assignee_user_id, "aname": name, "ts": ts, "id": atid},
         )
-    # Espelha nas atendimentos do core (fora da conn do plugin), exceto quando o fluxo
-    # de finalização pediu para salvar só o atendente do protocolo.
+    # Espelha nas atendimentos do core (fora da conn do plugin).
     if propagate_to_conversations:
         _propagate_assignee_to_conversations(_conversation_ids_of_protocolo(atid), assignee_user_id)
     _broadcast_changed(at["contact_id"], atid)
@@ -980,98 +1123,268 @@ def assign_protocolo(atid: int, assignee_user_id: int | None,
 
 
 def _hydrate_protocolos(rows) -> list[dict]:
-    """Batch: extras do protocolo + rótulos/atributos da última atendimento (evita N+1)."""
+    """Batch: extras do protocolo + rótulos/atributos da última atendimento + atributos de
+    contato do dono (evita N+1)."""
     extras = _visible_extras("protocolo", [r["id"] for r in rows])
     out = [_proto_dict(r, extras.get(r["id"], {})) for r in rows]
-    _attach_latest_atendimento(out)  # atendimento_fields + atendimento_attrs (última atendimento)
+    _attach_latest_atendimento(out)  # atendimento_fields (última atendimento)
+    _attach_contact_attrs(out)       # contact_attrs (atributos de contato do dono)
+    _attach_avaliacao(out)           # avaliacao (última nota RESPONDIDA do protocolo)
     return out
 
 
-def list_protocolos(*, status: str | None = None, assignee_user_id: int | None = None,
+def _proto_field_value(a: dict, scope: str, key: str):
+    """Valor de um campo de protocolo na row hidratada: escopo protocolo → ``fields``;
+    atendimento → ``atendimento_fields`` (última atendimento)."""
+    src = a.get("fields") if scope == "protocolo" else a.get("atendimento_fields")
+    return (src or {}).get(key)
+
+
+def _pf_option_keys() -> set[str]:
+    """Conjunto de '<scope>:<key>' dos campos de OPÇÃO (select/radio/checkboxes) de ambos os
+    escopos. Distingue, no filtro por campo de protocolo, OPÇÃO (casa EXATO/pertence, valor vindo
+    de dropdown) de TEXTO/número/data (casa SUBSTRING, valor digitado)."""
+    out: set[str] = set()
+    for scope in SCOPES:
+        for d in get_field_defs(scope):
+            if d.get("type") in _OPTION_FIELD_TYPES:
+                out.add(f"{scope}:{d.get('key')}")
+    return out
+
+
+# Normalização de texto p/ os filtros da aba: case- E acento-insensível.
+# Caminho Python (_norm_txt) e caminho SQL (_ACC_FROM/_ACC_TO via translate) ficam
+# consistentes — busca por "leandro"/"joao" casa "Leandro"/"João".
+# O mapa cobre minúsculas E MAIÚSCULAS acentuadas, ambas indo para a minúscula ASCII.
+# As maiúsculas NÃO são redundantes: este banco roda com collation `C`, onde o `lower()`
+# do Postgres é ASCII-only — `lower('JOÃO')` devolve `'joÃo'` (o `Ã` sobrevive). Com um
+# mapa só-minúsculo o translate não o pegaria e "joao" não acharia "JOÃO SILVA" (nome em
+# caixa alta é comum em dado importado). Mapeando a maiúscula acentuada direto para a
+# minúscula ASCII, o resultado fica correto sob qualquer collation.
+_ACC_FROM = "áàâãäçéèêëíìîïóòôõöúùûüñÁÀÂÃÄÇÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÑ"
+_ACC_TO = "aaaaaceeeeiiiiooooouuuunaaaaaceeeeiiiiooooouuuun"   # MESMO tamanho (translate exige)
+
+
+def _norm_txt(s) -> str:
+    """Normaliza p/ comparação de filtro: trim + remove acentos (NFD, tira
+    combinantes) + casefold → case- e acento-insensível. Retorna '' quando None."""
+    s = unicodedata.normalize("NFD", str(s if s is not None else ""))
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn").casefold().strip()
+
+
+def _option_value_set(val) -> set[str]:
+    """Conjunto de opções INDIVIDUAIS do valor de um campo de OPÇÃO da row. Aceita lista ou
+    escalar e desdobra rótulos legados unidos por vírgula ('teste 1,teste 2' → {'teste 1',
+    'teste 2'}) — espelha o split de opções do frontend (splitOptionList), p/ o filtro casar
+    mesmo em protocolos gravados antes da correção. Trim, sem vazios."""
+    items = val if isinstance(val, list) else ([] if val is None else [val])
+    out: set[str] = set()
+    for it in items:
+        for part in str(it).split(","):
+            p = part.strip()
+            if p:
+                out.add(p)
+    return out
+
+
+def _row_matches_filter(a: dict, fk: str, v, option_keys: set | None = None) -> bool:
+    """Casa UM filtro namespaceado contra a row. ``v`` pode ser um ÚNICO valor OU uma LISTA
+    (multi-seleção do dropdown) — nesse caso casa se QUALQUER valor escolhido casar (OR):
+    - ``pf:<scope>:<key>`` (campo de protocolo) → OPÇÃO: pertence ao conjunto de opções da row
+      (valor da row desdobrado por vírgula p/ tolerar rótulos legados unidos); qualquer OUTRO
+      tipo (texto/número/data): SUBSTRING case-insensitive (busca parcial). ``option_keys`` =
+      conjunto de '<scope>:<key>' de opção; None (chamada direta/legado) → trata como opção.
+    - ``cattr:<key>`` (atributo de CONTATO) → SUBSTRING case-insensitive (lista → pertence).
+    - ``canal`` (canal da conversa mais recente do protocolo) → igualdade EXATA de channel_id.
+    Chave desconhecida/malformada, OU nenhum valor escolhido → não restringe (True)."""
+    # Multi-seleção: normaliza p/ lista de candidatos não-vazios; lista vazia = sem restrição.
+    cands = [c for c in (v if isinstance(v, list) else [v]) if c is not None and str(c) != ""]
+    if not cands:
+        return True
+    if fk == "canal":
+        cv = str(a.get("channel_id") or "")
+        return any(cv == str(c) for c in cands)
+    if fk.startswith("pf:"):
+        parts = fk.split(":", 2)
+        if len(parts) != 3:
+            return True
+        scope, key = parts[1], parts[2]
+        val = _proto_field_value(a, scope, key)
+        is_option = option_keys is None or f"{scope}:{key}" in option_keys
+        if is_option:
+            # opções individuais da row (desdobra vírgulas), normalizadas case+acento.
+            stored = {_norm_txt(x) for x in _option_value_set(val)}
+            return any(_norm_txt(c) in stored for c in cands)
+        # Campo de TEXTO: busca parcial (substring) — casa se QUALQUER termo aparecer.
+        sval = _norm_txt(", ".join(str(x) for x in val) if isinstance(val, list) else val)
+        return any(_norm_txt(c) in sval for c in cands)
+    if fk.startswith("cattr:"):
+        val = (a.get("contact_attrs") or {}).get(fk.split(":", 1)[1])
+        if isinstance(val, list):
+            low = [_norm_txt(x) for x in val]
+            return any(_norm_txt(c) in low for c in cands)
+        sval = _norm_txt(val)
+        return any(_norm_txt(c) in sval for c in cands)
+    return True
+
+
+def _list_clause(sql: str, params: dict):
+    """text() do listar com bindparams EXPANDING p/ os filtros IN (status/assignee multi-seleção)."""
+    binds = [bindparam(k, expanding=True) for k in ("stats", "auids", "notas") if k in params]
+    c = text(sql)
+    return c.bindparams(*binds) if binds else c
+
+
+def list_protocolos(*, status=None, assignee_user_id=None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
-                      attr_filters: dict | None = None,
+                      attr_filters: dict | None = None, nota=None,
+                      include_archived: bool = False,
                       limit: int = 200, offset: int = 0) -> dict:
     """Página de protocolos como envelope ``{items, total, has_more}`` (plano 50).
 
     ``limit``/``offset`` passam pelo teto central (`clamp_limit`/`clamp_offset`,
-    default 50 / cap 200). Caminho normal pagina no SQL + COUNT(*); caminho
-    ``attr_filters`` filtra em Python após varrer ``_ATTR_SCAN_CAP`` linhas, logo
-    ``total``/``has_more`` são limite-inferior quando o scan-cap satura.
+    default 50 / cap 200 — `PAGE_LIST`/`CAP_LIST`). Caminho normal pagina no SQL e
+    conta o total via COUNT(*) com o mesmo WHERE. Caminho ``attr_filters`` filtra em
+    Python após varrer ``_ATTR_SCAN_CAP`` linhas, então ``total``/``has_more`` são
+    limite-inferior quando o scan-cap satura (mesma semântica do search ``q`` do core).
     """
     lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
     off = clamp_offset(offset)
     where, params = _build_list_where(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to)
+        opened_from=opened_from, opened_to=opened_to, nota=nota,
+        include_archived=include_archived)
     base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
             + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
     return _list_page(base, where, params, af_src=attr_filters, lim=lim, off=off)
 
 
 def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
-                      q: str | None = None, opened_from=None, opened_to=None
-                      ) -> tuple[list[str], dict]:
-    """WHERE + params da listagem — COMPARTILHADO com o índice do Kanban
-    (``kanban_index`` via ``scan_protocolos``), p/ as duas leituras varrerem o mesmo
-    conjunto. (Seed de bootstrap: aceita só escalar em status/assignee.)"""
+                      q: str | None = None, opened_from=None, opened_to=None,
+                      nota=None, include_archived: bool = False) -> tuple[list[str], dict]:
+    """WHERE + params da listagem de protocolos.
+
+    Extraído de ``list_protocolos`` para ser COMPARTILHADO com o índice de agrupamento
+    do Kanban (``kanban_index.build_index`` via ``scan_protocolos``): as duas leituras
+    precisam varrer exatamente o mesmo conjunto, senão contagem e páginas divergem.
+    Por isso ``nota`` e ``include_archived`` moram AQUI e não no corpo da listagem —
+    do contrário as colunas do Kanban contariam protocolos que a lista esconde.
+    """
     where = ["1=1"]
+    # Plano 54 (D3 — filtrar na leitura): esconde do quadro/contagem os protocolos cuja
+    # conversa CORE mais recente está ARQUIVADA (arquivo agora é por atendimento). Não
+    # destrutivo e reversível: desarquivar a conversa faz o protocolo reaparecer. A
+    # "conversa mais recente" = o ciclo (plugin_protocolos_atendimentos) de maior
+    # started_at/id com conversation_id não-nulo. ``include_archived=True`` desliga o
+    # corte (uma futura aba "arquivados" pode usá-lo). Ciclos órfãos (sem conversa) ou
+    # protocolos sem nenhum ciclo vinculado nunca casam o NOT IN → continuam visíveis.
+    if not include_archived:
+        where.append(
+            "id NOT IN ("
+            " SELECT pa.protocolo_id FROM plugin_protocolos_atendimentos pa"
+            " JOIN atendimentos a ON a.id = pa.conversation_id"
+            " WHERE a.is_archived = 1 AND pa.id = ("
+            "   SELECT p2.id FROM plugin_protocolos_atendimentos p2"
+            "   WHERE p2.protocolo_id = pa.protocolo_id AND p2.conversation_id IS NOT NULL"
+            "   ORDER BY p2.started_at DESC, p2.id DESC LIMIT 1"
+            " ))"
+        )
     params: dict = {}
-    if status in ("aberto", "fechado"):
-        where.append("status = :status")
-        params["status"] = status
-    if assignee_user_id is not None:
-        where.append("assignee_user_id = :auid")
-        params["auid"] = assignee_user_id
+    # status/assignee aceitam UM valor OU uma LISTA (multi-seleção do filtro) → WHERE ... IN.
+    stats = [s for s in (status if isinstance(status, list) else [status])
+             if s in ("aberto", "fechado")]
+    if stats:
+        where.append("status IN :stats")
+        params["stats"] = stats
+    auids = []
+    for x in (assignee_user_id if isinstance(assignee_user_id, list) else [assignee_user_id]):
+        if x is None or str(x).strip() == "":
+            continue
+        try:
+            auids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    if auids:
+        where.append("assignee_user_id IN :auids")
+        params["auids"] = auids
     if contact_id is not None:
         where.append("contact_id = :cid")
         params["cid"] = contact_id
     if q:
-        # Busca case- E acento-insensível sem a extensão `unaccent`: normaliza os dois
-        # lados com lower()+translate() (mapa pt-BR). Seed de bootstrap — a versão LIVE
-        # (storages/plugins/protocolos/logic.py) tem a mesma correção + os filtros Python.
-        _accf = "áàâãäçéèêëíìîïóòôõöúùûüñ"      # minúsculas
-        _acct = "aaaaaceeeeiiiiooooouuuun"       # MESMO tamanho de _accf
-        norm = "translate(lower({c}), :acc_from, :acc_to)"
-        term = "translate(lower(:q), :acc_from, :acc_to)"
-        where.append(
-            f"({norm.format(c='contact_name')} LIKE {term}"
-            f" OR {norm.format(c='contact_phone')} LIKE {term})")
-        params["q"] = f"%{q}%"
-        params["acc_from"] = _accf
-        params["acc_to"] = _acct
+        qs = str(q).strip()
+        params["q"] = f"%{qs}%"
+        # Busca case- E acento-insensível sem depender da extensão `unaccent`:
+        # normaliza ambos os lados com lower()+translate() (mapa pt-BR). Os `%` do
+        # padrão passam intactos (não estão no mapa).
+        _norm_col = "translate(lower({c}), :acc_from, :acc_to)"
+        _term = "translate(lower(:q), :acc_from, :acc_to)"
+        params["acc_from"] = _ACC_FROM
+        params["acc_to"] = _ACC_TO
+        clause = (f"{_norm_col.format(c='contact_name')} LIKE {_term}"
+                  f" OR {_norm_col.format(c='contact_phone')} LIKE {_term}")
+        # Também casa o Nº do protocolo: aceita o id puro ("44") OU o código
+        # "AAAAMMDD-HHMMSS-<id>" (o ÚLTIMO grupo de dígitos = id do protocolo).
+        digits = re.findall(r"\d+", qs)
+        if digits:
+            try:
+                params["qid"] = int(digits[-1])
+                clause += " OR id = :qid"
+            except (ValueError, OverflowError):
+                pass
+        where.append("(" + clause + ")")
     if opened_from is not None:
         where.append("opened_at >= :ofrom")
         params["ofrom"] = float(opened_from)
     if opened_to is not None:
         where.append("opened_at <= :oto")
         params["oto"] = float(opened_to)
+    # Filtro por NOTA de avaliação (multi-seleção 1..5): protocolos com ao menos uma
+    # avaliação RESPONDIDA cuja nota está na seleção (subquery na tabela de avaliações).
+    notas = []
+    for x in (nota if isinstance(nota, list) else [nota]):
+        if x is None or str(x).strip() == "":
+            continue
+        try:
+            v = int(x)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= v <= 5:
+            notas.append(v)
+    if notas:
+        where.append("id IN (SELECT protocolo_id FROM plugin_protocolos_avaliacoes "
+                     "WHERE answered_at IS NOT NULL AND nota IN :notas)")
+        params["notas"] = notas
     return where, params
 
 
 def _list_page(base: str, where: list[str], params: dict, *, af_src, lim: int, off: int) -> dict:
     """Corpo da paginação da LISTA (envelope). Separado do WHERE p/ o índice reusar este."""
-    # Filtro por atributo de ATENDIMENTO (valor na última atendimento). Como o valor não vive nas
-    # colunas do protocolo, filtra-se em Python ANTES do corte: varre um teto interno,
-    # atribui atendimento_attrs e só então aplica offset/limit (caro só quando a aba usa este
-    # filtro — caminho normal continua com LIMIT/OFFSET no SQL).
-    af = {k: v for k, v in (af_src or {}).items() if k and _KEY_RE.match(k)}
+    # Filtro por CAMPO DE PROTOCOLO (pf:<scope>:<key>) ou ATRIBUTO DE CONTATO (cattr:<key>).
+    # O valor não vive nas colunas do protocolo, então filtra-se em Python ANTES do corte:
+    # varre um teto interno, hidrata e só então aplica offset/limit (caro só quando a aba usa
+    # este filtro — caminho normal continua com LIMIT/OFFSET no SQL).
+    af = {str(k): v for k, v in (af_src or {}).items()
+          if k and (str(k).startswith("pf:") or str(k).startswith("cattr:")
+                    or str(k) == "canal")}
     if af:
         with make_plugin_db() as conn:
-            rows = conn.execute(text(base + " LIMIT :scan"),
+            rows = conn.execute(_list_clause(base + " LIMIT :scan", params),
                                 {**params, "scan": _ATTR_SCAN_CAP}).mappings().all()
         out = _hydrate_protocolos(rows)
-        out = [a for a in out
-               if all(str((a.get("atendimento_attrs") or {}).get(k, "")) == str(v)
-                      for k, v in af.items())]
+        if "canal" in af:
+            _attach_channels(out)  # só paga a resolução de canal quando a aba filtra por canal
+        # Chaves de campo de OPÇÃO (exato) vs TEXTO (substring) — só quando há filtro pf:.
+        opt_keys = _pf_option_keys() if any(str(k).startswith("pf:") for k in af) else None
+        out = [a for a in out if all(_row_matches_filter(a, fk, v, opt_keys) for fk, v in af.items())]
         total = len(out)
         items = out[off:off + lim]
         return {"items": items, "total": total, "has_more": off + len(items) < total}
 
     count_sql = "SELECT COUNT(*) FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
     with make_plugin_db() as conn:
-        total = int(conn.execute(text(count_sql), params).scalar() or 0)
-        rows = conn.execute(text(base + " LIMIT :limit OFFSET :offset"),
+        total = int(conn.execute(_list_clause(count_sql, params), params).scalar() or 0)
+        rows = conn.execute(_list_clause(base + " LIMIT :limit OFFSET :offset", params),
                             {**params, "limit": lim, "offset": off}).mappings().all()
     items = _hydrate_protocolos(rows)
     return {"items": items, "total": total, "has_more": off + len(items) < total}
@@ -1080,17 +1393,23 @@ def _list_page(base: str, where: list[str], params: dict, *, af_src, lim: int, o
 # ── Kanban agrupado (índice em cache + paginação POR COLUNA) ──────────────────
 
 def scan_protocolos(filters: dict, cap: int):
-    """Varredura bounded de rows CRUAS que alimenta o índice do Kanban — mesmo WHERE e
-    mesma ORDEM da listagem, sem hidratar nada."""
+    """Varredura bounded de rows CRUAS que alimenta o índice do Kanban.
+
+    Mesmo WHERE e mesma ORDEM da listagem (``_build_list_where``), sem hidratar nada —
+    a hidratação fica para a página de uma coluna (``hydrate_by_ids``). ``nota`` e
+    ``include_archived`` são repassados para o índice enxergar o mesmo recorte da lista.
+    """
     f = filters or {}
     where, params = _build_list_where(
         status=f.get("status"), assignee_user_id=f.get("assignee_user_id"),
         contact_id=f.get("contact_id"), q=f.get("q"),
-        opened_from=f.get("opened_from"), opened_to=f.get("opened_to"))
+        opened_from=f.get("opened_from"), opened_to=f.get("opened_to"),
+        nota=f.get("nota"), include_archived=bool(f.get("include_archived")))
     sql = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
            + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :scan")
     with make_plugin_db() as conn:
-        return conn.execute(text(sql), {**params, "scan": int(cap)}).mappings().all()
+        return conn.execute(_list_clause(sql, params),
+                            {**params, "scan": int(cap)}).mappings().all()
 
 
 def hydrate_by_ids(ids: list[int]) -> list[dict]:
@@ -1116,7 +1435,11 @@ def grouped_columns(view: dict, filters: dict) -> dict:
 
 def grouped_column_page(view: dict, filters: dict, col_id: str,
                         limit: int = PAGE_LIST, offset: int = 0) -> dict:
-    """Uma página de UMA coluna — envelope ``{items,total,has_more}``; hidrata só a fatia."""
+    """Uma página de UMA coluna — envelope ``{items,total,has_more}``.
+
+    O índice já tem os ids daquela coluna na ordem certa; aqui só fatiamos e
+    hidratamos a fatia (nunca a coleção inteira).
+    """
     from . import kanban_index
     lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
     off = clamp_offset(offset)
@@ -1126,40 +1449,9 @@ def grouped_column_page(view: dict, filters: dict, col_id: str,
             "has_more": off + len(page) < len(ids)}
 
 
-def _conversation_core_attrs(atend_ids: list[int]) -> dict[int, dict]:
-    """{conversation_id: {key: value}} dos ATRIBUTOS PERSONALIZADOS do core (escopo atendimento)
-    que NÃO são espelho do plugin — i.e., defs com is_system=0 (criadas na tela do core).
-    Lê de ``conversations.custom_attributes``. Batch (evita N+1)."""
-    ids = [int(c) for c in (atend_ids or []) if c]
-    if not ids:
-        return {}
-    try:
-        defs = custom_attribute_repo.list_definitions(applies_to="conversation")
-    except Exception:  # noqa: BLE001
-        defs = []
-    own = {d["attribute_key"] for d in defs if not d.get("is_system")}
-    if not own:
-        return {}
-    out: dict[int, dict] = {}
-    with make_plugin_db() as conn:
-        crows = conn.execute(
-            text("SELECT id, custom_attributes FROM atendimentos WHERE id IN :ids")
-            .bindparams(bindparam("ids", expanding=True)),
-            {"ids": ids},
-        ).mappings().all()
-    for r in crows:
-        ca = r["custom_attributes"]
-        ca = ca if isinstance(ca, dict) else _safe_json(ca)
-        sub = {k: v for k, v in (ca or {}).items() if k in own}
-        if sub:
-            out[int(r["id"])] = sub
-    return out
-
-
 def _attach_latest_atendimento(items: list[dict]) -> None:
     """Anexa a cada protocolo os valores da ÚLTIMA atendimento (ciclo mais recente):
-    ``atendimento_fields`` (rótulos do plugin do escopo atendimento — obs + extras) e
-    ``atendimento_attrs`` (atributos personalizados do core — is_system=0). Tudo batch."""
+    ``atendimento_fields`` (rótulos do plugin do escopo atendimento — obs + extras). Batch."""
     if not items:
         return
     atids = [a["id"] for a in items]
@@ -1174,16 +1466,122 @@ def _attach_latest_atendimento(items: list[dict]) -> None:
     for r in rows:
         latest.setdefault(int(r["protocolo_id"]), dict(r))  # 1º = mais recente (ordem desc)
     atend_extras = _visible_extras("atendimento", [r["id"] for r in latest.values()])
-    core_attrs = _conversation_core_attrs([r["conversation_id"] for r in latest.values()])
     for a in items:
         lc = latest.get(a["id"])
         if not lc:
             a["atendimento_fields"] = {}
-            a["atendimento_attrs"] = {}
             continue
         cf = dict(atend_extras.get(lc["id"], {}))  # obs já vem aqui (rótulo extra)
         a["atendimento_fields"] = cf
-        a["atendimento_attrs"] = core_attrs.get(lc["conversation_id"], {}) if lc.get("conversation_id") else {}
+
+
+def _attach_channels(items: list[dict]) -> None:
+    """Anexa ``channel_id`` a cada protocolo — o canal da conversa MAIS RECENTE do protocolo
+    (âncora multicanal: protocolo → atendimento-ciclo → conversa do core → inbox → canal).
+    Batch (uma query, sem N+1). Só é chamado quando a aba filtra por ``canal``, então o caminho
+    comum de listagem não paga esta resolução. Fallback '' quando o protocolo ainda não tem
+    conversa vinculada (ou o inbox não tem canal)."""
+    if not items:
+        return
+    for a in items:
+        a["channel_id"] = ""
+    atids = [a["id"] for a in items]
+    with make_plugin_db() as conn:
+        rows = conn.execute(
+            text("SELECT pa.protocolo_id AS pid, i.channel_id AS channel_id "
+                 "FROM plugin_protocolos_atendimentos pa "
+                 "JOIN atendimentos a ON a.id = pa.conversation_id "
+                 "JOIN inboxes i ON i.id = a.inbox_id "
+                 "WHERE pa.protocolo_id IN :ids "
+                 "ORDER BY pa.started_at DESC, pa.id DESC")
+            .bindparams(bindparam("ids", expanding=True)),
+            {"ids": atids},
+        ).mappings().all()
+    chan: dict[int, str] = {}
+    for r in rows:
+        chan.setdefault(int(r["pid"]), r["channel_id"] or "")  # 1º = mais recente (ordem desc)
+    for a in items:
+        a["channel_id"] = chan.get(int(a["id"]), "")
+
+
+def _contact_core_attrs(contact_ids: list[int]) -> dict[int, dict]:
+    """{contact_id: {key: value}} dos ATRIBUTOS PERSONALIZADOS de CONTATO do core
+    (``applies_to='contact'``, ``is_system=0`` — criados pelo usuário na tela do core). Lê de
+    ``contacts.custom_attributes``. Batch (evita N+1). É a fonte dos FILTROS por atributo de
+    contato do Kanban."""
+    ids = [int(c) for c in (contact_ids or []) if c]
+    if not ids:
+        return {}
+    try:
+        defs = custom_attribute_repo.list_definitions(applies_to="contact")
+    except Exception:  # noqa: BLE001
+        defs = []
+    own = {d["attribute_key"] for d in defs if not d.get("is_system")}
+    if not own:
+        return {}
+    out: dict[int, dict] = {}
+    with make_plugin_db() as conn:
+        crows = conn.execute(
+            text("SELECT id, custom_attributes FROM contacts WHERE id IN :ids")
+            .bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids},
+        ).mappings().all()
+    for r in crows:
+        ca = r["custom_attributes"]
+        ca = ca if isinstance(ca, dict) else _safe_json(ca)
+        sub = {k: v for k, v in (ca or {}).items() if k in own}
+        if sub:
+            out[int(r["id"])] = sub
+    return out
+
+
+def _attach_contact_attrs(items: list[dict]) -> None:
+    """Anexa ``contact_attrs`` a cada protocolo (atributos de CONTATO do dono, is_system=0)."""
+    if not items:
+        return
+    cmap = _contact_core_attrs([a.get("contact_id") for a in items])
+    for a in items:
+        cid = a.get("contact_id")
+        a["contact_attrs"] = cmap.get(int(cid), {}) if cid else {}
+
+
+def _attach_avaliacao(items: list[dict]) -> None:
+    """Anexa ``avaliacao`` a cada protocolo — a ÚLTIMA avaliação RESPONDIDA
+    (``{nota, sugestao, answered_at}``), ou ``None`` se ainda não avaliado. Batch (uma
+    query, sem N+1). Best-effort: qualquer erro deixa ``avaliacao=None`` (nunca quebra
+    a listagem do Kanban)."""
+    if not items:
+        return
+    for a in items:
+        a["avaliacao"] = None
+    pids = [a["id"] for a in items]
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text("SELECT protocolo_id, nota, sugestao, answered_at "
+                     "FROM plugin_protocolos_avaliacoes "
+                     "WHERE protocolo_id IN :ids AND answered_at IS NOT NULL "
+                     "ORDER BY answered_at DESC, id DESC")
+                .bindparams(bindparam("ids", expanding=True)),
+                {"ids": pids},
+            ).mappings().all()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: _attach_avaliacao falhou: %s", e)
+        return
+    latest: dict[int, dict] = {}
+    for r in rows:
+        latest.setdefault(int(r["protocolo_id"]),  # 1º = mais recente (ordem desc)
+                          {"nota": r["nota"], "sugestao": r["sugestao"] or "",
+                           "answered_at": r["answered_at"]})
+    for a in items:
+        a["avaliacao"] = latest.get(int(a["id"]))
+
+
+def with_avaliacao(at: dict | None) -> dict | None:
+    """Anexa ``avaliacao`` a UM protocolo já montado (detalhe). Devolve o próprio dict."""
+    if at:
+        _attach_avaliacao([at])
+    return at
 
 
 # ── Visualizações personalizadas do Kanban (abas de "Agrupar por") ────────────
@@ -1335,7 +1733,7 @@ def get_kanban_view(vid: int) -> dict | None:
 
 
 def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode,
-                   group_date_from=None, group_date_to=None,
+                   group_field_scope=None, group_date_from=None, group_date_to=None,
                    group_date_grain=None) -> str | None:
     if not (name or "").strip():
         return "Informe um nome para a visualização."
@@ -1343,8 +1741,12 @@ def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode,
         return "Escopo inválido."
     if group_by not in _VIEW_GROUP_BY:
         return "Agrupamento inválido."
-    if group_by == "attr" and not _KEY_RE.match(group_attr_key or ""):
-        return "Selecione um atributo (lista) válido para agrupar."
+    if group_by == "pfield":
+        # Agrupar exige campo de opção de VALOR ÚNICO (1 card = 1 coluna): select/radio/
+        # checkboxes SEM `multiple`. (checkboxes single guarda lista de 1 item — ok p/ coluna.)
+        d = _option_field_def(group_field_scope or "", group_attr_key or "")
+        if not d or d.get("multiple"):
+            return "Selecione um campo de opção (valor único) válido para agrupar."
     if group_by == "data":
         if (group_date_mode or "") not in _VIEW_DATE_MODES:
             return "Selecione um modo de data válido (faixas, dia, semana, mês ou período personalizado)."
@@ -1359,9 +1761,10 @@ def _validate_view(*, name, scope, group_by, group_attr_key, group_date_mode,
 
 
 def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_key=None,
-                       group_date_mode=None,
+                       group_date_mode=None, group_field_scope=None,
                        group_date_from=None, group_date_to=None, group_date_grain=None,
-                       filters=None, available_filters=None,
+                       filters=None,
+                       available_filters=None,
                        favorite_filters=None,
                        column_order=None, visibility_roles=None, visibility_users_include=None,
                        visibility_users_exclude=None,
@@ -1375,6 +1778,7 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
         scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
                          group_attr_key=group_attr_key, group_date_mode=group_date_mode,
+                         group_field_scope=group_field_scope,
                          group_date_from=group_date_from, group_date_to=group_date_to,
                          group_date_grain=group_date_grain)
     if err:
@@ -1384,8 +1788,9 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
     afjson = json.dumps([str(x) for x in available_filters]) if isinstance(available_filters, list) else None
     favjson = _dump_str_list(favorite_filters)  # favoritos ([]/None → NULL = nenhum favorito)
     cojson = _dump_str_list(column_order)  # ordem das colunas ([]/None → NULL = ordem padrão)
-    gak = (group_attr_key or None) if group_by == "attr" else None
+    gak = (group_attr_key or None) if group_by == "pfield" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
+    gfs = (group_field_scope or None) if group_by == "pfield" else None
     # Janela + granularidade: só valem quando data + personalizado; senão NULL.
     _custom = group_by == "data" and gdm == "personalizado"
     gdf = (group_date_from or None) if _custom else None
@@ -1397,16 +1802,16 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
         ).scalar() or 0
         conn.execute(
             text(f"INSERT INTO {_VIEWS_TABLE} "
-                 "(name, scope, owner_user_id, group_by, group_attr_key, group_date_mode, "
-                 " group_date_from, group_date_to, group_date_grain, "
+                 "(name, scope, owner_user_id, group_by, group_attr_key, group_field_scope, "
+                 " group_date_mode, group_date_from, group_date_to, group_date_grain, "
                  " filters, available_filters, favorite_filters, column_order, visibility_roles, "
                  " visibility_users_include, visibility_users_exclude, position, "
                  " created_at, updated_at) "
-                 "VALUES (:name, :scope, :owner, :gby, :gak, :gdm, :gdf, :gdt, :gdg, "
+                 "VALUES (:name, :scope, :owner, :gby, :gak, :gfs, :gdm, :gdf, :gdt, :gdg, "
                  " :filters, :af, :fav, :co, :vr, "
                  " :vi, :ve, :pos, :ts, :ts)"),
             {"name": name, "scope": scope, "owner": owner_user_id, "gby": group_by,
-             "gak": gak, "gdm": gdm, "gdf": gdf, "gdt": gdt, "gdg": gdg,
+             "gak": gak, "gfs": gfs, "gdm": gdm, "gdf": gdf, "gdt": gdt, "gdg": gdg,
              "filters": fjson, "af": afjson, "fav": favjson, "co": cojson,
              "vr": vroles, "vi": vinc, "ve": vexc, "pos": int(pos), "ts": ts},
         )
@@ -1422,9 +1827,10 @@ def create_kanban_view(*, name, scope="personal", group_by="status", group_attr_
 
 
 def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_key=None,
-                       group_date_mode=None,
+                       group_date_mode=None, group_field_scope=None,
                        group_date_from=None, group_date_to=None, group_date_grain=None,
-                       filters=None, available_filters=_UNSET,
+                       filters=None,
+                       available_filters=_UNSET,
                        favorite_filters=_UNSET,
                        column_order=_UNSET, visibility_roles=_UNSET,
                        visibility_users_include=_UNSET,
@@ -1437,6 +1843,7 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     group_by = group_by or cur["group_by"]
     group_attr_key = cur.get("group_attr_key") if group_attr_key is None else group_attr_key
     group_date_mode = cur.get("group_date_mode") if group_date_mode is None else group_date_mode
+    group_field_scope = cur.get("group_field_scope") if group_field_scope is None else group_field_scope
     group_date_from = cur.get("group_date_from") if group_date_from is None else group_date_from
     group_date_to = cur.get("group_date_to") if group_date_to is None else group_date_to
     group_date_grain = cur.get("group_date_grain") if group_date_grain is None else group_date_grain
@@ -1462,12 +1869,14 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
         scope = "team"
     err = _validate_view(name=name, scope=scope, group_by=group_by,
                          group_attr_key=group_attr_key, group_date_mode=group_date_mode,
+                         group_field_scope=group_field_scope,
                          group_date_from=group_date_from, group_date_to=group_date_to,
                          group_date_grain=group_date_grain)
     if err:
         return None, err
-    gak = (group_attr_key or None) if group_by == "attr" else None
+    gak = (group_attr_key or None) if group_by == "pfield" else None
     gdm = (group_date_mode or None) if group_by == "data" else None
+    gfs = (group_field_scope or None) if group_by == "pfield" else None
     # Janela + granularidade: só valem quando data + personalizado; senão NULL.
     _custom = group_by == "data" and gdm == "personalizado"
     gdf = (group_date_from or None) if _custom else None
@@ -1477,14 +1886,14 @@ def update_kanban_view(vid, *, name=None, scope=None, group_by=None, group_attr_
     with make_plugin_db() as conn:
         conn.execute(
             text(f"UPDATE {_VIEWS_TABLE} SET name = :name, scope = :scope, group_by = :gby, "
-                 "group_attr_key = :gak, group_date_mode = :gdm, "
+                 "group_attr_key = :gak, group_field_scope = :gfs, group_date_mode = :gdm, "
                  "group_date_from = :gdf, group_date_to = :gdt, group_date_grain = :gdg, "
                  "filters = :filters, "
                  "available_filters = :af, favorite_filters = :fav, column_order = :co, "
                  "visibility_roles = :vr, "
                  "visibility_users_include = :vi, visibility_users_exclude = :ve, "
                  "updated_at = :ts WHERE id = :id"),
-            {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gdm": gdm,
+            {"name": name, "scope": scope, "gby": group_by, "gak": gak, "gfs": gfs, "gdm": gdm,
              "gdf": gdf, "gdt": gdt, "gdg": gdg,
              "filters": fjson, "af": afjson, "fav": favjson, "co": cojson, "vr": vrjson, "vi": vijson,
              "ve": vejson, "ts": ts, "id": int(vid)},
@@ -1570,36 +1979,36 @@ def upsert_user_view_pref(view_id: int, user_id: int | None, *, use_personal=Non
     return {"use_personal": up, "personal_filters": pf, "personal_column_order": _avail_list(pcojson)}
 
 
-def set_atendimento_attr(atid: int, key: str, value) -> tuple[dict | None, str | None]:
-    """Drag no kanban por atributo: grava ``key`` = ``value`` em
-    ``conversations.custom_attributes`` da ÚLTIMA atendimento (ciclo mais recente) do
-    protocolo. ``value`` None/"" remove a chave (cai na coluna "Sem valor"). Espelha o
-    padrão de ``mirror_atendimento_to_core`` (set_values direto). Retorna o protocolo com
-    ``atendimento_attrs`` já recarregado."""
-    if not _KEY_RE.match(key or ""):
-        return None, "Atributo inválido."
+def set_protocolo_field(atid: int, scope: str, key: str, value) -> tuple[dict | None, str | None]:
+    """Drag no kanban agrupado por CAMPO DE PROTOCOLO (de opção): grava o valor do campo do
+    ``scope`` no dono certo — protocolo (``plugin_protocolos_protocolo_extras``) ou último
+    ciclo de atendimento (``plugin_protocolos_campos_extras``). ``value`` None/"" limpa (cai
+    na coluna "Sem valor"). Só campos de opção. Retorna o protocolo re-hidratado."""
+    d = _option_field_def(scope, key)
+    if not d:
+        return None, "Campo de opção inválido."
     at = get_protocolo(atid)
     if not at:
         return None, "Protocolo não encontrado."
+    val, err = _coerce_extra(d, value)
+    if err:
+        return None, err
     with make_plugin_db() as conn:
-        row = conn.execute(
-            text("SELECT conversation_id FROM plugin_protocolos_atendimentos "
-                 "WHERE protocolo_id = :aid AND conversation_id IS NOT NULL "
-                 "ORDER BY started_at DESC, id DESC LIMIT 1"),
-            {"aid": int(atid)},
-        ).mappings().first()
-    atend_id = row["conversation_id"] if row else None
-    if not atend_id:
-        return None, "Este protocolo ainda não tem atendimento vinculado."
-    v = None if value in (None, "") else str(value)
-    try:
-        custom_attribute_repo.set_values(_conversations_tbl, int(atend_id), {key: v})
-    except Exception as e:  # noqa: BLE001
-        logger.debug("protocolos: set_atendimento_attr falhou: %s", e)
-        return None, "Falha ao gravar o atributo."
+        if scope == "protocolo":
+            upsert_extra(conn, "protocolo", int(atid), d, val)
+        else:
+            row = conn.execute(
+                text("SELECT id FROM plugin_protocolos_atendimentos "
+                     "WHERE protocolo_id = :aid ORDER BY started_at DESC, id DESC LIMIT 1"),
+                {"aid": int(atid)},
+            ).mappings().first()
+            if not row:
+                return None, "Este protocolo ainda não tem atendimento vinculado."
+            upsert_extra(conn, "atendimento", int(row["id"]), d, val)
     _broadcast_changed(at.get("contact_id"), atid)
     out = [get_protocolo(atid)]
     _attach_latest_atendimento(out)
+    _attach_contact_attrs(out)
     return out[0], None
 
 
@@ -1618,13 +2027,6 @@ def list_atendimentos(atid: int) -> list[dict]:
         ).mappings().all()
     extras = _visible_extras("atendimento", [r["id"] for r in rows])  # batch (evita N+1)
     out = [_atendimento_dict(r, extras.get(r["id"], {})) for r in rows]
-    # Anexa os ATRIBUTOS PERSONALIZADOS do core (is_system=0) de CADA ciclo (lidos de
-    # conversations.custom_attributes pelo conversation_id). A tabela de detalhe os mostra
-    # numa coluna própria, separados das informações da atendimento. Batch (evita N+1).
-    core_attrs = _conversation_core_attrs([c.get("conversation_id") for c in out])
-    for c in out:
-        cid = c.get("conversation_id")
-        c["attrs"] = core_attrs.get(int(cid), {}) if cid else {}
     return out
 
 
@@ -2044,9 +2446,26 @@ def auto_assign_conversation_on_close_enabled() -> bool:
     return bool(config_repo.get(_general_key("auto_assign_conversation_on_close"), True))
 
 
+def relink_prompt_enabled() -> bool:
+    """Popup "vincular ao protocolo anterior" ligado? (plano 49, default ON)."""
+    return bool(config_repo.get(_general_key("relink_prompt_enabled"), True))
+
+
+def relink_window_minutes() -> int:
+    """Janela (minutos) do "logo após fechar" para sugerir o vínculo. Default 30;
+    valores inválidos/≤0 caem no default (nunca uma janela nula que esconderia o popup)."""
+    try:
+        v = int(config_repo.get(_general_key("relink_window_minutes"), 30))
+    except (TypeError, ValueError):
+        return 30
+    return v if v > 0 else 30
+
+
 def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
+        "relink_prompt_enabled": relink_prompt_enabled(),
+        "relink_window_minutes": relink_window_minutes(),
     }
 
 
@@ -2054,6 +2473,16 @@ def set_general_config(cfg: dict) -> dict:
     cfg = cfg or {}
     config_repo.set(_general_key("auto_assign_conversation_on_close"),
                     bool(cfg.get("auto_assign_conversation_on_close")))
+    # Chaves do plano 49: só grava quando presentes (payloads antigos não zeram o default).
+    if "relink_prompt_enabled" in cfg:
+        config_repo.set(_general_key("relink_prompt_enabled"),
+                        bool(cfg.get("relink_prompt_enabled")))
+    if "relink_window_minutes" in cfg:
+        try:
+            m = int(cfg.get("relink_window_minutes"))
+        except (TypeError, ValueError):
+            m = 30
+        config_repo.set(_general_key("relink_window_minutes"), max(1, min(m, 1440)))
     return get_general_config()
 
 
@@ -2168,6 +2597,18 @@ def _append_query(url: str, params: dict) -> str:
     if not qs:
         return url
     return url + ("&" if "?" in url else "?") + qs
+
+
+def list_channels() -> list[dict]:
+    """Canais disponíveis (não-arquivados) p/ o dropdown do filtro 'Canal' do Kanban.
+    Reaproveita ``channel_repo.list_all`` do core; devolve só o que a UI usa
+    (``id`` = valor do filtro; ``name`` = rótulo; ``provider`` informativo)."""
+    try:
+        rows = channel_repo.list_all(include_archived=False)
+    except Exception:  # noqa: BLE001
+        rows = []
+    return [{"id": c["id"], "name": c.get("display_name") or c["id"],
+             "provider": c.get("provider")} for c in rows]
 
 
 def _channel_for_contact(contact_id) -> str:
@@ -2327,6 +2768,14 @@ def send_protocol_on_close(at: dict) -> None:
                         (at or {}).get("id"))
             return
 
+        # Round-trip da avaliação (SÓ o link do CLIENTE — plano 50 Q4): persiste o
+        # id_protocol com o snapshot de atendente/contato/conversa/canal, para a página
+        # externa consultar o atendente e gravar a nota de volta (rotas
+        # /public/avaliacao/{id_protocol}). O link privado interno segue sem round-trip.
+        if normal.get("link"):
+            register_avaliacao(at, id_protocol=params["id_protocol"],
+                               conversation_id=conv_id, channel_id=channel_id)
+
         # 1) Link normal → WhatsApp (envia pelo canal + salva como mensagem do operador).
         if normal.get("link") and outbound:
             text_n = _compose_message(normal.get("title") or "", normal["link"], params)
@@ -2367,6 +2816,202 @@ def send_protocol_on_close(at: dict) -> None:
                 logger.warning("protocolos: falha ao salvar nota privada de protocolo: %s", e)
     except Exception as e:  # noqa: BLE001
         logger.warning("protocolos: send_protocol_on_close falhou: %s", e)
+
+
+# ── Avaliação pública (round-trip da página externa) ─────────────────────────
+# A página externa (Cloudflare Worker) chama, com o id_protocol na URL:
+#   GET  /api/plugins/protocolos/public/avaliacao/{id_protocol} → nome do atendente
+#   POST /api/plugins/protocolos/public/avaliacao/{id_protocol} → grava nota + sugestão
+# Rotas isentas de auth (sob /public/); a segurança é id_protocol + rate-limit por IP
+# (rate_limited) + uso único (answered_at). Ver plano 50.
+
+_SUGESTAO_CAP = 2000        # teto de caracteres da sugestão do cliente
+_RL_WINDOW = 60.0          # janela do rate-limit por IP (segundos)
+# Teto GENEROSO de propósito: se a página externa (Cloudflare Worker) chama
+# server-side, TODO o tráfego legítimo chega com o MESMO IP de egresso do Worker —
+# um teto baixo (ex.: 30) throttlaria clientes reais em burst. Ainda freia um
+# enumerador direto de IP único (120/min contra timestamp+random é impraticável).
+_RL_MAX = 120              # máximo de requisições públicas por IP na janela
+_rl_hits: dict[str, list[float]] = {}   # IP → timestamps recentes (em memória)
+
+
+def rate_limited(ip: str) -> bool:
+    """True se o IP estourou o teto de requisições públicas na janela. Best-effort,
+    em memória (reseta a cada restart) — só freia enumeração/spam grosseiro do
+    id_protocol. IP vazio nunca é limitado (não dá pra bucketar)."""
+    if not ip:
+        return False
+    t = now()
+    hits = [h for h in _rl_hits.get(ip, []) if t - h < _RL_WINDOW]
+    if len(hits) >= _RL_MAX:
+        _rl_hits[ip] = hits
+        return True
+    hits.append(t)
+    _rl_hits[ip] = hits
+    # Poda oportunista p/ limitar memória quando muitos IPs distintos passam.
+    if len(_rl_hits) > 5000:
+        for k in [k for k, v in _rl_hits.items() if all(t - h >= _RL_WINDOW for h in v)]:
+            _rl_hits.pop(k, None)
+    return False
+
+
+def register_avaliacao(at: dict, *, id_protocol: str, conversation_id: int | None,
+                       channel_id: str) -> None:
+    """Grava a linha de token da avaliação NO FECHAMENTO (snapshot p/ o GET/POST público).
+    Best-effort — nunca levanta (o envio do link não pode quebrar por causa disto)."""
+    try:
+        idp = str(id_protocol or "").strip()
+        if not idp or not (at or {}).get("id"):
+            return
+        assignee_uid = (at or {}).get("assignee_user_id")
+        assignee_name = str((at or {}).get("assignee_name") or "")
+        if not assignee_name and assignee_uid:
+            try:
+                u = user_repo.get(int(assignee_uid))
+                assignee_name = str((u or {}).get("name") or (u or {}).get("email") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        ts = now()
+        with make_plugin_db() as conn:
+            conn.execute(
+                text("INSERT INTO plugin_protocolos_avaliacoes "
+                     "(id_protocol, protocolo_id, contact_id, conversation_id, channel_id, "
+                     " assignee_user_id, assignee_name, contact_phone, contact_name, "
+                     " created_at, updated_at) "
+                     "VALUES (:idp, :pid, :cid, :conv, :chan, :auid, :aname, :phone, :cname, "
+                     " :ts, :ts)"),
+                {"idp": idp, "pid": (at or {}).get("id"),
+                 "cid": (at or {}).get("contact_id"), "conv": conversation_id,
+                 "chan": channel_id or "", "auid": assignee_uid, "aname": assignee_name,
+                 "phone": (at or {}).get("contact_phone") or "",
+                 "cname": (at or {}).get("contact_name") or "", "ts": ts},
+            )
+    except IntegrityError:
+        # id_protocol duplicado (colisão astronômica do random) — não re-registra.
+        logger.warning("protocolos: id_protocol duplicado ao registrar avaliação: %s",
+                       id_protocol)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: register_avaliacao falhou: %s", e)
+
+
+def get_avaliacao_public(id_protocol: str) -> dict | None:
+    """Consulta pública por id_protocol → ``{atendente, protocolo, ja_avaliado, nota}``.
+    ``None`` quando o código não existe (a rota devolve 404)."""
+    idp = str(id_protocol or "").strip()
+    if not idp:
+        return None
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT assignee_name, nota, answered_at "
+                 "FROM plugin_protocolos_avaliacoes WHERE id_protocol = :idp"),
+            {"idp": idp},
+        ).mappings().first()
+    if not row:
+        return None
+    return {
+        "atendente": row["assignee_name"] or "",
+        "protocolo": idp,
+        "ja_avaliado": row["answered_at"] is not None,
+        "nota": row["nota"],
+    }
+
+
+def record_avaliacao(id_protocol: str, nota, sugestao: str = "",
+                     ip: str = "") -> tuple[dict | None, str | None]:
+    """Grava a nota do cliente pela página externa. Valida ``nota ∈ 1..5``, corta a
+    sugestão e aplica USO ÚNICO (um UPDATE condicional ``answered_at IS NULL`` serializa
+    dois POSTs simultâneos). Devolve ``(dados, None)`` OK | ``(None, erro)``."""
+    idp = str(id_protocol or "").strip()
+    if not idp:
+        return None, "Avaliação não encontrada."
+    # bool é subclasse de int (True→1) — rejeita antes p/ não gravar nota de um `true`.
+    if isinstance(nota, bool):
+        return None, "Nota inválida (use 1 a 5)."
+    try:
+        n = int(nota)
+    except (TypeError, ValueError):
+        return None, "Nota inválida (use 1 a 5)."
+    if n < 1 or n > 5:
+        return None, "Nota inválida (use 1 a 5)."
+    sug = str(sugestao or "").strip()[:_SUGESTAO_CAP]
+    ts = now()
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT protocolo_id, contact_id, answered_at "
+                 "FROM plugin_protocolos_avaliacoes WHERE id_protocol = :idp"),
+            {"idp": idp},
+        ).mappings().first()
+        if not row:
+            return None, "Avaliação não encontrada."
+        if row["answered_at"] is not None:
+            return None, "Esta avaliação já foi respondida."
+        res = conn.execute(
+            text("UPDATE plugin_protocolos_avaliacoes SET nota = :nota, sugestao = :sug, "
+                 "answered_at = :ts, answered_ip = :ip, updated_at = :ts "
+                 "WHERE id_protocol = :idp AND answered_at IS NULL"),
+            {"nota": n, "sug": sug, "ts": ts, "ip": str(ip or "")[:64], "idp": idp},
+        )
+    if res.rowcount == 0:
+        # Perdeu a corrida: outro POST respondeu entre o SELECT e o UPDATE.
+        return None, "Esta avaliação já foi respondida."
+    # Atualiza o Kanban/painel ao vivo (a nota passa a aparecer no protocolo).
+    _broadcast_changed(row["contact_id"], row["protocolo_id"])
+    return {"protocolo": idp, "nota": n, "sugestao": sug}, None
+
+
+def get_reactivate_ai_on_close_setting() -> bool:
+    """Setting ``plugin.protocolos.reactivate_ai_on_close`` (default True): religar a
+    IA na conversa ao finalizar o protocolo. Serve de default quando o fechar não traz
+    um override explícito ``reactivate_ai`` no corpo (o futuro botão de finalização)."""
+    return bool(config_repo.get(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close", True))
+
+
+async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) -> None:
+    """Ao FINALIZAR o protocolo: religa a IA na conversa mais recente se o interruptor
+    GLOBAL (``auto_reply``) E a IA do CANAL (``ai_enabled``) estiverem ligados. Mantém a
+    tag ``transferido_atendente`` (é só rótulo visual desde o plano 37, não trava mais
+    a IA). Best-effort — nunca levanta (não pode quebrar a resposta do fechar).
+
+    Reusa ``conversation_service.set_ai`` (limpa o assignee humano, revincula o agente
+    de IA padrão do inbox e grava ``ai_active=1``) porque só gravar ``ai_active=1`` não
+    passa o gate de humano quando um atendente assumiu a conversa."""
+    try:
+        # Protocolo órfão (conversa excluída): sem alvo válido — não religa.
+        if _is_orphan_protocolo(at):
+            return
+        conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
+        if not conv_id:
+            return
+        channel_id = _channel_for_conversation(conv_id)
+        from plugins.context import get_deps
+        deps = get_deps()
+        if not deps:
+            return
+        # Gate global + canal — MESMA regra do webhook ``_channel_ai_enabled`` (que é
+        # closure e não é importável), replicada aqui: global primeiro, depois canal.
+        if not deps.settings.get("auto_reply", True):
+            return
+        from channels import ai_settings
+        if not ai_settings.value(channel_id, "ai_enabled", True):
+            return
+        conv = conversation_repo.get(conv_id)
+        if not conv:
+            return
+        # Guard anti-ruído: só age se a IA está de fato desligada nesta conversa
+        # (ai_active=0 OU humano no comando sem agente de IA) — evita card "ai_on"
+        # espúrio em protocolos fechados onde a IA nunca foi desligada.
+        human_owned = (conv.get("assignee_user_id") is not None
+                       and not conv.get("active_agent_key"))
+        if conv.get("ai_active") and not human_owned:
+            return
+        from app.services import conversation_service
+        # Ação AUTOMÁTICA (efeito de fechar o protocolo, não um toggle manual do
+        # atendente): actor_name=None ⇒ o card lê "🤖 SISTEMA reativou a IA.", nunca
+        # o nome de quem fechou. (O ``actor_name`` recebido fica só para logs futuros.)
+        await conversation_service.set_ai(
+            deps, conv, 1, actor_name=None, clear_transfer_tag=False)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: reactivate_ai_after_close falhou: %s", e)
 
 
 # ── Enforcement no backend (filter.conversation.before_status) ────────────────
@@ -2454,8 +3099,9 @@ def notify_on_ignored(ctx, value):
 # ── Util ──────────────────────────────────────────────────────────────────────
 
 def _broadcast_changed(contact_id: int | None, protocolo_id: int | None) -> None:
-    # Invalida o índice do Kanban ANTES de avisar o frontend (vale para todas as
-    # réplicas — a geração vive no `config`). Falhar aqui nunca impede o broadcast.
+    # Invalida o índice do Kanban ANTES de avisar o frontend: o refetch disparado pelo
+    # WS já enxerga a geração nova (vale para todas as réplicas — a geração vive no
+    # `config`). Defensivo: falhar aqui nunca pode impedir o broadcast.
     try:
         from . import kanban_index
         kanban_index.bump_generation()

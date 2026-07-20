@@ -1,23 +1,25 @@
 id: protocolos
 name: Protocolos
-version: 1.11.0
+version: 1.16.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
   kanban/lista nativo e ADICIONA a entidade Protocolo, que agrupa os atendimentos de um
   contato (1 protocolo aberto por contato; todo atendimento do contato entra nele). Assume
-  a aba Protocolos (override de rota) acrescentando a lista de protocolos + uma entrada
-  no menu da engrenagem; injeta o painel "Protocolo atual" dentro do chat (slot); abre um
-  popup com campos CONFIGURÁVEIS ao resolver cada atendimento (com enforcement no backend) e
-  espelha esses campos em conversations.custom_attributes do core (integra atendimento↔
-  protocolo e sobrevive se o plugin desativar); e traz uma tela de configuração para
-  criar/remover campos (texto, área, seleção, rádio, checkbox; com atalho de campos rápidos
-  por CSV). Ao finalizar exige resolver o último atendimento, grava o agente que resolveu e
-  registra uma nota privada de abertura. Substitui e aposenta o plugin de referência Extensão
-  Demo. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
+  a aba Protocolos (override de rota em /protocolos) com kanban e lista próprios + uma
+  entrada no menu da engrenagem. O Kanban traz visualizações dinâmicas de "Agrupar por"
+  (status, atendente, data — por dia/semana/mês/faixas ou período personalizado — e por
+  campo de opção do protocolo), arrastar cards entre colunas com confirmação, e
+  visualizações de EQUIPE e PESSOAIS com controle de visibilidade (ACL) e ordenação de
+  colunas. Ao resolver cada atendimento abre um popup com campos CONFIGURÁVEIS (com
+  enforcement no backend) e espelha esses campos em conversations.custom_attributes do core
+  (integra atendimento↔protocolo e sobrevive se o plugin desativar). A tela de configuração
+  cria/remove campos de vários tipos — texto, área, número, data, seleção, rádio, checkbox,
+  múltipla escolha e atendente nativo — com validação por regex. Ao finalizar exige resolver
+  o último atendimento, grava o agente que resolveu e registra uma nota privada de abertura.
+  Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
+  de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.
-short_description: >-
-  Camada de protocolos (estilo Chatwoot) que agrupa os atendimentos de cada contato, com popup de campos configuraveis ao resolver e Kanban personalizavel. Substitui a Extensao Demo.
 author: WhatsBot
 entry:
   routes: routes      # REST: /api/plugins/protocolos/...
