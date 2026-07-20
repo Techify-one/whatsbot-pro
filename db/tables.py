@@ -150,6 +150,15 @@ Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
 Index("idx_msg_execution", messages.c.execution_id)
+# Índice PARCIAL (plano 62 F2, materializado na migration 0059): o scan de
+# conteúdo da busca (``contact_ids_matching_message`` em db/search/contact_search.py)
+# faz ``ORDER BY ts DESC LIMIT MESSAGE_SCAN_CAP`` filtrando os MESMOS 4 roles do
+# predicado abaixo — vira index scan reverso com early-termination. Subconjunto
+# deliberado de LIST_PANEL_ONLY_ROLES: transcription/private_note/error seguem
+# pesquisáveis, então ficam no índice.
+Index("idx_msg_ts_visible", messages.c.ts.desc(),
+      postgresql_where=text(
+          "role NOT IN ('tool_call', 'system_notice', 'conversation_event', 'system')"))
 
 
 usage = Table(
