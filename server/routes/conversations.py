@@ -24,6 +24,7 @@ from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
 from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
+from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,11 @@ def register_routes(app, deps):
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
             limit=limit, offset=offset)
-        return _ok({"conversations": rows})
+        # avatar_v por row (plano 50 F8): o sidebar conversa-first monta a foto sem um
+        # fetch de contatos à parte. has_more = veio a página cheia (há próxima).
+        for r in rows:
+            r["avatar_v"] = avatar_version(settings, r.get("contact_phone") or "")
+        return _ok({"conversations": rows, "has_more": len(rows) >= limit})
 
     @app.get("/api/atendimentos/filter-schema")
     async def filter_schema(request: Request):
@@ -148,12 +153,17 @@ def register_routes(app, deps):
             logger.warning("Filtro inválido: %s", e)
             return _err("Filtro inválido.", status=400)
         _u = current_user(request)
+        # Over-fetch por 1 p/ saber se há próxima página (scroll infinito), sem 2ª query
+        # nem COUNT — mesmo padrão do endpoint de mensagens. Dropa a linha extra.
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where,
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
-            limit=spec.limit, offset=spec.offset)
-        return _ok({"conversations": rows, "count": len(rows)})
+            limit=spec.limit + 1, offset=spec.offset)
+        has_more = len(rows) > spec.limit
+        if has_more:
+            rows = rows[:spec.limit]
+        return _ok({"conversations": rows, "count": len(rows), "has_more": has_more})
 
     @app.get("/api/atendimentos/assignable-agents")
     async def assignable_agents(request: Request):
@@ -207,16 +217,25 @@ def register_routes(app, deps):
         return _ok({"conversation": conv})
 
     @app.get("/api/atendimentos/{conv_id}/messages")
-    async def conversation_messages(conv_id: int, request: Request, mark_read: bool = True):
+    async def conversation_messages(conv_id: int, request: Request,
+                                    mark_read: bool = True,
+                                    limit: int = PAGE_MSGS,
+                                    before_id: int | None = None):
         """Messages of ONE conversation (conversa-cêntrico, plano 11 D1).
 
         Substitui GET /api/contacts/{phone} para o chat: escopa o thread a um único
         canal (não funde os canais do mesmo número) e marca como lida APENAS esta
         conversa. Devolve conversa + contato (shape do chat) + mensagens + channel_id.
+
+        Paginação keyset (plano 50 F3): devolve a PÁGINA mais recente (as ``limit``
+        últimas, capado em ``CAP_MSGS``). ``before_id`` (id da 1ª msg da página atual)
+        traz as ``limit`` anteriores — o "carregar anteriores" do scroll-up. ``has_more``
+        avisa se ainda há msgs mais antigas. Ordem sempre cronológica (oldest→newest).
         """
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
+        page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
         can_read_contact = has_permission(request, "contact.read")
         _u = current_user(request)
@@ -225,10 +244,10 @@ def register_routes(app, deps):
         def _load():
             conv = conversation_repo.get_with_channel(conv_id, _uid)
             if conv is None:
-                return None, None, [], []
+                return None, None, [], [], False, None
             # Inbox membership scoping: hide (as 404) before any mark-read side effect.
             if vis is not None and conv.get("inbox_id") not in vis:
-                return None, None, [], []
+                return None, None, [], [], False, None
             phone = conv.get("contact_phone") or ""
             if can_read_contact:
                 contact = contact_repo.get_full_contact(phone) if phone else None
@@ -256,7 +275,13 @@ def register_routes(app, deps):
                     conv["has_user_mention"] = False
                 except Exception:
                     logger.exception("Falha ao marcar menções lidas na conversa %s", conv_id)
-            msgs = message_repo.get_by_conversation(conv_id)
+            # Keyset (plano 50 F3): over-fetch por 1 p/ detectar has_more sem 2ª query.
+            # A msg extra é a mais ANTIGA da janela (lista cronológica) → dropa índice 0.
+            msgs = message_repo.get_by_conversation(
+                conv_id, limit=page_limit + 1, before_id=before_id)
+            has_more = len(msgs) > page_limit
+            if has_more:
+                msgs = msgs[1:]
             # Atribuição de agente: resolve agent_key → display_name (dedupe por chave)
             # para o painel exibir "IA - <NOME>" / "Ferramenta IA - <NOME>".
             _an_cache: dict = {}
@@ -268,9 +293,13 @@ def register_routes(app, deps):
                     _an_cache[_ak] = agent_repo.display_name_for(_ak)
                 if _an_cache[_ak]:
                     _m["agent_name"] = _an_cache[_ak]
-            return conv, contact, msgs, ids
+            # Janela Cloud 24h: SEMPRE a query dedicada (não o max(ts) da página — que
+            # com paginação só veria a página recente e poderia "fechar" errado). Risco
+            # apontado no plano; mesmo precedente de contacts.py.
+            last_in = message_repo.last_inbound_ts(conversation_id=conv_id)
+            return conv, contact, msgs, ids, has_more, last_in
 
-        conv, contact, msgs, msg_ids = await asyncio.to_thread(_load)
+        conv, contact, msgs, msg_ids, has_more, last_inbound_ts = await asyncio.to_thread(_load)
         if conv is None:
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
@@ -280,16 +309,17 @@ def register_routes(app, deps):
         # Compositor hints (Frente C): whether this channel can send templates, and
         # whether the free-text session window is still open (else only a template
         # may be sent). Capability-driven — no provider-name checks.
-        last_inbound_ts = max(
-            (m.get("ts") or 0 for m in msgs if m.get("role") == "user"), default=None)
         return _ok({
             "conversation": conv,
             "contact": contact,
             "messages": msgs,
+            "has_more": has_more,
             "channel_id": channel_id,
             "avatar_v": avatar_version(settings, phone) if can_read_contact else None,
             "templates_supported": outbound.supports(channel_id, "templates"),
             "session_open": outbound.session_open(channel_id, last_inbound_ts),
+            "revoke_supported": outbound.supports(channel_id, "revoke"),
+            "edit_supported": outbound.supports(channel_id, "edit_message"),
         })
 
     @app.post("/api/atendimentos/{conv_id}/status")

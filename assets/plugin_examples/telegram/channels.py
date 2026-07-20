@@ -71,6 +71,8 @@ class TelegramChannel(Channel):
                 presence=False,       # Bot API has no "typing received" inbound
                 reactions=True,       # setMessageReaction (Bot API 7.0+)
                 media=True,
+                revoke=True,          # deleteMessage (delete for everyone)
+                edit_message=True,    # editMessageText
                 inbound_route="poll",  # long-poll by default; webhook also supported
                 session_window_hours=0,
                 # No QR / connect step: without a bot_token the channel can never
@@ -232,6 +234,17 @@ class TelegramChannel(Channel):
         self._request("setMessageReaction", {
             "chat_id": chat_id, "message_id": _to_int(msg_id), "reaction": reaction})
 
+    def revoke(self, chat_id: str, msg_id: str) -> None:
+        """Delete a message for everyone via Bot API ``deleteMessage``."""
+        self._request("deleteMessage", {
+            "chat_id": chat_id, "message_id": _to_int(msg_id)})
+
+    def edit_text(self, chat_id: str, msg_id: str, text: str) -> SendResult:
+        """Edit a sent message's text via Bot API ``editMessageText``."""
+        res = self._request("editMessageText", {
+            "chat_id": chat_id, "message_id": _to_int(msg_id), "text": text})
+        return _send_result(res)
+
     # mark_read: Bot API has no "mark as read"; inherit the base no-op.
 
     # ── Inbound media download (mirrors Cloud P16) ───────────────────
@@ -289,8 +302,24 @@ class TelegramChannel(Channel):
         if not isinstance(raw, dict):
             return events
 
-        msg = (raw.get("message") or raw.get("edited_message")
-               or raw.get("channel_post") or raw.get("edited_channel_post"))
+        # An edited message keeps the SAME message_id, so mirror it as an "edited"
+        # event (new text/caption) instead of re-ingesting it as a brand-new
+        # message. The core webhook updates the stored content + broadcasts.
+        edited = raw.get("edited_message") or raw.get("edited_channel_post")
+        if isinstance(edited, dict):
+            base = self._parse_message(edited)
+            if base is not None:
+                mid = base.external_msg_id
+                events.append(InboundEvent(
+                    channel_id=self.channel_id, provider=self.provider, kind="edited",
+                    external_msg_id=mid, chat_id=base.chat_id, sender_id=base.sender_id,
+                    sender_name=base.sender_name, is_group=base.is_group,
+                    text=base.text, ts=base.ts,
+                    media_extras={"original_message_id": mid, "is_from_me": False},
+                    raw=edited))
+            return events
+
+        msg = raw.get("message") or raw.get("channel_post")
         if isinstance(msg, dict):
             ev = self._parse_message(msg)
             if ev is not None:

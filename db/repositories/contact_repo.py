@@ -232,6 +232,93 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
     return contact_query.list_for_export(inbox_ids)
 
 
+def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
+    """Gerador chunked de contatos p/ export CSV streaming (plano 50 F11). Sem N+1
+    (tags em lote por chunk) e memória constante. Ver ``contact_query.iter_for_export``."""
+    return contact_query.iter_for_export(inbox_ids, chunk=chunk)
+
+
+def _shape_contact_row(row, tags_list: list) -> dict:
+    """Row (heavy SELECT) → dict de contato para a sidebar/lista. Shape byte-idêntico
+    ao antigo loop inline (plano 50 F5 extraiu para reuso entre list/page)."""
+    contact_id = row["id"]
+    last_content = media_preview(row["last_msg_content"], row["last_msg_media_type"])
+    is_group = bool(row["is_group"])
+    group_name = row["group_name"] or ""
+    name = group_name if is_group else (row["name"] or "")
+    attrs = _coerce_attrs(row)
+    return {
+        "id": contact_id,
+        "phone": row["phone"],
+        "name": name,
+        # Email is now a (default) custom attribute — source it from the JSON,
+        # falling back to the legacy column for not-yet-migrated rows. Kept at
+        # top-level so the contacts list can still show it under the name.
+        "email": (attrs.get("email") if isinstance(attrs, dict) else None) or (row["email"] or ""),
+        "last_message": last_content,
+        "last_message_role": row["last_msg_role"] or "",
+        "last_message_ts": row["last_msg_ts"] or 0,
+        "last_message_status": row["last_msg_status"] or "",
+        "last_message_msg_id": row["last_msg_id"] or "",
+        "msg_count": row["msg_count"] or 0,
+        "unread_count": row["unread_count"],
+        "unread_ai_count": row["unread_ai_count"],
+        "has_unread_mention": bool(row["has_unread_mention"]),
+        # Tipo do contato (plano tipos-de-contato) — alimenta o filtro por
+        # tipo na sidebar (client-side) e a marca no painel do contato.
+        "contact_type": row["contact_type"] or "outros",
+        "ai_enabled": bool(row["ai_enabled"]),
+        "is_group": is_group,
+        "group_name": group_name,
+        "is_archived": bool(row["is_archived"]),
+        "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
+        "is_pinned": bool(row["is_pinned"]) if row["is_pinned"] is not None else False,
+        "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
+        # Contact-scoped custom attributes (plano 05) — exposed in the list so
+        # the client-side contact/conversation filter can match on them
+        # (incl. the seeded defaults Email/Profissão/Empresa/Endereço). The
+        # column is already SELECTed (full contacts table); coerce_attrs
+        # tolerates the SQLite str-serialized form.
+        "custom_attributes": attrs,
+        "tags": tags_list,
+        "updated_at": row["updated_at"],
+        # Active conversation (plano 10 FF2) — drives the status/assignment
+        # tabs and the assignee shown on each row. NULL for contacts that
+        # never got a conversation (treated as open/unassigned by the UI).
+        "conversation_id": row["conv_id"],
+        "conv_status": row["conv_status"] or "open",
+        "assignee_user_id": row["conv_assignee_user_id"],
+        "active_agent_key": row["conv_active_agent_key"],
+        "conv_ai_active": (
+            bool(row["conv_ai_active"]) if row["conv_ai_active"] is not None else True),
+    }
+
+
+def _apply_q_filter(conn, results: list, q: str, archived: bool) -> list:
+    """Filtra a lista já shaped pela busca textual ``q`` (nome/telefone/grupo/tag +
+    conteúdo de mensagem). Roda em Python DEPOIS do SELECT — por isso a paginação SQL
+    só vale SEM ``q`` (com ``q`` a página é fatiada em Python, ver ``list_contacts_page``)."""
+    ql = contact_search.fold(q)
+    # Also match by message content (normal, private notes, transcriptions),
+    # so the search bar finds a conversation by something that was said in it.
+    msg_matched = contact_search.contact_ids_matching_message(conn, ql, archived)
+    filtered = []
+    for c in results:
+        if (ql in contact_search.fold(c["name"])
+                or ql in c["phone"]
+                or ql in contact_search.fold(c.get("group_name", ""))
+                or any(ql in contact_search.fold(t) for t in c.get("tags", []))):
+            filtered.append(c)
+        elif c["id"] in msg_matched:
+            # Matched only by message content — show the matching excerpt so the
+            # operator sees why this conversation came up, and the message id so
+            # opening it can scroll straight to that message.
+            c["match_snippet"] = msg_matched[c["id"]]["snippet"]
+            c["match_msg_id"] = msg_matched[c["id"]]["id"]
+            filtered.append(c)
+    return filtered
+
+
 def list_contacts(q: str = "", archived: bool = False,
                   inbox_ids: list[int] | None = None) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts.
@@ -239,105 +326,57 @@ def list_contacts(q: str = "", archived: bool = False,
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7): ``None``
     ⇒ no scoping; empty ⇒ nothing; a list ⇒ only contacts with a conversation in
     one of those inboxes. Mirrors ``conversation_repo.list_conversations`` so the
-    contact-centric sidebar não vaza contatos de caixas que o usuário não acessa."""
-    if inbox_ids is not None and not inbox_ids:
-        return []  # member of no inbox → sees nothing
+    contact-centric sidebar não vaza contatos de caixas que o usuário não acessa.
 
-    # Heavy SELECT (last visible message + active conversation + msg_count + inbox
-    # scope) built in Core by contact_search — replaces the prior raw-SQL .format().
-    # The inbox-scope IN-list is bound by Core's ``.in_(list)`` (auto-expanding).
-    stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids)
+    Retorna a lista COMPLETA (sem teto) — caminho legado para callers internos
+    (varredura de avatares) e para o endpoint sem paginação. A versão paginada é
+    :func:`list_contacts_page` (plano 50 F5)."""
+    return list_contacts_page(q, archived, inbox_ids, limit=None, offset=0)["items"]
+
+
+def list_contacts_page(q: str = "", archived: bool = False,
+                       inbox_ids: list[int] | None = None, *,
+                       limit: int | None = None, offset: int = 0,
+                       sort: str = "recency") -> dict:
+    """Página de contatos (plano 50 F5) → ``{items, total, has_more}``.
+
+    ``limit=None`` ⇒ tudo (byte-idêntico ao legado; ``total=len``, ``has_more=False``).
+    ``limit`` set: SEM ``q`` pagina no SQL (``LIMIT/OFFSET`` + COUNT barato); COM ``q``
+    carrega tudo, filtra em Python e fatia a página (a busca corre post-SELECT, não dá
+    p/ paginar no SQL). ``total`` = universo (sem/uma busca), ``has_more`` = há página
+    seguinte."""
+    if inbox_ids is not None and not inbox_ids:
+        return {"items": [], "total": 0, "has_more": False}  # sem inbox → nada
 
     with get_engine().connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-
-        # N+1 fix: batch-load every listed contact's tags in ONE query, grouped in
-        # row-iteration order so the per-contact tag list/order is byte-identical to
-        # the old per-row query.
-        contact_ids = [row["id"] for row in rows]
-        tags_map = contact_query.tags_by_contact(conn, contact_ids)
-
-        results = []
-        for row in rows:
-            contact_id = row["id"]
-            tags_list = tags_map.get(contact_id, [])
-
-            last_content = media_preview(row["last_msg_content"], row["last_msg_media_type"])
-
-            is_group = bool(row["is_group"])
-            group_name = row["group_name"] or ""
-            name = group_name if is_group else (row["name"] or "")
-
-            attrs = _coerce_attrs(row)
-
-            results.append({
-                "id": contact_id,
-                "phone": row["phone"],
-                "name": name,
-                # Email is now a (default) custom attribute — source it from the JSON,
-                # falling back to the legacy column for not-yet-migrated rows. Kept at
-                # top-level so the contacts list can still show it under the name.
-                "email": (attrs.get("email") if isinstance(attrs, dict) else None) or (row["email"] or ""),
-                "last_message": last_content,
-                "last_message_role": row["last_msg_role"] or "",
-                "last_message_ts": row["last_msg_ts"] or 0,
-                "last_message_status": row["last_msg_status"] or "",
-                "last_message_msg_id": row["last_msg_id"] or "",
-                "msg_count": row["msg_count"] or 0,
-                "unread_count": row["unread_count"],
-                "unread_ai_count": row["unread_ai_count"],
-                "has_unread_mention": bool(row["has_unread_mention"]),
-                # Tipo do contato (plano tipos-de-contato) — alimenta o filtro por
-                # tipo na sidebar (client-side) e a marca no painel do contato.
-                "contact_type": row["contact_type"] or "outros",
-                "ai_enabled": bool(row["ai_enabled"]),
-                "is_group": is_group,
-                "group_name": group_name,
-                "is_archived": bool(row["is_archived"]),
-                "archived_by_app": bool(row["archived_by_app"]) if row["archived_by_app"] is not None else False,
-                "is_pinned": bool(row["is_pinned"]) if row["is_pinned"] is not None else False,
-                "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
-                # Contact-scoped custom attributes (plano 05) — exposed in the list so
-                # the client-side contact/conversation filter can match on them
-                # (incl. the seeded defaults Email/Profissão/Empresa/Endereço). The
-                # column is already SELECTed (full contacts table); coerce_attrs
-                # tolerates the SQLite str-serialized form.
-                "custom_attributes": attrs,
-                "tags": tags_list,
-                "updated_at": row["updated_at"],
-                # Active conversation (plano 10 FF2) — drives the status/assignment
-                # tabs and the assignee shown on each row. NULL for contacts that
-                # never got a conversation (treated as open/unassigned by the UI).
-                "conversation_id": row["conv_id"],
-                "conv_status": row["conv_status"] or "open",
-                "assignee_user_id": row["conv_assignee_user_id"],
-                "active_agent_key": row["conv_active_agent_key"],
-                "conv_ai_active": (
-                    bool(row["conv_ai_active"]) if row["conv_ai_active"] is not None else True),
-            })
-
         if q:
-            ql = contact_search.fold(q)
-            # Also match by message content (normal, private notes, transcriptions),
-            # so the search bar finds a conversation by something that was said in it.
-            msg_matched = contact_search.contact_ids_matching_message(conn, ql, archived)
-            filtered = []
-            for c in results:
-                if (ql in contact_search.fold(c["name"])
-                        or ql in c["phone"]
-                        or ql in contact_search.fold(c.get("group_name", ""))
-                        or any(ql in contact_search.fold(t) for t in c.get("tags", []))):
-                    filtered.append(c)
-                elif c["id"] in msg_matched:
-                    # Matched only by message content — show the matching excerpt so the
-                    # operator sees why this conversation came up, and the message id so
-                    # opening it can scroll straight to that message.
-                    c["match_snippet"] = msg_matched[c["id"]]["snippet"]
-                    c["match_msg_id"] = msg_matched[c["id"]]["id"]
-                    filtered.append(c)
-            results = filtered
+            # Busca: precisa de TODAS as linhas p/ o filtro Python; fatia a página depois.
+            stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
+            rows = conn.execute(stmt).mappings().all()
+            tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
+            results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
+            results = _apply_q_filter(conn, results, q, archived)
+            total = len(results)
+            if limit is not None:
+                results = results[offset:offset + limit]
+            return {"items": results, "total": total,
+                    "has_more": (offset + len(results)) < total}
 
-    return results
+        # Sem busca: pagina no SQL (o ponto do plano — não trazer 100k linhas).
+        stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
+        rows = conn.execute(stmt).mappings().all()
+        # N+1 fix: batch-load das tags de toda a página em UMA query.
+        tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
+        results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
+        if limit is None:
+            return {"items": results, "total": len(results), "has_more": False}
+        total = conn.execute(
+            contact_search.build_count_contacts_query(archived=archived, inbox_ids=inbox_ids)
+        ).scalar() or 0
+        return {"items": results, "total": total,
+                "has_more": (offset + len(results)) < total}
 
 
 def get_full_contact(phone: str) -> dict | None:

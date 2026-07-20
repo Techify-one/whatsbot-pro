@@ -559,6 +559,15 @@ class GOWAClient:
             logger.warning("revoke_message failed for %s: %s", message_id, e)
             return None
 
+    def update_message(self, message_id: str, phone: str, text: str) -> dict | None:
+        """Edit a sent message's text via ``POST /message/{id}/update``.
+
+        Raises on error (``raise_on_error=True``) so the caller can surface an edit
+        failure — WhatsApp only allows editing text messages within ~15 min."""
+        payload = {"phone": self._message_jid(phone), "message": text}
+        return self._request("POST", f"/message/{message_id}/update",
+                             json=payload, raise_on_error=True)
+
     def delete_message(self, message_id: str, phone: str) -> dict | None:
         """Delete a message for me only (local device). Best-effort, never raises."""
         payload = {"phone": self._message_jid(phone)}

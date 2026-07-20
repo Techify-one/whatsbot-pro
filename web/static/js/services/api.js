@@ -158,10 +158,17 @@ export async function sandboxSendDocument(phone, file, caption = '') {
 
 // ── Contacts ──────────────────────────────────────────────────────
 
-export async function getContacts(q = '', archived = false) {
+// `opts` (plano 50 F5/F7): { limit, offset, sort } ativam a paginação server-side — a
+// resposta vira o envelope { items, total, has_more } (cap no servidor). `sort='name'`
+// ordena alfabético (tela /contacts); default do servidor = recência (sidebar). SEM opts
+// o shape legado (data = lista completa) é mantido, então callers antigos não mudam.
+export async function getContacts(q = '', archived = false, opts = {}) {
   const params = [];
   if (archived) params.push('archived=true');
   if (q) params.push(`q=${encodeURIComponent(q)}`);
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
+  if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts${query}`);
 }
@@ -191,19 +198,29 @@ export async function getUnreadCount() {
 // atendimento Novo pela caixa de entrada selecionada, antes de existir um atendimento
 // nesse canal, carrega só as mensagens daquele canal (vazio se ainda não houver) —
 // nunca cai no atendimento de outro canal do mesmo número.
-export async function getContact(phone, markRead = true, channelId = null) {
+// `opts` (plano 50 F4): { limit, beforeId } paginam o histórico (keyset). Sem opts
+// = página mais recente (retrocompatível). `beforeId` (o _id da 1ª msg da página
+// atual) carrega as anteriores; a resposta traz `has_more`.
+export async function getContact(phone, markRead = true, channelId = null, opts = {}) {
   const params = [];
   if (!markRead) params.push('mark_read=false');
   if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
   const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
 }
 
 // Atendimento-cêntrico (plano 11 D1): carrega a thread de Um atendimento (um canal),
 // sem fundir os canais do mesmo número. Retorna {conversation, contact, messages,
-// channel_id, avatar_v}. markRead=false não zera o badge daquela atendimento.
-export async function getConversationMessages(convId, markRead = true) {
-  const qs = markRead ? '' : '?mark_read=false';
+// has_more, channel_id, avatar_v}. markRead=false não zera o badge daquela atendimento.
+// `opts` (plano 50 F4): { limit, beforeId } — keyset scroll-up (ver getContact).
+export async function getConversationMessages(convId, markRead = true, opts = {}) {
+  const params = [];
+  if (!markRead) params.push('mark_read=false');
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/atendimentos/${convId}/messages${qs}`);
 }
 
@@ -245,6 +262,14 @@ export async function deleteMessage(phone, { msgId = null, dbId = null, scope = 
   const body = { msg_id: msgId, db_id: dbId, scope };
   if (conversationId != null) body.conversation_id = conversationId;
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/delete`, body);
+}
+
+// Edit the text of an already-sent outgoing message (operator/AI). Requires msgId
+// (the provider message id); text-only messages, within the provider's edit window.
+export async function editMessage(phone, { msgId = null, dbId = null, text = '', conversationId = null } = {}) {
+  const body = { msg_id: msgId, db_id: dbId, text };
+  if (conversationId != null) body.conversation_id = conversationId;
+  return request('POST', `/api/contacts/${encodeURIComponent(phone)}/messages/edit`, body);
 }
 
 // React to a message with an emoji. Empty emoji removes the operator's reaction.
@@ -572,6 +597,12 @@ export async function getConversationLabelsFor(convId) {
   return request('GET', `/api/atendimentos/${convId}/labels`);
 }
 
+// plano 50 F13 — etiquetas de VÁRIAS conversas numa request: {labels_by_conv:{id:[...]}}.
+// Substitui o fan-out de 1 GET por atendimento no modo etiqueta do Kanban.
+export async function getConversationLabelsBatch(ids) {
+  return request('POST', '/api/atendimentos/labels-batch', { ids });
+}
+
 // Replace a conversation's labels (snapshot of names).
 export async function updateConversationLabels(convId, labels) {
   return request('PUT', `/api/atendimentos/${convId}/labels`, { labels });
@@ -748,6 +779,12 @@ export async function setChannelMembers(id, userIds) {
 // {connected, logged_in, needs_qr, own_phone, error}
 export async function getChannelStatus(id) {
   return request('GET', `/api/channels/${encodeURIComponent(id)}/status`);
+}
+
+// plano 50 F13 — status de VÁRIOS canais numa request: {status_by_id:{id:status}}.
+// Substitui o fan-out de 1 GET por canal na tela Canais.
+export async function getChannelStatusBatch(ids) {
+  return request('POST', '/api/channels/status-batch', { ids });
 }
 
 // Reconnect a GOWA channel's device socket (plano 27) — acts on the right

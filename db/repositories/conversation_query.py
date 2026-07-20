@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from sqlalchemy import exists, literal
 
-from db.repositories._mapping import _PREVIEW_EXCLUDED, media_preview
+from db.repositories._mapping import _PREVIEW_EXCLUDED, coerce_json, media_preview
 from db.tables import (channels, contacts, conversations, inboxes, mentions,
                        messages, unread_msg_ids)
 
@@ -79,10 +79,18 @@ def enriched_columns(include_private_note: bool = False,
         # o conversation_upsert (WS) já nascer filtrável por tipo, sem esperar o
         # reconcile — igual a unread_ai_count (nível-contato).
         contacts.c.contact_type.label("contact_type"),
-        # ``is_pinned`` vem do ATENDIMENTO (plano 54 — fixar por conversa), não do
+        # Atributos personalizados DO CONTATO (plano 50 F8): carregados no row para o
+        # sidebar conversa-first filtrar por `cattr:contact:*` sem um fetch de contatos
+        # à parte. NÃO confundir com o custom_attributes DA CONVERSA (coluna própria de
+        # `conversations`, já incluída via `conversations` acima).
+        contacts.c.custom_attributes.label("contact_custom_attributes"),
+        # ``is_pinned`` vem do ATENDIMENTO (plano 54/57 — fixar por conversa), não do
         # contato: a coluna ``atendimentos.is_pinned`` já entra no row via o
         # ``conversations`` selecionado inteiro acima, então NÃO se re-rotula o do
-        # contato aqui (colidiria a chave). ``finalize_conv`` lê essa mesma chave.
+        # contato aqui. Re-rotular colidiria a chave ``is_pinned`` e, no ``.mappings()``,
+        # o valor do CONTATO venceria — mascarando o pin da conversa e divergindo da
+        # ordenação por ``conversations.c.is_pinned`` do ``conversation_repo``.
+        # ``finalize_conv`` lê essa mesma chave.
         contacts.c.has_unread_mention.label("has_unread_mention"),
         # Contact-level AI-unread count (plano 28): carried so a conversation_upsert
         # keeps the "IA respondeu" badge live (contact-level, like in buildRows).
@@ -124,4 +132,8 @@ def finalize_conv(row) -> dict:
     d["is_pinned"] = bool(d.get("is_pinned"))
     d["has_unread_mention"] = bool(d.get("has_unread_mention"))
     d["has_user_mention"] = bool(d.get("has_user_mention"))
+    # Contato (plano 50 F8): decodifica os atributos personalizados do contato para dict
+    # (tolera a forma str legada), para o sidebar conversa-first filtrar por eles.
+    _cca = coerce_json(d.get("contact_custom_attributes"), {})
+    d["contact_custom_attributes"] = _cca if isinstance(_cca, dict) else {}
     return d

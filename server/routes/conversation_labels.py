@@ -21,6 +21,7 @@ from server import system_notices
 from server.authz import permission_denied, current_user
 from server.deps import require_permission, install_exception_handlers
 from server.helpers import _ok, _err
+from server.pagination import CAP_LIST
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,26 @@ def register_routes(app, deps):
             return denied
         rows = await asyncio.to_thread(label_repo.get_for_conversation, conv_id)
         return _ok({"conversation_id": conv_id, "labels": rows})
+
+    @app.post("/api/atendimentos/labels-batch")
+    async def get_conversation_labels_batch(body: dict, request: Request):
+        """Etiquetas de VÁRIAS conversas em UMA request (plano 50 F13). Substitui o
+        fan-out de 1 GET por atendimento no modo etiqueta do Kanban. Body: ``{ids:[...]}``
+        → ``{labels_by_conv: {id: [label,...]}}``. Cap defensivo no nº de ids."""
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        raw = body.get("ids") or []
+        if not isinstance(raw, list):
+            return _err("ids deve ser uma lista.")
+        ids = []
+        for x in raw[:CAP_LIST * 5]:  # cap defensivo (F12): no máximo 1000 ids
+            try:
+                ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        by_conv = await asyncio.to_thread(label_repo.get_for_conversations, ids)
+        return _ok({"labels_by_conv": by_conv})
 
     @app.put("/api/atendimentos/{conv_id}/labels")
     async def set_conversation_labels(conv_id: int, body: dict, request: Request):

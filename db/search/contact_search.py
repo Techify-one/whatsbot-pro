@@ -69,6 +69,20 @@ def match_snippet(content: str, folded_q: str, radius: int = 40) -> str:
     return f"{prefix}{excerpt}{suffix}"
 
 
+# Teto de trabalho da busca por conteúdo (plano 50 F6): varre no máximo as N mensagens
+# MAIS RECENTES em vez da tabela `messages` inteira. Bound o custo por busca a algo
+# constante independente do total de mensagens. Trade-off: um match que só existe em
+# mensagens muito antigas (além das N recentes) pode escapar — aceitável p/ o caso de
+# uso "achar uma conversa por algo dito recentemente". Caminho futuro = FTS/tsvector
+# (plano P2). Nomes/telefone/tags NÃO usam este scan (casam sempre).
+MESSAGE_SCAN_CAP = 5000
+
+# Comprimento mínimo da query para ACIONAR o scan de conteúdo. Uma busca de 1 caractere
+# casaria quase tudo e forçaria a varredura inteira sem valor — nome/telefone/tag ainda
+# funcionam para 1 char (não dependem do scan).
+MIN_SCAN_QUERY_LEN = 2
+
+
 def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[int, dict]:
     """Map of contact id -> ``{"snippet": str, "id": int}`` for contacts (within the
     given archived scope) that have at least one message whose content matches
@@ -80,12 +94,16 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
     kept in the DB with their content, so they remain searchable too.
 
     Runs on the caller's ``conn`` (same connection used by ``list_contacts``).
+
+    Plano 50 F6: varre só as ``MESSAGE_SCAN_CAP`` mensagens mais recentes (teto de
+    custo) e exige ``len(folded_q) >= MIN_SCAN_QUERY_LEN`` (busca de 1 char não dispara
+    o scan — nome/telefone/tag já cobrem esse caso).
     """
-    if not folded_q:
+    if not folded_q or len(folded_q) < MIN_SCAN_QUERY_LEN:
         return {}
 
     # Most recent first, so the first match seen per contact is the freshest one.
-    # Core equivalent of the prior raw SQL — same join/filter/order.
+    # `.limit(MESSAGE_SCAN_CAP)` bound the scan às N recentes (F6).
     stmt = (
         select(messages.c.id, messages.c.contact_id, messages.c.content)
         .select_from(messages.join(contacts, contacts.c.id == messages.c.contact_id))
@@ -94,6 +112,7 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
         .where(messages.c.role.notin_(
             ("tool_call", "system_notice", "conversation_event", "system")))
         .order_by(messages.c.ts.desc())
+        .limit(MESSAGE_SCAN_CAP)
     )
     matched: dict[int, dict] = {}
     for row in conn.execute(stmt).mappings():
@@ -107,7 +126,8 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
 
 
 def build_list_contacts_query(*, archived: bool,
-                              inbox_ids: list[int] | None) -> Select:
+                              inbox_ids: list[int] | None,
+                              sort: str = "recency") -> Select:
     """Build the ``list_contacts`` SELECT as a SQLAlchemy Core statement.
 
     Replaces the prior raw ``text().format(preview_excluded=…, inbox_clause=…)``:
@@ -217,8 +237,39 @@ def build_list_contacts_query(*, archived: bool,
         ).exists()
         stmt = stmt.where(scope)
 
-    stmt = stmt.order_by(
-        contacts.c.is_pinned.desc(),
-        func.coalesce(lm.c.ts, contacts.c.updated_at).desc(),
+    if sort == "name":
+        # Tela /contacts (full-page): ordem alfabética por nome, caindo no telefone.
+        # (plano 50 F7 — a sidebar segue por recência via o default abaixo.)
+        stmt = stmt.order_by(
+            func.coalesce(func.nullif(contacts.c.name, ""), contacts.c.phone),
+            contacts.c.phone,
+        )
+    else:
+        stmt = stmt.order_by(
+            contacts.c.is_pinned.desc(),
+            func.coalesce(lm.c.ts, contacts.c.updated_at).desc(),
+        )
+    return stmt
+
+
+def build_count_contacts_query(*, archived: bool,
+                               inbox_ids: list[int] | None) -> Select:
+    """COUNT dos contatos que :func:`build_list_contacts_query` listaria (plano 50 F5).
+
+    Espelha só o ``WHERE`` (archived + escopo de inbox) — sem os joins de preview/
+    conversa/msg_count — para dar o ``total`` da paginação barato (uma varredura de
+    índice em ``contacts``, não a query pesada). Vale apenas para o caminho SEM busca
+    textual (com ``q`` o total é o tamanho da lista já filtrada em Python)."""
+    stmt = (
+        select(func.count())
+        .select_from(contacts)
+        .where(contacts.c.is_archived == (1 if archived else 0))
     )
+    if inbox_ids is not None:
+        scope = (
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contacts.c.id)
+            .where(conversations.c.inbox_id.in_(inbox_ids))
+        ).exists()
+        stmt = stmt.where(scope)
     return stmt

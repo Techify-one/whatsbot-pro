@@ -390,6 +390,25 @@ def register_routes(app, deps):
             return _err("Canal não encontrado.", 404)
         return _ok(await svc.status(deps, row))
 
+    @app.post("/api/channels/status-batch")
+    async def channels_status_batch(body: dict, request: Request):
+        """Status de VÁRIOS canais em UMA request (plano 50 F13). Substitui o fan-out de
+        1 GET por canal na tela Canais. Body ``{ids:[...]}`` → ``{status_by_id: {id: status}}``.
+        Status é volátil (rede/GOWA), por isso batch-endpoint (P6 opção a) e não embutido."""
+        denied = permission_denied(request, "channel.manage")
+        if denied:
+            return denied
+        raw = body.get("ids") or []
+        if not isinstance(raw, list):
+            return _err("ids deve ser uma lista.")
+        ids = [str(x) for x in raw[:200]]  # cap defensivo
+        out: dict[str, dict] = {}
+        for cid in ids:
+            row = await asyncio.to_thread(channel_repo.get, cid)
+            if row is not None:
+                out[cid] = await svc.status(deps, row)
+        return _ok({"status_by_id": out})
+
     @app.get("/api/channels/{channel_id}/qr")
     async def channel_qr(channel_id: str, request: Request):
         denied = permission_denied(request, "channel.manage")

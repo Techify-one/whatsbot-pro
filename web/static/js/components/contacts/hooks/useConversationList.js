@@ -21,9 +21,14 @@ import { buildRows, convRowToSidebarRow, sortContacts, distinctChannelCount } fr
  * @param {Object} opts
  * @param {(...args:any[])=>void} [opts.onUnreadChange] - app-shell unread refresh.
  */
+// Tamanho de página da sidebar conversa-first (plano 50 F8).
+const SIDEBAR_PAGE = 50;
+
 export function useConversationList({ onUnreadChange }) {
   const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);  // plano 50 F8: scroll infinito
+  const [hasMore, setHasMore] = useState(false);          // há próxima página (servidor)
   const [search, setSearch] = useState('');
   const [showArchived, setShowArchived] = useState(false);
 
@@ -32,6 +37,8 @@ export function useConversationList({ onUnreadChange }) {
   const searchRef = useRef('');                // current search term (for ref-based refetch)
   const fetchContactsRef = useRef(null);       // stable handle to fetchContacts
   const showArchivedRef = useRef(false);
+  const offsetRef = useRef(0);                  // plano 50 F8: cursor de paginação
+  const loadingMoreRef = useRef(false);         // guarda contra loadMore concorrente
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -79,31 +86,83 @@ export function useConversationList({ onUnreadChange }) {
     return () => { alive = false; };
   }, []);
 
+  // plano 50 F8 — SEM busca: conversa-first paginado (dirige por /api/atendimentos, que
+  // já pagina; DOM cresce por página via scroll infinito, sem baixar TODOS os contatos).
+  // COM busca: caminho legado (buildRows cruzando getContacts(q) × conversas) — preserva
+  // a semântica de busca. Contatos SEM atendimento não aparecem no modo conversa-first
+  // (P3: tratados à parte / pela tela Contatos); aparecem no modo busca via buildRows.
   const fetchContacts = useCallback((q = '') => {
+    offsetRef.current = 0;
     setLoading(true);
     const archivedView = showArchivedRef.current;
-    Promise.all([
-      // Plano 54: o arquivo agora é por CONVERSA, não por contato — a sidebar SEMPRE
-      // busca os contatos não-arquivados (universo de riqueza: nome/avatar/tags + os
-      // contatos sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
-      // ATENDIMENTOS abaixo; `buildRows` cruza os dois honrando `archivedView`.
-      getContacts(q, false),
-      listConversations({ archived: archivedView, limit: 200 }),
-    ]).then(([cRes, vRes]) => {
-      if (vRes && vRes.ok) {
-        const convs = (vRes.data && vRes.data.conversations) || [];
-        const rows = sortContacts(cRes && cRes.ok
-          ? buildRows(cRes.data || [], convs, { archivedView })
-          : convs.map(convRowToSidebarRow));
-        setContacts(rows);
-        contactsRef.current = rows;
-      } else {
-        setContacts([]);
-        contactsRef.current = [];
-      }
-      setLoading(false);
-    });
+    if (q) {
+      // Modo busca (legado): lista completa filtrada × conversas.
+      // Plano 54: o arquivo é por CONVERSA, não por contato — a busca SEMPRE pede os
+      // contatos não-arquivados (universo de riqueza: nome/avatar/tags + os contatos
+      // sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
+      // ATENDIMENTOS; `buildRows` cruza os dois honrando `archivedView`.
+      Promise.all([
+        getContacts(q, false),
+        listConversations({ archived: archivedView, limit: 200 }),
+      ]).then(([cRes, vRes]) => {
+        if (vRes && vRes.ok) {
+          const convs = (vRes.data && vRes.data.conversations) || [];
+          const rows = sortContacts(cRes && cRes.ok
+            ? buildRows(cRes.data || [], convs, { archivedView })
+            : convs.map(convRowToSidebarRow));
+          setContacts(rows);
+          contactsRef.current = rows;
+        } else {
+          setContacts([]); contactsRef.current = [];
+        }
+        setHasMore(false);
+        setLoading(false);
+      });
+      return;
+    }
+    // Modo conversa-first (1ª página). Aqui as rows vêm direto dos atendimentos, então
+    // a view (caixa × arquivadas) já é decidida no servidor pelo filtro `archived`.
+    listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 })
+      .then((vRes) => {
+        if (vRes && vRes.ok) {
+          const convs = (vRes.data && vRes.data.conversations) || [];
+          const rows = sortContacts(convs.map(convRowToSidebarRow));
+          setContacts(rows);
+          contactsRef.current = rows;
+          setHasMore(!!(vRes.data && vRes.data.has_more));
+          offsetRef.current = convs.length;
+        } else {
+          setContacts([]); contactsRef.current = []; setHasMore(false);
+        }
+        setLoading(false);
+      });
   }, []);
+
+  // Carrega a PRÓXIMA página (scroll infinito) e ANEXA (dedup por conversation_id).
+  // Só no modo conversa-first (sem busca). Guardado contra chamadas concorrentes.
+  const loadMore = useCallback(() => {
+    if (searchRef.current || loadingMoreRef.current || !hasMore) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    listConversations({ archived: showArchivedRef.current,
+                        limit: SIDEBAR_PAGE, offset: offsetRef.current })
+      .then((vRes) => {
+        if (vRes && vRes.ok) {
+          const convs = (vRes.data && vRes.data.conversations) || [];
+          const fresh = convs.map(convRowToSidebarRow);
+          setContacts((prev) => {
+            const seen = new Set(prev.map(r => r.conversation_id));
+            const add = fresh.filter(r => r.conversation_id == null || !seen.has(r.conversation_id));
+            const next = sortContacts([...prev, ...add]);
+            contactsRef.current = next;
+            return next;
+          });
+          setHasMore(!!(vRes.data && vRes.data.has_more));
+          offsetRef.current += convs.length;
+        }
+      })
+      .finally(() => { loadingMoreRef.current = false; setLoadingMore(false); });
+  }, [hasMore]);
 
   // Stable handle so the []-dep WS callback can refetch with the current search.
   useEffect(() => { fetchContactsRef.current = fetchContacts; }, [fetchContacts]);
@@ -127,6 +186,7 @@ export function useConversationList({ onUnreadChange }) {
 
   return {
     contacts, setContacts, loading,
+    loadingMore, hasMore, loadMore,
     search, setSearch, handleSearchChange,
     showArchived, setShowArchived,
     fetchContacts, sortContacts,

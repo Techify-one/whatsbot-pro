@@ -75,6 +75,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const list = useConversationList({ onUnreadChange });
   const {
     contacts, setContacts, loading,
+    loadingMore, hasMore, loadMore,
     search, setSearch, handleSearchChange,
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
@@ -95,6 +96,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect,
@@ -244,6 +246,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         <${ContactList}
           contacts=${displayedContacts}
           loading=${loading}
+          loadingMore=${loadingMore}
+          hasMore=${hasMore}
+          loadMore=${loadMore}
           search=${search}
           onSearchChange=${onSearchChange}
           statusFilter=${statusFilter}
@@ -340,6 +345,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
                 showAgentName=${config ? (config.show_agent_name !== false) : true}
+                loadOlder=${loadOlder}
+                loadingOlder=${loadingOlder}
+                hasMore=${contactData && contactData.has_more}
               />`
           }
           ${openPanel === 'contact' && selected && canReadContact ? html`

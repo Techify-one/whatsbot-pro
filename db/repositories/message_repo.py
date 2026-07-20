@@ -85,31 +85,59 @@ def find_execution_for_message(msg_row: dict) -> dict | None:
         return None
 
 
-def get_all(contact_id: int) -> list[dict]:
-    """Return all messages for a contact ordered by timestamp."""
-    with get_engine().connect() as conn:
-        rows = conn.execute(
-            select(messages)
-            .where(messages.c.contact_id == contact_id)
-            .order_by(messages.c.ts)
-        ).mappings().all()
-    return [_row_to_dict(r) for r in rows]
+def get_all(contact_id: int, *, limit: int | None = None,
+            before_id: int | None = None) -> list[dict]:
+    """Return messages for a contact ordered by timestamp (oldest→newest).
+
+    ``limit`` (plano 50): keyset pagination for the chat panel. When set, fetch the
+    newest ``limit`` rows (``ts DESC, id DESC``) — optionally only those *older* than
+    ``before_id`` (``id < before_id``) — and return them chronological. ``limit=None``
+    ⇒ the historical path (all rows, ``ORDER BY ts``), byte-for-byte identical, for
+    internal callers that need the whole thread.
+    """
+    cond = messages.c.contact_id == contact_id
+    if before_id is not None:
+        cond = cond & (messages.c.id < before_id)
+    return _select_messages(cond, limit)
 
 
-def get_by_conversation(conversation_id: int) -> list[dict]:
-    """Return all messages for ONE conversation ordered by ts (plano 11 D1).
+def get_by_conversation(conversation_id: int, *, limit: int | None = None,
+                        before_id: int | None = None) -> list[dict]:
+    """Return messages for ONE conversation ordered by ts (plano 11 D1).
 
     Conversa-cêntrico: filtra por ``conversation_id`` (uma thread por canal),
     ao contrário de :func:`get_all` que casa por ``contact_id`` e funde todos os
     canais do mesmo número. Usa ``idx_msg_conversation_ts`` (db/tables.py).
+
+    ``limit``/``before_id`` (plano 50): keyset como em :func:`get_all` — página das
+    ``limit`` mais recentes (+ ``id < before_id`` p/ "carregar anteriores"), devolvida
+    cronológica. ``limit=None`` ⇒ thread inteira (byte-idêntico ao caminho legado).
+    """
+    cond = messages.c.conversation_id == conversation_id
+    if before_id is not None:
+        cond = cond & (messages.c.id < before_id)
+    return _select_messages(cond, limit)
+
+
+def _select_messages(cond, limit: int | None) -> list[dict]:
+    """Shared SELECT for the chat panel readers (:func:`get_all`/:func:`get_by_conversation`).
+
+    ``limit=None`` ⇒ all rows ``ORDER BY ts`` (legacy, chronological). ``limit`` set ⇒
+    the newest ``limit`` rows via ``ts DESC, id DESC`` (id desempata ts empatado —
+    keyset estável, plano 50 Riscos), revertidas para cronológico (oldest→newest).
     """
     with get_engine().connect() as conn:
+        if limit is None:
+            rows = conn.execute(
+                select(messages).where(cond).order_by(messages.c.ts)
+            ).mappings().all()
+            return [_row_to_dict(r) for r in rows]
         rows = conn.execute(
-            select(messages)
-            .where(messages.c.conversation_id == conversation_id)
-            .order_by(messages.c.ts)
+            select(messages).where(cond)
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
+            .limit(limit)
         ).mappings().all()
-    return [_row_to_dict(r) for r in rows]
+    return [_row_to_dict(r) for r in reversed(rows)]
 
 
 def _fetch_limit(limit: int, exclude) -> int:
@@ -289,6 +317,22 @@ def update_content(message_id: int, content: str) -> None:
     """Update the content of a specific message."""
     with get_engine().begin() as conn:
         conn.execute(sa_update(messages).where(messages.c.id == message_id).values(content=content))
+
+
+def mark_edited(message_id: int, content: str) -> float | None:
+    """Edit a sent message: update its content and stamp ``edited_ts`` (epoch now).
+
+    Used by the operator/AI message-edit flow. Returns the new ``edited_ts`` on a
+    matched row (so the caller can broadcast it), or ``None`` if nothing matched."""
+    if not message_id:
+        return None
+    ts = time.time()
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_update(messages).where(messages.c.id == message_id)
+            .values(content=content, edited_ts=ts)
+        )
+    return ts if (result.rowcount or 0) > 0 else None
 
 
 def update_status(contact_id: int, content: str, new_status: str | None,
@@ -508,6 +552,10 @@ def _row_to_dict(row) -> dict:
     # `reply_to_msg_id` may be absent on old rows read before the column existed.
     if row.get("reply_to_msg_id"):
         d["reply_to_msg_id"] = row["reply_to_msg_id"]
+    # Timestamp da última edição (operador/IA). Ausente/NULL em mensagens nunca
+    # editadas → o painel só mostra "editada" quando presente.
+    if row.get("edited_ts"):
+        d["edited_ts"] = row["edited_ts"]
     # Nome (snapshot) do operador que enviou a mensagem manual. Ausente em linhas
     # legadas / echo / IA → o frontend cai em "Manual". Só expõe o nome (o
     # sent_by_user_id é interno e não vai ao cliente).

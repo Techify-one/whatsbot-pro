@@ -1,11 +1,15 @@
 import { h } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { getUsageSummary, getUsageByContact, getConfig } from '../services/api.js';
 import { useUrlState } from '../hooks/useUrlState.js';
+import { useInfiniteScroll, useScrollSentinel } from '../hooks/useInfiniteScroll.js';
 import { readParams, writeParams, enumStr, str } from '../services/urlState.js';
 
 const html = htm.bind(h);
+
+// Tamanho de página da paginação server-side (plano 50 F10) — top gastadores.
+const PAGE_SIZE = 25;
 
 // Deep-link do estado da tela de custos (Plano 24): período/ordenação/busca na
 // query-string. `start`/`end` (formato YYYY-MM-DDTHH:mm) só saem no período custom
@@ -66,8 +70,6 @@ export function CostsDashboard() {
   const [customEndDate, setCustomEndDate] = useState('');
   const [customEndTime, setCustomEndTime] = useState('23:59');
   const [summary, setSummary] = useState(null);
-  const [contacts, setContacts] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [usdBrlRate, setUsdBrlRate] = useState(5.5);
   const [sortField, setSortField] = useState('cost_usd');
   const [sortAsc, setSortAsc] = useState(false);
@@ -81,29 +83,43 @@ export function CostsDashboard() {
     });
   }, []);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    const params = {};
+  // Params de período (compartilhados por summary + lista).
+  const periodParams = useMemo(() => {
+    const p = {};
     if (period === 'custom') {
-      if (customStartDate) params.start = toTimestamp(customStartDate, customStartTime);
-      if (customEndDate) params.end = toTimestamp(customEndDate, customEndTime);
+      if (customStartDate) p.start = toTimestamp(customStartDate, customStartTime);
+      if (customEndDate) p.end = toTimestamp(customEndDate, customEndTime);
     } else if (period !== 'all') {
-      params.period = period;
+      p.period = period;
     }
-
-    const [sumRes, conRes] = await Promise.all([
-      getUsageSummary(params),
-      getUsageByContact(params),
-    ]);
-
-    if (sumRes.ok) setSummary(sumRes.data);
-    if (conRes.ok) setContacts(conRes.data || []);
-    setLoading(false);
+    return p;
   }, [period, customStartDate, customStartTime, customEndDate, customEndTime]);
 
+  // Resumo (totais) — recarrega ao mudar o período (não paginado).
+  const periodKey = JSON.stringify(periodParams);
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    getUsageSummary(periodParams).then((res) => { if (res.ok) setSummary(res.data); });
+    // eslint-disable-next-line
+  }, [periodKey]);
+
+  // plano 50 — SCROLL INFINITO com LOTE FIXO. O servidor entrega os TOP gastadores
+  // (custo desc) em lotes de PAGE_SIZE; rolar até o fim carrega o próximo lote. Nunca
+  // baixa tudo. Busca e ordenação por outro campo são aplicadas no CLIENTE sobre os
+  // itens já carregados (ver `filtered`/`pageItems`).
+  const fetchPage = useCallback((offset) =>
+    getUsageByContact({ ...periodParams, limit: PAGE_SIZE, offset })
+      .then((res) => ({
+        items: (res && res.ok && res.data && res.data.items) || [],
+        hasMore: !!(res && res.ok && res.data && res.data.has_more),
+      })).catch(() => ({ items: [], hasMore: false })),
+    [periodKey]);   // eslint-disable-line
+
+  const {
+    items: contacts, loading, loadingMore, hasMore, loadMore,
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: periodKey, keyOf: (c) => c.phone });
+
+  const sentinelRef = useRef(null);
+  useScrollSentinel(sentinelRef, loadMore, hasMore);
 
   function handleSort(field) {
     if (sortField === field) {
@@ -143,22 +159,24 @@ export function CostsDashboard() {
     deps: [period, customStartDate, customStartTime, customEndDate, customEndTime, sortField, sortAsc, search],
   });
 
-  const filtered = contacts.filter(c => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
-  });
+  // Busca + ordenação são aplicadas no CLIENTE sobre os itens JÁ carregados (o servidor
+  // entrega top-gastadores em lotes; rolar carrega mais). Busca por nome/telefone;
+  // ordenação por custo/tokens/nome. `pageItems` = tudo o que já foi carregado, filtrado.
+  const filtered = search
+    ? contacts.filter((c) => {
+        const q = search.toLowerCase();
+        return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
+      })
+    : contacts;
 
-  const sorted = [...filtered].sort((a, b) => {
+  const pageItems = useMemo(() => [...filtered].sort((a, b) => {
     const va = a[sortField] || 0;
     const vb = b[sortField] || 0;
     if (sortField === 'name') {
-      return sortAsc
-        ? String(va).localeCompare(String(vb))
-        : String(vb).localeCompare(String(va));
+      return sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
     }
     return sortAsc ? va - vb : vb - va;
-  });
+  }), [filtered, sortField, sortAsc]);
 
   const typeLabel = { text: 'Texto', audio: 'Audio', image: 'Imagem' };
 
@@ -315,13 +333,13 @@ export function CostsDashboard() {
               </tr>
             </thead>
             <tbody>
-              ${sorted.length === 0 ? html`
+              ${pageItems.length === 0 ? html`
                 <tr>
                   <td colspan="6" class="text-center py-8 text-wa-secondary">
                     ${search ? 'Nenhum contato encontrado.' : 'Nenhum dado de uso encontrado para este periodo.'}
                   </td>
                 </tr>
-              ` : sorted.map(c => html`
+              ` : pageItems.map(c => html`
                 <${ContactRow}
                   key=${c.phone}
                   contact=${c}
@@ -332,6 +350,13 @@ export function CostsDashboard() {
             </tbody>
           </table>
         </div>
+
+        <!-- Scroll infinito (plano 50): sentinela carrega o próximo lote ao rolar (segue
+             ativo durante a busca — busca é client-side, então rolar carrega+filtra mais). -->
+        ${hasMore ? html`
+          <div ref=${sentinelRef} class="text-center text-wa-secondary py-3 text-[12px]">
+            ${loadingMore ? 'Carregando mais…' : ''}
+          </div>` : null}
       `}
     </div>
   `;
