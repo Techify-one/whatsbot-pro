@@ -6,10 +6,13 @@ Owns the text-search side of ``contact_repo.list_contacts``:
   centered on a match (display keeps the original, accented text).
 - ``contact_ids_matching_message`` — the "find a conversation by something said
   in it" message scan.
-- ``build_list_contacts_query`` — the heavy ``list_contacts`` SELECT, now built
-  with SQLAlchemy Core instead of raw ``text().format()`` interpolation of
-  ``{preview_excluded}`` / ``{inbox_clause}``. Same rows, same order, dialect-
-  agnostic (SQLite + Postgres) as before.
+- ``build_list_contacts_query`` — the heavy ``list_contacts`` SELECT, built
+  with SQLAlchemy Core. Since plano 62 F1 the per-contact "latest row" lookups
+  (``lm``/``conv``) are LEFT JOIN LATERAL ``ORDER BY … LIMIT 1`` probes instead
+  of ``MAX()`` self-join subqueries: the self-join form made the Postgres
+  planner misestimate the join (Nested Loop + Materialize over the full
+  ``messages`` aggregate — ~70× slower in production). Postgres-only, like the
+  rest of the app (plano 29).
 
 These are pure query/string builders — ``contact_repo`` keeps owning the
 row→dict shaping and the post-fetch filtering loop, so the public API is
@@ -21,7 +24,7 @@ from __future__ import annotations
 import unicodedata
 
 from sqlalchemy import Select
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, true
 
 from db.repositories._mapping import _PREVIEW_EXCLUDED
 from db.tables import contacts, conversations, messages
@@ -130,80 +133,72 @@ def build_list_contacts_query(*, archived: bool,
                               sort: str = "recency") -> Select:
     """Build the ``list_contacts`` SELECT as a SQLAlchemy Core statement.
 
-    Replaces the prior raw ``text().format(preview_excluded=…, inbox_clause=…)``:
+    Plano 62 F1 — the per-contact "latest row" lookups are LEFT JOIN LATERAL
+    (correlated ``ORDER BY … LIMIT 1``, one index-backed probe per contact)
+    instead of the previous ``MAX()`` self-join subqueries. The self-join form
+    made the Postgres planner misestimate the join cardinality (Nested Loop +
+    Materialize over the whole ``messages`` aggregate — ~70× slower measured in
+    production). The LATERAL form also DEDUPLICATES ties: two messages of the
+    same contact with an identical ``ts`` yield ONE contact row, not two.
 
-    - ``lm`` — the latest VISIBLE message per contact (roles in ``_PREVIEW_EXCLUDED``
-      excluded), via a ``MAX(ts)`` self-join. This was the ``{preview_excluded}``
-      literal; now ``_PREVIEW_EXCLUDED`` flows through ``.notin_()`` as bind params.
-    - ``conv`` — the ACTIVE conversation per contact (the highest id), via a
-      ``MAX(id)`` self-join, surfacing status/assignee/agente/ai_active.
-    - ``msg_count`` — correlated scalar count of all messages of the contact.
-    - the inbox scope — was the optional ``{inbox_clause}`` EXISTS; now a Core
-      ``.exists()`` correlated subquery only when ``inbox_ids`` is not None.
+    - ``lm`` — the latest VISIBLE message per contact (roles in
+      ``_PREVIEW_EXCLUDED`` excluded): ``LATERAL (SELECT … WHERE contact_id =
+      contacts.id AND role NOT IN (…) ORDER BY ts DESC LIMIT 1)``.
+    - ``conv`` — the ACTIVE conversation per contact (the highest id):
+      ``LATERAL (SELECT … WHERE contact_id = contacts.id ORDER BY id DESC
+      LIMIT 1)``.
+    - ``msg_count`` — literal ``0``. The correlated per-contact COUNT was dead
+      weight (zero consumers front/back — plano 62 F1); the key is kept only to
+      preserve the public row shape.
+    - the inbox scope — a Core ``.exists()`` correlated subquery, only when
+      ``inbox_ids`` is not None.
 
     Ordering and selected labels match the original exactly so the row→dict shaping
     in ``contact_repo`` is unchanged. ``inbox_ids`` is assumed non-empty when not
     None (the empty-list "sees nothing" shortcut is handled by the caller).
     """
-    # lm: latest visible message per contact (MAX(ts) self-join, preview roles out)
-    m1 = messages.alias("m1")
+    # lm: latest visible message per contact (LEFT JOIN LATERAL … LIMIT 1,
+    # preview roles out — plano 62 F1).
     visible = messages.c.role.notin_(_PREVIEW_EXCLUDED)
-    m2 = (
-        select(
-            messages.c.contact_id.label("contact_id"),
-            func.max(messages.c.ts).label("max_ts"),
-        )
-        .where(visible)
-        .group_by(messages.c.contact_id)
-        .subquery("m2")
-    )
     lm = (
         select(
-            m1.c.contact_id.label("contact_id"),
-            m1.c.content.label("content"),
-            m1.c.role.label("role"),
-            m1.c.ts.label("ts"),
-            m1.c.media_type.label("media_type"),
-            m1.c.status.label("status"),
-            m1.c.msg_id.label("msg_id"),
+            messages.c.content.label("content"),
+            messages.c.role.label("role"),
+            messages.c.ts.label("ts"),
+            messages.c.media_type.label("media_type"),
+            messages.c.status.label("status"),
+            messages.c.msg_id.label("msg_id"),
         )
-        .select_from(
-            m1.join(m2, (m1.c.contact_id == m2.c.contact_id) & (m1.c.ts == m2.c.max_ts))
-        )
-        .subquery("lm")
+        .where(messages.c.contact_id == contacts.c.id)
+        .where(visible)
+        # id DESC tie-breaker: two visible messages with an identical ts would
+        # otherwise leave the picked row planner-dependent (plano 62 F1 review).
+        .order_by(messages.c.ts.desc(), messages.c.id.desc())
+        .limit(1)
+        .correlate(contacts)
+        .lateral("lm")
     )
 
-    # conv: active conversation per contact (MAX(id) self-join)
-    cv1 = conversations.alias("cv1")
-    cv2 = (
-        select(
-            conversations.c.contact_id.label("contact_id"),
-            func.max(conversations.c.id).label("max_id"),
-        )
-        .group_by(conversations.c.contact_id)
-        .subquery("cv2")
-    )
+    # conv: active conversation per contact (LEFT JOIN LATERAL … LIMIT 1 on the
+    # highest id — plano 62 F1).
     conv = (
         select(
-            cv1.c.contact_id.label("contact_id"),
-            cv1.c.id.label("conv_id"),
-            cv1.c.status.label("conv_status"),
-            cv1.c.assignee_user_id.label("conv_assignee_user_id"),
-            cv1.c.active_agent_key.label("conv_active_agent_key"),
-            cv1.c.ai_active.label("conv_ai_active"),
+            conversations.c.id.label("conv_id"),
+            conversations.c.status.label("conv_status"),
+            conversations.c.assignee_user_id.label("conv_assignee_user_id"),
+            conversations.c.active_agent_key.label("conv_active_agent_key"),
+            conversations.c.ai_active.label("conv_ai_active"),
         )
-        .select_from(
-            cv1.join(cv2, (cv1.c.contact_id == cv2.c.contact_id) & (cv1.c.id == cv2.c.max_id))
-        )
-        .subquery("conv")
+        .where(conversations.c.contact_id == contacts.c.id)
+        .order_by(conversations.c.id.desc())
+        .limit(1)
+        .correlate(contacts)
+        .lateral("conv")
     )
 
-    msg_count = (
-        select(func.count())
-        .select_from(messages)
-        .where(messages.c.contact_id == contacts.c.id)
-        .scalar_subquery()
-    )
+    # Dead column kept as a fixed 0 for row-shape compat (plano 62 F1 — the
+    # correlated COUNT had zero consumers and cost a full per-contact scan).
+    msg_count = literal(0)
 
     stmt = (
         select(
@@ -223,8 +218,8 @@ def build_list_contacts_query(*, archived: bool,
         )
         .select_from(
             contacts
-            .outerjoin(lm, lm.c.contact_id == contacts.c.id)
-            .outerjoin(conv, conv.c.contact_id == contacts.c.id)
+            .outerjoin(lm, true())
+            .outerjoin(conv, true())
         )
         .where(contacts.c.is_archived == (1 if archived else 0))
     )
