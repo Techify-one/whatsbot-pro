@@ -41,6 +41,8 @@ def _infer_operator(key: str, value: str) -> tuple[str, list]:
         return "greater_than", [value.strip()]
     if key == "q":
         return "contains", [value]
+    if key in ("labels", "conv_labels"):
+        return "in", [v.strip() for v in value.split(",") if v.strip()]
     if "," in value:
         return "in", [v.strip() for v in value.split(",") if v.strip()]
     return "equal_to", [value]
@@ -49,18 +51,35 @@ def _infer_operator(key: str, value: str) -> tuple[str, list]:
 def from_params(params: dict) -> FilterSpec:
     """Build a spec from flat query params (?status=open&labels=vip,lead&since=7d&cattr:plan=gold)."""
     spec = FilterSpec()
+    op_overrides = {
+        raw_key[:-4]: str(raw_val)
+        for raw_key, raw_val in params.items()
+        if str(raw_key).endswith("__op") and raw_val is not None
+    }
     for raw_key, raw_val in params.items():
-        if raw_key in _RESERVED:
+        if raw_key in _RESERVED or str(raw_key).endswith("__op"):
             continue
         if raw_val is None:
             continue
         value = str(raw_val)
-        op, values = _infer_operator(raw_key, value)
+        if raw_key in op_overrides:
+            op = op_overrides[raw_key]
+            values = _values_for_operator(op, value)
+        else:
+            op, values = _infer_operator(raw_key, value)
         spec.clauses.append(Clause(attribute_key=raw_key, operator=op, values=values))
     spec.match = str(params.get("match", "and")).lower()
     spec.limit = _coerce_int(params.get("limit"), 50, 1, 200)
     spec.offset = _coerce_int(params.get("offset"), 0, 0, 10_000_000)
     return spec
+
+
+def _values_for_operator(op: str, value: str) -> list:
+    if op in ("is_present", "is_not_present"):
+        return []
+    if op in ("in", "between") or "," in value:
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return [value]
 
 
 def from_payload(payload: dict) -> FilterSpec:

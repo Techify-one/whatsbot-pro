@@ -29,7 +29,7 @@ CATTR_KEY_RE = r"^[a-z][a-z0-9_]{0,63}$"
 @dataclass(frozen=True)
 class Dim:
     key: str
-    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q
+    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q|channel|contact_type|agent|ai|starter|activity|contact_cattr
     ops: frozenset
     label: str = ""
     enum: frozenset = field(default_factory=frozenset)
@@ -48,7 +48,16 @@ DIMENSIONS: dict[str, Dim] = {
                     frozenset({"equal_to", "in", "is_present", "is_not_present"}),
                     "Prioridade"),
     "since": Dim("since", "reltime", frozenset({"greater_than"}), "Atividade desde"),
+    "activity": Dim("activity", "activity",
+                    frozenset({"greater_than", "less_than", "between"}),
+                    "Última atividade"),
     "display_id": Dim("display_id", "int", frozenset({"equal_to"}), "Número"),
+    "channel": Dim("channel", "channel", frozenset({"equal_to", "not_equal_to", "in"}), "Canal"),
+    "contact_type": Dim("contact_type", "contact_type",
+                        frozenset({"equal_to", "not_equal_to", "in"}), "Tipo de contato"),
+    "agent": Dim("agent", "agent", frozenset({"equal_to", "not_equal_to", "in"}), "Agente"),
+    "ai": Dim("ai", "ai", frozenset({"equal_to", "not_equal_to"}), "IA"),
+    "starter": Dim("starter", "starter", frozenset({"equal_to", "not_equal_to"}), "Iniciador"),
     "labels": Dim("labels", "labels", frozenset({"in"}), "Etiquetas do contato"),
     "conv_labels": Dim("conv_labels", "conv_labels", frozenset({"in"}),
                        "Etiquetas da conversa"),

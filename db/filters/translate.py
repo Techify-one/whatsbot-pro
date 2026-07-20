@@ -10,9 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import and_, or_, not_, select
+from sqlalchemy import and_, or_, not_, select, func
 
-from db.tables import (conversations, contacts, contact_tags, tags,
+from db.tables import (conversations, contacts, contact_tags, tags, inboxes,
                        conversation_labels, conversation_label_links)
 from db.filters.registry import (
     FilterError, DIMENSIONS, OPS, CATTR_PREFIX, CATTR_KEY_RE,
@@ -26,6 +26,7 @@ class FilterContext:
     user_id: int | None = None
     now: float = 0.0
     cattr_keys: frozenset = field(default_factory=frozenset)  # active filterable conversation keys
+    contact_cattr_keys: frozenset = field(default_factory=frozenset)
 
 
 def build_where(spec, ctx: FilterContext):
@@ -49,6 +50,10 @@ def _build_clause(clause, ctx: FilterContext):
     op = clause.operator
     values = clause.values or []
 
+    if key.startswith(f"{CATTR_PREFIX}contact:"):
+        return _contact_cattr_clause(key[len(f"{CATTR_PREFIX}contact:"):], op, values, ctx)
+    if key.startswith(f"{CATTR_PREFIX}conversation:"):
+        return _cattr_clause(key[len(f"{CATTR_PREFIX}conversation:"):], op, values, ctx)
     if key.startswith(CATTR_PREFIX):
         return _cattr_clause(key[len(CATTR_PREFIX):], op, values, ctx)
 
@@ -77,6 +82,19 @@ def _build_clause(clause, ctx: FilterContext):
     if kind == "reltime":
         threshold = _resolve_reltime(values[0] if values else "", ctx.now)
         return conversations.c.last_activity_at > threshold
+    if kind == "activity":
+        return _activity_clause(op, values, ctx)
+    if kind == "channel":
+        return _scalar_clause(func.coalesce(inboxes.c.channel_id, "default"), op,
+                              [str(v) for v in values])
+    if kind == "contact_type":
+        return _scalar_clause(contacts.c.contact_type, op, [str(v) for v in values])
+    if kind == "agent":
+        return _agent_clause(op, values)
+    if kind == "ai":
+        return _ai_clause(op, values)
+    if kind == "starter":
+        return _starter_clause(op, values)
     if kind == "labels":
         return _labels_clause(values)
     if kind == "conv_labels":
@@ -117,6 +135,32 @@ def _scalar_clause(col, op: str, values: list):
     raise FilterError(f"Operador não implementado: {op!r}.")  # pragma: no cover
 
 
+def _activity_clause(op: str, values: list, ctx: FilterContext):
+    if not values:
+        raise FilterError("Filtro de atividade requer um valor.")
+    if op == "between":
+        if len(values) < 2:
+            raise FilterError("Operador 'between' requer dois valores.")
+        return conversations.c.last_activity_at.between(
+            _activity_threshold(values[1], ctx),
+            _activity_threshold(values[0], ctx),
+        )
+    threshold = _activity_threshold(values[0], ctx)
+    if op == "less_than":
+        return conversations.c.last_activity_at > threshold
+    if op == "greater_than":
+        return conversations.c.last_activity_at < threshold
+    raise FilterError(f"Operador {op!r} não permitido para activity.")  # pragma: no cover
+
+
+def _activity_threshold(v, ctx: FilterContext) -> float:
+    try:
+        days = float(v)
+    except (TypeError, ValueError):
+        raise FilterError(f"Valor de atividade inválido: {v!r}.")
+    return ctx.now - days * 86400
+
+
 def _assignee_clause(op: str, values: list, ctx: FilterContext):
     col = conversations.c.assignee_user_id
     if op == "is_present":
@@ -138,6 +182,43 @@ def _assignee_clause(op: str, values: list, ctx: FilterContext):
     if op == "in":
         return col.in_(resolved)
     raise FilterError(f"Operador {op!r} não permitido para assignee.")  # pragma: no cover
+
+
+def _agent_clause(op: str, values: list):
+    vals = [str(v) for v in values if str(v).strip()]
+    if not vals:
+        raise FilterError("Filtro de agente requer um valor.")
+    clauses = []
+    for value in vals:
+        if value == "none":
+            clauses.append(and_(conversations.c.assignee_user_id.is_(None),
+                                conversations.c.active_agent_key.is_(None)))
+        elif value.startswith("user:"):
+            clauses.append(conversations.c.assignee_user_id == _to_int(value[5:], "agent"))
+        elif value.startswith("ai:"):
+            clauses.append(conversations.c.active_agent_key == value[3:])
+        else:
+            raise FilterError(f"Valor inválido para 'agent': {value!r}.")
+    hit = or_(*clauses)
+    return not_(hit) if op == "not_equal_to" else hit
+
+
+def _ai_clause(op: str, values: list):
+    value = str(values[0]).lower() if values else ""
+    if value not in ("on", "off"):
+        raise FilterError(f"Valor inválido para 'ai': {value!r}.")
+    hit = conversations.c.ai_active != 0 if value == "on" else conversations.c.ai_active == 0
+    return not_(hit) if op == "not_equal_to" else hit
+
+
+def _starter_clause(op: str, values: list):
+    value = str(values[0]).lower() if values else ""
+    if value not in ("customer", "operator"):
+        raise FilterError(f"Valor inválido para 'starter': {value!r}.")
+    by_customer = conversations.c.origin == "inbound"
+    by_operator = or_(conversations.c.origin != "inbound", conversations.c.origin.is_(None))
+    hit = by_customer if value == "customer" else by_operator
+    return not_(hit) if op == "not_equal_to" else hit
 
 
 def _labels_clause(values: list):
@@ -183,6 +264,18 @@ def _cattr_clause(raw_key: str, op: str, values: list, ctx: FilterContext):
     # generic JSON indexing → JSON_EXTRACT (SQLite) / ->> (Postgres); key is allowlisted
     # AND regex-validated, so no JSON-path break-out is possible.
     expr = conversations.c.custom_attributes[raw_key].as_string()
+    return _scalar_clause(expr, op, [str(v) for v in values])
+
+
+def _contact_cattr_clause(raw_key: str, op: str, values: list, ctx: FilterContext):
+    if not _CATTR_RE.match(raw_key):
+        raise FilterError(f"Chave de atributo inválida: {raw_key!r}.")
+    if raw_key not in ctx.contact_cattr_keys:
+        raise FilterError(f"Atributo {raw_key!r} não é filtrável.")
+    allowed = frozenset({"equal_to", "not_equal_to", "is_present", "is_not_present",
+                         "contains", "does_not_contain", "in"})
+    _check_op(f"cattr:contact:{raw_key}", allowed, op)
+    expr = contacts.c.custom_attributes[raw_key].as_string()
     return _scalar_clause(expr, op, [str(v) for v in values])
 
 

@@ -33,8 +33,11 @@ def _filter_context(request: Request) -> FilterContext:
     user = current_user(request)
     cattr_keys = frozenset(
         d["attribute_key"] for d in custom_attribute_repo.list_filterable("conversation"))
+    contact_cattr_keys = frozenset(
+        d["attribute_key"] for d in custom_attribute_repo.list_filterable("contact"))
     return FilterContext(
-        user_id=(user or {}).get("id"), now=time.time(), cattr_keys=cattr_keys)
+        user_id=(user or {}).get("id"), now=time.time(), cattr_keys=cattr_keys,
+        contact_cattr_keys=contact_cattr_keys)
 
 
 # Teto de ids no CSV de `contact_ids`. A busca da barra lateral manda os contatos que
@@ -173,18 +176,24 @@ def register_routes(app, deps):
             return denied
         return await _run_filter(request, body, params=None)
 
-    async def _run_filter(request: Request, payload, *, params):
+    async def _spec_and_where(request: Request, payload, *, params):
         from db.filters.spec import from_params, from_payload
         try:
             spec = from_params(params) if params is not None else from_payload(payload)
             ctx = _filter_context(request)
             where = await asyncio.to_thread(conv_filters.build_where, spec, ctx)
+            return spec, where, None
         except conv_filters.FilterError as e:
-            return _err(str(e), status=400)
+            return None, None, _err(str(e), status=400)
         except (TypeError, ValueError, IndexError, KeyError) as e:
             # Safety net: malformed input must be a clean 400, never a 500.
             logger.warning("Filtro inválido: %s", e)
-            return _err("Filtro inválido.", status=400)
+            return None, None, _err("Filtro inválido.", status=400)
+
+    async def _run_filter(request: Request, payload, *, params):
+        spec, where, err = await _spec_and_where(request, payload, params=params)
+        if err:
+            return err
         _u = current_user(request)
         # Over-fetch por 1 p/ saber se há próxima página (scroll infinito), sem 2ª query
         # nem COUNT — mesmo padrão do endpoint de mensagens. Dropa a linha extra.
@@ -197,6 +206,32 @@ def register_routes(app, deps):
         if has_more:
             rows = rows[:spec.limit]
         return _ok({"conversations": rows, "count": len(rows), "has_more": has_more})
+
+    @app.get("/api/atendimentos/count")
+    async def count_get(request: Request):
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        params = dict(request.query_params)
+        return await _run_count(request, None, params=params)
+
+    @app.post("/api/atendimentos/count")
+    async def count_post(body: dict, request: Request):
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        return await _run_count(request, body, params=None)
+
+    async def _run_count(request: Request, payload, *, params):
+        _spec, where, err = await _spec_and_where(request, payload, params=params)
+        if err:
+            return err
+        _u = current_user(request)
+        counts = await asyncio.to_thread(
+            conversation_repo.count_tab_counts, where,
+            inbox_ids=visible_inbox_ids(request),
+            current_user_id=(_u.get("id") if _u else None))
+        return _ok(counts)
 
     @app.get("/api/atendimentos/assignable-agents")
     async def assignable_agents(request: Request):

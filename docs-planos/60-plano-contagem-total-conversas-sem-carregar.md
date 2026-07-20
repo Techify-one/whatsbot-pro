@@ -161,11 +161,11 @@ WAVE 4  F8(tela Contatos)                                     ← decisão-gated
 **Pronto quando:** numa base de teste com conversas conhecidas, `count_tab_counts(None)['all'] == count(*)` da tabela (não-arquivadas via `where`/escopo), e `mine+unassigned+outros == all`; com um `where` de status, bate com `len(list_filtered(where, limit=10_000))`.
 
 #### Status de execução — Fase 0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas + porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado / ficou para depois)_
-- **Verificação:** _(testes rodados + resultado; validação manual)_
+**Estado:** ✅ Concluída (2026-07-20)
+- **O que foi feito:** `conversation_repo.count_tab_counts(where, inbox_ids, current_user_id)` criado.
+- **Como foi feito / decisões:** usa uma query agregada com `COUNT(*) FILTER`, mesma base enriquecida de `list_filtered`, mesmo escopo de inbox e `EXISTS` em `mentions` para a aba Menções.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** `python3 -m py_compile` dos módulos alterados passou.
 
 ---
 
@@ -180,11 +180,11 @@ WAVE 4  F8(tela Contatos)                                     ← decisão-gated
 **Pronto quando:** `curl /api/atendimentos/count` sem filtro devolve o total real; com `status=open` devolve só as abertas; escopo de caixa respeitado (usuário sem caixa vê 0); suíte verde no Postgres.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-20)
+- **O que foi feito:** adicionados `GET/POST /api/atendimentos/count`; `_run_filter` passou a reusar `_spec_and_where`.
+- **Como foi feito / decisões:** endpoint aditivo, mesmo gate `conversation.read`, ignora `limit/offset` na contagem e devolve `{all,mine,unassigned,mentions}`.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** `python3 -m py_compile` dos módulos alterados passou.
 
 ---
 
@@ -198,11 +198,11 @@ WAVE 4  F8(tela Contatos)                                     ← decisão-gated
 **Pronto quando:** `node --test` do módulo verde; `isServerExpressible` retorna `false` para toda dim ainda não implementada no engine (nunca produz número errado).
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-20)
+- **O que foi feito:** criado `web/static/js/services/conversationFilterSpec.js` e teste `conversationFilterSpec.test.js`.
+- **Como foi feito / decisões:** tradutor conservador; quando duas cláusulas do cliente exigiriam `AND` na mesma dimensão mas o GET plano viraria `OR`, `isServerExpressible=false`.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** `node --test web/static/js/services/conversationFilterSpec.test.js` passou.
 
 ---
 
@@ -217,11 +217,11 @@ WAVE 4  F8(tela Contatos)                                     ← decisão-gated
 **Pronto quando:** abrir o hub com 15k conversas mostra "Todas 15.000" (e os splits corretos) sem baixar as linhas; trocar Status=Abertas atualiza para o total de abertas; ativar um filtro ainda-não-coberto cai no número cliente sem erro; a sidebar segue mostrando só a página carregada.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (2026-07-20)
+- **O que foi feito:** `useConversationFilters` agora busca `countConversations(buildCountParams(...))` com debounce e fallback para `.length`.
+- **Como foi feito / decisões:** `Contacts.js` passa `search` e `showArchived` ao hook; count antigo é limpo ao mudar filtros para não exibir número obsoleto.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** teste JS do tradutor e `py_compile` passaram.
 
 ---
 

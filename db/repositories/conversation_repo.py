@@ -10,13 +10,15 @@ import logging
 import time
 
 from sqlalchemy import (select, update, func, delete as sa_delete,
-                        insert as sa_insert, case, exists, false as sa_false)
+                        insert as sa_insert, case, exists, false as sa_false,
+                        literal)
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.repositories import conversation_query, conversation_label_repo
 from db.tables import (conversations, contacts, conversation_counters,
-                       messages, unread_msg_ids, conversation_label_links)
+                       messages, unread_msg_ids, conversation_label_links,
+                       mentions)
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +486,54 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
     return _attach_contact_tags(_attach_labels([_finalize_conv(r) for r in rows]))
+
+
+def count_tab_counts(where, *, inbox_ids: list[int] | None = None,
+                     current_user_id: int | None = None) -> dict:
+    """Count the conversation-hub tabs for a pre-built filter WHERE.
+
+    The WHERE comes from ``db.filters`` (same safety boundary used by
+    ``list_filtered``). ``all`` is the filtered universe; the other counters are
+    conditional aggregates inside that same universe, so the UI can display totals
+    without loading every matching row.
+    """
+    mine_filter = (conversations.c.assignee_user_id == current_user_id
+                   if current_user_id is not None else literal(False))
+    if current_user_id is not None:
+        mention_filter = (
+            exists()
+            .where(mentions.c.conversation_id == conversations.c.id)
+            .where(mentions.c.mentioned_user_id == current_user_id)
+            .where(mentions.c.read_at.is_(None))
+        )
+    else:
+        mention_filter = literal(False)
+
+    stmt = (
+        select(
+            func.count().label("all"),
+            func.count().filter(mine_filter).label("mine"),
+            func.count().filter(
+                conversations.c.assignee_user_id.is_(None),
+                conversations.c.active_agent_key.is_(None),
+            ).label("unassigned"),
+            func.count().filter(mention_filter).label("mentions"),
+        )
+        .select_from(_enriched_from())
+    )
+    if where is not None:
+        stmt = stmt.where(where)
+    if inbox_ids is not None:
+        stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
+                          else sa_false())
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt).mappings().first() or {}
+    return {
+        "all": int(row.get("all") or 0),
+        "mine": int(row.get("mine") or 0),
+        "unassigned": int(row.get("unassigned") or 0),
+        "mentions": int(row.get("mentions") or 0),
+    }
 
 
 def get_with_channel(conv_id: int, current_user_id: int | None = None) -> dict | None:
