@@ -3206,6 +3206,32 @@ _asyncio.run(_csvc.set_ai(app.state.deps, _conv_repo.get(_ctk2["id"]), 1))
 check("clear_transfer_tag default=True -> tag removida",
       _TT not in tag_repo.get_contact_tags(_cid))
 
+# ── P66: o header "Atribuir a mim" / "Atribuída a você" roteia pelo toggle /ai
+#    (setConversationAi → set_ai). Assumir DESLIGA a IA e atribui ao operador;
+#    devolver RELIGA a IA, limpa o responsável e remove a tag de transferência. ──
+_conv_repo.set_status(_ctk2["id"], "closed")  # 1 aberta por (contato, inbox)
+_p66 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_ai_active(_p66["id"], 1)        # nasce com IA ligada, sem humano
+tag_repo.add_contact_tag(_cid, _TT)            # simula transferência prévia p/ humano
+# "Atribuir a mim" no header -> POST /ai {active:false} como o operador logado.
+r = client.post(f"/api/conversations/{_p66['id']}/ai", json={"active": False},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
+check("P66 header assumir -> 200", r.status_code == 200)
+_h66 = r.json()["data"]["conversation"]
+check("P66 header assumir -> IA desligada", _h66["ai_active"] == 0)
+check("P66 header assumir -> conversa atribuída ao operador", _h66["assignee_user_id"] == _mgr["id"])
+check("P66 header assumir -> agente ativo limpo", not _h66["active_agent_key"])
+# "Atribuída a você" no header -> POST /ai {active:true} devolve à IA.
+r = client.post(f"/api/conversations/{_p66['id']}/ai", json={"active": True},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
+check("P66 header devolver -> 200", r.status_code == 200)
+_h66b = r.json()["data"]["conversation"]
+check("P66 header devolver -> IA religada", _h66b["ai_active"] == 1)
+check("P66 header devolver -> responsável humano limpo", _h66b["assignee_user_id"] is None)
+check("P66 header devolver -> agente default re-vinculado", _h66b["active_agent_key"] == "default")
+check("P66 header devolver -> tag transferido_atendente removida",
+      _TT not in tag_repo.get_contact_tags(_cid))
+
 # ── A IA se auto-desligando (transfer_to_human) emite o card "SISTEMA pausou a IA" ──
 from server import system_notices as _sysn
 _txf_cm = _CM("5500011177777")

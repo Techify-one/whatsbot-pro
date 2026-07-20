@@ -6,13 +6,19 @@
 // action is permission-gated (P48: hide, don't disable). Live-updates via the WS
 // conversation_* events for this conversation. Renders nothing in sandbox or when
 // the contact has no open conversation.
+//
+// "Atribuir a mim" / "Atribuída a você" route through the per-conversation AI
+// toggle (setConversationAi → set_ai, plano 66): taking the conversation turns the
+// AI OFF and assigns it to the operator; giving it back turns the AI ON and clears
+// the assignee. This keeps the header consistent with the sidebar right-click menu,
+// which also silences the AI on assignment.
 
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   getContactConversation, getConversation, getMe, getUsers, getCustomAttributes,
-  setConversationStatus, assignConversation, assignMeConversation, setConversationAi,
+  setConversationStatus, setConversationAi,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { CopyLinkButton } from '../../utils/copyDeepLink.js';
@@ -192,19 +198,22 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
         </span>
       `}
 
-      <!-- Atribuir a mim / responsável (somente em atendimentos abertos) -->
-      ${isOpen && can('conversation.assign') ? html`
+      <!-- Atribuir a mim / responsável (somente em atendimentos abertos).
+           Assumir DESLIGA a IA e atribui a conversa ao operador; devolver RELIGA a IA
+           e limpa o responsável — reusando o toggle /ai (set_ai, plano 66). Gate em
+           conversation.reply: a rota /ai exige reply, e quem assume vai responder. -->
+      ${isOpen && can('conversation.reply') ? html`
         ${assignedToMe
           ? html`
-            <button disabled=${busy} onClick=${() => run(() => assignConversation(conv.id, null))} class=${btn} title="Remover atribuição">
+            <button disabled=${busy} onClick=${() => run(() => setConversationAi(conv.id, true))} class=${btn} title="Devolver à IA (religa a IA nesta conversa)">
               Atribuída a você
             </button>`
           : html`
             <button
               disabled=${busy}
-              onClick=${() => run(() => assignMeConversation(conv.id))}
+              onClick=${() => run(() => setConversationAi(conv.id, false))}
               class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50 whitespace-nowrap"
-              title="Assumir esta conversa"
+              title="Assumir esta conversa e desligar a IA"
             >
               Atribuir a mim
             </button>`}
