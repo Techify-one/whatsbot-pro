@@ -249,13 +249,18 @@ def register_routes(app, deps):
     @app.get("/api/contacts")
     async def list_contacts(request: Request, q: str = "", archived: bool = False,
                             limit: int | None = None, offset: int = 0,
-                            sort: str = "recency"):
+                            sort: str = "recency", include_messages: bool = True):
         """List all contacts with summary info.
 
         Paginação (plano 50 F5): quando ``limit`` é informado, devolve o envelope
         ``{items, total, has_more}`` (cap ``CAP_LIST``). SEM ``limit`` mantém o shape
         legado (``data`` = lista). ``sort`` (F7): ``name`` = alfabético (tela /contacts),
-        default ``recency`` (sidebar). ``offset`` ≥ 0."""
+        default ``recency`` (sidebar). ``offset`` ≥ 0.
+
+        ``include_messages`` (plano 62 F5, default ``true`` por compat): com
+        ``false`` a busca ``q`` não olha o conteúdo das mensagens (só nome/
+        telefone/grupo/tag) e as linhas não ganham ``match_snippet`` — mais barato
+        para telas que não renderizam o trecho casado."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
@@ -267,7 +272,8 @@ def register_routes(app, deps):
         if limit is None:
             # Caminho legado: lista completa (retrocompatível).
             results = await asyncio.to_thread(
-                contact_repo.list_contacts, q, archived, inbox_ids)
+                contact_repo.list_contacts, q, archived, inbox_ids,
+                include_messages=include_messages)
             for c in results:
                 c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
             return _ok(results)
@@ -276,7 +282,7 @@ def register_routes(app, deps):
         off = clamp_offset(offset)
         page = await asyncio.to_thread(
             contact_repo.list_contacts_page, q, archived, inbox_ids,
-            limit=lim, offset=off, sort=sort)
+            limit=lim, offset=off, sort=sort, include_messages=include_messages)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
         for c in page["items"]:

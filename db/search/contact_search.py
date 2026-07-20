@@ -4,8 +4,13 @@ Owns the text-search side of ``contact_repo.list_contacts``:
 
 - ``fold`` / ``match_snippet`` — accent/case-insensitive folding and the excerpt
   centered on a match (display keeps the original, accented text).
-- ``contact_ids_matching_message`` — the "find a conversation by something said
-  in it" message scan.
+- ``build_q_clause`` — the search ``q`` as a SQL boolean expression (plano 62
+  F5), so the WHERE does the matching and ``LIMIT/OFFSET`` paginates for real.
+- ``build_content_matches_query`` — the per-page lookup that backs
+  ``match_snippet``/``match_msg_id`` (only for the rows actually shown).
+- ``contact_ids_matching_message`` — LEGACY message scan (pre-F5). No longer on
+  the search path; kept because it is still exercised directly by
+  ``tests/test_endpoints.py``.
 - ``build_list_contacts_query`` — the heavy ``list_contacts`` SELECT, built
   with SQLAlchemy Core. Since plano 62 F1 the per-contact "latest row" lookups
   (``lm``/``conv``) are LEFT JOIN LATERAL ``ORDER BY … LIMIT 1`` probes instead
@@ -23,11 +28,11 @@ from __future__ import annotations
 
 import unicodedata
 
-from sqlalchemy import Select
-from sqlalchemy import func, literal, select, true
+from sqlalchemy import ColumnElement, Select, String
+from sqlalchemy import and_, func, literal, or_, select, true
 
 from db.repositories._mapping import _PREVIEW_EXCLUDED
-from db.tables import contacts, conversations, messages
+from db.tables import contact_tags, contacts, conversations, messages, tags
 
 
 def fold(s: str) -> str:
@@ -35,6 +40,17 @@ def fold(s: str) -> str:
 
     "Ó"/"ó"/"o" all fold to "o", so typing an unaccented letter still finds
     accented names (and vice-versa).
+
+    Still used for the SNIPPET (``match_snippet``) and for deciding which page
+    rows need the content lookup; the MATCHING itself moved to SQL in plano 62
+    F5 (``f_unaccent(lower(x)) ILIKE …`` — see :func:`_folded_match`).
+
+    NOTE (plano 62 F5): the two folds agree on every PT-BR case (accents,
+    cedilla, upper/lower), but NOT in exotic ones — ``casefold()`` expands ``ß``
+    → ``ss`` and NFKD splits ligatures (``ﬁ`` → ``fi``), which
+    ``lower()``/``unaccent`` do not; conversely ``unaccent`` transliterates some
+    non-decomposable letters (``Æ`` → ``AE``) that NFKD leaves alone. Parity is
+    targeted at PT-BR text; the divergence is accepted (plano 62 §5 Riscos).
     """
     if not s:
         return ""
@@ -85,9 +101,33 @@ MESSAGE_SCAN_CAP = 5000
 # funcionam para 1 char (não dependem do scan).
 MIN_SCAN_QUERY_LEN = 2
 
+# Piso do ramo de CONTEÚDO no caminho SQL (plano 62 F5, fix da revisão de perf).
+# O `pg_trgm` só extrai trigramas com >= 3 caracteres; com 2, o `ILIKE '%xx%'` sobre
+# o índice GIN degenera para um FULL SCAN (devolve TODAS as mensagens não-excluídas —
+# ~534k em produção — independente de quantas casam), ficando ~1,7× MAIS lento que a
+# busca antiga. Então o ramo de conteúdo só entra com >= 3 chars; nome/telefone/tag/
+# grupo continuam casando a partir de 1 char (não dependem do trigrama). Trade-off:
+# buscar CONTEÚDO de mensagem por 2 chars deixa de funcionar (casava quase tudo e era
+# ruído) — mudança de comportamento deliberada e documentada.
+TRIGRAM_MIN_LEN = 3
+
+# Roles NUNCA pesquisáveis por conteúdo (puramente internos). Este é o MESMO
+# conjunto do predicado dos índices parciais ``idx_msg_ts_visible`` (0059) e
+# ``idx_msg_content_trgm`` (0060): se divergir, o índice deixa de ser aplicável e
+# a busca por conteúdo volta a varrer a tabela inteira. NÃO confundir com
+# ``_PREVIEW_EXCLUDED`` (7 roles), que é o filtro do PREVIEW da lista.
+SEARCH_EXCLUDED_ROLES = ("tool_call", "system_notice", "conversation_event", "system")
+
 
 def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[int, dict]:
-    """Map of contact id -> ``{"snippet": str, "id": int}`` for contacts (within the
+    """LEGACY (pre plano 62 F5) — no longer used by the search path.
+
+    Superseded by :func:`build_q_clause` (matching moved into the WHERE) plus
+    :func:`build_content_matches_query` (snippet only for the rows of the page).
+    Kept because ``tests/test_endpoints.py`` still calls it directly to assert the
+    ``MIN_SCAN_QUERY_LEN`` guard.
+
+    Map of contact id -> ``{"snippet": str, "id": int}`` for contacts (within the
     given archived scope) that have at least one message whose content matches
     ``folded_q`` (accent/case-insensitive, like names). The match comes from the most
     recent matching message; ``id`` is its DB primary key (so the UI can scroll to it).
@@ -112,8 +152,7 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
         .select_from(messages.join(contacts, contacts.c.id == messages.c.contact_id))
         .where(contacts.c.is_archived == (1 if archived else 0))
         .where(messages.c.content != "")
-        .where(messages.c.role.notin_(
-            ("tool_call", "system_notice", "conversation_event", "system")))
+        .where(messages.c.role.notin_(SEARCH_EXCLUDED_ROLES))
         .order_by(messages.c.ts.desc())
         .limit(MESSAGE_SCAN_CAP)
     )
@@ -126,6 +165,146 @@ def contact_ids_matching_message(conn, folded_q: str, archived: bool) -> dict[in
         if folded_q in fold(content):
             matched[cid] = {"snippet": match_snippet(content, folded_q), "id": row["id"]}
     return matched
+
+
+# ── Busca `q` NO SQL (plano 62 F5) ───────────────────────────────────────────
+
+def _escape_like(s: str) -> str:
+    """Escape the LIKE metacharacters of ``s`` (backslash is Postgres' default
+    LIKE escape). The Python ``in`` this replaces had no wildcards, so a ``%``
+    or ``_`` typed by the operator must keep matching itself."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _folded(col) -> ColumnElement[str]:
+    """``f_unaccent(lower(col))`` — the EXACT expression indexed by
+    ``idx_contacts_name_trgm``/``idx_msg_content_trgm`` (migration 0060). Any
+    deviation (extra cast, different nesting) makes the trigram index
+    inapplicable, so keep this the single place that spells it."""
+    return func.f_unaccent(func.lower(col), type_=String)
+
+
+def _folded_pattern(q: str) -> ColumnElement[str]:
+    """``'%' || f_unaccent(lower(:q)) || '%'`` — the pattern for ``q``, folded by
+    the SAME expression as the column side (:func:`_folded`) so both halves
+    normalize identically. ``f_unaccent``/``lower`` are IMMUTABLE, so Postgres
+    constant-folds this at plan time and pg_trgm can still extract the trigrams.
+    Bind param — never interpolated."""
+    esc = literal(_escape_like(q), String)
+    return literal("%", String).concat(func.f_unaccent(func.lower(esc), type_=String)).concat(
+        literal("%", String))
+
+
+def _folded_match(col, pattern: ColumnElement[str]) -> ColumnElement[bool]:
+    """``f_unaccent(lower(col)) ILIKE pattern`` — the folded text comparison.
+
+    ⚠️ ILIKE, not LIKE, and that is load-bearing. Both the production and the
+    test clusters run with ``lc_collate = 'C'``, where ``lower()`` only lowers
+    ASCII: ``lower('ORÇAMENTO')`` is ``'orÇamento'``, so
+    ``f_unaccent(lower(…))`` yields ``'orCamento'`` — an ASCII capital left
+    behind by ``unaccent`` AFTER ``lower()`` already ran. Folding the query the
+    same way does not help (the residual capitals land in different positions on
+    each side: column ``'orcamento'`` vs query ``'orCamento'``), so a plain
+    ``LIKE`` silently misses every accented UPPERCASE search — caught by the F0
+    characterization tests (``óLiViA``, ``ORÇAMENTO``).
+
+    ILIKE closes the gap: whatever ``unaccent`` leaves is plain ASCII, and ASCII
+    case-insensitivity works under the C collation. The expression on the column
+    side stays byte-identical to the 0060 index, and ``gin_trgm_ops`` supports
+    ``ILIKE`` (``~~*``) just like ``LIKE``.
+
+    (The alternative — indexing ``lower(f_unaccent(col))``, which folds correctly
+    in one pass — would need the 0060 indexes rebuilt; noted as follow-up.)
+    """
+    return _folded(col).ilike(pattern)
+
+
+def message_content_predicate(pattern: ColumnElement[str]) -> ColumnElement[bool]:
+    """The searchable-message predicate: non-empty content, role not internal,
+    content matches ``pattern``. The role filter MUST mirror
+    ``SEARCH_EXCLUDED_ROLES`` (= the ``idx_msg_content_trgm`` partial predicate)."""
+    return and_(
+        messages.c.content != "",
+        messages.c.role.notin_(SEARCH_EXCLUDED_ROLES),
+        _folded_match(messages.c.content, pattern),
+    )
+
+
+def build_q_clause(q: str, *, include_messages: bool = True) -> ColumnElement[bool] | None:
+    """The search ``q`` as a SQL boolean expression over ``contacts`` (plano 62 F5).
+
+    Replaces the post-SELECT Python filter (``contact_repo._apply_q_filter``), so
+    the search paginates in the database instead of shaping the whole universe
+    and slicing in memory. Returns ``None`` for an empty ``q`` (caller skips the
+    WHERE). Matches the same surface the Python filter did, OR-ed:
+
+    - ``contacts.name`` and ``contacts.group_name`` (accent/case-insensitive).
+      The Python filter tested the SHAPED ``name``, which for a group is already
+      ``group_name`` — so it effectively ignored a group's raw ``contacts.name``.
+      Testing both raw columns is a deliberate (tiny) superset: a group whose
+      stored ``name`` matches now surfaces too.
+    - ``contacts.phone`` — substring of the RAW phone against the FOLDED ``q``,
+      exactly like the Python filter did. Digits are unchanged by folding, so
+      this is behavior-preserving; folding just keeps the two halves consistent.
+    - any of the contact's tags (``contact_tags ⋈ tags``).
+    - if ``include_messages``: any searchable message of the contact
+      (``SEARCH_EXCLUDED_ROLES`` skipped, empty content skipped). Gated by
+      ``TRIGRAM_MIN_LEN`` (=3) on the FOLDED ``q`` — a 1-2 char search still
+      matches name/phone/tag/group but never content, because pg_trgm needs 3
+      chars to prune and a 2-char content ``ILIKE`` would full-scan the whole
+      table (plano 62 F5 perf fix). Unlike the legacy scan there is NO
+      ``MESSAGE_SCAN_CAP``: the trigram index makes the whole history searchable
+      (it used to reach back ~5 days in production).
+
+    The tag/message branches are UNCORRELATED ``IN (SELECT …)`` rather than
+    correlated ``EXISTS``: inside an ``OR`` Postgres cannot turn a correlated
+    ``EXISTS`` into a semi-join, so it would re-run the subplan once per contact
+    row. The uncorrelated form is evaluated ONCE (hashed), which is what lets
+    ``idx_msg_content_trgm`` be scanned a single time.
+    """
+    if not q:
+        return None
+    folded = fold(q)
+    pattern = _folded_pattern(q)
+
+    tag_match = select(contact_tags.c.contact_id).select_from(
+        contact_tags.join(tags, tags.c.id == contact_tags.c.tag_id)
+    ).where(_folded_match(tags.c.name, pattern))
+
+    clauses = [
+        _folded_match(contacts.c.name, pattern),
+        _folded_match(contacts.c.group_name, pattern),
+        # Folded q vs raw phone — see docstring (digits survive folding).
+        contacts.c.phone.like(literal("%" + _escape_like(folded) + "%", String)),
+        contacts.c.id.in_(tag_match),
+    ]
+
+    if include_messages and len(folded) >= TRIGRAM_MIN_LEN:
+        content_match = (
+            select(messages.c.contact_id)
+            .where(message_content_predicate(pattern))
+        )
+        clauses.append(contacts.c.id.in_(content_match))
+
+    return or_(*clauses)
+
+
+def build_content_matches_query(q: str, contact_ids: list[int]) -> Select:
+    """Most recent searchable message matching ``q``, one row per contact id.
+
+    Backs ``match_snippet``/``match_msg_id`` for the rows of the CURRENT page
+    only (≤ ``limit`` contacts), instead of the legacy scan over the 5000 newest
+    messages of the whole database. ``DISTINCT ON (contact_id)`` + ``ORDER BY
+    contact_id, ts DESC, id DESC`` picks the freshest match deterministically
+    (the legacy scan relied on ``ts DESC`` row order, leaving ties to the
+    planner)."""
+    return (
+        select(messages.c.contact_id, messages.c.id, messages.c.content)
+        .where(messages.c.contact_id.in_(contact_ids))
+        .where(message_content_predicate(_folded_pattern(q)))
+        .order_by(messages.c.contact_id, messages.c.ts.desc(), messages.c.id.desc())
+        .distinct(messages.c.contact_id)
+    )
 
 
 def build_list_contacts_query(*, archived: bool,
@@ -253,8 +432,12 @@ def build_count_contacts_query(*, archived: bool,
 
     Espelha só o ``WHERE`` (archived + escopo de inbox) — sem os joins de preview/
     conversa/msg_count — para dar o ``total`` da paginação barato (uma varredura de
-    índice em ``contacts``, não a query pesada). Vale apenas para o caminho SEM busca
-    textual (com ``q`` o total é o tamanho da lista já filtrada em Python)."""
+    índice em ``contacts``, não a query pesada).
+
+    Plano 62 F5: vale também para o caminho COM busca — o caller adiciona a mesma
+    cláusula de :func:`build_q_clause` no ``WHERE`` (ela só referencia ``contacts``
+    + subqueries, nunca os LATERALs), então o ``total`` continua sendo o universo
+    filtrado, agora contado no banco em vez de ``len()`` da lista em memória."""
     stmt = (
         select(func.count())
         .select_from(contacts)
