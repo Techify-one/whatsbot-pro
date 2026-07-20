@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { sendMessage, sendImage, sendAudio, sendDocument } from '../../services/api.js';
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
@@ -22,7 +22,7 @@ import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
 import { useMessageActions, myReaction, selectionKey } from './hooks/useMessageActions.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, quotedMediaText } from '../../services/messageView.js';
+import { senderColor, quotedMediaText, cardStateKey, isCollapsibleRole } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
@@ -167,6 +167,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Remember a message to focus (e.g. opened from a search hit) until it renders,
   // so the messages-driven scroll below jumps to it instead of to the bottom.
   const pendingScrollRef = useRef(null);
+  // Plano 63 F5: a deep-linked collapsible card must be RE-focused after it
+  // expands — on expand the chip's DOM node is replaced by the expanded card, so
+  // the highlight added to the chip wouldn't survive. This ref hands the target
+  // off to the [expandedCards] effect below (which re-focuses once the open card
+  // is committed). null on a manual toggle ⇒ that effect no-ops (no scroll, G2).
+  const focusAfterExpandRef = useRef(null);
   useEffect(() => {
     pendingScrollRef.current = scrollToMsg != null ? String(scrollToMsg) : null;
   }, [scrollToMsg, phone]);
@@ -187,6 +193,29 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     return true;
   }
 
+  // ── Collapsible cards (plano 63) ───────────────────────────────
+  // transcription/tool_call render minimized by default as a 1-line chip. The
+  // expansion state lives HERE (not inside the card) so a history prepend can't
+  // glue it to the wrong message — list keys are indices (G1). It's keyed by
+  // message identity via `cardStateKey`. No persistence (D2): reset when the
+  // conversation changes. The DEFAULT ("collapsed") is DERIVED in the render
+  // below ("absent from the Set ⇒ collapsed") — never applied via an effect, so
+  // opening a conversation never flashes expanded content or jumps scroll (G5).
+  const [expandedCards, setExpandedCards] = useState(() => new Set());
+  const toggleCard = useCallback((key) => {
+    // A NEW Set each toggle — mutating the existing one wouldn't re-render
+    // (Preact compares state by reference).
+    setExpandedCards((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+  // Reset on conversation change (D2). Declared BEFORE the messages-driven scroll
+  // effect below, so on a conversation switch it clears first and a search-hit
+  // re-expand (F5) in that effect wins.
+  useEffect(() => { setExpandedCards(new Set()); }, [conversationId, phone, channelId]);
+
   useEffect(() => {
     // Prepend de "carregar anteriores" (F4): a posição visual já foi RESTAURADA pelo
     // useReverseInfiniteScroll (useLayoutEffect, antes do paint). Aqui só não rolamos
@@ -197,6 +226,20 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     }
     const target = pendingScrollRef.current;
     if (target != null) {
+      // Plano 63 (F5): a search hit / deep-link may land on a collapsed
+      // transcription or tool_call — expand it so the operator sees the content,
+      // not a bare chip. `target` is a message `_id`, and cardStateKey prefixes
+      // `_id` with `id:`. Only expand a genuinely collapsible target (never
+      // pollute the Set for a normal bubble). The chip carries `data-mid` too, so
+      // focusMessage scrolls to it now; the [expandedCards] effect below then
+      // re-focuses once the OPEN card is committed (the chip node is replaced on
+      // expand, so this immediate highlight wouldn't survive).
+      const wantKey = `id:${target}`;
+      const tMsg = (messages || []).find((mm) => mm._id != null && String(mm._id) === target);
+      if (tMsg && isCollapsibleRole(tMsg.role) && !expandedCards.has(wantKey)) {
+        focusAfterExpandRef.current = target;
+        setExpandedCards((prev) => new Set(prev).add(wantKey));
+      }
       if (focusMessage(target)) {
         pendingScrollRef.current = null;
         if (onScrolledToMsg) onScrolledToMsg();
@@ -207,6 +250,17 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     }
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
+
+  // Plano 63 F5: re-focus a deep-linked card once it has EXPANDED. On expand the
+  // collapsed chip (a component) is replaced by the expanded card (a plain div),
+  // so the highlight added to the chip is dropped — this lands it on the open
+  // card after the commit. Guarded by the ref: a manual expand/collapse leaves it
+  // null, so this never scrolls the viewport on its own (G2).
+  useEffect(() => {
+    const t = focusAfterExpandRef.current;
+    if (t == null) return;
+    if (focusMessage(t)) focusAfterExpandRef.current = null;
+  }, [expandedCards]);
 
   // Client-side plugin lifecycle (plano 23 §3.4): emit `ui.conversation.opened`
   // when this chat view mounts/changes and `ui.conversation.closed` on teardown.
@@ -431,12 +485,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               if (isSystemCardRole(m.role)) {
                 // List key MUST live on the array-member vnode (Preact reconciles
                 // by the key on the direct child of the mapped array, not on the
-                // element the component returns). Match the baseline exactly:
-                // private_note keyed by _localId||i, all other cards by i.
-                const cardKey = m.role === 'private_note' ? (m._localId || i) : i;
+                // element the component returns).
+                // Plano 63 F2: key by message identity (cardStateKey), not index —
+                // the history prepends, and an index key would drift after "load
+                // older". Keep the optimistic `_localId` precedence for a
+                // not-yet-saved private_note.
+                const stateKey = cardStateKey(m, i);
+                const cardKey = m._localId || stateKey;
+                // Plano 63 F4: transcription/tool_call are collapsed unless the
+                // user expanded THIS card. Derived in render (no effect) so there's
+                // no flash/jump on open (G5); the card is controlled (G1).
+                const collapsed = isCollapsibleRole(m.role) && !expandedCards.has(stateKey);
                 return [dateSeparator, html`<${SystemMessageCard}
                   key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${openMsgMenu}
-                  showAgentName=${showAgentName} />`];
+                  showAgentName=${showAgentName}
+                  collapsed=${collapsed} onToggleCollapse=${() => toggleCard(stateKey)} />`];
               }
 
               return [dateSeparator, html`<${MessageBubble}
