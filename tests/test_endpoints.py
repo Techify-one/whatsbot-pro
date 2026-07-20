@@ -939,6 +939,41 @@ check("POST /send-document -> 200", r.status_code == 200)
 check("POST /send-document -> gowa called", mock_gowa_client.send_file.called)
 
 # ═══════════════════════════════════════════════════════════════════
+#  10c. Contact send video (plano 65)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Send Video")
+
+# GOWA (always-open) routes kind="video" to send_file — no Cloud validation.
+mock_gowa_client.send_file.reset_mock()
+fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100
+r = client.post(
+    "/api/contacts/5511999990001/send-video",
+    files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+    data={"caption": "Vídeo teste"},
+)
+check("POST /send-video -> 200", r.status_code == 200)
+check("POST /send-video -> gowa send_file called", mock_gowa_client.send_file.called)
+
+# Video validator policy (capability-driven). A windowed (Cloud) channel enforces
+# the Cloud limits; an always-open channel never blocks.
+from types import SimpleNamespace as _NS
+from channels import video_validate as _vv
+_windowed = _NS(session_window_hours=24)
+_open = _NS(session_window_hours=0)
+check("validate_video: always-open -> ok (any file)",
+      _vv.validate_video("/tmp/whatever.mkv", _open).ok)
+check("validate_video: windowed + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _windowed).reason == _vv.BAD_FORMAT)
+# Oversized mp4 (>16 MB) on a windowed channel -> too_big.
+import tempfile as _tf, os as _os
+_big = _os.path.join(_tf.gettempdir(), "wac_big_test.mp4")
+with open(_big, "wb") as _fh:
+    _fh.truncate(_vv.MAX_VIDEO_BYTES + 1)
+check("validate_video: windowed + >16MB -> too_big",
+      _vv.validate_video(_big, _windowed).reason == _vv.TOO_BIG)
+_os.remove(_big)
+
+# ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Presence")
@@ -4990,6 +5025,17 @@ check("POST /sandbox/send (no phone) -> 400", r.status_code == 400)
 
 r = client.post("/api/sandbox/send", json={"phone": "test", "message": ""})
 check("POST /sandbox/send (no msg) -> 400", r.status_code == 400)
+
+# Sandbox video (plano 65) — stored locally, agent reacts to the caption.
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=ProcessResult(
+                      reply="Vi o vídeo", tool_calls=[]))):
+    r = client.post(
+        "/api/sandbox/send-video",
+        files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+        data={"phone": "sandbox_test", "caption": "olha isso"},
+    )
+    check("POST /sandbox/send-video -> 200", r.status_code == 200)
 
 r = client.post("/api/sandbox/clear", json={"phone": "sandbox_test"})
 check("POST /sandbox/clear -> 200", r.status_code == 200)

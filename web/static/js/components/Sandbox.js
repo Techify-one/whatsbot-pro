@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import {
   getContact, sandboxClear, getLogs, clearLogs,
-  sandboxSend, sandboxSendImage, sandboxSendAudio, sandboxSendDocument,
+  sandboxSend, sandboxSendImage, sandboxSendAudio, sandboxSendDocument, sandboxSendVideo,
 } from '../services/api.js';
 import { ContactDetail } from './contacts/ContactDetail.js';
 import { isSameMessage } from './contacts/utils.js';
@@ -172,6 +172,7 @@ export function Sandbox({ newMessage }) {
     sendImage: (p, file, caption) => withTyping(() => sandboxSendImage(p, file, caption)),
     sendAudio: (p, blob, filename) => withTyping(() => sandboxSendAudio(p, blob, filename)),
     sendDocument: (p, file, caption) => withTyping(() => sandboxSendDocument(p, file, caption)),
+    sendVideo: (p, file, caption) => withTyping(() => sandboxSendVideo(p, file, caption)),
   };
 
   async function handleClear() {

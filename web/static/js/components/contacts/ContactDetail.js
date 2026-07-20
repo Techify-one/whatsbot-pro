@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, sendImage, sendAudio, sendDocument } from '../../services/api.js';
+import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../../services/api.js';
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
@@ -53,7 +53,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
-    sendText: sendMessage, sendImage, sendAudio, sendDocument,
+    sendText: sendMessage, sendImage, sendAudio, sendDocument, sendVideo,
     ...(api || {}),
   };
 

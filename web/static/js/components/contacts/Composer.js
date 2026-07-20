@@ -43,8 +43,9 @@ export function Composer({
   } = autocomplete;
   const {
     attachMenuOpen, attachMenuRef, pendingMedia, mediaCaption, setMediaCaption,
-    fileInputRef, docInputRef, sending,
-    handleAttachClick, pickImage, pickDocument, handleFileSelected, handleDocSelected,
+    fileInputRef, docInputRef, videoInputRef, sending,
+    handleAttachClick, pickImage, pickDocument, pickVideo,
+    handleFileSelected, handleDocSelected, handleVideoSelected,
     handlePaste, cancelPendingMedia, confirmPendingMedia,
   } = media;
   const { recording, recordDuration, handleMicClick } = audio;
@@ -77,12 +78,21 @@ export function Composer({
       class="hidden"
       onChange=${handleDocSelected}
     />
+    <input
+      ref=${videoInputRef}
+      type="file"
+      accept="video/*"
+      class="hidden"
+      onChange=${handleVideoSelected}
+    />
 
     <!-- Media confirmation overlay -->
     ${pendingMedia && canSend ? html`
       <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
         ${pendingMedia.type === 'image' ? html`
           <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
+        ` : pendingMedia.type === 'video' ? html`
+          <video src=${pendingMedia.previewUrl} controls class="max-h-[220px] max-w-full rounded-[8px] bg-black"></video>
         ` : pendingMedia.type === 'document' ? html`
           <div class="flex items-center gap-[8px] bg-wa-inputBg border border-wa-border rounded-[8px] px-[14px] py-[10px] max-w-full">
             <span class="text-[22px]">📄</span>
@@ -266,6 +276,10 @@ export function Composer({
                 <button type="button" onClick=${pickImage}
                   class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
                   <span class="text-[16px]">🖼️</span> Imagem
+                </button>
+                <button type="button" onClick=${pickVideo}
+                  class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
+                  <span class="text-[16px]">🎬</span> Vídeo
                 </button>
                 <button type="button" onClick=${pickDocument}
                   class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">

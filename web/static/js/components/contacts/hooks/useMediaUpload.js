@@ -10,6 +10,12 @@
 // same blob/object-URL handling, same `session_window_closed` steering.
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
+import { notify } from '../../../services/notify.js';
+
+// Client-side input ceiling (matches the server transcode teto). Larger inputs
+// are refused up front; conforming/oversized-but-convertible files pass and the
+// server decides (block vs. transcode) per channel capability — plano 65.
+const MAX_VIDEO_INPUT_BYTES = 200 * 1024 * 1024;
 
 /**
  * @param {Object} opts
@@ -33,12 +39,13 @@ export function useMediaUpload({
 }) {
   const [sending, setSending] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  // pendingMedia: { type: 'image'|'audio'|'document', file?, blob?, filename?, previewUrl? }
+  // pendingMedia: { type: 'image'|'audio'|'document'|'video', file?, blob?, filename?, previewUrl? }
   const [pendingMedia, setPendingMedia] = useState(null);
-  // Caption typed in the media-confirmation overlay (image/document only).
+  // Caption typed in the media-confirmation overlay (image/document/video).
   const [mediaCaption, setMediaCaption] = useState('');
   const fileInputRef = useRef(null);
   const docInputRef = useRef(null);
+  const videoInputRef = useRef(null);
   const attachMenuRef = useRef(null);
 
   // Close the attach menu on outside click
@@ -72,6 +79,11 @@ export function useMediaUpload({
     docInputRef.current?.click();
   }
 
+  function pickVideo() {
+    setAttachMenuOpen(false);
+    videoInputRef.current?.click();
+  }
+
   function requestImageSend(file) {
     if (!file || sending || pendingMedia) return;
     const previewUrl = URL.createObjectURL(file);
@@ -90,6 +102,20 @@ export function useMediaUpload({
       setPendingMedia({ type: 'document', file, filename: file.name });
     }
     if (docInputRef.current) docInputRef.current.value = '';
+  }
+
+  function handleVideoSelected(e) {
+    const file = e.target.files[0];
+    if (file && !sending && !pendingMedia) {
+      if (file.size > MAX_VIDEO_INPUT_BYTES) {
+        notify('Vídeo muito grande (máx. 200 MB). Reduza o arquivo e tente novamente.',
+          { kind: 'error' });
+      } else {
+        const previewUrl = URL.createObjectURL(file);
+        setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
+      }
+    }
+    if (videoInputRef.current) videoInputRef.current.value = '';
   }
 
   function handlePaste(e) {
@@ -122,6 +148,12 @@ export function useMediaUpload({
     // contato — então ignora a janela de 24h.
     const isPrivate = mode === 'private';
     const isPrivateAudio = pendingMedia.type === 'audio' && isPrivate;
+    // Video has no private-note path — it always goes to the contact.
+    if (pendingMedia.type === 'video' && isPrivate) {
+      notify('Vídeo não pode ser enviado como nota privada.', { kind: 'error' });
+      cancelPendingMedia();
+      return;
+    }
     // 24h window closed (WhatsApp Cloud): media also requires a template.
     if (sessionClosed && !isPrivate) {
       cancelPendingMedia();
@@ -177,6 +209,10 @@ export function useMediaUpload({
       optimistic = { ...base, content: docContent,
                      media_type: 'document', media_path: localUrl };
       sendPromise = api.sendDocument(phone, media.file, caption, conversationId, channelId);
+    } else if (media.type === 'video') {
+      optimistic = { ...base, content: caption || '[Vídeo]',
+                     media_type: 'video', media_path: localUrl };
+      sendPromise = api.sendVideo(phone, media.file, caption, conversationId, channelId);
     } else if (isPrivateAudio) {
       // Panel-only audio note (role private_note). "IA lê" / "IA responde no chat"
       // toggles ride along so the backend can transcribe + optionally run the AI.
@@ -232,6 +268,10 @@ export function useMediaUpload({
         if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
             && conversationId != null) {
           openTemplatePicker();
+        } else if (res && !res.ok && res.error) {
+          // Surface a clear rejection (e.g. video blocked: too big / bad format /
+          // codec — plano 65 F5A) instead of a silent failed bubble.
+          notify(res.error, { kind: 'error' });
         }
       }
     } catch (err) {
@@ -246,9 +286,9 @@ export function useMediaUpload({
     attachMenuOpen, setAttachMenuOpen, attachMenuRef,
     pendingMedia, setPendingMedia, setPendingAudio,
     mediaCaption, setMediaCaption,
-    fileInputRef, docInputRef,
-    handleAttachClick, pickImage, pickDocument,
-    handleFileSelected, handleDocSelected, handlePaste,
+    fileInputRef, docInputRef, videoInputRef,
+    handleAttachClick, pickImage, pickDocument, pickVideo,
+    handleFileSelected, handleDocSelected, handleVideoSelected, handlePaste,
     requestImageSend, cancelPendingMedia, confirmPendingMedia,
   };
 }
