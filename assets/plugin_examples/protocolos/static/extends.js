@@ -13,6 +13,7 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { ResolveForm } from '/plugins/protocolos/static/resolve_form.js';
+import { RelinkModal } from '/plugins/protocolos/static/relink_modal.js';
 import { ProtocolosTab } from '/plugins/protocolos/static/protocolos_tab.js';
 // Helper do core p/ resolver o assignee atual da conversa (seed do rótulo "atendente").
 // Carrega auth como qualquer chamada core.
@@ -30,6 +31,37 @@ function currentUserId() {
 function currentUser() {
   try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); }
   catch (_) { return null; }
+}
+
+// Encadeamento "fechar conversa e protocolo juntos" (botão c do popup de vínculo) —
+// replica o forceResolveAndClose da aba Protocolos, sem depender do componente: resolve
+// o ciclo aberto (abrindo o popup de campos se houver obrigatórios), fecha a conversa no
+// core (status=closed) e finaliza o protocolo. Retorna { ok, error? }.
+async function resolveAndCloseAll(api, apiBase, conversationId, protocoloId) {
+  let fields = {};
+  try {
+    const d = await api.http.get(`${apiBase}/field-defs?scope=atendimento`);
+    const defs = ((d && d.ok && d.data && d.data.defs) || [])
+      .filter((x) => !x.readonly && x.type !== 'atendente');
+    if (defs.length) {
+      const picked = await api.ui.openModal((close) => html`
+        <${ResolveForm} defs=${defs} initialValues=${{}} defaultAssignee=${currentUserId()}
+          onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
+      if (!picked) return { ok: false, error: 'Cancelado.' };
+      fields = picked.fields || {};
+    }
+  } catch (_) { /* sem defs → segue com fields vazio */ }
+  // 1) resolve o CICLO (Fim + campos). 2) fecha a conversa no core. 3) finaliza o protocolo.
+  const res = await api.http.post(`/atendimentos/${conversationId}/resolve`, { fields });
+  if (res && res.ok === false) return res;
+  const st = await api.services.setConversationStatus(conversationId, 'closed');
+  if (st && st.ok === false) return { ok: false, error: st.error || 'Falha ao fechar a conversa.' };
+  const pid = protocoloId || (res && res.data && res.data.protocolo_id) || null;
+  if (pid) {
+    const closed = await api.http.post(`/protocolos/${pid}/close`);
+    if (closed && closed.ok === false) return closed;
+  }
+  return { ok: true };
 }
 
 export default function register(api) {
@@ -121,4 +153,48 @@ export default function register(api) {
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 5h6v6H4V5zm0 8h6v6H4v-6zm8-8h8v6h-8V5zm0 8h8v6h-8v-6z"/></svg>
       Protocolos
     </a>` : null));
+
+  // 4) Popup "vincular ao protocolo anterior" (plano 49): ao ABRIR uma conversa cujo
+  //    contato fechou um protocolo há pouco (janela configurável no backend), pergunta
+  //    se este atendimento faz parte do anterior. O evento ui.conversation.opened
+  //    dispara a CADA mount do ContactDetail, então um guard em memória por previous.id
+  //    evita repetir na mesma sessão (P7/gotcha 5). Tudo best-effort: nunca quebra a
+  //    abertura da conversa.
+  const askedRelink = new Set();   // previous.id já perguntados nesta sessão
+  api.on('ui.conversation.opened', async ({ conversationId, phone }) => {
+    try {
+      if (!can('edit')) return;                    // sem editar → não oferece o vínculo
+      if (!conversationId) return;
+      // O evento traz conversationId/phone; a sugestão é por contato → resolve o contato.
+      let contactId = null;
+      try {
+        const c = await getConversation(conversationId);
+        contactId = (c && c.ok && c.data) ? c.data.contact_id : null;
+      } catch (_) { contactId = null; }
+      if (contactId == null) return;
+
+      const s = await getJson(`${apiBase}/contacts/${contactId}/relink-suggestion`);
+      const data = (s && s.ok && s.data) || null;
+      if (!data || !data.suggest || !data.previous) return;   // fora da janela / desligado
+      const prevId = data.previous.id;
+      if (askedRelink.has(prevId)) return;         // já perguntei por este anterior
+      askedRelink.add(prevId);
+      const currentOpenId = (data.current_open && data.current_open.id) || null;
+
+      const doRelink = () => api.http.post(`/protocolos/${prevId}/relink`,
+        { current_open_id: currentOpenId });
+      const doCloseAll = () => resolveAndCloseAll(api, apiBase, conversationId, currentOpenId);
+
+      const outcome = await api.ui.openModal((close) => html`
+        <${RelinkModal} previous=${data.previous} secondsSinceClose=${data.seconds_since_close}
+          doRelink=${doRelink} doCloseAll=${doCloseAll} onDone=${(o) => close(o)} />`);
+
+      // (a) sucesso: deep-link opcional pra aba Protocolos abrindo o anterior reaberto
+      //     (mesmo precedente do "Resolver e ir ao protocolo").
+      if (outcome === 'relinked') {
+        history.pushState(null, '', `/protocolos?detail=${prevId}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
+    } catch (_) { /* popup best-effort — a abertura da conversa nunca é bloqueada */ }
+  });
 }

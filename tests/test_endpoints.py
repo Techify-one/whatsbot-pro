@@ -2057,8 +2057,20 @@ check("protocolos rbac -> create_views declarada",
 # 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
 _atd_manifest = _load_manifest(_atd_dir)
 _run_pending(_atd_manifest, _atd_dir)
-_alogic_spec = _ilu.spec_from_file_location("atendimentos_logic_test", _atd_dir / "logic.py")
+# Carrega o plugin como PACOTE (igual ao runtime, que registra `whatsbot_plugins.<id>`):
+# logic.py usa imports RELATIVOS (`from . import kanban_index`), que só resolvem dentro de
+# um pacote. O __path__ sintético aponta para a pasta do plugin.
+import importlib as _il
+import sys as _sys
+import types as _types
+_APKG = "protocolos_pkg_test"
+if _APKG not in _sys.modules:
+    _apkg = _types.ModuleType(_APKG)
+    _apkg.__path__ = [str(_atd_dir)]
+    _sys.modules[_APKG] = _apkg
+_alogic_spec = _ilu.spec_from_file_location(f"{_APKG}.logic", _atd_dir / "logic.py")
 _alogic = _ilu.module_from_spec(_alogic_spec)
+_sys.modules[f"{_APKG}.logic"] = _alogic   # antes do exec: o pacote precisa se auto-resolver
 _alogic_spec.loader.exec_module(_alogic)
 
 # 2b) Seed 010: as abas padrão Status/Atendente agora são VIEWS REAIS (equipe, sem owner) —
@@ -2178,12 +2190,14 @@ check("set_protocolo_field -> grava valor de opção",
 
 # 7) attr_filters namespaceados: pf:<scope>:<key> (campo de protocolo) + cattr:<key> (contato).
 _lf = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Dúvida"}, limit=50)
-check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf))
+check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf["items"]))
 _lf2 = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Reclamação"}, limit=50)
 check("list_protocolos(pf filter) -> exclui valor diferente",
-      all(a["id"] != _proto_sf["id"] for a in _lf2))
+      all(a["id"] != _proto_sf["id"] for a in _lf2["items"]))
 _lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
-check("list_protocolos(cattr filter) -> retorna lista", isinstance(_lf3, list))
+check("list_protocolos(cattr filter) -> envelope {items,total,has_more}",
+      isinstance(_lf3, dict) and isinstance(_lf3.get("items"), list)
+      and "total" in _lf3 and "has_more" in _lf3)
 # _row_matches_filter: cattr = substring case-insensitive (texto); pf = igualdade exata.
 check("cattr filter -> substring case-insensitive",
       _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro Civil"}}, "cattr:profissao", "civil") is True
@@ -2223,21 +2237,172 @@ _cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001"
 _alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
 _lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
 check("list_protocolos(canal filter) -> acha o protocolo do canal",
-      any(a["id"] == _cproto["id"] for a in _lc))
+      any(a["id"] == _cproto["id"] for a in _lc["items"]))
 _lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
 check("list_protocolos(canal filter) -> exclui canal diferente",
-      all(a["id"] != _cproto["id"] for a in _lc2))
+      all(a["id"] != _cproto["id"] for a in _lc2["items"]))
 
 # 7c) BUSCA "Buscar cliente" (q → SQL) case- E acento-insensível (fix filtros protocolos).
 _proto_q = _alogic.ensure_protocolo_for_contact(70055, phone="5511960000055", name="João DA Silva")
 def _q_has(q):
-    return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200))
+    return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200)["items"])
 check("q busca: 'joão' (exato) acha", _q_has("joão"))
 check("q busca: 'joao' (sem acento) acha", _q_has("joao"))          # acento-insensível
 check("q busca: 'JOAO' (maiúsc.) acha", _q_has("JOAO"))             # case-insensível (o bug)
 check("q busca: 'silva' (substring) acha", _q_has("silva"))
 check("q busca: 'da' (minúsc. do nome) acha", _q_has("da"))
 check("q busca: 'zzznaoexiste' NÃO acha", not _q_has("zzznaoexiste"))
+
+# 7d) Paginação (plano 50): envelope {items,total,has_more}, caminhada de cursor sem
+# dup/gap, e teto (clamp_limit/clamp_offset). Isola um conjunto próprio via um token
+# único no nome (q → caminho normal com LIMIT/OFFSET + COUNT no SQL).
+_PGN = 57  # > PAGE_LIST (50) → força múltiplas páginas
+_pgn_ids = set()
+for _i in range(_PGN):
+    _pph = f"55119{_i:07d}"
+    _pc = _alogic.contact_repo.get_or_create(_pph)
+    _pp = _alogic.ensure_protocolo_for_contact(_pc["id"], phone=_pph, name=f"ZPGNTEST Cliente {_i}")
+    _pgn_ids.add(_pp["id"])
+_pg1 = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=0)
+check("paginação: envelope {items,total,has_more}",
+      isinstance(_pg1, dict) and isinstance(_pg1.get("items"), list)
+      and isinstance(_pg1.get("total"), int) and isinstance(_pg1.get("has_more"), bool))
+check("paginação: total isola o conjunto (== _PGN) e >= len(items)",
+      _pg1["total"] == _PGN and _pg1["total"] >= len(_pg1["items"]))
+check("paginação: página respeita o limit", len(_pg1["items"]) <= 20)
+check("paginação: 1ª página tem has_more (57 > 20)", _pg1["has_more"] is True)
+check("paginação: has_more coerente com offset+len < total",
+      _pg1["has_more"] == (0 + len(_pg1["items"]) < _pg1["total"]))
+# Caminhada de cursor por offset: cobre TODOS os ZPGNTEST sem duplicar/pular.
+_seen, _off = [], 0
+while True:
+    _pg = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=_off)
+    _seen.extend(a["id"] for a in _pg["items"])
+    if not _pg["has_more"] or not _pg["items"]:
+        break
+    _off += len(_pg["items"])
+check("paginação: cursor-walk cobre todo o conjunto sem gap",
+      set(_seen) == _pgn_ids and len(_seen) == len(set(_seen)))
+check("paginação: última página has_more=False", _pg["has_more"] is False)
+# Teto: limit exagerado é capado por CAP_LIST (200); negativos saneados (página não-vazia).
+_cap = _alogic.list_protocolos(limit=99999, offset=0)
+check("paginação: limit=99999 capado em <= 200", len(_cap["items"]) <= 200)
+_neg = _alogic.list_protocolos(q="ZPGNTEST", limit=-5, offset=-10)
+check("paginação: limit/offset negativos saneados (>=1 item, offset→0)",
+      len(_neg["items"]) >= 1 and _neg["total"] == _PGN)
+
+# ── 7e) Kanban agrupado NO SERVIDOR: índice em cache + paginação POR COLUNA ──
+# O agrupamento saiu do navegador (grouping.py) e cada coluna pagina sozinha, então
+# nenhuma tela precisa baixar a coleção inteira para montar as colunas/contagens.
+_kanban = _il.import_module(f"{_APKG}.kanban_index")
+_grp = _il.import_module(f"{_APKG}.grouping")
+_kanban.invalidate()
+_gf = {"q": "ZPGNTEST"}          # isola o conjunto criado em 7d
+
+# (a) Classificador PURO e determinístico (tz + "agora" fixos), um modo por vez.
+import datetime as _dtm
+_tzt = _grp.resolve_tz("America/Sao_Paulo")
+_nowt = _dtm.datetime(2026, 7, 17, 15, 0, 0, tzinfo=_tzt).timestamp()
+_t_today = _dtm.datetime(2026, 7, 17, 9, 0, 0, tzinfo=_tzt).timestamp()
+_t_yest = _dtm.datetime(2026, 7, 16, 9, 0, 0, tzinfo=_tzt).timestamp()
+_t_old = _dtm.datetime(2025, 1, 1, 9, 0, 0, tzinfo=_tzt).timestamp()
+_g_st = _grp.build_grouping({"group_by": "status"})
+check("grouping status -> colunas aberto/fechado e classificação",
+      [c["id"] for c in _g_st.static_columns()] == ["aberto", "fechado"]
+      and _g_st.column_id_of({"status": "fechado"}) == "fechado"
+      and _g_st.column_id_of({"status": "aberto"}) == "aberto")
+_g_at = _grp.build_grouping({"group_by": "atendente"}, users=[{"id": 7, "name": "Ana"}])
+check("grouping atendente -> u:<id>/__none__ + rótulo de usuário fora da lista",
+      _g_at.column_id_of({"assignee_user_id": 7}) == "u:7"
+      and _g_at.column_id_of({"assignee_user_id": None}) == "__none__"
+      and _g_at.label_for("u:99") == "Usuário #99")
+_g_dt = _grp.build_grouping({"group_by": "data", "group_date_mode": "faixas"},
+                            now_epoch=_nowt, tz=_tzt)
+check("grouping data/faixas -> today/yesterday/older",
+      _g_dt.column_id_of({"opened_at": _t_today}) == "today"
+      and _g_dt.column_id_of({"opened_at": _t_yest}) == "yesterday"
+      and _g_dt.column_id_of({"opened_at": _t_old}) == "older")
+_g_dd = _grp.build_grouping({"group_by": "data", "group_date_mode": "dia"},
+                            now_epoch=_nowt, tz=_tzt)
+check("grouping data/dia -> bucket d:YYYY-MM-DD, sem data -> __nodate__",
+      _g_dd.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+      and _g_dd.column_id_of({"opened_at": None}) == "__nodate__")
+check("grouping data/dia -> colunas dinâmicas desc + especial ao fim",
+      [c["id"] for c in _g_dd.build_dynamic_columns(
+          ["d:2026-07-16", "d:2026-07-17", "__nodate__"])]
+      == ["d:2026-07-17", "d:2026-07-16", "__nodate__"])
+_g_sem = _grp.build_grouping({"group_by": "data", "group_date_mode": "semana"},
+                             now_epoch=_nowt, tz=_tzt)
+_g_mes = _grp.build_grouping({"group_by": "data", "group_date_mode": "mes"},
+                             now_epoch=_nowt, tz=_tzt)
+check("grouping data/semana|mes -> chave da segunda-feira e do mês",
+      _g_sem.column_id_of({"opened_at": _t_today}) == "w:2026-07-13"
+      and _g_mes.column_id_of({"opened_at": _t_today}) == "m:2026-07")
+_g_pr = _grp.build_grouping(
+    {"group_by": "data", "group_date_mode": "personalizado", "group_date_grain": "dia",
+     "group_date_from": "2026-07-17", "group_date_to": "2026-07-17"},
+    now_epoch=_nowt, tz=_tzt)
+check("grouping data/personalizado -> dentro da janela vs __outofrange__",
+      _g_pr.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+      and _g_pr.column_id_of({"opened_at": _t_yest}) == "__outofrange__")
+_g_pf = _grp.build_grouping(
+    {"group_by": "pfield", "group_field_scope": "protocolo", "group_attr_key": "motivo"},
+    option_def=lambda s, k: {"key": k, "options": ["Dúvida"], "label": "Motivo"})
+check("grouping pfield -> o:<valor>/__none__, lista pega o 1º, needs=extras",
+      _g_pf.column_id_of({"fields": {"motivo": "Dúvida"}}) == "o:Dúvida"
+      and _g_pf.column_id_of({"fields": {"motivo": ["Dúvida"]}}) == "o:Dúvida"
+      and _g_pf.column_id_of({"fields": {}}) == "__none__"
+      and "protocolo_extras" in _g_pf.needs)
+check("grouping pfield -> campo removido vira indisponível (1 coluna, só-leitura)",
+      _grp.build_grouping({"group_by": "pfield", "group_field_scope": "protocolo",
+                           "group_attr_key": "sumiu"}, option_def=lambda s, k: None).unavailable is True)
+
+# (b) Índice: colunas + contagem EXATA por coluna (os ZPGNTEST nascem todos abertos).
+_idx = _kanban.build_index({"group_by": "status"}, _gf)
+_icols = {c["id"]: c["total"] for c in _idx["columns"]}
+check("índice status -> aberto == _PGN, fechado == 0",
+      _icols.get("aberto") == _PGN and _icols.get("fechado") == 0)
+check("índice -> soma das colunas == total filtrado, sem truncar",
+      sum(c["total"] for c in _idx["columns"]) == _PGN and _idx["truncated"] is False)
+check("índice -> ids da coluna sem duplicata",
+      len(_idx["column_ids"]["aberto"]) == _PGN
+      and set(_idx["column_ids"]["aberto"]) == _pgn_ids)
+
+# (c) Paginação POR COLUNA: cursor-walk cobre a coluna sem dup/gap; teto respeitado.
+_seen_c, _offc = [], 0
+while True:
+    _pgc = _alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                       limit=20, offset=_offc)
+    _seen_c.extend(a["id"] for a in _pgc["items"])
+    if not _pgc["has_more"] or not _pgc["items"]:
+        break
+    _offc += len(_pgc["items"])
+check("coluna paginada -> cursor-walk cobre a coluna sem dup/gap",
+      len(_seen_c) == _PGN and len(set(_seen_c)) == _PGN and set(_seen_c) == _pgn_ids)
+check("coluna paginada -> total = tamanho da coluna e última página has_more=False",
+      _pgc["total"] == _PGN and _pgc["has_more"] is False)
+check("coluna paginada -> limit exagerado capado em <= 200",
+      len(_alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                      limit=99999)["items"]) <= 200)
+_pgz = _alogic.grouped_column_page({"group_by": "status"}, _gf, "fechado", limit=20)
+check("coluna vazia -> envelope zerado",
+      _pgz["items"] == [] and _pgz["total"] == 0 and _pgz["has_more"] is False)
+check("coluna inexistente -> envelope zerado (não estoura)",
+      _alogic.grouped_column_page({"group_by": "status"}, _gf, "nao_existe")["total"] == 0)
+
+# (d) grouped_columns (o que a rota serve) + agrupamento por atendente.
+_gcols = _alogic.grouped_columns({"group_by": "atendente"}, _gf)
+_nao = next((c for c in _gcols["columns"] if c["id"] == "__none__"), None)
+check("grouped_columns atendente -> 'Não atribuído' concentra os ZPGNTEST",
+      _nao is not None and _nao["total"] == _PGN)
+check("grouped_columns -> shape {columns,truncated,unavailable,read_only}",
+      all(k in _gcols for k in ("columns", "truncated", "unavailable", "read_only")))
+
+# (e) Cache/geração: o bump muda a chave ⇒ invalida em todas as réplicas.
+_ck1 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+_kanban.bump_generation()
+_ck2 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+check("geração -> bump muda a chave do cache (invalidação entre réplicas)", _ck1 != _ck2)
 check("q busca: por telefone (substring) acha", _q_has("960000055"))
 # Campo de OPÇÃO agora casa ignorando caixa E acento (antes: exato sensível).
 check("pf opção -> case-insensível",

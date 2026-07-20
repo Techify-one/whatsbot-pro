@@ -54,7 +54,6 @@ export function useConversationList({ onUnreadChange }) {
   const fetchSeqRef = useRef(0);                // plano 62 F3: token de sequência do fetch
   const fetchAbortRef = useRef(null);           // plano 62 F3: aborta o fetch anterior
   const loadMoreAbortRef = useRef(null);        // plano 62 F3: aborta o loadMore em voo
-  const searchConvsRef = useRef([]);            // plano 62 F6: janela de atendimentos da busca atual
   // plano 62 F6: a query que produziu a lista ATUALMENTE carregada ('' = conversa-first).
   // É ela — não `searchRef`, que muda a cada tecla — que decide o modo do `loadMore`:
   // durante os 300ms de debounce `searchRef` já é a query nova enquanto `offsetRef`/as
@@ -142,42 +141,49 @@ export function useConversationList({ onUnreadChange }) {
       // contatos não-arquivados (universo de riqueza: nome/avatar/tags + os contatos
       // sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
       // ATENDIMENTOS; `buildRows` cruza os dois honrando `archivedView`.
-      // A janela de atendimentos é buscada UMA vez por query e guardada em
-      // `searchConvsRef`: as páginas seguintes cruzam contra a MESMA janela, então o
-      // append não duplica linha nem re-embaralha o que já está na tela.
-      // (O cache de 30s do universo de busca da F3 saiu junto — ver notas da F6: com
-      // paginação real cada página é barata e o cache só adicionava defasagem.)
-      Promise.all([
-        getContacts(q, false, { limit: SIDEBAR_PAGE, offset: 0, signal: ctrl.signal }),
-        listConversations({ archived: archivedView, limit: 200 }, { signal: ctrl.signal }),
-      ]).then(([cRes, vRes]) => {
+      // COMBINAÇÃO plano 62 F6 (contatos paginados) + eafb629/Leandro (atendimentos por
+      // `contact_ids`): 1º pede a PÁGINA de contatos que casa `q` (envelope
+      // { items, has_more } — não baixa mais os ~8,5k num payload só); depois pede os
+      // atendimentos EXATOS desses contatos (`contact_ids`), não a janela das 200 mais
+      // recentes que fazia o `buildRows` descartar em silêncio o contato cujo atendimento
+      // estivesse fora dela. Cada página busca os SEUS atendimentos, então o `loadMore`
+      // (loadSearchPage) repete o mesmo padrão — não há janela compartilhada entre páginas.
+      getContacts(q, false, { limit: SIDEBAR_PAGE, offset: 0, signal: ctrl.signal }).then((cRes) => {
         if (token !== fetchSeqRef.current) return;  // resposta obsoleta — descarta
-        loadedQueryRef.current = q;
         const env = (cRes && cRes.ok) ? (cRes.data || {}) : null;
-        // `items` só existe no envelope paginado; sem ele (falha do request) o
-        // cruzamento é pulado e a janela de atendimentos vira a lista, como antes.
+        // `items` só existe no envelope paginado; sem ele (falha do request) o cruzamento
+        // é pulado e a janela de atendimentos das 200 mais recentes vira a lista (fallback).
         const contactList = env ? (env.items || []) : null;
-        if (vRes && vRes.ok) {
-          const convs = (vRes.data && vRes.data.conversations) || [];
-          searchConvsRef.current = convs;
-          const rows = sortContacts(contactList
-            ? buildRows(contactList, convs, { archivedView })
-            : convs.map(convRowToSidebarRow));
-          setContacts(rows);
-          contactsRef.current = rows;
-          // Só paginamos quando o universo de contatos paginou de verdade — no fallback
-          // sem `contactList` não há cursor a avançar.
-          setHasMore(!!(env && env.has_more) && !!contactList && contactList.length > 0);
-          // O cursor conta CONTATOS lidos (unidade da paginação do servidor), não linhas.
-          offsetRef.current = contactList ? contactList.length : 0;
-        } else {
-          setContacts([]); contactsRef.current = [];
-          searchConvsRef.current = [];
-          setHasMore(false);
-        }
-        setLoading(false);
+        const ids = contactList ? contactList.map(c => c.id).filter(id => id != null) : [];
+        const convsP = ids.length
+          ? listConversations({ archived: archivedView, contact_ids: ids.join(','), limit: 500 },
+                               { signal: ctrl.signal })
+          : listConversations({ archived: archivedView, limit: 200 }, { signal: ctrl.signal });
+        return convsP.then((vRes) => {
+          if (token !== fetchSeqRef.current) return;
+          loadedQueryRef.current = q;
+          if (vRes && vRes.ok) {
+            const convs = (vRes.data && vRes.data.conversations) || [];
+            const rows = sortContacts(contactList
+              ? buildRows(contactList, convs, { archivedView })
+              : convs.map(convRowToSidebarRow));
+            setContacts(rows);
+            contactsRef.current = rows;
+            // Só paginamos quando o universo de contatos paginou de verdade — no fallback
+            // sem `contactList` não há cursor a avançar. O cursor conta CONTATOS lidos
+            // (unidade da paginação do servidor), não linhas.
+            setHasMore(!!(env && env.has_more) && !!contactList && contactList.length > 0);
+            offsetRef.current = contactList ? contactList.length : 0;
+          } else {
+            setContacts([]); contactsRef.current = [];
+            setHasMore(false);
+          }
+          setLoading(false);
+        });
       }).catch((e) => {
         if (token !== fetchSeqRef.current || (e && e.name === 'AbortError')) return;
+        setContacts([]); contactsRef.current = [];
+        setHasMore(false);
         setLoading(false);
       });
       return;
@@ -207,13 +213,13 @@ export function useConversationList({ onUnreadChange }) {
       });
   }, []);
 
-  // plano 62 F6 — próxima página do modo BUSCA: avança o cursor de CONTATOS, cruza a
-  // página nova contra a janela de atendimentos JÁ carregada (`searchConvsRef`, fixa por
-  // query) e anexa. Páginas de contatos são disjuntas, então o append não duplica; a
-  // dedup por `rowKeyFor` é cinto de segurança contra o re-ordenamento que o offset
-  // pagination sofre quando chega mensagem nova durante a rolagem.
-  // `step` se auto-chama enquanto a página não render NENHUMA linha (ver
-  // SEARCH_EMPTY_PAGE_CHAIN) — do contrário o scroll travaria.
+  // plano 62 F6 + eafb629 — próxima página do modo BUSCA: avança o cursor de CONTATOS,
+  // pede os atendimentos EXATOS dos contatos da página nova (`contact_ids`, mesmo padrão
+  // da 1ª página — nenhum some por ter o atendimento fora das 200 mais recentes) e anexa.
+  // Páginas de contatos são disjuntas, então o append não duplica; a dedup por `rowKeyFor`
+  // é cinto de segurança contra o re-ordenamento que o offset pagination sofre quando
+  // chega mensagem nova durante a rolagem. `step` se auto-chama enquanto a página não
+  // render NENHUMA linha (ver SEARCH_EMPTY_PAGE_CHAIN) — do contrário o scroll travaria.
   const loadSearchPage = useCallback((q, archivedView, token, done) => {
     const step = (chainLeft) => {
       const offset = offsetRef.current;
@@ -221,31 +227,42 @@ export function useConversationList({ onUnreadChange }) {
       loadMoreAbortRef.current = ctrl;
       getContacts(q, false, { limit: SIDEBAR_PAGE, offset, signal: ctrl.signal })
         .then((cRes) => {
-          // Token ANTES de qualquer escrita: um reset (query nova/troca de aba) já zerou
+          // Token ANTES de avançar o cursor: um reset (query nova/troca de aba) já zerou
           // o `offsetRef`, e avançá-lo aqui corromperia a paginação da query nova.
           if (token !== fetchSeqRef.current) { done(); return; }
           if (!cRes || !cRes.ok) { done(); return; }
           const env = cRes.data || {};
           const items = env.items || [];
           offsetRef.current = offset + items.length;
-          const fresh = buildRows(items, searchConvsRef.current || [], { archivedView });
-          if (fresh.length) {
-            setContacts((prev) => {
-              const seen = new Set(prev.map(rowKeyFor));
-              const add = fresh.filter((r) => !seen.has(rowKeyFor(r)));
-              const next = sortContacts([...prev, ...add]);
-              contactsRef.current = next;
-              return next;
-            });
-          }
           // `items.length === 0` fecha a paginação mesmo com um `has_more` otimista —
           // sem isso o cursor ficaria parado pedindo a mesma página vazia pra sempre.
           const serverHasMore = !!env.has_more && items.length > 0;
-          if (serverHasMore && fresh.length === 0 && chainLeft > 1) { step(chainLeft - 1); return; }
-          setHasMore(serverHasMore && fresh.length > 0);
-          done();
+          const finish = (fresh) => {
+            if (token !== fetchSeqRef.current) { done(); return; }  // reset durante o 2º request
+            if (fresh.length) {
+              setContacts((prev) => {
+                const seen = new Set(prev.map(rowKeyFor));
+                const add = fresh.filter((r) => !seen.has(rowKeyFor(r)));
+                const next = sortContacts([...prev, ...add]);
+                contactsRef.current = next;
+                return next;
+              });
+            }
+            if (serverHasMore && fresh.length === 0 && chainLeft > 1) { step(chainLeft - 1); return; }
+            setHasMore(serverHasMore && fresh.length > 0);
+            done();
+          };
+          if (!items.length) { finish([]); return; }
+          const ids = items.map((c) => c.id).filter((id) => id != null);
+          listConversations({ archived: archivedView, contact_ids: ids.join(','), limit: 500 },
+                            { signal: ctrl.signal })
+            .then((vRes) => {
+              const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
+              finish(buildRows(items, convs, { archivedView }));
+            })
+            .catch(() => { done(); });  // AbortError/erro de rede — sem estado a corrigir
         })
-        .catch(() => { done(); });  // AbortError/erro de rede — sem estado a corrigir
+        .catch(() => { done(); });
     };
     step(SEARCH_EMPTY_PAGE_CHAIN);
   }, []);

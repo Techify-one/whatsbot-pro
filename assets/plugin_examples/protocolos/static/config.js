@@ -45,7 +45,11 @@ function slug(s) {
 }
 
 export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', can }) {
-  const canEdit = !can || can('edit');
+  // Esta tela grava via PUT /field-defs, /protocol-config, /general-config e
+  // /skip-open-config — todas gateadas por `config` no backend (e o próprio screen
+  // declara `requires: config`). Gatear aqui por `edit` deixaria os campos editáveis
+  // para quem tomaria 403 ao salvar.
+  const canEdit = !can || can('config');
   const [tab, setTab] = useState('protocolo'); // 'protocolo' | 'atendimento' | 'avaliacao'
   const [defs, setDefs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -72,7 +76,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   useEffect(() => { if (FIELD_TABS.includes(tab)) load(tab); }, [tab, load]);
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
-  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, relink_prompt_enabled: true, relink_window_minutes: 30 };
   const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
@@ -381,6 +385,31 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
               </span>
             </span>
           </label>
+        </div>
+      `}
+
+      ${general === null ? null : html`
+        <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
+          <label class="flex items-start gap-2 text-[13px] text-wa-text">
+            <input class="mt-0.5" type="checkbox"
+              checked=${general.relink_prompt_enabled !== false}
+              disabled=${!canEdit}
+              onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), relink_prompt_enabled: e.target.checked }))} />
+            <span>
+              <span class="font-medium">Perguntar ao reabrir logo após fechar</span>
+              <span class="block text-[12px] text-wa-secondary mt-0.5">
+                Ao abrir uma conversa cujo contato finalizou um protocolo há pouco, mostra um popup
+                perguntando se o atendimento faz parte do protocolo anterior ou é um novo.
+              </span>
+            </span>
+          </label>
+          <div class="flex items-center gap-2 pl-6">
+            <label class="text-[12px] text-wa-secondary">Janela (minutos)</label>
+            <input class="wa-field w-24 px-2 py-1.5 rounded-md text-[13px]" type="number" min="1" max="1440"
+              value=${general.relink_window_minutes == null ? 30 : general.relink_window_minutes}
+              disabled=${!canEdit || general.relink_prompt_enabled === false}
+              onInput=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), relink_window_minutes: e.target.value === '' ? '' : Number(e.target.value) }))} />
+          </div>
         </div>
       `}
 

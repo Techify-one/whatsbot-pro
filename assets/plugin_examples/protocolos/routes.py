@@ -31,6 +31,21 @@ def _err(msg: str, status: int = 400):
     return JSONResponse(status_code=status, content={"ok": False, "error": msg})
 
 
+def _client_ip(request: Request) -> str:
+    """IP do cliente p/ o bucket de rate-limit das rotas PÚBLICAS (avaliação).
+
+    Atrás do proxy reverso documentado (Coolify/Traefik/nginx) a entrada MAIS À
+    DIREITA do X-Forwarded-For é o endereço que o proxy confiável realmente viu — o
+    chamador pode PREPENDAR entradas forjadas, mas não a que o proxy anexa. Usa o hop
+    mais à direita (não o forjável mais à esquerda). Sem XFF → o peer TCP real."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    return request.client.host if request.client else ""
+
+
 async def _can_team(request: Request) -> bool:
     """Pode criar/editar visualizações de EQUIPE? (default-allow em legado/open via acheck)."""
     return await acheck(request, "plugin.protocolos.manage_team_views")
@@ -62,31 +77,132 @@ async def _gate_view_write(request: Request, *, existing: dict | None,
 
 # ── Protocolos ──────────────────────────────────────────────────────────────
 
+# status/assignee_user_id/nota: valor ÚNICO OU lista JSON (multi-seleção do filtro). Ambos
+# aceitos — '["aberto","fechado"]' vira lista; 'aberto' / '5' seguem como escalar (a logic
+# normaliza).
+def _maybe_list(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.startswith("["):
+        try:
+            p = json.loads(s)
+            return p if isinstance(p, list) else v
+        except (ValueError, TypeError):
+            return v
+    return v
+
+
+def _parse_attr_filters(attr_filters: str | None):
+    """attr_filters = JSON {chave: valor} (filtro por campo/atributo da aba)."""
+    if not attr_filters:
+        return None
+    try:
+        parsed = json.loads(attr_filters)
+        return {str(k): v for k, v in parsed.items()} if isinstance(parsed, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                  attr_filters, nota=None) -> dict:
+    """Filtros normalizados — MESMO conjunto para a lista e para o índice do Kanban.
+
+    ``nota`` entra aqui (e não só na lista) porque o índice do Kanban precisa varrer
+    exatamente o mesmo recorte: filtro de avaliação só na lista faria as contagens por
+    coluna contarem protocolos que a lista esconde.
+    """
+    return {"status": _maybe_list(status),
+            "assignee_user_id": _maybe_list(assignee_user_id),
+            "contact_id": contact_id, "q": q,
+            "opened_from": opened_from, "opened_to": opened_to,
+            "nota": _maybe_list(nota),
+            "attr_filters": _parse_attr_filters(attr_filters)}
+
+
 @router.get("/protocolos", dependencies=[plugin_permission("view")])
-async def list_protocolos(status: str | None = None, assignee_user_id: int | None = None,
+async def list_protocolos(status: str | None = None, assignee_user_id: str | None = None,
                             contact_id: int | None = None, q: str | None = None,
                             opened_from: float | None = None, opened_to: float | None = None,
-                            attr_filters: str | None = None,
+                            attr_filters: str | None = None, nota: str | None = None,
                             limit: int = 200, offset: int = 0):
-    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de atendimento da aba).
-    af = None
-    if attr_filters:
-        try:
-            parsed = json.loads(attr_filters)
-            if isinstance(parsed, dict):
-                af = {str(k): v for k, v in parsed.items()}
-        except (ValueError, TypeError):
-            af = None
-    data = logic.list_protocolos(
-        status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, attr_filters=af,
-        limit=limit, offset=offset)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters, nota)
+    data = await asyncio.to_thread(
+        lambda: logic.list_protocolos(**f, limit=limit, offset=offset))
+    return {"ok": True, "data": data}
+
+
+@router.get("/canais", dependencies=[plugin_permission("view")])
+async def list_canais():
+    """Canais disponíveis (não-arquivados) p/ o dropdown do filtro 'Canal' do Kanban."""
+    return {"ok": True, "data": logic.list_channels()}
+
+
+# ── Kanban agrupado (colunas + página POR COLUNA) ────────────────────────────
+# O agrupamento roda no SERVIDOR (grouping.py) sobre um índice em cache
+# (kanban_index.py): o cliente pede as colunas e depois pagina UMA coluna por vez,
+# em vez de baixar a coleção inteira para agrupar no navegador.
+
+def _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+               group_date_grain, group_date_from, group_date_to) -> dict:
+    """Config de agrupamento da visualização ativa (mesmas chaves da tabela de views)."""
+    return {"group_by": group_by or "status", "group_attr_key": group_attr_key,
+            "group_field_scope": group_field_scope, "group_date_mode": group_date_mode,
+            "group_date_grain": group_date_grain, "group_date_from": group_date_from,
+            "group_date_to": group_date_to}
+
+
+@router.get("/grouped/columns", dependencies=[plugin_permission("view")])
+async def grouped_columns(status: str | None = None, assignee_user_id: str | None = None,
+                          contact_id: int | None = None, q: str | None = None,
+                          opened_from: float | None = None, opened_to: float | None = None,
+                          attr_filters: str | None = None, nota: str | None = None,
+                          group_by: str | None = None, group_attr_key: str | None = None,
+                          group_field_scope: str | None = None,
+                          group_date_mode: str | None = None,
+                          group_date_grain: str | None = None,
+                          group_date_from: str | None = None,
+                          group_date_to: str | None = None):
+    """Colunas da visualização + contagem EXATA por coluna (índice em cache)."""
+    view = _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+                      group_date_grain, group_date_from, group_date_to)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters, nota)
+    data = await asyncio.to_thread(logic.grouped_columns, view, f)
+    return {"ok": True, "data": data}
+
+
+@router.get("/grouped/column", dependencies=[plugin_permission("view")])
+async def grouped_column(col_id: str = "",
+                         status: str | None = None, assignee_user_id: str | None = None,
+                         contact_id: int | None = None, q: str | None = None,
+                         opened_from: float | None = None, opened_to: float | None = None,
+                         attr_filters: str | None = None, nota: str | None = None,
+                         group_by: str | None = None, group_attr_key: str | None = None,
+                         group_field_scope: str | None = None,
+                         group_date_mode: str | None = None,
+                         group_date_grain: str | None = None,
+                         group_date_from: str | None = None,
+                         group_date_to: str | None = None,
+                         limit: int = 50, offset: int = 0):
+    """Uma página de UMA coluna — envelope ``{items,total,has_more}``.
+
+    ``col_id`` vai como QUERY param (não no path): ids de coluna carregam o valor cru da
+    opção em ``o:<valor>``, que pode conter ``/`` e acentos.
+    """
+    view = _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+                      group_date_grain, group_date_from, group_date_to)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters, nota)
+    data = await asyncio.to_thread(
+        lambda: logic.grouped_column_page(view, f, col_id, limit=limit, offset=offset))
     return {"ok": True, "data": data}
 
 
 @router.get("/protocolos/{atid}", dependencies=[plugin_permission("view")])
 async def get_protocolo(atid: int):
-    at = logic.get_protocolo(atid)
+    at = logic.with_avaliacao(logic.get_protocolo(atid))
     if not at:
         return _err("Protocolo não encontrado.", status=404)
     return {"ok": True, "data": {"protocolo": at, "atendimentos": logic.list_atendimentos(atid)}}
@@ -98,6 +214,12 @@ async def get_contact_protocolo(contact_id: int):
     at = logic.get_open_protocolo_for_contact(contact_id)
     atendimentos = logic.list_atendimentos(at["id"]) if at else []
     return {"ok": True, "data": {"protocolo": at, "atendimentos": atendimentos}}
+
+
+@router.get("/contacts/{contact_id}/relink-suggestion", dependencies=[plugin_permission("view")])
+async def relink_suggestion(contact_id: int):
+    """Plano 49: há protocolo fechado dentro da janela p/ sugerir o vínculo? (contrato §4)."""
+    return {"ok": True, "data": logic.relink_suggestion_for_contact(contact_id)}
 
 
 @router.post("/contacts/{contact_id}/protocolo/ensure", dependencies=[plugin_permission("edit")])
@@ -135,6 +257,13 @@ async def update_fields(atid: int, body: dict, request: Request):
 @router.post("/protocolos/{atid}/close", dependencies=[plugin_permission("resolve")])
 async def close_protocolo(atid: int, request: Request):
     uid, name = _atendente(request)
+    # Corpo opcional: `reactivate_ai` (bool) sobrepõe a setting — é o seam do futuro
+    # botão "Finalizar atendimento" (fechar + religar IA / só fechar). Tolerante a
+    # corpo vazio ou não-JSON (o fluxo atual do painel fecha sem corpo).
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
     at, err = logic.close_protocolo(atid, assignee_user_id=uid, assignee_name=name)
     if err:
         # 404 (não existe) | 400 (atendimento aberta / campo obrigatório faltando).
@@ -144,6 +273,15 @@ async def close_protocolo(atid: int, request: Request):
         await asyncio.to_thread(logic.send_protocol_on_close, at)
     except Exception:  # noqa: BLE001 — envio nunca pode quebrar a resposta do fechar
         pass
+    # Religar a IA na conversa: override explícito do corpo OU a setting (default ON).
+    override = (body or {}).get("reactivate_ai")
+    do_reactivate = bool(override) if override is not None \
+        else logic.get_reactivate_ai_on_close_setting()
+    if do_reactivate:
+        try:
+            await logic.reactivate_ai_after_close(at, actor_name=name)
+        except Exception:  # noqa: BLE001 — religar nunca pode quebrar a resposta do fechar
+            pass
     return {"ok": True, "data": at}
 
 
@@ -153,6 +291,25 @@ async def reopen_protocolo(atid: int):
     if err:
         return _err(err, status=404 if "encontrado" in err else 409)
     return {"ok": True, "data": at}
+
+
+@router.post("/protocolos/{previous_id}/relink", dependencies=[plugin_permission("resolve")])
+async def relink_protocolo(previous_id: int, request: Request):
+    """Plano 49: vincula o atendimento atual ao protocolo ANTERIOR (reabre o anterior,
+    absorve os ciclos do novo e descarta o novo). Corpo opcional ``{current_open_id}``."""
+    _, name = _atendente(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — corpo vazio/não-JSON é tolerado
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    cur = body.get("current_open_id")
+    cur = int(cur) if cur not in (None, "") else None
+    at, err = logic.relink_to_previous(previous_id, current_open_id=cur, actor=(name or None))
+    if err:
+        return _err(err, status=404 if "encontrado" in err else 409)
+    return {"ok": True, "data": {"protocolo": at}}
 
 
 @router.post("/protocolos/{atid}/assign", dependencies=[plugin_permission("assign")])
@@ -167,13 +324,14 @@ async def assign_protocolo(atid: int, body: dict):
     return {"ok": True, "data": at}
 
 
-@router.post("/protocolos/{atid}/set-attr", dependencies=[plugin_permission("edit")])
-async def set_protocolo_attr(atid: int, body: dict):
-    """Drag-and-drop do kanban agrupado por ATRIBUTO: grava o valor do atributo na última
-    atendimento do protocolo (custom_attributes do core). value vazio/None limpa a chave."""
+@router.post("/protocolos/{atid}/set-field", dependencies=[plugin_permission("edit")])
+async def set_protocolo_field(atid: int, body: dict):
+    """Drag-and-drop do kanban agrupado por CAMPO DE PROTOCOLO (de opção): grava o valor do
+    campo do escopo (protocolo | atendimento) no dono certo. value vazio/None limpa a chave."""
+    scope = str((body or {}).get("scope") or "")
     key = str((body or {}).get("key") or "")
     value = (body or {}).get("value")
-    at, err = logic.set_atendimento_attr(atid, key, value)
+    at, err = logic.set_protocolo_field(atid, scope, key, value)
     if err:
         return _err(err, status=404 if "encontrado" in err else 400)
     return {"ok": True, "data": at}
@@ -215,6 +373,7 @@ async def create_kanban_view(body: dict, request: Request):
         name=(body or {}).get("name"), scope=scope,
         group_by=(body or {}).get("group_by") or "status",
         group_attr_key=(body or {}).get("group_attr_key"),
+        group_field_scope=(body or {}).get("group_field_scope"),
         group_date_mode=(body or {}).get("group_date_mode"),
         group_date_from=(body or {}).get("group_date_from"),
         group_date_to=(body or {}).get("group_date_to"),
@@ -252,6 +411,7 @@ async def update_kanban_view(vid: int, body: dict, request: Request):
         vid, name=(body or {}).get("name"), scope=target_scope,
         group_by=(body or {}).get("group_by"),
         group_attr_key=(body or {}).get("group_attr_key"),
+        group_field_scope=(body or {}).get("group_field_scope"),
         group_date_mode=(body or {}).get("group_date_mode"),
         group_date_from=(body or {}).get("group_date_from"),
         group_date_to=(body or {}).get("group_date_to"),
@@ -376,6 +536,44 @@ async def get_skip_open_config():
     return {"ok": True, "data": logic.get_skip_open_config()}
 
 
-@router.put("/skip-open-config", dependencies=[plugin_permission("edit")])
+@router.put("/skip-open-config", dependencies=[plugin_permission("config")])
 async def set_skip_open_config(body: dict):
     return {"ok": True, "data": logic.set_skip_open_config(body or {})}
+
+
+# ── PÚBLICO: avaliação de protocolo (round-trip da página externa) ────────────
+# Rotas sob /public/ → ISENTAS de auth (o core exime /api/plugins/<id>/public/).
+# Autenticam-se pelo próprio id_protocol + rate-limit por IP + uso único. A página
+# externa (Cloudflare Worker) chama server-side. Ver plano 50.
+
+@router.get("/public/avaliacao/{id_protocol}")
+async def get_avaliacao_public(id_protocol: str, request: Request):
+    """Consulta pública: nome do atendente + se já foi avaliado, pelo id_protocol."""
+    if logic.rate_limited(_client_ip(request)):
+        return _err("Muitas requisições. Tente novamente em instantes.", status=429)
+    data = await asyncio.to_thread(logic.get_avaliacao_public, id_protocol)
+    if data is None:
+        return _err("Avaliação não encontrada.", status=404)
+    return {"ok": True, "data": data}
+
+
+@router.post("/public/avaliacao/{id_protocol}")
+async def post_avaliacao_public(id_protocol: str, request: Request):
+    """Gravação pública da nota (1..5) + sugestão. Corpo JSON ``{nota, sugestao}``."""
+    if logic.rate_limited(_client_ip(request)):
+        return _err("Muitas requisições. Tente novamente em instantes.", status=429)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    # Rota PÚBLICA: um corpo JSON truthy NÃO-dict (ex.: `5`, `"x"`, `[1]`) passaria
+    # `body or {}` e estouraria em `.get` → 500. Normaliza para dict.
+    body = body if isinstance(body, dict) else {}
+    data, err = await asyncio.to_thread(
+        logic.record_avaliacao, id_protocol, body.get("nota"),
+        body.get("sugestao") or "", _client_ip(request))
+    if err:
+        # 404 não encontrada | 409 já respondida | 400 nota inválida.
+        status = 404 if "não encontrada" in err else (409 if "já foi" in err else 400)
+        return _err(err, status=status)
+    return {"ok": True, "data": data}

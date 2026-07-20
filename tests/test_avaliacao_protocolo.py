@@ -146,17 +146,18 @@ def test_list_filter_by_nota_and_protocol_code(build_app):
     assert err is None
     c = built.client
     # Filtro nota=5 → o protocolo aparece, com a avaliação anexada em cada linha.
+    # A listagem responde o envelope {items,total,has_more} do plano 50.
     r = c.get("/api/plugins/protocolos/protocolos", params={"nota": json.dumps(["5"])})
     assert r.status_code == 200, r.text
-    rows = r.json()["data"]
+    rows = r.json()["data"]["items"]
     assert pid in [p["id"] for p in rows]
     assert next(p for p in rows if p["id"] == pid)["avaliacao"]["nota"] == 5
     # Filtro nota=1 → NÃO aparece (a nota é 5).
     r = c.get("/api/plugins/protocolos/protocolos", params={"nota": json.dumps(["1"])})
-    assert pid not in [p["id"] for p in r.json()["data"]]
+    assert pid not in [p["id"] for p in r.json()["data"]["items"]]
     # Busca pelo CÓDIGO do protocolo (último grupo de dígitos = id) → aparece.
     r = c.get("/api/plugins/protocolos/protocolos", params={"q": idp})
-    assert pid in [p["id"] for p in r.json()["data"]]
+    assert pid in [p["id"] for p in r.json()["data"]["items"]]
     # Busca pelo id puro também.
     r = c.get("/api/plugins/protocolos/protocolos", params={"q": str(pid)})
-    assert pid in [p["id"] for p in r.json()["data"]]
+    assert pid in [p["id"] for p in r.json()["data"]["items"]]

@@ -40,3 +40,13 @@ class Settings(BaseModel):
             "plugin for desativado. Desligado, os campos ficam só nas tabelas do plugin."
         ),
     )
+    reactivate_ai_on_close: bool = Field(
+        default=True,
+        title="Religar a IA ao finalizar o protocolo",
+        description=(
+            "Ao FINALIZAR um protocolo, se o interruptor global da IA e a IA do canal "
+            "estiverem ligados, religar a IA na conversa (mantendo a tag de "
+            "transferência) — o cliente volta a ser atendido pela IA sem depender de o "
+            "atendente lembrar de religá-la. Desligado, o fechamento não mexe na IA."
+        ),
+    )
