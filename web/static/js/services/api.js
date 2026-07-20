@@ -519,6 +519,11 @@ export async function archiveConversation(id, archived) {
   return request('POST', `/api/atendimentos/${id}/archive`, { archived });
 }
 
+// Fixar/desafixar uma conversa no topo da sidebar (plano 54 — por atendimento).
+export async function pinConversation(id, pinned) {
+  return request('POST', `/api/atendimentos/${id}/pin`, { pinned });
+}
+
 // Hard-delete a single conversation/thread (plano 16). Keeps the contact and its
 // other conversations; only this thread + its messages are removed.
 export async function deleteConversation(id) {
@@ -682,6 +687,14 @@ export async function restoreChannel(id) {
 // (gated por conversation.reply, sem credenciais). Itens: {id, provider, display_name, own_phone}.
 export async function listConnectedChannels() {
   return request('GET', '/api/channels/connected');
+}
+
+// TODOS os canais (id/provider/display_name) para as opções do filtro "Canais"
+// do hub de atendimentos (plano 59). Baixo privilégio (conversation.reply, sem
+// credenciais) e mais amplo que /connected (inclui desabilitados + arquivados) —
+// as opções do filtro não podem depender das conversas carregadas na sidebar.
+export async function listChannelsForFilter() {
+  return request('GET', '/api/channels/for-filter');
 }
 
 export async function getChannel(id) {

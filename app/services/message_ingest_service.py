@@ -31,6 +31,7 @@ from channels.events import InboundEvent
 from channels import jid as jid_classifier
 from db.repositories import channel_repo, contact_repo, conversation_repo
 from plugins.events import apply_filter, emit_with_filter
+from app.services.realtime_broadcast import build_inbound_saved_message
 
 logger = logging.getLogger(__name__)
 
@@ -502,10 +503,18 @@ class MessageIngestService:
         # Group message with no @mention (group_reply_mode): save to history +
         # message.saved, but do NOT run the agent (plano 13 Fase 0 — trigger_ai).
         if not getattr(event, "trigger_ai", True):
-            await asyncio.to_thread(
+            saved = await asyncio.to_thread(
                 contact.add_message, "user", display_text,
                 media_type=media_type, media_path=media_path,
                 msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen)
+            # plano 57: new_message autoritativo pós-save (grupo sem @menção — 1 linha).
+            try:
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone, "channel_id": channel_id,
+                    "message": build_inbound_saved_message(saved),
+                })
+            except Exception:
+                logger.exception("[Ingest] falha ao re-emitir new_message (grupo) pós-save para %s", phone)
             await emit_with_filter("message.saved", {
                 "phone": phone, "channel_id": channel_id, "text": display_text,
                 "msg_id": msg_id, "media_type": media_type, "media_path": media_path,

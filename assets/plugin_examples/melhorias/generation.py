@@ -72,6 +72,24 @@ DEFAULT_IMPROVEMENT_PROMPT = (
     "acionáveis)."
 )
 
+# Communication-style preamble prepended to the FIRST message sent to the
+# agentic executor. It steers HOW the assistant writes for a non-technical
+# audience — it does NOT change the analysis task itself.
+COMMUNICATION_STYLE_PREAMBLE = (
+    "## Estilo de comunicação\n"
+    "Fale com um público **não-técnico**: operadores de atendimento, não "
+    "engenheiros.\n\n"
+    "- Respostas **curtas e diretas** (1 a 3 frases por ponto).\n"
+    "- **Explique** em vez de citar nomes internos: diga \"a ferramenta que "
+    "transfere a conversa para um atendente humano\" em vez de "
+    "`transfer_to_human`, e \"o agente que decide para quem encaminhar\" em "
+    "vez de \"roteador\"/\"hub-and-spoke\"/\"spoke\".\n"
+    "- **Evite jargão técnico** (\"versão N\", \"tool\", \"endpoint\") a menos "
+    "que o operador pergunte.\n"
+    "- Use **markdown leve** (negrito e listas) para facilitar a leitura.\n\n"
+    "Isto é apenas uma instrução de ESTILO — não muda a tarefa de análise."
+)
+
 
 @dataclass
 class GenContext:
@@ -388,7 +406,7 @@ class ExternalAgentGenerator:
     @staticmethod
     def build_initial_message(ctx: GenContext) -> str:
         payload = build_analysis_payload(ctx)
-        return payload["analysis_user"]
+        return f"{COMMUNICATION_STYLE_PREAMBLE}\n\n{payload['analysis_user']}"
 
     def generate(self, ctx: GenContext) -> GenResult:
         raise RuntimeError(

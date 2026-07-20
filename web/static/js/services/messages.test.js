@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   sameMessage, isDuplicateMessage, findDuplicateIndex, optimisticDupIndex,
   mediaPreviewLabel, DEDUP_WINDOW_S,
+  dropSuperseded, mergeBufferedMessages,
 } from './messages.js';
 
 test('sameMessage: exact ts + role → dup', () => {
@@ -188,4 +189,101 @@ test('isDuplicateMessage: buffered WS copy vs DB-loaded row matches by _id', () 
   // Two DISTINCT notes with identical content seconds apart stay apart.
   const other = { role: 'private_note', ts: 401, content: 'teste', _id: 1426, msg_id: 'pn:b' };
   assert.equal(isDuplicateMessage(other, loaded), false);
+});
+
+// ── plano 57: dropSuperseded ─────────────────────────────────────────────
+test('dropSuperseded: removes bubbles whose msg_id is superseded', () => {
+  const msgs = [
+    { role: 'user', ts: 1, content: 'Oii', msg_id: 'A' },
+    { role: 'user', ts: 2, content: 'Oiiiiiiiiii', msg_id: 'B' },
+  ];
+  const out = dropSuperseded(msgs, ['A']);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].msg_id, 'B');
+});
+
+test('dropSuperseded: no supersedes → SAME array reference (no-op)', () => {
+  const msgs = [{ role: 'user', ts: 1, content: 'x', msg_id: 'A' }];
+  assert.equal(dropSuperseded(msgs, undefined), msgs);
+  assert.equal(dropSuperseded(msgs, []), msgs);
+  // supersedes present but nothing matches → still same ref
+  assert.equal(dropSuperseded(msgs, ['Z']), msgs);
+});
+
+test('dropSuperseded: non-array messages → []', () => {
+  assert.deepEqual(dropSuperseded(null, ['A']), []);
+});
+
+// ── plano 57: mergeBufferedMessages ──────────────────────────────────────
+test('mergeBufferedMessages: authoritative combined row + supersedes collapses bubbles', () => {
+  // History already has the individual t=0 bubbles (buffered before fetch); the
+  // fetched DB row is the combined one; the buffered authoritative carries supersedes.
+  const existing = [
+    { role: 'user', ts: 1, content: 'Oii', msg_id: 'A' },
+  ];
+  const pending = [
+    { role: 'user', ts: 2, content: 'Oii\nOiiiiiiiiii', msg_id: 'B', _id: 99,
+      supersedes: ['A'], authoritative: true },
+  ];
+  const out = mergeBufferedMessages(existing, pending);
+  // 'A' bubble collapsed; combined 'B' row present exactly once.
+  assert.equal(out.length, 1);
+  assert.equal(out[0].msg_id, 'B');
+  assert.equal(out[0].content, 'Oii\nOiiiiiiiiii');
+});
+
+test('mergeBufferedMessages: combined DB row already present → authoritative dedups (no dup)', () => {
+  const existing = [
+    { role: 'user', ts: 2, content: 'Oii\nOiiiiiiiiii', msg_id: 'B', _id: 99 },
+  ];
+  const pending = [
+    { role: 'user', ts: 1, content: 'Oii', msg_id: 'A' },  // orphan optimistic bubble
+    { role: 'user', ts: 2, content: 'Oii\nOiiiiiiiiii', msg_id: 'B', _id: 99,
+      supersedes: ['A'], authoritative: true },
+  ];
+  const out = mergeBufferedMessages(existing, pending);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].msg_id, 'B');
+});
+
+test('mergeBufferedMessages: no pending → same existing ref', () => {
+  const existing = [{ role: 'user', ts: 1, content: 'x', msg_id: 'A' }];
+  assert.equal(mergeBufferedMessages(existing, []), existing);
+});
+
+test('mergeBufferedMessages: plain new inbound not in history → appended once', () => {
+  const existing = [{ role: 'user', ts: 1, content: 'a', msg_id: 'A' }];
+  const pending = [{ role: 'user', ts: 2, content: 'b', msg_id: 'B', _id: 5, authoritative: true }];
+  const out = mergeBufferedMessages(existing, pending);
+  assert.equal(out.length, 2);
+  assert.equal(out[1].msg_id, 'B');
+});
+
+test('mergeBufferedMessages: t=0 optimistic (msg_id, no _id) then authoritative (_id) → one bubble', () => {
+  // Loader ran before save; history empty. Buffer has the t=0 copy AND the
+  // authoritative copy of the SAME message (same msg_id) → collapse to one.
+  const out = mergeBufferedMessages([], [
+    { role: 'user', ts: 1.0, content: 'Oii', msg_id: 'A' },
+    { role: 'user', ts: 1.2, content: 'Oii', msg_id: 'A', _id: 42, authoritative: true },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].msg_id, 'A');
+});
+
+test('mergeBufferedMessages: batch during load — combined NOT yet in history keeps combined content (não perde fragmento)', () => {
+  // Finding #2 (plano 57 review): fetch SELECT snapshot predates the save, so the
+  // combined row is NOT in `existing`; the buffer holds optA, optB and the
+  // authoritative combined (msg_id=B). Must render the COMBINED "a\nb", not "b".
+  const existing = [];
+  const pending = [
+    { role: 'user', ts: 1.0, content: 'a', msg_id: 'A' },
+    { role: 'user', ts: 1.1, content: 'b', msg_id: 'B' },
+    { role: 'user', ts: 2.0, content: 'a\nb', msg_id: 'B', _id: 77,
+      supersedes: ['A'], authoritative: true },
+  ];
+  const out = mergeBufferedMessages(existing, pending);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].msg_id, 'B');
+  assert.equal(out[0].content, 'a\nb');   // combined content wins, not the "b" fragment
+  assert.equal(out[0]._id, 77);
 });

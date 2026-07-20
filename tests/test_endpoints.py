@@ -1325,6 +1325,17 @@ check("GET /channels/default -> 200", r.status_code == 200)
 r = client.get("/api/channels/inexistente")
 check("GET /channels/{unknown} -> 404", r.status_code == 404)
 
+# Plano 59 — opções do filtro "Canais" vêm do banco (endpoint leve, sem creds).
+r = client.get("/api/channels/for-filter")
+check("GET /channels/for-filter -> 200", r.status_code == 200)
+_ff = r.json()["data"]
+check("GET /channels/for-filter -> is list", isinstance(_ff, list))
+_ff_default = next((c for c in _ff if c["id"] == "default"), None)
+check("GET /channels/for-filter -> inclui 'default'", _ff_default is not None)
+check("GET /channels/for-filter -> só id/provider/display_name",
+      _ff_default is not None and set(_ff_default.keys()) == {"id", "provider", "display_name"})
+check("GET /channels/for-filter -> sem credentials", all("credentials" not in c for c in _ff))
+
 # plano 50 F13 — status-batch: UMA request cobre N canais.
 r = client.post("/api/channels/status-batch", json={"ids": ["default", "inexistente"]})
 check("F13: channels status-batch -> 200", r.status_code == 200)

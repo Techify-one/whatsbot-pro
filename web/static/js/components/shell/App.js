@@ -308,6 +308,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
   useEffect(() => {
     if (!newMessage) return;
     const m = newMessage.message;
+    // plano 57: o re-emit AUTORITATIVO pós-save (mesma msg do t=0, com `_id`/`msg_id`
+    // reais) NÃO deve re-notificar — o som/alerta já tocou no broadcast do ingest, e o
+    // contrato `silent` (ex.: "ignorar abertura") só marca o payload do t=0. Sem este
+    // guard, toda mensagem tocaria 2× e uma msg silenciosa tocaria no re-emit.
+    if (m && m.authoritative) return;
     // Nota privada (mensagem interna do operador): o ícone verde na conversa e a
     // contagem na aba do navegador são dirigidos pelo backend (unread_count, quando
     // a conta liga `notify_private_messages`) — nada a fazer aqui para eles. O SOM

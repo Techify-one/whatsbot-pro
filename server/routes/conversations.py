@@ -548,6 +548,24 @@ def register_routes(app, deps):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
+    @app.post("/api/atendimentos/{conv_id}/pin")
+    async def pin(conv_id: int, body: dict, request: Request):
+        """Fixar/desafixar uma conversa no topo da sidebar (plano 54 — por atendimento).
+
+        Ação leve de ordenação, gated por ``conversation.reply`` (mesmo nível de
+        marcar como lida). Substitui o antigo pin por CONTATO na sidebar de atendimentos."""
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        pinned = 1 if body.get("pinned") else 0
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
+        conv = await conv_svc.pin(deps, _conv, pinned)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        return _ok({"conversation": conv})
+
     @app.put("/api/atendimentos/{conv_id}/info")
     async def update_info(conv_id: int, body: dict, request: Request):
         """Update conversation custom_attributes (FF5). Validates keys against the

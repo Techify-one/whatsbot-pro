@@ -53,6 +53,22 @@ def register_routes(app, deps):
             return denied
         return _ok(await svc.list_connected(deps))
 
+    @app.get("/api/channels/for-filter")
+    async def list_channels_for_filter(request: Request):
+        """ALL channels (id/provider/display_name) for the conversation-filter
+        "Canais" options (plano 59).
+
+        Lower-privileged than ``GET /api/channels`` (``conversation.reply`` vs.
+        ``channel.manage``, no credentials) and broader than ``/connected``
+        (includes disabled + archived): the filter must offer every channel a
+        conversation could belong to, independent of the loaded sidebar rows.
+        Registered BEFORE ``/api/channels/{channel_id}`` so the fixed path wins.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        return _ok(await svc.list_for_filter(deps))
+
     @app.get("/api/channels/{channel_id}/session-state")
     async def channel_session_state(channel_id: str, request: Request, phone: str = ""):
         """Session/window state for STARTING a conversation on ``channel_id`` (plano 21).

@@ -65,3 +65,23 @@ export function formatPhoneDisplay(phone) {
  * @returns {string}
  */
 export const formatPhone = formatPhoneDisplay;
+
+/**
+ * Whether two phone identifiers refer to the same chat, comparing by DIGITS only
+ * (plano 57). The WS payload phone and the selected-row phone are normally
+ * digit-strings already, but formats can diverge (a stray `+`, spaces, a JID
+ * suffix). This only ever BROADENS a match to digit-equal values — it never
+ * narrows the strict `===` — so it cannot cross two distinct numbers, and the
+ * caller keeps requiring the channel to match too.
+ *
+ * @param {string | null | undefined} a
+ * @param {string | null | undefined} b
+ * @returns {boolean}
+ */
+export function samePhone(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  const da = String(a).replace(/\D/g, '');
+  const db = String(b).replace(/\D/g, '');
+  return da !== '' && da === db;
+}

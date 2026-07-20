@@ -449,7 +449,7 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
-    stmt = (stmt.order_by(contacts.c.is_pinned.desc(),
+    stmt = (stmt.order_by(conversations.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
@@ -469,7 +469,7 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
-    stmt = (stmt.order_by(contacts.c.is_pinned.desc(),
+    stmt = (stmt.order_by(conversations.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())
             .limit(limit).offset(offset))
     with get_engine().connect() as conn:
@@ -666,6 +666,11 @@ def set_status(conv_id: int, status: str) -> dict | None:
 
 def set_archived(conv_id: int, is_archived: int) -> dict | None:
     return _update(conv_id, {"is_archived": is_archived})
+
+
+def set_pinned(conv_id: int, is_pinned: int) -> dict | None:
+    """Fixar/desafixar uma conversa no topo da sidebar (plano 54 — por atendimento)."""
+    return _update(conv_id, {"is_pinned": is_pinned})
 
 
 def set_assignee(conv_id: int, assignee_user_id: int | None) -> dict | None:

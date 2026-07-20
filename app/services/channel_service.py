@@ -288,6 +288,28 @@ async def list_connected(deps) -> list[dict]:
     return out
 
 
+async def list_for_filter(deps) -> list[dict]:
+    """ALL channels that can appear as a conversation's ``channel_id``, for the
+    conversation-filter "Canais" options (plano 59).
+
+    Lower-privileged than ``GET /api/channels`` (gated by ``conversation.reply``,
+    no credentials) and broader than ``/connected`` (includes disabled and
+    archived channels): the filter must offer every channel a conversation could
+    belong to, independent of which conversations are currently loaded in the
+    sidebar. Projects only ``{id, provider, display_name}`` — no ``serialize``,
+    so no credential crosses the boundary.
+    """
+    rows = await asyncio.to_thread(channel_repo.list_all, True)  # include_archived=True
+    return [
+        {
+            "id": row["id"],
+            "provider": row.get("provider"),
+            "display_name": row.get("display_name") or "",
+        }
+        for row in rows
+    ]
+
+
 async def get(deps, channel_id: str) -> dict | None:
     """Fetch a channel row (raw, unmasked) — None if it doesn't exist."""
     return await asyncio.to_thread(channel_repo.get, channel_id)

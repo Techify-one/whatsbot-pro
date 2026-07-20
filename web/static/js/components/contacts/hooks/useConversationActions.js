@@ -14,7 +14,7 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import {
   markAsRead, markAsUnread, markConversationRead, markConversationUnread,
   setConversationAi, deleteConversation, deleteContact,
-  archiveContact, pinContact, createTag, updateContactTags,
+  archiveConversation, pinConversation, createTag, updateContactTags,
   getMe, getAssignableAgents, getUsers, getTags,
   getContactConversation, getConversation, assignConversation, assignAgent,
 } from '../../../services/api.js';
@@ -98,18 +98,24 @@ export function useConversationActions({
     }
   }, [setContacts]);
 
-  const handleArchive = useCallback(async (phone, archived) => {
-    const res = await archiveContact(phone, archived);
+  // Arquivar/Desarquivar uma CONVERSA (plano 54 — antes era o contato inteiro, o que
+  // não sincronizava com a lista filtrada por atendimento e a conversa nunca sumia).
+  // Remove a linha por conversation_id (NUNCA phone — um número tem N atendimentos) e
+  // limpa a thread aberta só se for a arquivada. O WS `conversation_archived` faz o
+  // mesmo em outros clientes; a próxima mensagem NÃO re-injeta (o upsert filtra por view).
+  const handleArchive = useCallback(async (convId, archived) => {
+    if (convId == null) return;
+    const res = await archiveConversation(convId, archived);
     if (res.ok) {
-      setContacts(prev => prev.filter(c => c.phone !== phone));
-      if (selectedRef.current === phone) {
+      setContacts(prev => prev.filter(c => c.conversation_id !== convId));
+      if (selectedConvIdRef.current === convId) {
         setSelected(null);
         setSelectedConvId(null);
         setContactData(null);
         history.pushState(null, '', '/');
       }
     }
-  }, [setContacts, selectedRef, setSelected, setSelectedConvId, setContactData]);
+  }, [setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
   const handleDelete = useCallback(async (phone) => {
     const res = await deleteContact(phone);
@@ -141,11 +147,17 @@ export function useConversationActions({
     }
   }, [setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
-  const handlePin = useCallback(async (phone, pinned) => {
-    const res = await pinContact(phone, pinned);
+  // Fixar/desafixar uma CONVERSA (plano 54 — antes era o contato inteiro). Mira a
+  // linha por conversation_id e re-ordena (fixadas ao topo). O WS `conversation_pinned`
+  // replica em outros clientes.
+  const handlePin = useCallback(async (convId, pinned) => {
+    if (convId == null) return;
+    const res = await pinConversation(convId, pinned);
     if (res.ok) {
+      const nextPinned = res.data && res.data.conversation
+        ? (res.data.conversation.is_pinned ? 1 : 0) : (pinned ? 1 : 0);
       setContacts(prev => sortContacts(prev.map(c =>
-        c.phone === phone ? { ...c, is_pinned: res.data.pinned } : c
+        c.conversation_id === convId ? { ...c, is_pinned: nextPinned } : c
       )));
     }
   }, [setContacts, sortContacts]);

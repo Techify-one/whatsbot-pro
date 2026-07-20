@@ -77,14 +77,20 @@ def enriched_columns(include_private_note: bool = False,
         contacts.c.is_group.label("contact_is_group"),
         # Tipo do contato (plano tipos-de-contato): carregado no row enriquecido para
         # o conversation_upsert (WS) já nascer filtrável por tipo, sem esperar o
-        # reconcile — igual a is_pinned/unread_ai_count (nível-contato).
+        # reconcile — igual a unread_ai_count (nível-contato).
         contacts.c.contact_type.label("contact_type"),
         # Atributos personalizados DO CONTATO (plano 50 F8): carregados no row para o
         # sidebar conversa-first filtrar por `cattr:contact:*` sem um fetch de contatos
         # à parte. NÃO confundir com o custom_attributes DA CONVERSA (coluna própria de
         # `conversations`, já incluída via `conversations` acima).
         contacts.c.custom_attributes.label("contact_custom_attributes"),
-        contacts.c.is_pinned.label("is_pinned"),
+        # ``is_pinned`` vem do ATENDIMENTO (plano 54/57 — fixar por conversa), não do
+        # contato: a coluna ``atendimentos.is_pinned`` já entra no row via o
+        # ``conversations`` selecionado inteiro acima, então NÃO se re-rotula o do
+        # contato aqui. Re-rotular colidiria a chave ``is_pinned`` e, no ``.mappings()``,
+        # o valor do CONTATO venceria — mascarando o pin da conversa e divergindo da
+        # ordenação por ``conversations.c.is_pinned`` do ``conversation_repo``.
+        # ``finalize_conv`` lê essa mesma chave.
         contacts.c.has_unread_mention.label("has_unread_mention"),
         # Contact-level AI-unread count (plano 28): carried so a conversation_upsert
         # keeps the "IA respondeu" badge live (contact-level, like in buildRows).

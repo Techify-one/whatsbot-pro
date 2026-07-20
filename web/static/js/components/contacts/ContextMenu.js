@@ -223,10 +223,10 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
         </button>
       `) : null}
 
-      <!-- Pin / Unpin -->
-      ${canEditContact ? html`
+      <!-- Pin / Unpin (por CONVERSA — plano 54) -->
+      ${conversationId != null && can('conversation.reply') ? html`
       <button
-        onClick=${() => { onPin && onPin(phone, !isPinned); onClose(); }}
+        onClick=${() => { onPin && onPin(conversationId, !isPinned); onClose(); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
       >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
@@ -328,9 +328,9 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
 
       <!-- Archive / Delete separator -->
       <div class="border-t border-wa-border">
-        ${canEditContact ? html`
+        ${conversationId != null && can('conversation.resolve') ? html`
         <button
-          onClick=${() => { onArchive(phone, !isArchived); onClose(); }}
+          onClick=${() => { onArchive(conversationId, !isArchived); onClose(); }}
           class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">

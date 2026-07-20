@@ -123,7 +123,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const bulk = useBulkSelection({
     contactsRef, displayedRef, showArchivedRef,
     setContacts, sortContacts, setContactData,
-    setSelected, setSelectedConvId, selectedRef, applyTagResults,
+    setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
   });
   const {
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
@@ -207,6 +207,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, conversationCreated,
     setContacts, contactsRef, fetchContacts, fetchContactsRef, searchRef, search, sortContacts,
+    showArchivedRef,
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     pendingWsMessages, isOpenRow, selected, contactData,
