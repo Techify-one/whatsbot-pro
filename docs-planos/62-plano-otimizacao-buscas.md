@@ -396,3 +396,164 @@ Itens:
 - [ ] Validação manual: digitar nas DUAS barras com DevTools Network aberto — nº de requests, tamanho de payload, tempo de resposta
 - [ ] Limpar a busca durante um request em voo — a lista NÃO pode regredir para o resultado velho
 - [ ] Sem segredo/senha em URL ou log; acesso a dados só via SQLAlchemy Core com bind params
+
+---
+
+# 9. HANDOFF — como continuar este plano (leia isto primeiro)
+
+> Esta seção é auto-contida: um agente novo consegue retomar o trabalho lendo só ela + as seções 4 (fases) e 5 (riscos). Escrita em 2026-07-20, após a execução de F0–F4 e F7.
+
+## 9.1 — Onde o trabalho parou
+
+| Fase | Estado | Commit | Arquivos |
+|---|---|---|---|
+| F0 caracterização | ✅ feito | `6aa7e0d` | `tests/characterization/test_busca_contatos_characterization.py` (399 linhas, 13 testes) |
+| F1 LATERAL | ✅ feito | `729160e` | `db/search/contact_search.py` |
+| F2 índice `ts` | ✅ feito | `fc12929` | `db/alembic/versions/20260720_0059_idx_msg_ts_visible.py`, `db/tables.py` |
+| F3 frontend | ✅ feito | `c6c846b` | `ContactsListScreen.js`, `NewConversationModal.js`, `useConversationList.js`, `useConversationWsEvents.js`, `api.js`, `httpClient.js` |
+| F4 trigram/unaccent | ✅ feito (código) · ⏸️ **DDL NÃO aplicado em produção** | `252f27b` | `db/alembic/versions/20260720_0060_trgm_unaccent_search.py`, `db/tables.py` |
+| F5 busca no SQL | ⬜ **não iniciada** — bloqueada pelo DDL da F4 em produção | — | — |
+| F6 sidebar paginada | ⬜ **não iniciada** — depende da F5 | — | — |
+| F7 avatar sweep | ✅ feito | `04ff820` | `contact_repo.py`, `conversation_repo.py`, `server/background.py`, `tests/test_latest_channel_id_batch.py` |
+| F8 infra | ⬜ adiado — exige janela (restart do Postgres compartilhado) | — | — |
+| Doc do plano | ✅ | `e90e67a` | este arquivo |
+
+**⚠️ Nada foi para produção.** Os commits estão só na branch local `developer` — **sem `git push`**. Como o Coolify faz deploy automático no push, o push é decisão do Thiago. O banco de produção também **não** recebeu nenhum DDL.
+
+## 9.2 — Estado do ambiente
+
+- **`whatsbot.service`** (dev, systemd) está **rodando** na porta **8090** (`linux_start.sh`, uvicorn `--reload`). Só sobe/para com `sudo systemctl`.
+- ⚠️ Ele observa `db/` e roda `alembic upgrade head` **no banco de DEV** ao salvar migration. **Pare o serviço antes de criar/editar migrations.** As migrations 0059 e 0060 já foram aplicadas ao banco de dev por esse caminho.
+- Head do Alembic: **`0060_trgm_unaccent_search`** (head único).
+- A API de dev exige autenticação (retorna 401 sem token) — para medir latência, use a camada de repo direto (ver 9.5), não o HTTP.
+
+## 9.3 — Credenciais dos bancos
+
+As senhas ficam em **`.env.plano62-credenciais`** na raiz do repo — arquivo **gitignored** (`.gitignore:18` cobre `.env.*`). **Nunca copie senha para dentro de `docs-planos/`** ou de qualquer arquivo rastreado: o histórico do git é permanente e este repositório vai para o GitHub.
+
+| Ambiente | Host | Banco | Observação |
+|---|---|---|---|
+| **Produção** (Empresa Exemplo / Coolify) | `203.0.113.30:5432` | `whatsbot` | Cluster **compartilhado** com Chatwoot e Nexus. Dono: `ExemploDB_owner`. **Somente leitura** salvo autorização explícita |
+| Dev (o `whatsbot.service` aponta pra cá) | `203.0.113.60:5432` | `whatsbot` | URL canônica no `.env` da raiz |
+| Teste (suíte) | `203.0.113.60:5432` | `whatsbot_test` | `WHATSBOT_TEST_DB_URL`; nome precisa conter `test` (o runner faz `DROP SCHEMA public`) |
+| Teste paralelo A / B | `203.0.113.60:5432` | `whatsbot_test_a`, `whatsbot_test_b` | Criados para rodar suítes simultâneas sem colisão |
+
+**Investigar produção — sempre nesta forma (read-only forçado):**
+```bash
+source .env.plano62-credenciais
+export PGOPTIONS='-c default_transaction_read_only=on'
+PGPASSWORD="$PROD_PGPASSWORD" psql -h "$PROD_PGHOST" -U "$PROD_PGUSER" -d "$PROD_PGDATABASE"
+```
+
+## 9.4 — DDL pendente em produção (pré-requisito da F5)
+
+Decisão P2=b: os objetos da F4 são criados **manualmente com `CONCURRENTLY`** fora do boot (o GIN sobre `messages` é grande demais para segurar lock durante o deploy). A migration `0060` é idempotente (`IF NOT EXISTS`), então vira no-op quando o container subir.
+
+**Requer autorização explícita do Thiago — é escrita no banco vivo.** `CONCURRENTLY` não pode rodar dentro de transação (não use `psql -1`), e a sessão **não** pode ter `default_transaction_read_only`:
+
+```sql
+-- 1) extensões (trusted; o dono do banco cria sem superuser)
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- 2) wrapper IMMUTABLE (a unaccent() nativa é STABLE e não indexa)
+CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text
+  AS $$ SELECT public.unaccent('public.unaccent', $1) $$
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT;
+
+-- 3) índices trigram (CONCURRENTLY: lento, mas sem lock de escrita)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_contacts_name_trgm
+  ON contacts USING gin (f_unaccent(lower(name)) gin_trgm_ops);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_msg_content_trgm
+  ON messages USING gin (f_unaccent(lower(content)) gin_trgm_ops)
+  WHERE role NOT IN ('tool_call','system_notice','conversation_event','system');
+
+-- 4) marcar a migration como aplicada (evita o boot tentar de novo)
+--    só se o container ainda NÃO subiu com o código novo:
+-- UPDATE alembic_version SET version_num = '0060_trgm_unaccent_search';
+```
+Depois: `ANALYZE contacts; ANALYZE messages;` e confirmar com `\di+ idx_*_trgm` que os índices ficaram `valid` (um `CONCURRENTLY` que falha deixa índice inválido — dropar e refazer).
+
+## 9.5 — Como medir (o que provou os ganhos)
+
+**Latência real da busca contra os dados de produção** (roda o código Python de verdade, read-only):
+```bash
+source .env.plano62-credenciais
+PGOPTIONS='-c default_transaction_read_only=on' venv/bin/python -c "
+from db.engine import init_engine; init_engine('$PROD_DATABASE_URL')
+from db.repositories import contact_repo
+import time
+a=time.perf_counter(); r=contact_repo.list_contacts_page(q='maria', limit=15, sort='name')
+print(f'{(time.perf_counter()-a)*1000:.0f} ms · itens={len(r[\"items\"])} total={r[\"total\"]}')"
+```
+⚠️ `init_engine()` exige a URL como argumento posicional (não lê `DATABASE_URL` sozinha).
+
+**Compilar o SQL real para `EXPLAIN`:**
+```bash
+venv/bin/python -c "
+from sqlalchemy.dialects import postgresql
+from db.search import contact_search
+s = contact_search.build_list_contacts_query(archived=False, inbox_ids=None, sort='recency')
+print(str(s.compile(dialect=postgresql.dialect(),
+      compile_kwargs={'literal_binds': True, 'render_postcompile': True})) + ';')"
+```
+
+**Baseline × atual (medido, mesma máquina e dados):**
+
+| Caminho | Antes | Depois |
+|---|---|---|
+| Listagem sem busca (limit 50 / limit 15) | ~35,8 s | **213 ms / 136 ms** |
+| Busca por nome (limit 15) | ~20 s | **1.102 ms** |
+| Busca sem limit (628 matches) | ~20 s | **1.268 ms** |
+| Busca por conteúdo de mensagem | ~20 s | **1.069 ms** |
+| `EXPLAIN` da query base, produção | 19.618 ms | **196 ms** (sem limit) / **135 ms** (limit 15) |
+
+## 9.6 — Como rodar os testes (e o que já falha de antes)
+
+```bash
+# suíte da busca (o guarda-costas das próximas fases) — 13 testes
+venv/bin/python -m pytest tests/characterization/test_busca_contatos_characterization.py -q
+# resolvedor batch do sweep (F7) — 5 testes
+venv/bin/python -m pytest tests/test_latest_channel_id_batch.py -q
+# suíte grande de endpoints: rode como SCRIPT (sob pytest dá SystemExit na coleção)
+venv/bin/python tests/test_endpoints.py
+# JS puro
+for t in $(find web/static/js -name '*.test.js'); do node --test "$t"; done
+```
+Para rodar duas suítes ao mesmo tempo, prefixe cada uma com `WHATSBOT_TEST_DB_URL=$TEST_DB_URL_A` / `_B` (nunca duas no mesmo banco).
+
+**Falhas PRÉ-EXISTENTES — não são regressão, não perca tempo:**
+- `tests/test_endpoints.py`: 2 falhas (`agent_transfer_alert emitido`, `duration da config global`) — reproduzem idênticas no `HEAD` anterior.
+- `tests/endpoints/`: 18 falhas no run de diretório (`test_p26`, `test_p27`, `test_p36`) — poluição de estado order-dependent; os mesmos arquivos passam 31/31 em isolamento.
+- `tests/test_alembic_hygiene.py`: 2 falhas (a merge `0058_merge_p50_p57` viola o teste de cadeia linear; prefixos duplicados `0037/0042/0043/0046/0052` fora da allowlist). `test_single_alembic_head` está verde.
+- `tests/characterization/`: 3 falhas em `test_sandbox_improve_characterization.py` só no run de diretório; 9/9 em isolamento.
+
+## 9.7 — Contexto técnico que não está no código
+
+- **A causa da lentidão era o PLANO, não o volume.** O banco tem 279 MB com 99,87% de cache hit — zero I/O. O self-join `MAX(ts)` fazia o planner estimar `rows=1` (real: 14.540) e cair em Nested Loop+Materialize com ~211M comparações descartadas. `ANALYZE` **não** corrige (é seletividade de join, não estatística velha) — só a reescrita resolve. Prova: `SET enable_nestloop=off` derrubava de 19,6 s para 450 ms.
+- **Os índices parciais usam 4 roles** (`tool_call`, `system_notice`, `conversation_event`, `system`) — os do scan de conteúdo em `contact_ids_matching_message`. **Não confunda** com `_PREVIEW_EXCLUDED` (7 roles, inclui `private_note`/`transcription`/`error`), que é o filtro do *preview* da lista. Se mudar um, revise o outro.
+- **`msg_count` virou `literal(0)`** na listagem — o COUNT correlato não tinha nenhum consumidor (frontend nem backend). A chave continua no payload só para preservar o shape.
+- **Tie-breaker `id DESC`** na lateral `lm`: sem ele, duas mensagens visíveis com `ts` idêntico deixavam a escolha a critério do planner.
+- **Volume de produção:** 626.873 mensagens (+~1.154/dia), 14.508 contatos, 14.713 atendimentos. O cap de 5.000 do scan de conteúdo cobre só **~5 dias** de histórico — a F5 remove essa limitação.
+- **`pg_stat_statements` não está instalado** (`shared_preload_libraries` vazio) — não há telemetria agregada; toda medição foi por `EXPLAIN` manual.
+
+## 9.8 — Armadilhas descobertas na execução (não repita)
+
+| Armadilha | Como evitar |
+|---|---|
+| Um subagente rodou `git stash pop` e restaurou um stash antigo alheio, sujando ~30 arquivos | **Proibir comandos git de escrita** em qualquer agente paralelo (`commit`/`stash`/`checkout --`/`reset`). Para provar pré-existência de falha, troque o arquivo na mão (`git show HEAD:arq > tmp`), nunca com stash |
+| Vários agentes no mesmo checkout se pisando | Dê a cada um uma lista **disjunta** de arquivos e diga explicitamente o que NÃO tocar |
+| Duas suítes pytest no mesmo banco de teste | O bootstrap faz `DROP SCHEMA public` por processo → use `whatsbot_test_a`/`_b` |
+| Banco de teste novo com acento quebrado | O cluster `203.0.113.60` cria em `SQL_ASCII`; force `ENCODING 'UTF8' TEMPLATE template0` |
+| `revision` do Alembic longo demais | `alembic_version.version_num` é `varchar(32)` — id curto, nome descritivo vai no filename |
+| Editar migration com o `whatsbot.service` ligado | Ele aplica `alembic upgrade head` no banco de dev ao salvar — pare o serviço antes |
+| Crase ou `${}` dentro de comentário em template `html\`...\`` | Fecha o template e quebra o módulo; `node --check` simples dá falso negativo — use `node --input-type=module --check < arquivo` |
+| GIN recém-criado parece não ser usado | A *pending list* (fastupdate) faz o planner escolher Seq Scan até o merge; rode `ANALYZE` e re-teste |
+
+## 9.9 — Próximos passos sugeridos, em ordem
+
+1. **Decisão do Thiago: `git push`?** A Wave 0 sozinha entrega o grosso e **não depende de nada em produção**. Recomendado validar antes na interface (as duas barras, com DevTools: nº de requests e tempo).
+2. **Decisão do Thiago: aplicar o DDL da 9.4 em produção?** Só necessário se for seguir com a F5.
+3. **F5** (seção 4, "Fase F5") — mover o matching de `q` para o SQL com `f_unaccent`/trigram e paginar no banco; elimina o ~1 s residual e o teto de 5 dias da busca por conteúdo. Só comece **depois** do passo 2. Guarda-costas: os 13 testes da F0 precisam continuar verdes; divergências entre o `fold()` Python (`casefold`+NFKD) e o `unaccent` SQL devem ser documentadas.
+4. **F6** — sidebar paginada no modo busca (hoje ainda traz todos os matches num payload só).
+5. **F8** — higiene de infra, quando houver janela combinada com Chatwoot/Nexus.
