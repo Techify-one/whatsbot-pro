@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from db.engine import get_engine
 from db.repositories import conversation_query, conversation_label_repo
 from db.tables import (conversations, contacts, conversation_counters,
-                       messages, unread_msg_ids, conversation_label_links)
+                       inboxes, messages, unread_msg_ids, conversation_label_links)
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +504,39 @@ def channel_id_for_contact(contact_id: int) -> str | None:
     except Exception:
         logger.debug("channel_id_for_contact failed for %s", contact_id, exc_info=True)
         return None
+
+
+def latest_channel_id_by_contact(contact_ids: list[int]) -> dict[int, str | None]:
+    """Batch version of :func:`channel_id_for_contact` (plano 62 F7).
+
+    ONE query resolves, for each contact, the ``channel_id`` of its MOST RECENT
+    conversation — same semantics as the one-by-one path: "most recent" is
+    ``last_activity_at DESC`` (:func:`get_latest_for_contact`) and the channel is
+    reached via ``atendimentos.inbox_id → inboxes.channel_id`` with an OUTER join
+    (:func:`conversation_query.enriched_from`), so a conversation whose inbox is
+    gone maps to ``None``. Contacts with no conversation are ABSENT from the
+    result (the caller skips them). Best-effort — returns ``{}`` on failure,
+    never raises. Uses Postgres ``DISTINCT ON (contact_id)``; ``id DESC`` breaks
+    ``last_activity_at`` ties deterministically."""
+    if not contact_ids:
+        return {}
+    try:
+        stmt = (
+            select(conversations.c.contact_id, inboxes.c.channel_id)
+            .select_from(conversations.outerjoin(
+                inboxes, inboxes.c.id == conversations.c.inbox_id))
+            .where(conversations.c.contact_id.in_(contact_ids))
+            .order_by(conversations.c.contact_id,
+                      conversations.c.last_activity_at.desc(),
+                      conversations.c.id.desc())
+            .distinct(conversations.c.contact_id)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        return {contact_id: channel_id for contact_id, channel_id in rows}
+    except Exception:
+        logger.debug("latest_channel_id_by_contact failed", exc_info=True)
+        return {}
 
 
 def get_row_for_broadcast(conv_id: int) -> dict | None:

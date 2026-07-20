@@ -383,3 +383,18 @@ def get_full_contact(phone: str) -> dict | None:
     """Get full contact data for API response (contact + info + observations)."""
     variants = _br_phone_variants(phone)
     return contact_query.get_full_contact(variants)
+
+
+def list_avatar_targets() -> list[dict]:
+    """Minimal contact listing for the background avatar sweep (plano 62 F7).
+
+    Returns ``id``/``phone``/``is_group``/``is_archived`` of ALL contacts
+    (archived included) in a single plain SELECT — no joins, no previews, no
+    tags. Replaces the two heavy :func:`list_contacts` calls (full enriched
+    query, active + archived) the sweep used to make every pass."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(contacts.c.id, contacts.c.phone,
+                   contacts.c.is_group, contacts.c.is_archived)
+        ).mappings().all()
+    return [dict(r) for r in rows]
