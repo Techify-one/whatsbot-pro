@@ -170,7 +170,9 @@ export async function getContacts(q = '', archived = false, opts = {}) {
   if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
   if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
   const query = params.length ? `?${params.join('&')}` : '';
-  return request('GET', `/api/contacts${query}`);
+  // plano 62 F3: `opts.signal` (AbortSignal) cancela o request; abort rejeita
+  // com AbortError — caller engole (não é erro de UI).
+  return request('GET', `/api/contacts${query}`, undefined, { signal: opts.signal });
 }
 
 // Exporta todos os contatos como CSV (download). Retorna o Blob ou null.
@@ -451,14 +453,16 @@ export async function updateContactTags(phone, tags) {
 // Conversation lifecycle: list with filters, fetch one, change status
 // (open/closed), assign to a user, and archive/unarchive.
 
-export async function listConversations(params = {}) {
+// `reqOpts` (plano 62 F3): { signal } opcional para cancelamento via AbortController
+// (um abort rejeita com AbortError — caller engole). Callers antigos não mudam.
+export async function listConversations(params = {}, reqOpts = {}) {
   const clean = {};
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
     clean[k] = v;
   }
   const qs = new URLSearchParams(clean).toString();
-  return request('GET', `/api/atendimentos${qs ? '?' + qs : ''}`);
+  return request('GET', `/api/atendimentos${qs ? '?' + qs : ''}`, undefined, reqOpts);
 }
 
 export async function getConversation(id) {

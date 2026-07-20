@@ -298,6 +298,9 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const canImport = hasPermission(currentUser, 'contact.import');
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
+  // plano 62 F3: `search` reflete o input NA HORA (UX); `debouncedSearch` é o que
+  // alimenta o fetch (resetKey/fetchPage) — 1 request por pausa de digitação.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [reloadTick, setReloadTick] = useState(0);  // plano 50: força refetch (delete/import)
   const [detail, setDetail] = useState(null); // contato aberto no painel
   const [showCreate, setShowCreate] = useState(false);
@@ -328,23 +331,41 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     deps: [search, advFilters],
   });
 
+  // plano 62 F3: debounce de 300ms entre digitar e disparar a busca no servidor.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
   // plano 50 — SCROLL INFINITO com LOTE FIXO. A busca vai pro servidor (q + paginação
   // + ordem alfabética via sort=name); o servidor SEMPRE devolve um lote de PAGE_SIZE,
   // nunca a tabela inteira. Os filtros avançados (atributos/etiquetas) são aplicados no
   // cliente sobre os itens JÁ carregados — rolar carrega o próximo lote e filtra também.
-  const fetchPage = useCallback((offset) =>
-    getContacts(search, false, { limit: PAGE_SIZE, offset, sort: 'name' })
+  // plano 62 F3: cada fetch aborta o anterior ainda em voo (busca redigitada durante
+  // um request lento) — libera o slot do browser; o guard `alive` do useInfiniteScroll
+  // já protege o estado contra respostas velhas. AbortError não é erro de UI.
+  const listAbortRef = useRef(null);
+  const fetchPage = useCallback((offset) => {
+    if (listAbortRef.current) listAbortRef.current.abort();
+    const ctrl = new AbortController();
+    listAbortRef.current = ctrl;
+    return getContacts(debouncedSearch, false,
+      { limit: PAGE_SIZE, offset, sort: 'name', signal: ctrl.signal })
       .then((res) => {
         if (res && res.ok) { setError(null); return { items: (res.data && res.data.items) || [], hasMore: !!(res.data && res.data.has_more) }; }
         setError((res && res.error) || 'Falha ao carregar contatos');
         return { items: [], hasMore: false };
       })
-      .catch((e) => { setError(String(e)); return { items: [], hasMore: false }; }),
-    [search]);
+      .catch((e) => {
+        if (e && e.name === 'AbortError') return { items: [], hasMore: false };
+        setError(String(e));
+        return { items: [], hasMore: false };
+      });
+  }, [debouncedSearch]);
 
   const {
     items: contacts, setItems: setContacts, loading, loadingMore, hasMore, loadMore,
-  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${search}|${reloadTick}`, keyOf: (c) => c.id });
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${debouncedSearch}|${reloadTick}`, keyOf: (c) => c.id });
 
   // reload após ações (delete/import) força a 1ª página de novo.
   const reload = useCallback(() => setReloadTick((t) => t + 1), []);
@@ -663,11 +684,11 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
           onClose=${() => setShowCreate(false)}
           onCreated=${async (phone) => {
             setShowCreate(false);
-            await reload();
-            // Abre o detalhe do contato recém-criado (resolve o id pela lista nova).
-            const res = await getContacts('', false);
-            const created = res && res.ok ? (res.data || []).find((c) => c.phone === phone) : null;
-            if (created) openDetail(created);
+            reload();
+            // plano 62 F3: abre o detalhe buscando SÓ o contato criado
+            // (GET /api/contacts/{phone}) em vez de re-baixar a lista completa.
+            const res = await getContact(phone, false, null, { limit: 1 });
+            if (res && res.ok && res.data && res.data.id != null) openDetail(res.data);
           }}
         />
       ` : null}

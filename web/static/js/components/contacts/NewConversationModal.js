@@ -171,9 +171,12 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     const seq = ++sugSeq.current;
     const t = setTimeout(async () => {
       try {
-        const res = await getContacts(q);
+        // plano 62 F3: teto no caller — com `limit` o backend pagina e devolve o
+        // envelope { items, total, has_more } em vez da lista completa.
+        const res = await getContacts(q, false, { limit: 20 });
         if (seq !== sugSeq.current) return;  // resposta obsoleta
-        const list = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+        const list = (res && res.ok && res.data && Array.isArray(res.data.items))
+          ? res.data.items : [];
         // Só pessoas (grupos não são um "novo atendimento" por número) e com número,
         // e do mesmo tipo de contato que o canal escolhido.
         const people = list
