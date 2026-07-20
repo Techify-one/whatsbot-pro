@@ -39,6 +39,7 @@ from plugins.context import broadcast, make_plugin_db
 from db.repositories import (config_repo, contact_repo, conversation_repo,
                              custom_attribute_repo, user_repo)
 from db.tables import conversations as _conversations_tbl
+from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
 logger = logging.getLogger(__name__)
 
@@ -990,10 +991,31 @@ def list_protocolos(*, status: str | None = None, assignee_user_id: int | None =
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
                       attr_filters: dict | None = None,
-                      limit: int = 200, offset: int = 0) -> list[dict]:
+                      limit: int = 200, offset: int = 0) -> dict:
+    """Página de protocolos como envelope ``{items, total, has_more}`` (plano 50).
+
+    ``limit``/``offset`` passam pelo teto central (`clamp_limit`/`clamp_offset`,
+    default 50 / cap 200). Caminho normal pagina no SQL + COUNT(*); caminho
+    ``attr_filters`` filtra em Python após varrer ``_ATTR_SCAN_CAP`` linhas, logo
+    ``total``/``has_more`` são limite-inferior quando o scan-cap satura.
+    """
+    lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
+    off = clamp_offset(offset)
+    where, params = _build_list_where(
+        status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
+        opened_from=opened_from, opened_to=opened_to)
+    base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
+            + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
+    return _list_page(base, where, params, af_src=attr_filters, lim=lim, off=off)
+
+
+def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
+                      q: str | None = None, opened_from=None, opened_to=None
+                      ) -> tuple[list[str], dict]:
+    """WHERE + params da listagem — COMPARTILHADO com o índice do Kanban
+    (``kanban_index`` via ``scan_protocolos``), p/ as duas leituras varrerem o mesmo
+    conjunto. (Seed de bootstrap: aceita só escalar em status/assignee.)"""
     where = ["1=1"]
-    lim = max(1, min(int(limit or 200), 500))
-    off = max(0, int(offset or 0))
     params: dict = {}
     if status in ("aberto", "fechado"):
         where.append("status = :status")
@@ -1024,14 +1046,16 @@ def list_protocolos(*, status: str | None = None, assignee_user_id: int | None =
     if opened_to is not None:
         where.append("opened_at <= :oto")
         params["oto"] = float(opened_to)
-    base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
-            + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
+    return where, params
 
+
+def _list_page(base: str, where: list[str], params: dict, *, af_src, lim: int, off: int) -> dict:
+    """Corpo da paginação da LISTA (envelope). Separado do WHERE p/ o índice reusar este."""
     # Filtro por atributo de ATENDIMENTO (valor na última atendimento). Como o valor não vive nas
     # colunas do protocolo, filtra-se em Python ANTES do corte: varre um teto interno,
     # atribui atendimento_attrs e só então aplica offset/limit (caro só quando a aba usa este
     # filtro — caminho normal continua com LIMIT/OFFSET no SQL).
-    af = {k: v for k, v in (attr_filters or {}).items() if k and _KEY_RE.match(k)}
+    af = {k: v for k, v in (af_src or {}).items() if k and _KEY_RE.match(k)}
     if af:
         with make_plugin_db() as conn:
             rows = conn.execute(text(base + " LIMIT :scan"),
@@ -1040,12 +1064,66 @@ def list_protocolos(*, status: str | None = None, assignee_user_id: int | None =
         out = [a for a in out
                if all(str((a.get("atendimento_attrs") or {}).get(k, "")) == str(v)
                       for k, v in af.items())]
-        return out[off:off + lim]
+        total = len(out)
+        items = out[off:off + lim]
+        return {"items": items, "total": total, "has_more": off + len(items) < total}
 
+    count_sql = "SELECT COUNT(*) FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
     with make_plugin_db() as conn:
+        total = int(conn.execute(text(count_sql), params).scalar() or 0)
         rows = conn.execute(text(base + " LIMIT :limit OFFSET :offset"),
                             {**params, "limit": lim, "offset": off}).mappings().all()
-    return _hydrate_protocolos(rows)
+    items = _hydrate_protocolos(rows)
+    return {"items": items, "total": total, "has_more": off + len(items) < total}
+
+
+# ── Kanban agrupado (índice em cache + paginação POR COLUNA) ──────────────────
+
+def scan_protocolos(filters: dict, cap: int):
+    """Varredura bounded de rows CRUAS que alimenta o índice do Kanban — mesmo WHERE e
+    mesma ORDEM da listagem, sem hidratar nada."""
+    f = filters or {}
+    where, params = _build_list_where(
+        status=f.get("status"), assignee_user_id=f.get("assignee_user_id"),
+        contact_id=f.get("contact_id"), q=f.get("q"),
+        opened_from=f.get("opened_from"), opened_to=f.get("opened_to"))
+    sql = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
+           + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :scan")
+    with make_plugin_db() as conn:
+        return conn.execute(text(sql), {**params, "scan": int(cap)}).mappings().all()
+
+
+def hydrate_by_ids(ids: list[int]) -> list[dict]:
+    """Hidrata SOMENTE os ids pedidos, PRESERVANDO a ordem recebida (a do índice)."""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return []
+    with make_plugin_db() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM plugin_protocolos_protocolos WHERE id IN :ids")
+            .bindparams(bindparam("ids", expanding=True)), {"ids": ids}).mappings().all()
+    by_id = {r["id"]: r for r in rows}
+    return _hydrate_protocolos([by_id[i] for i in ids if i in by_id])
+
+
+def grouped_columns(view: dict, filters: dict) -> dict:
+    """Colunas do Kanban + contagem EXATA por coluna (do índice em cache)."""
+    from . import kanban_index
+    idx = kanban_index.get_index(view, filters)
+    return {"columns": idx["columns"], "truncated": idx["truncated"],
+            "unavailable": idx["unavailable"], "read_only": idx["read_only"]}
+
+
+def grouped_column_page(view: dict, filters: dict, col_id: str,
+                        limit: int = PAGE_LIST, offset: int = 0) -> dict:
+    """Uma página de UMA coluna — envelope ``{items,total,has_more}``; hidrata só a fatia."""
+    from . import kanban_index
+    lim = clamp_limit(limit, PAGE_LIST, CAP_LIST)
+    off = clamp_offset(offset)
+    ids = kanban_index.get_index(view, filters)["column_ids"].get(str(col_id), [])
+    page = ids[off:off + lim]
+    return {"items": hydrate_by_ids(page), "total": len(ids),
+            "has_more": off + len(page) < len(ids)}
 
 
 def _conversation_core_attrs(atend_ids: list[int]) -> dict[int, dict]:
@@ -2376,5 +2454,12 @@ def notify_on_ignored(ctx, value):
 # ── Util ──────────────────────────────────────────────────────────────────────
 
 def _broadcast_changed(contact_id: int | None, protocolo_id: int | None) -> None:
+    # Invalida o índice do Kanban ANTES de avisar o frontend (vale para todas as
+    # réplicas — a geração vive no `config`). Falhar aqui nunca impede o broadcast.
+    try:
+        from . import kanban_index
+        kanban_index.bump_generation()
+    except Exception:
+        logger.debug("protocolos: falha ao invalidar o índice do kanban", exc_info=True)
     broadcast("plugin_protocolos_changed",
               {"contact_id": contact_id, "protocolo_id": protocolo_id})

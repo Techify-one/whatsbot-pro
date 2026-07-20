@@ -62,25 +62,96 @@ async def _gate_view_write(request: Request, *, existing: dict | None,
 
 # ── Protocolos ──────────────────────────────────────────────────────────────
 
+def _parse_attr_filters(attr_filters: str | None):
+    """attr_filters = JSON {chave: valor} (filtro por atributo de atendimento da aba)."""
+    if not attr_filters:
+        return None
+    try:
+        parsed = json.loads(attr_filters)
+        return {str(k): v for k, v in parsed.items()} if isinstance(parsed, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                  attr_filters) -> dict:
+    """Filtros normalizados — MESMO conjunto para a lista e para o índice do Kanban."""
+    return {"status": status, "assignee_user_id": assignee_user_id,
+            "contact_id": contact_id, "q": q,
+            "opened_from": opened_from, "opened_to": opened_to,
+            "attr_filters": _parse_attr_filters(attr_filters)}
+
+
 @router.get("/protocolos", dependencies=[plugin_permission("view")])
 async def list_protocolos(status: str | None = None, assignee_user_id: int | None = None,
                             contact_id: int | None = None, q: str | None = None,
                             opened_from: float | None = None, opened_to: float | None = None,
                             attr_filters: str | None = None,
                             limit: int = 200, offset: int = 0):
-    # attr_filters = JSON {attribute_key: valor} (filtro por atributo de atendimento da aba).
-    af = None
-    if attr_filters:
-        try:
-            parsed = json.loads(attr_filters)
-            if isinstance(parsed, dict):
-                af = {str(k): v for k, v in parsed.items()}
-        except (ValueError, TypeError):
-            af = None
-    data = logic.list_protocolos(
-        status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, attr_filters=af,
-        limit=limit, offset=offset)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters)
+    data = await asyncio.to_thread(
+        lambda: logic.list_protocolos(**f, limit=limit, offset=offset))
+    return {"ok": True, "data": data}
+
+
+# ── Kanban agrupado (colunas + página POR COLUNA) ────────────────────────────
+# O agrupamento roda no SERVIDOR (grouping.py) sobre um índice em cache
+# (kanban_index.py): o cliente pede as colunas e depois pagina UMA coluna por vez.
+
+def _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+               group_date_grain, group_date_from, group_date_to) -> dict:
+    """Config de agrupamento da visualização ativa (mesmas chaves da tabela de views)."""
+    return {"group_by": group_by or "status", "group_attr_key": group_attr_key,
+            "group_field_scope": group_field_scope, "group_date_mode": group_date_mode,
+            "group_date_grain": group_date_grain, "group_date_from": group_date_from,
+            "group_date_to": group_date_to}
+
+
+@router.get("/grouped/columns", dependencies=[plugin_permission("view")])
+async def grouped_columns(status: str | None = None, assignee_user_id: int | None = None,
+                          contact_id: int | None = None, q: str | None = None,
+                          opened_from: float | None = None, opened_to: float | None = None,
+                          attr_filters: str | None = None,
+                          group_by: str | None = None, group_attr_key: str | None = None,
+                          group_field_scope: str | None = None,
+                          group_date_mode: str | None = None,
+                          group_date_grain: str | None = None,
+                          group_date_from: str | None = None,
+                          group_date_to: str | None = None):
+    """Colunas da visualização + contagem EXATA por coluna (índice em cache)."""
+    view = _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+                      group_date_grain, group_date_from, group_date_to)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters)
+    data = await asyncio.to_thread(logic.grouped_columns, view, f)
+    return {"ok": True, "data": data}
+
+
+@router.get("/grouped/column", dependencies=[plugin_permission("view")])
+async def grouped_column(col_id: str = "",
+                         status: str | None = None, assignee_user_id: int | None = None,
+                         contact_id: int | None = None, q: str | None = None,
+                         opened_from: float | None = None, opened_to: float | None = None,
+                         attr_filters: str | None = None,
+                         group_by: str | None = None, group_attr_key: str | None = None,
+                         group_field_scope: str | None = None,
+                         group_date_mode: str | None = None,
+                         group_date_grain: str | None = None,
+                         group_date_from: str | None = None,
+                         group_date_to: str | None = None,
+                         limit: int = 50, offset: int = 0):
+    """Uma página de UMA coluna — envelope ``{items,total,has_more}``.
+
+    ``col_id`` vai como QUERY param: ids de coluna carregam o valor cru da opção em
+    ``o:<valor>``, que pode conter ``/`` e acentos.
+    """
+    view = _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+                      group_date_grain, group_date_from, group_date_to)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters)
+    data = await asyncio.to_thread(
+        lambda: logic.grouped_column_page(view, f, col_id, limit=limit, offset=offset))
     return {"ok": True, "data": data}
 
 

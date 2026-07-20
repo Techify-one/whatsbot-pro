@@ -12,8 +12,34 @@ import htm from 'htm';
 import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
 import { ResolveForm, LabeledField, isMultiDef } from '/plugins/protocolos/static/resolve_form.js';
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
+import { useInfiniteScroll } from '/static/js/hooks/useInfiniteScroll.js';
 
 const html = htm.bind(h);
+
+// Tamanho da página — vale para a Lista E para cada coluna do Kanban (que pagina
+// sozinha contra /grouped/column; o agrupamento é feito no servidor).
+const PAGE_SIZE = 50;
+// Distância do fim (px) em que já pedimos a próxima página.
+const NEAR_BOTTOM_PX = 300;
+
+// Ancestral que REALMENTE rola. A tela do plugin pode rolar num container interno em vez
+// da janela, e é por isso que um IntersectionObserver ancorado na viewport não dispara —
+// preferimos escutar o scroll de quem rola de fato. `null` = a própria página.
+function scrollParentOf(el) {
+  let n = el && el.parentElement;
+  while (n) {
+    const s = window.getComputedStyle(n);
+    if (/(auto|scroll|overlay)/.test(s.overflowY) && n.scrollHeight > n.clientHeight) return n;
+    n = n.parentElement;
+  }
+  return null;
+}
+
+// True quando o scroller está a menos de NEAR_BOTTOM_PX do fim. `sc` null = página.
+function nearBottom(sc) {
+  const el = sc || document.scrollingElement || document.documentElement;
+  return el.scrollTop + el.clientHeight >= el.scrollHeight - NEAR_BOTTOM_PX;
+}
 
 const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
 const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
@@ -393,6 +419,67 @@ export function ProtocolosTab({ api, setTab }) {
     </div>`;
 }
 
+// UMA coluna do Kanban: pagina SOZINHA (scroll infinito próprio dentro da coluna) via
+// /grouped/column. O total do cabeçalho vem do índice do SERVIDOR — não do que já foi
+// carregado —, então a contagem é exata mesmo com a coluna só parcialmente baixada.
+function KanbanColumn({ col, fetchColumnPage, resetKey, canDrag, dragRef, draggedRef,
+                        dropCol, setDropCol, colDragRef, colDropTarget, setColDropTarget,
+                        reorderColumns, applyDrop, openDetail }) {
+  const fetchPage = useCallback((offset) => fetchColumnPage(col.id, offset),
+                                [fetchColumnPage, col.id]);
+  const { items: cards, loading, loadingMore, hasMore, loadMore } = useInfiniteScroll({
+    fetchPage, pageSize: PAGE_SIZE, resetKey: `${resetKey}|${col.id}`, keyOf: (r) => r.id });
+  const bodyRef = useRef(null);
+
+  // Carregar mais AO ROLAR a própria coluna. Usamos o evento de scroll do container em
+  // vez de um IntersectionObserver com `root` de elemento: o sentinela dentro da coluna
+  // não disparava de forma confiável (a lista fica presa nos primeiros 50). O guard de
+  // concorrência é o próprio hook (busyRef) + `hasMore`.
+  const onScroll = useCallback((e) => {
+    const el = e.currentTarget;
+    if (!el || !hasMore || loadingMore) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) loadMore();
+  }, [hasMore, loadingMore, loadMore]);
+
+  // Se o que já carregou NÃO enche a coluna, não há como rolar — completa sozinho até
+  // dar scroll (ou acabar). Cobre colunas curtas e telas altas.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !hasMore || loadingMore || loading) return;
+    if (el.scrollHeight <= el.clientHeight + 4) loadMore();
+  }, [cards.length, hasMore, loadingMore, loading, loadMore]);
+
+  const isTarget = dropCol === col.id;
+  const isColTarget = colDropTarget === col.id;
+  return html`
+    <div class="flex flex-col w-72 shrink-0">
+      <div draggable=${true}
+        onDragStart=${(e) => { colDragRef.current = col.id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(col.id)); } catch (_) { /* ignore */ } }}
+        onDragEnd=${() => { colDragRef.current = null; setColDropTarget(null); }}
+        onDragOver=${(e) => { if (!colDragRef.current) return; e.preventDefault(); if (colDropTarget !== col.id) setColDropTarget(col.id); }}
+        onDragLeave=${() => setColDropTarget((d) => (d === col.id ? null : d))}
+        onDrop=${(e) => { if (!colDragRef.current) return; e.preventDefault(); reorderColumns(colDragRef.current, col.id); colDragRef.current = null; setColDropTarget(null); }}
+        title="Arraste para reordenar as colunas"
+        class="flex items-center justify-between mb-2 px-1 py-0.5 rounded cursor-move select-none ${isColTarget ? 'ring-2 ring-wa-teal bg-wa-hover' : ''}">
+        <span class="text-[13px] font-semibold text-wa-text truncate">${col.label}</span>
+        <span class="text-[12px] text-wa-secondary">${col.total}</span>
+      </div>
+      <div ref=${bodyRef} onScroll=${onScroll}
+        onDragOver=${(e) => { if (colDragRef.current) return; e.preventDefault(); if (dropCol !== col.id) setDropCol(col.id); }}
+        onDragLeave=${() => setDropCol((d) => (d === col.id ? null : d))}
+        onDrop=${(e) => { if (colDragRef.current) return; e.preventDefault(); const row = dragRef.current; setDropCol(null); applyDrop(row, col.id); }}
+        class="flex-1 min-h-[120px] max-h-[70vh] overflow-y-auto rounded-lg p-2 flex flex-col gap-2 border border-dashed transition-colors ${isTarget ? 'ring-2 ring-wa-teal bg-wa-hover border-wa-teal' : 'bg-wa-bg border-wa-border'}">
+        ${loading ? html`<div class="text-[12px] text-wa-secondary text-center py-4">Carregando…</div>`
+          : cards.length === 0 ? html`<div class="text-[12px] text-wa-secondary text-center py-4">Vazio</div>`
+          : cards.map((r) => html`<${KanbanCard} key=${r.id} row=${r}
+              draggedRef=${draggedRef} dragRef=${dragRef} canDrag=${canDrag}
+              onClearDrop=${() => setDropCol(null)} onOpen=${() => openDetail(r.id)} />`)}
+        ${loadingMore ? html`<div class="text-[12px] text-wa-secondary text-center py-1 shrink-0">Carregando mais…</div>` : null}
+        ${!loadingMore && hasMore ? html`<div class="text-[11px] text-wa-secondary text-center py-1 shrink-0">Role para carregar mais (${cards.length}/${col.total})</div>` : null}
+      </div>
+    </div>`;
+}
+
 function ProtocolosList({ api, mode }) {
   const apiBase = api.apiBase;
   const { authHeaders } = api.services;
@@ -402,8 +489,6 @@ function ProtocolosList({ api, mode }) {
   const [atendResolveDefs, setAtendResolveDefs] = useState([]); // atendimento: obs+extras editáveis (popup)
   const [contactAttrDefs, setContactAttrDefs] = useState([]);  // atributo de CONTATO do core (filtros; list=dropdown, resto=texto; não-sistema)
   const [channels, setChannels] = useState([]);  // canais disponíveis p/ o dropdown do filtro "Canal" ([{value,label}])
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState([]);   // filtro Status — LISTA (multi): ['aberto'|'fechado']
   const [q, setQ] = useState('');
   // Padrão ao entrar/F5: intervalo começa HOJE e fica aberto p/ frente (sem teto).
@@ -503,45 +588,147 @@ function ProtocolosList({ api, mode }) {
   const getJson = useCallback((url) => api.http.get(url), [api]);
   const apiPost = useCallback((path, body) => api.http.post(path, body), [api]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (status.length) params.set('status', JSON.stringify(status));
-      if (q.trim()) params.set('q', q.trim());
-      const of = dayStartEpoch(dateFrom);
-      const ot = dayEndEpoch(dateTo);
-      if (of != null) params.set('opened_from', String(of));
-      if (ot != null) params.set('opened_to', String(ot));
-      if (assigneeFilter.length) params.set('assignee_user_id', JSON.stringify(assigneeFilter));
-      if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
-      const [dd, cd, co, ch, ll] = await Promise.all([
-        getJson(`${apiBase}/field-defs?scope=protocolo`),
-        getJson(`${apiBase}/field-defs?scope=atendimento`),
-        getJson('/api/custom-attributes?applies_to=contact'),       // atributos de CONTATO (filtros)
-        getJson(`${apiBase}/canais`),                               // canais disponíveis (filtro Canal)
-        getJson(`${apiBase}/protocolos?${params.toString()}`),
-      ]);
-      // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
-      // form editável do detalhe e o gate de obrigatórios (drag p/ "Fechado"). Sem filtrar.
-      setCols((dd && dd.ok && dd.data && dd.data.defs) || []);
-      const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
-      setAtendDefs(atendAll.filter((d) => !d.fixed));
-      setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
-      // Atributo de CONTATO (is_system=0) — alimenta os FILTROS do Kanban. Tipo list vira
-      // dropdown (opções); os demais (texto/número/data) viram campo de digitação (busca parcial).
-      setContactAttrDefs(((co && co.ok && co.data) || [])
-        .filter((d) => !d.is_system)
-        .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
-                       options: Array.isArray(d.options) ? d.options : [] })));
-      // Canais disponíveis (não-arquivados) → opções do dropdown do filtro "Canal".
-      setChannels(((ch && ch.ok && ch.data) || []).map((c) => ({ value: c.id, label: c.name || c.id })));
-      setRows((ll && ll.ok && ll.data) || []);
-    } finally { setLoading(false); }
-  }, [apiBase, status, q, dateFrom, dateTo, assigneeFilter, attrFilters, getJson]);
-
+  // Metadados da aba (field-defs, atributos de contato, canais) — NÃO dependem dos
+  // filtros; carregam uma vez (e a cada troca de apiBase), separados da lista paginada.
+  const loadMeta = useCallback(async () => {
+    const [dd, cd, co, ch] = await Promise.all([
+      getJson(`${apiBase}/field-defs?scope=protocolo`),
+      getJson(`${apiBase}/field-defs?scope=atendimento`),
+      getJson('/api/custom-attributes?applies_to=contact'),       // atributos de CONTATO (filtros)
+      getJson(`${apiBase}/canais`),                               // canais disponíveis (filtro Canal)
+    ]);
+    // TODAS as defs do protocolo (OBS fixo + extras, com `required`) — alimentam o
+    // form editável do detalhe e o gate de obrigatórios (drag p/ "Fechado"). Sem filtrar.
+    setCols((dd && dd.ok && dd.data && dd.data.defs) || []);
+    const atendAll = (cd && cd.ok && cd.data && cd.data.defs) || [];
+    setAtendDefs(atendAll.filter((d) => !d.fixed));
+    setAtendResolveDefs(atendAll.filter((d) => !d.readonly)); // p/ o popup "Resolver atendimento"
+    // Atributo de CONTATO (is_system=0) — alimenta os FILTROS do Kanban. Tipo list vira
+    // dropdown (opções); os demais (texto/número/data) viram campo de digitação (busca parcial).
+    setContactAttrDefs(((co && co.ok && co.data) || [])
+      .filter((d) => !d.is_system)
+      .map((d) => ({ key: d.attribute_key, label: d.display_name || d.attribute_key, type: d.type,
+                     options: Array.isArray(d.options) ? d.options : [] })));
+    // Canais disponíveis (não-arquivados) → opções do dropdown do filtro "Canal".
+    setChannels(((ch && ch.ok && ch.data) || []).map((c) => ({ value: c.id, label: c.name || c.id })));
+  }, [apiBase, getJson]);
   // Sem permissão de VER → não dispara os GETs (evita uma rajada de 403 no load).
-  useEffect(() => { if (canView) load(); }, [load, canView]);
+  useEffect(() => { if (canView) loadMeta(); }, [loadMeta, canView]);
+
+  // Filtros → querystring da lista paginada de protocolos.
+  const listParams = useCallback(() => {
+    const params = new URLSearchParams();
+    if (status.length) params.set('status', JSON.stringify(status));
+    if (q.trim()) params.set('q', q.trim());
+    const of = dayStartEpoch(dateFrom);
+    const ot = dayEndEpoch(dateTo);
+    if (of != null) params.set('opened_from', String(of));
+    if (ot != null) params.set('opened_to', String(ot));
+    if (assigneeFilter.length) params.set('assignee_user_id', JSON.stringify(assigneeFilter));
+    if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
+    return params;
+  }, [status, q, dateFrom, dateTo, assigneeFilter, attrFilters]);
+
+  // Bump manual → re-busca da 1ª página (botão Atualizar, WS, pós-ação no detalhe).
+  const [reloadTick, setReloadTick] = useState(0);
+  const reload = useCallback(() => setReloadTick((t) => t + 1), []);
+  const [totalCount, setTotalCount] = useState(0);  // total do servidor (badge "N protocolos")
+
+  // fetchPage(offset) → uma página do envelope {items,total,has_more} (plano 50). Só a
+  // LISTA usa esta rota — no Kanban quem pagina é cada coluna (/grouped/column). Sem
+  // permissão de VER devolve vazio (não dispara GET ⇒ sem rajada de 403).
+  const fetchPage = useCallback(async (offset) => {
+    if (!canView || mode === 'kanban') return { items: [], hasMore: false };
+    const params = listParams();
+    params.set('limit', String(PAGE_SIZE));
+    params.set('offset', String(offset));
+    const ll = await getJson(`${apiBase}/protocolos?${params.toString()}`);
+    const env = (ll && ll.ok && ll.data) || {};
+    // Envelope novo {items,...}; tolera shape legado (lista pura) por segurança.
+    const items = Array.isArray(env) ? env : (Array.isArray(env.items) ? env.items : []);
+    if (typeof env.total === 'number') setTotalCount(env.total);
+    return { items, hasMore: !!env.has_more };
+  }, [apiBase, canView, mode, listParams, getJson]);
+
+  // resetKey: qualquer mudança de filtro / permissão / modo / reload volta à 1ª página.
+  const resetKey = useMemo(
+    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, mode, reloadTick]),
+    [status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, mode, reloadTick]);
+
+  const { items: rows, loading, loadingMore, hasMore, loadMore } =
+    useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey, keyOf: (r) => r.id });
+
+  // Scroll infinito da LISTA: escuta o scroll de quem realmente rola (janela OU container
+  // interno do painel). Mesma abordagem das colunas do Kanban — o sentinela por
+  // IntersectionObserver não disparava aqui e a lista ficava presa nos primeiros 50.
+  const listEndRef = useRef(null);
+  useEffect(() => {
+    if (mode !== 'lista' || !hasMore) return undefined;
+    const marker = listEndRef.current;
+    if (!marker) return undefined;
+    const sc = scrollParentOf(marker);
+    const target = sc || window;
+    const onScroll = () => { if (hasMore && !loadingMore && nearBottom(sc)) loadMore(); };
+    target.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();   // conteúdo que não enche a tela nunca geraria scroll: completa sozinho
+    return () => target.removeEventListener('scroll', onScroll);
+  }, [mode, hasMore, loadingMore, loadMore, rows.length]);
+
+  // ── Kanban agrupado NO SERVIDOR ────────────────────────────────────────────
+  // As colunas e a contagem exata de cada uma vêm do índice do backend
+  // (/grouped/columns); cada coluna pagina sozinha (/grouped/column). O navegador
+  // nunca baixa a coleção inteira para agrupar.
+  const [kanban, setKanban] = useState({ columns: [], truncated: false, unavailable: false });
+  const [kanbanLoading, setKanbanLoading] = useState(false);
+
+  // Filtros + config de agrupamento da aba ativa → query params das rotas /grouped/*.
+  const groupParams = useCallback(() => {
+    const p = listParams();
+    const v = activeView || {};
+    p.set('group_by', v.group_by || 'status');
+    for (const k of ['group_attr_key', 'group_field_scope', 'group_date_mode',
+                     'group_date_grain', 'group_date_from', 'group_date_to']) {
+      if (v[k]) p.set(k, String(v[k]));
+    }
+    return p;
+  }, [listParams, activeView]);
+
+  // Muda ⇒ recarrega colunas e reinicia a paginação de TODAS as colunas.
+  const groupResetKey = useMemo(() => JSON.stringify([
+    status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, reloadTick,
+    (activeView || {}).group_by, (activeView || {}).group_attr_key,
+    (activeView || {}).group_field_scope, (activeView || {}).group_date_mode,
+    (activeView || {}).group_date_grain, (activeView || {}).group_date_from,
+    (activeView || {}).group_date_to,
+  ]), [status, q, dateFrom, dateTo, assigneeFilter, attrFilters, canView, reloadTick, activeView]);
+
+  useEffect(() => {
+    if (!canView || mode !== 'kanban') return undefined;
+    let alive = true;
+    setKanbanLoading(true);
+    (async () => {
+      try {
+        const r = await getJson(`${apiBase}/grouped/columns?${groupParams().toString()}`);
+        const d = (r && r.ok && r.data) || {};
+        if (alive) {
+          setKanban({ columns: Array.isArray(d.columns) ? d.columns : [],
+                      truncated: !!d.truncated, unavailable: !!d.unavailable });
+        }
+      } finally { if (alive) setKanbanLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [mode, groupResetKey]);   // groupParams/getJson lidos no corpo (groupResetKey cobre as entradas)
+
+  const fetchColumnPage = useCallback(async (colId, offset) => {
+    if (!canView) return { items: [], hasMore: false };
+    const p = groupParams();
+    p.set('col_id', colId);
+    p.set('limit', String(PAGE_SIZE));
+    p.set('offset', String(offset));
+    const r = await getJson(`${apiBase}/grouped/column?${p.toString()}`);
+    const d = (r && r.ok && r.data) || {};
+    return { items: Array.isArray(d.items) ? d.items : [], hasMore: !!d.has_more };
+  }, [apiBase, canView, groupParams, getJson]);
 
   // Visualizações (abas) + usuário atual (p/ permissão de equipe).
   const loadViews = useCallback(async () => {
@@ -623,10 +810,10 @@ function ProtocolosList({ api, mode }) {
     let ws;
     try {
       ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_protocolos_changed') { load(); loadViews(); } } catch (_) { /* ignore */ } };
+      ws.onmessage = (m) => { try { if (JSON.parse(m.data).event === 'plugin_protocolos_changed') { reload(); loadViews(); } } catch (_) { /* ignore */ } };
     } catch (_) { /* ignore */ }
     return () => { try { ws && ws.close(); } catch (_) { /* ignore */ } };
-  }, [load, loadViews]);
+  }, [reload, loadViews]);
 
   // ── Filtro de período ───────────────────────────────────────────────────────
   const onManualDate = (f, t) => { setDateFrom(f); setDateTo(t); setDatePreset(null); };
@@ -792,10 +979,13 @@ function ProtocolosList({ api, mode }) {
     return () => window.removeEventListener('popstate', readDeep);
   }, [openDetail]);
 
-  // ── Kanban: agrupamento (dinâmico pela aba ativa) + drag-to-set-state ─────────
+  // ── Kanban: comportamento do DRAG (as COLUNAS vêm do servidor) ───────────────
+  // `buildGrouping` continua sendo a fonte de `onDrop`/`confirmText`/`columnIdOf` (o
+  // último só para detectar "já está nesta coluna" no drag). A LISTA de colunas e as
+  // contagens agora vêm do índice do backend — por isso `rows: []` aqui.
   const grouping = useMemo(
-    () => buildGrouping(activeView, { users, groupFields, rows, apiPost }),
-    [activeView, users, groupFields, rows, apiPost]);
+    () => buildGrouping(activeView, { users, groupFields, rows: [], apiPost }),
+    [activeView, users, groupFields, apiPost]);
 
   // Ordem das colunas salva desta aba: PESSOAL (pref) se a origem for pessoal, senão da EQUIPE
   // (view.column_order). Ambas podem ser null → ordem padrão de buildGrouping.
@@ -806,9 +996,20 @@ function ProtocolosList({ api, mode }) {
   };
   // Colunas efetivamente exibidas: rascunho local (se o usuário arrastou) tem precedência
   // sobre a ordem salva. Reaplica sobre as colunas ATUAIS (dinâmicas continuam funcionando).
+  // Badge "N protocolos": no Kanban é a soma das colunas (contagem do servidor); na
+  // Lista, o `total` do envelope. O "+" indica resultado parcial (índice truncado).
+  const shownTotal = useMemo(
+    () => (mode === 'kanban'
+      ? (kanban.columns || []).reduce((s, c) => s + (c.total || 0), 0)
+      : totalCount),
+    [mode, kanban, totalCount]);
+  const shownPartial = mode === 'kanban' ? kanban.truncated : hasMore;
+
+  // Colunas do SERVIDOR (com `total` exato), reordenadas pela preferência salva/rascunho —
+  // a ordem continua sendo por id de coluna, então `column_order` antigo segue valendo.
   const orderedColumns = useMemo(
-    () => applyColumnOrder(grouping.columns, colOrderDraft || storedColumnOrder(activeView)),
-    [grouping, colOrderDraft, activeView]);
+    () => applyColumnOrder(kanban.columns, colOrderDraft || storedColumnOrder(activeView)),
+    [kanban, colOrderDraft, activeView]);
   // Troca de aba OU de origem (Pessoal/Equipe) → descarta o rascunho, refletindo o que está salvo.
   useEffect(() => { setColOrderDraft(null); },
     [activeViewId, !!(activeView && activeView.pref && activeView.pref.use_personal)]);
@@ -899,12 +1100,12 @@ function ProtocolosList({ api, mode }) {
     if (res && res.ok === false) {
       if (/atendimento abert[ao]/i.test(res.error || '')) {
         const done = await forceResolveAndClose(atid);
-        if (done) { closeDetail(); await load(); return { ok: true }; }
+        if (done) { closeDetail(); reload(); return { ok: true }; }
         return { ok: false, error: 'Resolva o atendimento aberto para finalizar o protocolo.' };
       }
       return { ok: false, error: res.error || 'Falha ao finalizar.' };
     }
-    closeDetail(); await load();
+    closeDetail(); reload();
     return { ok: true };
   }
 
@@ -945,7 +1146,7 @@ function ProtocolosList({ api, mode }) {
         }
       }
     } catch (_) { setActionMsg({ text: 'Falha ao mover o protocolo.', error: true }); }
-    await load();
+    reload();
   }
 
   // ── Lista: colunas data-driven (ordenáveis) ──────────────────────────────────
@@ -1032,36 +1233,17 @@ function ProtocolosList({ api, mode }) {
   const kanbanView = html`
     <div>
       ${actionMsg ? html`<div class="mb-2 px-3 py-2 rounded-md text-[13px] ${actionMsg.error ? 'bg-red-500/15 border border-red-500 text-red-500 font-semibold' : 'text-wa-secondary'}">${actionMsg.text}</div>` : null}
+      ${kanban.truncated ? html`<div class="mb-2 text-[12px] text-amber-600">
+        Muitos protocolos para agrupar de uma vez — as contagens por coluna são um piso.
+        Refine os filtros para um resultado exato.</div>` : null}
       <div class="flex gap-3 overflow-x-auto pb-2">
-        ${orderedColumns.map((col) => {
-          const cards = rows.filter((r) => grouping.columnIdOf(r) === col.id);
-          const isTarget = dropCol === col.id;
-          const isColTarget = colDropTarget === col.id;
-          return html`
-            <div key=${col.id} class="flex flex-col w-72 shrink-0">
-              <div draggable=${true}
-                onDragStart=${(e) => { colDragRef.current = col.id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(col.id)); } catch (_) { /* ignore */ } }}
-                onDragEnd=${() => { colDragRef.current = null; setColDropTarget(null); }}
-                onDragOver=${(e) => { if (!colDragRef.current) return; e.preventDefault(); if (colDropTarget !== col.id) setColDropTarget(col.id); }}
-                onDragLeave=${() => setColDropTarget((d) => (d === col.id ? null : d))}
-                onDrop=${(e) => { if (!colDragRef.current) return; e.preventDefault(); reorderColumns(colDragRef.current, col.id); colDragRef.current = null; setColDropTarget(null); }}
-                title="Arraste para reordenar as colunas"
-                class="flex items-center justify-between mb-2 px-1 py-0.5 rounded cursor-move select-none ${isColTarget ? 'ring-2 ring-wa-teal bg-wa-hover' : ''}">
-                <span class="text-[13px] font-semibold text-wa-text truncate">${col.label}</span>
-                <span class="text-[12px] text-wa-secondary">${cards.length}</span>
-              </div>
-              <div
-                onDragOver=${(e) => { if (colDragRef.current) return; e.preventDefault(); if (dropCol !== col.id) setDropCol(col.id); }}
-                onDragLeave=${() => setDropCol((d) => (d === col.id ? null : d))}
-                onDrop=${(e) => { if (colDragRef.current) return; e.preventDefault(); const row = dragRef.current; setDropCol(null); applyDrop(row, col.id); }}
-                class="flex-1 min-h-[120px] rounded-lg p-2 flex flex-col gap-2 border border-dashed transition-colors ${isTarget ? 'ring-2 ring-wa-teal bg-wa-hover border-wa-teal' : 'bg-wa-bg border-wa-border'}">
-                ${cards.length === 0 ? html`<div class="text-[12px] text-wa-secondary text-center py-4">Vazio</div>`
-                  : cards.map((r) => html`<${KanbanCard} key=${r.id} row=${r}
-                      draggedRef=${draggedRef} dragRef=${dragRef} canDrag=${!!grouping.onDrop && canEdit}
-                      onClearDrop=${() => setDropCol(null)} onOpen=${() => openDetail(r.id)} />`)}
-              </div>
-            </div>`;
-        })}
+        ${orderedColumns.map((col) => html`<${KanbanColumn} key=${col.id} col=${col}
+          fetchColumnPage=${fetchColumnPage} resetKey=${groupResetKey}
+          canDrag=${!!grouping.onDrop && canEdit}
+          dragRef=${dragRef} draggedRef=${draggedRef}
+          dropCol=${dropCol} setDropCol=${setDropCol}
+          colDragRef=${colDragRef} colDropTarget=${colDropTarget} setColDropTarget=${setColDropTarget}
+          reorderColumns=${reorderColumns} applyDrop=${applyDrop} openDetail=${openDetail} />`)}
       </div>
     </div>`;
 
@@ -1217,9 +1399,10 @@ function ProtocolosList({ api, mode }) {
           </div>` : null}
         <!-- Linha de ação final: Atualizar + Limpar filtros -->
         <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-wa-border">
-          <button onClick=${load} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
+          <button onClick=${reload} class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
           ${hasViewFilters ? html`<button onClick=${clearFilters}
             class="px-3 py-2 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
+          ${(mode === 'kanban' ? !kanbanLoading : !loading) ? html`<span class="ml-auto text-[12px] text-wa-secondary">${shownTotal} protocolo${shownTotal === 1 ? '' : 's'}${shownPartial ? '+' : ''}</span>` : null}
         </div>
       </div>
 
@@ -1227,15 +1410,30 @@ function ProtocolosList({ api, mode }) {
            mesmo quando vazio, p/ não perder a aba selecionada. -->
       ${mode === 'kanban' ? tabBar : null}
 
-      ${loading ? html`<div class="text-[13px] text-wa-secondary p-4">Carregando…</div>`
-        : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
-        : mode === 'kanban' ? kanbanView : listaView}
+      <!-- Kanban e Lista têm ciclos de carga distintos: o Kanban carrega as COLUNAS
+           (e cada coluna pagina sozinha); a Lista pagina a si mesma. -->
+      ${mode === 'kanban'
+        ? (kanbanLoading ? html`<div class="text-[13px] text-wa-secondary p-4">Carregando…</div>`
+           : (!orderedColumns.length || orderedColumns.every((c) => !c.total))
+             ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
+             : kanbanView)
+        : loading ? html`<div class="text-[13px] text-wa-secondary p-4">Carregando…</div>`
+          : rows.length === 0 ? html`<div class="text-[13px] text-wa-secondary p-4">Nenhum protocolo.${hasViewFilters ? html` Esta aba tem filtros pré-determinados — <button onClick=${clearFilters} class="text-wa-teal hover:underline">limpar filtros</button> para ver todos.` : null}</div>`
+          : listaView}
+
+      <!-- Fim da Lista: marcador usado p/ achar o container que rola + estado do lote. -->
+      ${mode === 'lista' && !loading ? html`<div ref=${listEndRef} class="h-2"></div>` : null}
+      ${mode === 'lista' && loadingMore
+        ? html`<div class="text-[12px] text-wa-secondary p-2 text-center">Carregando mais…</div>`
+        : (mode === 'lista' && !loading && hasMore
+            ? html`<div class="text-[12px] text-wa-secondary p-2 text-center">Role para carregar mais (${rows.length}/${totalCount})</div>`
+            : null)}
 
       ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs}
         protoDefs=${cols} warning=${detailWarning} api=${api} canEdit=${canEdit}
         defaultAssignee=${currentUser && currentUser.id}
         onClose=${closeDetail}
-        onChanged=${load} onFinalize=${finalizeProtocolo} />` : null}
+        onChanged=${reload} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
 }
 
