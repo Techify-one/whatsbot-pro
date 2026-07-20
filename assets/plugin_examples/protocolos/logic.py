@@ -1433,6 +1433,25 @@ def grouped_columns(view: dict, filters: dict) -> dict:
             "unavailable": idx["unavailable"], "read_only": idx["read_only"]}
 
 
+def count_protocolos_grouped(view: dict, filters: dict) -> dict:
+    """Total real por coluna do Kanban, sem hidratar cards.
+
+    Compatível com o contrato planejado de ``/protocolos/counts``. A implementação
+    reusa o índice server-side já usado por ``/grouped/columns``: ele guarda ids por
+    coluna, então o total é calculado sem carregar a página de cards no navegador.
+    ``exact`` fica falso apenas quando a varredura do índice atingiu o teto de segurança.
+    """
+    data = grouped_columns(view, filters)
+    columns = {str(c.get("id")): int(c.get("total") or 0)
+               for c in (data.get("columns") or [])}
+    total = sum(columns.values())
+    exact = not bool(data.get("truncated"))
+    return {"total": total, "columns": columns, "exact": exact,
+            "truncated": bool(data.get("truncated")),
+            "unavailable": bool(data.get("unavailable")),
+            "read_only": bool(data.get("read_only"))}
+
+
 def grouped_column_page(view: dict, filters: dict, col_id: str,
                         limit: int = PAGE_LIST, offset: int = 0) -> dict:
     """Uma página de UMA coluna — envelope ``{items,total,has_more}``.

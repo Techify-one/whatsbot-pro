@@ -148,7 +148,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search), []);
   const filters = useConversationFilters({
     contacts, selected, selectedConvId, currentUserId, displayedRef,
+    search,
     searching: !!search,
+    showArchived,
     skipStoredPreset: hasUrlFilters,
   });
   const {

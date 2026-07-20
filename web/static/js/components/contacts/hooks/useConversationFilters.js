@@ -13,11 +13,15 @@
 import { useState, useEffect, useCallback, useMemo } from 'preact/hooks';
 import {
   listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter,
+  countConversations,
 } from '../../../services/api.js';
 import {
   isUnassigned, matchesStatus, matchesAssignment, matchesAdvFilters, matchesTags,
   isVisibleInSidebar, sortContactsBy, normalizeSpec, specsEqual, isDefaultSpec,
 } from '../../../services/conversationRows.js';
+import {
+  buildCountParams, isServerExpressible,
+} from '../../../services/conversationFilterSpec.js';
 
 // Persists which saved conversation-filter preset is applied, so it survives a
 // page reload (per device). Stores the preset id; re-applied once the presets load.
@@ -26,13 +30,15 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
 /**
  * @param {Object} opts
  * @param {Record<string, any>[]} opts.contacts
+ * @param {string} [opts.search]
  * @param {string|null} opts.selected
  * @param {number|null} opts.selectedConvId
  * @param {number|null} opts.currentUserId
  * @param {{ current: Record<string, any>[] }} opts.displayedRef
  * @param {boolean} [opts.searching] - há um termo de busca ativo na barra lateral.
+ * @param {boolean} [opts.showArchived]
  */
-export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef, searching = false, skipStoredPreset = false }) {
+export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
@@ -45,6 +51,7 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   // filters diverge from the saved spec.
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
+  const [serverCounts, setServerCounts] = useState(null);
 
   // Quais atendimentos entram na sidebar (plano 28) — regra em `isVisibleInSidebar`.
   //
@@ -75,12 +82,43 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
       && matchesAdvFilters(c, advFilters, now));
   }, [activeContacts, statusFilter, tagFilter, advFilters, searching]);
 
-  const tabCounts = useMemo(() => ({
+  const clientTabCounts = useMemo(() => ({
     all: statusTagFiltered.length,
     mine: currentUserId == null ? 0 : statusTagFiltered.filter(c => c.assignee_user_id === currentUserId).length,
     unassigned: statusTagFiltered.filter(isUnassigned).length,
     mentions: statusTagFiltered.filter(c => c.has_user_mention).length,
   }), [statusTagFiltered, currentUserId]);
+  const tabCounts = serverCounts || clientTabCounts;
+
+  useEffect(() => {
+    const spec = {
+      search, searching, statusFilter, tagFilter, advFilters, archived: showArchived,
+    };
+    if (!isServerExpressible(spec)) {
+      setServerCounts(null);
+      return () => {};
+    }
+    setServerCounts(null);
+    let alive = true;
+    const timer = setTimeout(() => {
+      countConversations(buildCountParams(spec)).then((res) => {
+        if (!alive) return;
+        if (res && res.ok && res.data) {
+          setServerCounts({
+            all: Number(res.data.all || 0),
+            mine: Number(res.data.mine || 0),
+            unassigned: Number(res.data.unassigned || 0),
+            mentions: Number(res.data.mentions || 0),
+          });
+        } else {
+          setServerCounts(null);
+        }
+      }).catch(() => {
+        if (alive) setServerCounts(null);
+      });
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [search, searching, statusFilter, tagFilter, advFilters, showArchived, contacts]);
 
   // Com busca ativa a aba de atribuição também não corta (buscar é procurar em tudo,
   // não só no que está atribuído a mim). As abas seguem visíveis com os contadores

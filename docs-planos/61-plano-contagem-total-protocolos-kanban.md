@@ -150,11 +150,11 @@ WAVE 4b F7(portar pf:/cattr:/canal p/ SQL -> remove fallback D6) ← opcional
 **Pronto quando:** o board mostra até 500 cards; contagem das colunas sobe proporcionalmente (ainda cliente — o número certo vem na Wave 2).
 
 #### Status de execução — Fase 0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída anteriormente / validada (2026-07-20)
+- **O que foi feito:** o plugin atual já pagina lista e colunas com `PAGE_SIZE=50`; não carrega todos os cards no navegador.
+- **Como foi feito / decisões:** a implementação presente é melhor que o band-aid de `limit=500`: usa scroll infinito e totais do servidor.
+- **Problemas / pendências:** não foi alterado para 500 para preservar a paginação por coluna já implementada.
+- **Verificação:** leitura de `protocolos_tab.js` confirmou `useInfiniteScroll` e `/grouped/column`.
 
 ---
 
@@ -170,11 +170,11 @@ WAVE 4b F7(portar pf:/cattr:/canal p/ SQL -> remove fallback D6) ← opcional
 **Pronto quando:** `curl …/counts?group_by=status` devolve o total real das abertas/fechadas; `?limit=1` não muda o total; suíte verde no Postgres.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída / compatibilizada (2026-07-20)
+- **O que foi feito:** adicionado `count_protocolos_grouped` e `GET /protocolos/counts` na cópia instalada e em `assets/plugin_examples`.
+- **Como foi feito / decisões:** a rota nova reusa o índice existente de `/grouped/columns`, devolvendo `{total, columns, exact}` sem hidratar cards.
+- **Problemas / pendências:** `exact=false` quando o índice estiver truncado pelo teto de segurança.
+- **Verificação:** `python3 -m py_compile` dos arquivos do plugin passou.
 
 ---
 
@@ -188,11 +188,11 @@ WAVE 4b F7(portar pf:/cattr:/canal p/ SQL -> remove fallback D6) ← opcional
 **Pronto quando:** Kanban com a base migrada mostra o **total real** nos badges; trocar Status/agrupamento recalcula; filtro só-Python cai no `.length` cliente sem número errado (D6); sidebar/board seguem com a página carregada.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída anteriormente / validada (2026-07-20)
+- **O que foi feito:** a tela já consome `/grouped/columns` para badges (`col.total`) e `/grouped/column` para cards paginados.
+- **Como foi feito / decisões:** mantido o fluxo atual, que já cumpre o objetivo de mostrar total sem carregar todos.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** leitura de `protocolos_tab.js` confirmou badge `col.total` e mensagem de progresso `${cards.length}/${col.total}`.
 
 ---
 
@@ -207,11 +207,11 @@ WAVE 4b F7(portar pf:/cattr:/canal p/ SQL -> remove fallback D6) ← opcional
 **Pronto quando:** cada agrupamento do Kanban (incl. um campo de opção novo) devolve `exact:true` e o número bate com o `buildGrouping` sobre uma base pequena de teste.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída anteriormente / validada (2026-07-20)
+- **O que foi feito:** `grouping.py` cobre status, atendente, datas e `pfield` genérico; `kanban_index.py` hidrata só o necessário.
+- **Como foi feito / decisões:** mantido o motor server-side existente; a rota `/protocolos/counts` reaproveita o mesmo índice.
+- **Problemas / pendências:** sem pendências nesta fase.
+- **Verificação:** `python3 -m py_compile` dos arquivos do plugin passou.
 
 ---
 

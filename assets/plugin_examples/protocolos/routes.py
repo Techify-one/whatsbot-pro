@@ -173,6 +173,31 @@ async def grouped_columns(status: str | None = None, assignee_user_id: str | Non
     return {"ok": True, "data": data}
 
 
+@router.get("/protocolos/counts", dependencies=[plugin_permission("view")])
+async def protocolos_counts(status: str | None = None, assignee_user_id: str | None = None,
+                            contact_id: int | None = None, q: str | None = None,
+                            opened_from: float | None = None, opened_to: float | None = None,
+                            attr_filters: str | None = None, nota: str | None = None,
+                            group_by: str | None = None, group_attr_key: str | None = None,
+                            group_field_scope: str | None = None,
+                            group_date_mode: str | None = None,
+                            group_date_grain: str | None = None,
+                            group_date_from: str | None = None,
+                            group_date_to: str | None = None,
+                            limit: int = 50, offset: int = 0):
+    """Total por coluna do agrupamento ativo.
+
+    ``limit``/``offset`` são aceitos por compatibilidade com a listagem, mas ignorados:
+    este endpoint devolve totais do filtro inteiro, sem hidratar cards.
+    """
+    view = _view_dict(group_by, group_attr_key, group_field_scope, group_date_mode,
+                      group_date_grain, group_date_from, group_date_to)
+    f = _filters_dict(status, assignee_user_id, contact_id, q, opened_from, opened_to,
+                      attr_filters, nota)
+    data = await asyncio.to_thread(logic.count_protocolos_grouped, view, f)
+    return {"ok": True, "data": data}
+
+
 @router.get("/grouped/column", dependencies=[plugin_permission("view")])
 async def grouped_column(col_id: str = "",
                          status: str | None = None, assignee_user_id: str | None = None,

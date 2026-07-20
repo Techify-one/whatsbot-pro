@@ -509,6 +509,21 @@ export async function filterConversations(params = {}) {
   return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`);
 }
 
+export async function countConversations(params = {}) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (Array.isArray(v)) {
+      if (v.length === 0) continue;
+      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v.join(','))}`);
+    } else {
+      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+    }
+  }
+  const qs = parts.join('&');
+  return request('GET', `/api/atendimentos/count${qs ? '?' + qs : ''}`);
+}
+
 export async function setConversationStatus(id, status) {
   return request('POST', `/api/atendimentos/${id}/status`, { status });
 }
