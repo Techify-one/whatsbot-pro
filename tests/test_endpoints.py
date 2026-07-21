@@ -5036,6 +5036,26 @@ _tsm = _tg.send_media("555", "image", "https://x/y.jpg", caption="cap")
 check("telegram send_media(url) -> sendPhoto com link no campo photo",
       _tg_calls[-1][0] == "sendPhoto" and _tg_calls[-1][1].get("photo") == "https://x/y.jpg")
 
+# plano 64 — a zona "Arquivo" do drop tem de chegar como ARQUIVO no Telegram.
+# Sem `disable_content_type_detection`, o servidor do Telegram detecta o .mp4
+# e o exibe com player, tornando a zona indistinguível da de vídeo.
+_tg_mp4 = os.path.join(_tmpdir, "clipe_tg.mp4")
+with open(_tg_mp4, "wb") as _f:
+    _f.write(b"\x00\x00\x00\x18ftypmp42")
+_tg.send_media("555", "document", _tg_mp4, caption="cap", filename="clipe.mp4")
+check("telegram send_media(document) -> sendDocument",
+      _tg_calls[-1][0] == "sendDocument")
+check("telegram sendDocument -> desliga a detecção de tipo do servidor",
+      _tg_calls[-1][1].get("disable_content_type_detection") == "true")
+check("telegram sendDocument -> nome original preservado",
+      (_tg_calls[-1][2] or {}).get("document", (None,))[0] == "clipe.mp4")
+
+_tg.send_media("555", "video", _tg_mp4, caption="cap")
+check("telegram send_media(video) -> sendVideo (zona foto/vídeo intacta)",
+      _tg_calls[-1][0] == "sendVideo")
+check("telegram sendVideo -> NÃO manda o flag de documento",
+      "disable_content_type_detection" not in (_tg_calls[-1][1] or {}))
+
 # Token ausente -> erro limpo, sem rede (nunca derruba o core)
 _tg_noTok = _TelegramChannel("tg2")
 check("telegram sem token -> status missing_bot_token",
