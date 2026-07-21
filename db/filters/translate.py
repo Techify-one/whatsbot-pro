@@ -10,12 +10,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import and_, or_, not_, select, func
+from sqlalchemy import and_, or_, not_, select, func, exists, literal
 
 from db.tables import (conversations, contacts, contact_tags, tags, inboxes,
-                       conversation_labels, conversation_label_links)
+                       conversation_labels, conversation_label_links, mentions)
 from db.filters.registry import (
-    FilterError, DIMENSIONS, OPS, CATTR_PREFIX, CATTR_KEY_RE,
+    FilterError, DIMENSIONS, OPS, CATTR_PREFIX, CATTR_KEY_RE, INTERNAL_DIMS,
 )
 
 _CATTR_RE = re.compile(CATTR_KEY_RE)
@@ -95,6 +95,8 @@ def _build_clause(clause, ctx: FilterContext):
         return _ai_clause(op, values)
     if kind == "starter":
         return _starter_clause(op, values)
+    if kind == "has_mention":
+        return _has_mention_clause(values, ctx)
     if kind == "labels":
         return _labels_clause(values)
     if kind == "conv_labels":
@@ -221,6 +223,24 @@ def _starter_clause(op: str, values: list):
     return not_(hit) if op == "not_equal_to" else hit
 
 
+def _has_mention_clause(values: list, ctx: FilterContext):
+    """Unread @mention of the logged-in user (feeds the sidebar 'Menções' tab).
+
+    Mirrors the ``mentions`` sub-count in ``conversation_repo.count_tab_counts`` so the
+    filtered list and the tab counter agree by construction. Without a user, nobody has
+    an unread mention → constant-false (same as the count's ``mentions=0``)."""
+    value = str(values[0]).lower() if values else "true"
+    want = value in ("1", "true", "yes", "sim", "on")
+    if ctx.user_id is None:
+        hit = literal(False)
+    else:
+        hit = (exists()
+               .where(mentions.c.conversation_id == conversations.c.id)
+               .where(mentions.c.mentioned_user_id == ctx.user_id)
+               .where(mentions.c.read_at.is_(None)))
+    return hit if want else not_(hit)
+
+
 def _labels_clause(values: list):
     names = [str(v) for v in values if str(v).strip()]
     if not names:
@@ -301,6 +321,8 @@ def available_dimensions(cattr_defs: list[dict]) -> list[dict]:
     """The filter-schema: static dimensions + cattr:<key> for filterable conversation defs."""
     dims = []
     for d in DIMENSIONS.values():
+        if d.key in INTERNAL_DIMS:
+            continue   # server-expressable but not a user-pickable chip (e.g. has_mention)
         entry = {"key": d.key, "label": d.label, "kind": d.kind, "ops": sorted(d.ops)}
         if d.enum:
             entry["enum"] = sorted(d.enum)

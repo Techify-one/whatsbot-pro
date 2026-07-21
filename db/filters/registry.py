@@ -29,7 +29,7 @@ CATTR_KEY_RE = r"^[a-z][a-z0-9_]{0,63}$"
 @dataclass(frozen=True)
 class Dim:
     key: str
-    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q|channel|contact_type|agent|ai|starter|activity|contact_cattr
+    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q|channel|contact_type|agent|ai|starter|activity|has_mention|contact_cattr
     ops: frozenset
     label: str = ""
     enum: frozenset = field(default_factory=frozenset)
@@ -62,4 +62,10 @@ DIMENSIONS: dict[str, Dim] = {
     "conv_labels": Dim("conv_labels", "conv_labels", frozenset({"in"}),
                        "Etiquetas da conversa"),
     "q": Dim("q", "q", frozenset({"contains"}), "Busca"),
+    # Internal dim (plano 69 F0): feeds the sidebar "Menções" assignment tab server-side.
+    # NOT exposed in `available_dimensions` (not a user-pickable chip).
+    "has_mention": Dim("has_mention", "has_mention", frozenset({"equal_to"}), "Menção"),
 }
+
+# Dims that are server-expressable but NOT offered as manual filter chips in the UI.
+INTERNAL_DIMS: frozenset = frozenset({"has_mention"})
