@@ -202,24 +202,6 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
           ` : null}
         </div>
 
-        <!-- Alerta sonoro de transferência -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
-            <input type="checkbox" checked=${ai.transfer_alert_enabled !== false}
-              onChange=${(e) => set('transfer_alert_enabled', e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
-            Alerta sonoro ao transferir para humano
-          </label>
-          ${ai.transfer_alert_enabled !== false ? html`
-            <div>
-              <label class="block text-[12px] text-wa-secondary mb-1">Duração do alerta (segundos)</label>
-              <input type="number" min="1" max="30" step="1"
-                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-                value=${ai.transfer_alert_duration ?? 5}
-                onInput=${(e) => num('transfer_alert_duration', e.target.value, 5)} />
-            </div>
-          ` : null}
-        </div>
       ` : null}
     </div>
   `;

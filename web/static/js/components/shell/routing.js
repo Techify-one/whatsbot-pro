@@ -27,7 +27,9 @@ export const CORE_ROUTES = {
   '/users': 'users',
   '/audit': 'audit',
   '/ai': 'ai',
-  '/sounds': 'sounds',
+  // Alias legado: a tela virou a aba "Notificações e sons" de Configurações
+  // Gerais (Dashboard.js abre nela ao ver este path / ?tab=sons).
+  '/sounds': 'dashboard',
 };
 export const CORE_TAB_PATHS = {
   contacts: '/',
@@ -45,7 +47,6 @@ export const CORE_TAB_PATHS = {
   users: '/users',
   audit: '/audit',
   ai: '/ai',
-  sounds: '/sounds',
 };
 
 // Legacy Portuguese URLs → canonical English paths. The routes were standardized

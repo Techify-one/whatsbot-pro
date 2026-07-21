@@ -1379,6 +1379,74 @@ check("repo uid real: upsert sobrescreve",
       _uspr.get(4242)["events"]["new_message"]["volume"] == 0.9)
 check("repo isolamento: outro uid sem override", _uspr.get(4343) is None)
 
+from server import sound_catalog as _sound_catalog
+
+# ── Biblioteca de sons importados (aba "Sons") ─────────────────────────────────
+# Qualquer atendente logado importa; só ÁUDIO e no máximo 1 MB. O arquivo vai para
+# statics/sounds/<gerado> — o nome do upload nunca é usado no disco.
+r = client.get("/api/sounds/library")
+check("GET /api/sounds/library -> 200 lista", r.status_code == 200 and r.json()["data"] == [])
+
+_wav = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 32   # header WAV mínimo
+r = client.post("/api/sounds/library",
+                files={"file": ("meu-som.wav", _wav, "audio/wav")},
+                data={"name": "Sino da recepção"})
+check("POST /api/sounds/library -> 200", r.status_code == 200 and r.json()["ok"])
+_snd = r.json()["data"]
+_snd_num = int(_snd["id"].split(":")[1])
+check("som importado -> id custom:<n>", _snd["id"].startswith("custom:"))
+check("som importado -> nome escolhido", _snd["label"] == "Sino da recepção")
+check("som importado -> cls any (serve p/ alerta e one-shot)", _snd["cls"] == "any")
+check("som importado -> url em /statics/sounds/", _snd["url"].startswith("/statics/sounds/"))
+check("som importado -> arquivo renomeado (não usa o nome do upload)",
+      "meu-som" not in _snd["url"])
+
+# Recusa o que não é áudio (extensão fora da lista) e o que passa do teto.
+r = client.post("/api/sounds/library", files={"file": ("virus.exe", b"MZ\x90\x00", "application/x-msdownload")})
+check("import .exe -> recusado", r.status_code == 400 and r.json()["ok"] is False)
+r = client.post("/api/sounds/library", files={"file": ("falso.mp3", b"MZ\x90\x00nao-e-audio", "application/octet-stream")})
+check("import extensão de áudio com conteúdo não-áudio -> recusado", r.json()["ok"] is False)
+r = client.post("/api/sounds/library", files={"file": ("grande.wav", b"RIFF" + b"\x00" * (1024 * 1024 + 64), "audio/wav")})
+check("import acima de 1 MB -> recusado", r.json()["ok"] is False)
+check("import recusado -> nada gravado",
+      len(client.get("/api/sounds/library").json()["data"]) == 1)
+
+# O catálogo passa a oferecer o som importado junto dos sintetizados.
+_cat2 = client.get("/api/sounds/catalog").json()["data"]
+check("catálogo inclui o som importado",
+      any(s["id"] == _snd["id"] and s["kind"] == "file" for s in _cat2["sounds"]))
+
+# Uma preferência pode apontar para o som importado (normalize aceita custom:<n>).
+r = client.put("/api/me/sound-prefs", json={"prefs": {"events": {"new_message": {"sound": _snd["id"]}}}})
+check("preferência aceita som importado",
+      r.json()["data"]["prefs"]["events"]["new_message"]["sound"] == _snd["id"])
+check("normalize recusa custom: malformado",
+      _sound_catalog.is_valid_sound_id("custom:abc") is False
+      and _sound_catalog.is_valid_sound_id("custom:7") is True)
+
+r = client.put(f"/api/sounds/library/{_snd_num}", json={"name": "Sino novo"})
+check("PUT renomeia o som", r.json()["data"]["label"] == "Sino novo")
+
+r = client.delete(f"/api/sounds/library/{_snd_num}")
+check("DELETE remove o som", r.status_code == 200 and r.json()["ok"])
+check("DELETE -> biblioteca vazia", client.get("/api/sounds/library").json()["data"] == [])
+check("DELETE de som inexistente -> 404", client.delete("/api/sounds/library/99999").status_code == 404)
+# A preferência que apontava para o som excluído NÃO é reescrita (o motor cai no
+# som padrão do evento) — fail-open, sem varredura de preferências.
+check("preferência órfã sobrevive ao delete",
+      client.get("/api/me/sound-prefs").json()["data"]["prefs"]["events"]["new_message"]["sound"]
+      == _snd["id"])
+client.put("/api/me/sound-prefs", json={"prefs": {}})   # limpa p/ os asserts seguintes
+
+# ── Permissão de escrita POR CHAVE (abas de Configurações Gerais) ──────────────
+from config.settings import config_key_permission as _ckp
+check("chave de avisos -> settings.general", _ckp("system_notice_tags") == "settings.general")
+check("chave de avançado -> settings.advanced", _ckp("audit_retention_days") == "settings.advanced")
+check("notas privadas -> settings.notifications",
+      _ckp("notify_private_messages") == "settings.notifications")
+check("padrão de som -> settings.notifications", _ckp("sound_settings") == "settings.notifications")
+check("chave sem aba -> só settings.manage", _ckp("openrouter_api_key") is None)
+
 # ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
 # ═══════════════════════════════════════════════════════════════════
@@ -1771,8 +1839,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 37 permissions", _perm_count == 37)
-check("RBAC seed -> role_permissions populated (gestor 32 + atendente 5)", _rp_count == 37)
+check("RBAC seed -> 40 permissions", _perm_count == 40)
+check("RBAC seed -> role_permissions populated (gestor 35 + atendente 5)", _rp_count == 40)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1811,7 +1879,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 37 permissions", len([p for p in _perms if p != "*"]) == 37)
+check("admin me -> all 40 permissions", len([p for p in _perms if p != "*"]) == 40)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -1873,7 +1941,7 @@ from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 32 perms, no '*'", "*" not in _gperms and len(_gperms) == 32)
+check("gestor resolver -> 35 perms, no '*'", "*" not in _gperms and len(_gperms) == 35)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1882,8 +1950,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 37 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 37)
+check("GET /api/roles -> 3 roles + 40 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 40)
 
 r = client.get("/api/users")
 check("GET /api/users (admin session) -> 200", r.status_code == 200)
@@ -2062,9 +2130,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 32)
-check("GET /api/roles -> admin shows all 37",
-      len(_by_key["admin"]["permission_keys"]) == 37)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 35)
+check("GET /api/roles -> admin shows all 40",
+      len(_by_key["admin"]["permission_keys"]) == 40)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -2118,7 +2186,7 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 32 perms", len(_rrepo.get_role_permissions("gestor")) == 32)
+check("gestor restored to 35 perms", len(_rrepo.get_role_permissions("gestor")) == 35)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio
@@ -2991,6 +3059,25 @@ check("skip avaliação por atributo de CONVERSA -> True",
 _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                              "privado": {"title": "", "link": ""}, "skip_attrs": []})
 check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
+
+# Escopo "protocolo": a regra também aceita um RÓTULO da aba Protocolo (sistema de
+# campos próprio do plugin), lido de ``at["fields"]`` — não é atributo do core.
+check("sanitize aceita scope protocolo",
+      _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+      == [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
+check("skip avaliação por RÓTULO do protocolo -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "Sem contato"}}, None) is True)
+check("rótulo do protocolo com outro valor -> não pula",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "vendeu"}}, None) is False)
+check("rótulo multi (checkboxes) casa por pertencimento",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": ["x", "sem contato"]}}, None) is True)
+check("protocolo sem o rótulo preenchido -> não pula",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {}}, None) is False)
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
 _alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
 
 # Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
@@ -5493,15 +5580,29 @@ check("config -> agent_transfer_alert_enabled default True",
 check("config -> agent_transfer_alert_duration default 5",
       _cfg_ata.get("agent_transfer_alert_duration") == 5)
 
-# Transferência para OUTRO atendente (via assign) → dispara o alerta direcionado.
+# Transferência para OUTRO atendente → dispara o alerta direcionado. Exercitada no
+# SERVIÇO (actor != assignee): pelo HTTP o cliente de teste está logado como o
+# próprio `_admin_id`, o que seria auto-atribuição e nunca soaria.
+from app.services import conversation_service as _conv_svc
+
 config_repo.set("agent_transfer_alert_enabled", True)
 config_repo.set("agent_transfer_alert_duration", 7)
-_deps_ata.ws_manager.broadcast = _capture_ata
-try:
-    r = client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
-finally:
-    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+
+def _assign_via_service(actor_id=None):
+    """Reatribui a conversa `_cid` capturando os broadcasts de alerta."""
+    _ata_events.clear()
+    _conv_ata = conversation_repo.get(_cid)
+    _deps_ata.ws_manager.broadcast = _capture_ata
+    try:
+        _asyncio.run(_conv_svc.assign(_deps_ata, _conv_ata, _admin_id, actor_id=actor_id))
+    finally:
+        _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+
+r = client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
 check("assign p/ outro atendente -> 200", r.status_code == 200)
+_assign_via_service()
 check("assign p/ outro atendente -> agent_transfer_alert emitido",
       any(e.get("assignee_user_id") == _admin_id for e in _ata_events))
 check("agent_transfer_alert -> carrega duration da config global",
@@ -5509,7 +5610,6 @@ check("agent_transfer_alert -> carrega duration da config global",
 
 # Auto-atribuição NÃO dispara o alerta (não é "de um atendente para outro"). Testado
 # no serviço: (a) assign_me sempre é auto-atribuição; (b) assign com actor==assignee.
-from app.services import conversation_service as _conv_svc
 _ata_events.clear()
 _deps_ata.ws_manager.broadcast = _capture_ata
 try:
@@ -5524,14 +5624,46 @@ finally:
 
 # Toggle desligado → nenhum alerta, mesmo transferindo para outro atendente.
 config_repo.set("agent_transfer_alert_enabled", False)
-_ata_events.clear()
-_deps_ata.ws_manager.broadcast = _capture_ata
-try:
-    client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
-finally:
-    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+_assign_via_service()
 check("agent_transfer_alert desligado -> sem broadcast", len(_ata_events) == 0)
 config_repo.set("agent_transfer_alert_enabled", True)
+
+# Padrão da equipe (sound_settings) tem precedência sobre as keys legadas: é lá
+# que a aba "Notificações e sons" grava ativação/duração dos alertas.
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"assigned_to_me": {"enabled": True, "duration": 11}},
+})
+_assign_via_service()
+check("sound_settings duration vence a key legada",
+      any(e.get("duration") == 11 for e in _ata_events))
+
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"assigned_to_me": {"enabled": False}},
+})
+_assign_via_service()
+check("sound_settings enabled=False silencia mesmo com key legada ligada",
+      len(_ata_events) == 0)
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"new_message": {"enabled": True, "sound": "ding", "volume": 0.6}},
+})
+
+# event_gate puro: sem o evento no padrão da equipe, o piso é a key legada.
+from server import sound_catalog as _sc
+check("event_gate: cai no legado quando o padrão não define",
+      _sc.event_gate({"events": {}}, "ia_to_human",
+                     legacy_enabled=True, legacy_duration=9) == (True, 9))
+check("event_gate: padrão da equipe vence o legado",
+      _sc.event_gate({"events": {"ia_to_human": {"enabled": False, "duration": 12}}},
+                     "ia_to_human", legacy_enabled=True, legacy_duration=9) == (False, 12))
+check("event_gate: entrada corrompida cai no legado (fail-open)",
+      _sc.event_gate("lixo", "ia_to_human",
+                     legacy_enabled=False, legacy_duration=4) == (False, 4))
+from channels import ai_settings as _ai_settings_mod
+check("ia_to_human deixou de ser per-canal",
+      "transfer_alert_enabled" not in _ai_settings_mod.PER_CHANNEL_AI_KEYS)
 
 # The enriched contact list now reflects Alice's open conversation.
 _alice_row = next((c for c in client.get("/api/contacts").json()["data"]

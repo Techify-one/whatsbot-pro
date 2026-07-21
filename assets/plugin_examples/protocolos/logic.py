@@ -2702,10 +2702,16 @@ def _skip_open_matches(text_value: str, msg_direction: str) -> bool:
         return False
 
 
+# Escopos aceitos numa regra de "não enviar avaliação". Além dos atributos
+# personalizados do CORE (contato/conversa), aceita ``protocolo`` = um rótulo da
+# aba "Protocolo" (sistema de campos PRÓPRIO do plugin, lido de ``at["fields"]``).
+_SKIP_ATTR_SCOPES = ("contact", "conversation", "protocolo")
+
+
 def _sanitize_skip_attrs(raw) -> list:
     """Normaliza a lista de regras {key, scope, value} da aba Avaliação.
 
-    Descarta itens inválidos (key vazia, escopo fora de contact/conversation).
+    Descarta itens inválidos (key vazia, escopo fora de :data:`_SKIP_ATTR_SCOPES`).
     O valor é coagido para string (comparação feita em ``_attr_value_matches``).
     """
     out = []
@@ -2714,7 +2720,7 @@ def _sanitize_skip_attrs(raw) -> list:
             continue
         key = str(r.get("key") or "").strip()
         scope = r.get("scope")
-        if not key or scope not in ("contact", "conversation"):
+        if not key or scope not in _SKIP_ATTR_SCOPES:
             continue
         out.append({"key": key, "scope": scope, "value": str(r.get("value") or "")})
     return out
@@ -2860,21 +2866,30 @@ def _should_skip_evaluation(at: dict, conv_id) -> bool:
     """Decide se as mensagens da aba Avaliação devem ser PULADAS para este contato.
 
     Lê as regras {key, scope, value} da config e compara com os custom_attributes
-    do contato e/ou da conversa. Qualquer regra que casar → pula (retorna True).
-    Best-effort: qualquer erro de leitura NÃO bloqueia o envio (retorna False)."""
+    do contato e/ou da conversa E com os rótulos da aba "Protocolo" (escopo
+    ``protocolo``, campos próprios do plugin). Qualquer regra que casar → pula
+    (retorna True). Best-effort: erro de leitura NÃO bloqueia o envio (False)."""
     try:
         rules = get_protocol_config().get("skip_attrs") or []
         if not rules:
             return False
-        contact_vals, conv_vals = {}, {}
+        contact_vals, conv_vals, proto_vals = {}, {}, {}
         cid = (at or {}).get("contact_id")
         if cid and any(r.get("scope") == "contact" for r in rules):
             from db.tables import contacts as _contacts_tbl
             contact_vals = custom_attribute_repo.get_values(_contacts_tbl, cid) or {}
         if conv_id and any(r.get("scope") == "conversation" for r in rules):
             conv_vals = custom_attribute_repo.get_values(_conversations_tbl, conv_id) or {}
+        if any(r.get("scope") == "protocolo" for r in rules):
+            # `at` já vem hidratado com `fields` (``_proto_dict``); re-hidrata só se
+            # o chamador passou uma row crua.
+            proto_vals = (at or {}).get("fields")
+            if proto_vals is None:
+                proto_vals = ((get_protocolo((at or {}).get("id")) or {}).get("fields") or {})
+        by_scope = {"contact": contact_vals, "conversation": conv_vals,
+                    "protocolo": proto_vals}
         for r in rules:
-            vals = contact_vals if r.get("scope") == "contact" else conv_vals
+            vals = by_scope.get(r.get("scope")) or {}
             if _attr_value_matches(vals.get(r.get("key")), r.get("value")):
                 return True
         return False

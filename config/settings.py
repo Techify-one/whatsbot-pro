@@ -98,7 +98,10 @@ _NO_SEED = object()
 # ``soundEngine.js`` e com o catálogo em ``server/routes/sound_prefs.py`` (fonte
 # única dos metadados servidos por ``GET /api/sounds/catalog``). Os dois eventos de
 # transferência só carregam ``sound``/``volume`` aqui — ``enabled``/``duration``
-# deles seguem nas keys legadas ``transfer_alert_*``/``agent_transfer_alert_*``.
+# deles PODEM ser definidos no padrão da equipe (e sobrescritos por atendente),
+# mas enquanto ausentes o servidor cai nas keys legadas ``transfer_alert_*`` /
+# ``agent_transfer_alert_*`` (``server.sound_catalog.event_gate``) — preservando o
+# comportamento de instalações que nunca editaram o padrão.
 #
 # Padrão (plano 63 · decisões do usuário 2026-07-20): master LIGADO com volume
 # modesto (0.6) — hoje os atendentes reclamam de NÃO conseguir ligar o som; nascer
@@ -287,6 +290,30 @@ def exposed_config_keys() -> list[ConfigKey]:
 def writable_config_keys() -> set[str]:
     """The ``PUT /api/config`` allowlist (R17 single source)."""
     return {ck.key for ck in CONFIG_KEYS if ck.writable} | {_BOT_PHONE_WRITABLE}
+
+
+# ── Permissão de ESCRITA por chave (abas de Configurações Gerais) ──────────────
+# ``PUT /api/config`` exige ``settings.manage`` por padrão. As chaves editadas por
+# uma aba específica aceitam TAMBÉM a permissão granular daquela aba, senão quem
+# só tem `settings.notifications` veria a aba e tomaria 403 ao salvar. Chave fora
+# do mapa ⇒ só ``settings.manage`` (fechado por padrão).
+_TAB_PERMISSION: dict[str, str] = {
+    **{k: "settings.general" for k in (
+        "system_notice_assignment", "system_notice_tags", "system_notice_conv_labels",
+        "system_notice_status", "system_notice_ai")},
+    **{k: "settings.advanced" for k in (
+        "public_base_url", "max_executions", "audit_retention_days")},
+    **{k: "settings.notifications" for k in ("notify_private_messages",)},
+    # O padrão da equipe de som é editado nas abas Notificações (ativação) e Sons
+    # (som/volume/duração); a aba Sons é pessoal, então quem administra o padrão
+    # entra por ``settings.notifications`` ou ``settings.manage``.
+    "sound_settings": "settings.notifications",
+}
+
+
+def config_key_permission(key: str) -> str | None:
+    """Permissão granular que TAMBÉM autoriza escrever ``key`` (ou ``None``)."""
+    return _TAB_PERMISSION.get(key)
 
 
 # Prefix of the per-group "system notice" gate keys (plano 12 / plano 23 Fase C3).

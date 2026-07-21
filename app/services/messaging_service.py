@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from channels import ai_settings
 from db.repositories import agent_repo, contact_repo, conversation_repo
 from agent import group_mentions
-from server import system_notices
+from server import sound_catalog, system_notices
 from server.execution import (
     astart_execution, aend_execution, atrack_step, prune_executions,
     astamp_execution_channel, aset_execution_texts, set_current_contact_id,
@@ -565,15 +565,14 @@ class MessagingService:
 
         # If transfer_to_human was called, broadcast alert + state updates
         if any(tc.get("tool") == "transfer_to_human" for tc in tool_calls):
-            # Per-channel sound alert (plano 21): resolve the channel's setting and
-            # ship it in the payload so the panel respects it even though the
-            # toggle no longer lives in the global config.
-            ta_enabled = bool(ai_settings.value(
-                channel_id, "transfer_alert_enabled",
-                settings.get("transfer_alert_enabled", True)))
-            ta_duration = ai_settings.value(
-                channel_id, "transfer_alert_duration",
-                settings.get("transfer_alert_duration", 5))
+            # Alerta sonoro GLOBAL: ativação/duração moram no padrão da equipe
+            # (``config.sound_settings`` → evento ``ia_to_human``, editável na aba
+            # "Notificações e sons"), com fallback nas keys legadas. Deixou de ser
+            # per-canal — o alerta é sobre QUEM recebe, não sobre o canal.
+            ta_enabled, ta_duration = sound_catalog.event_gate(
+                settings.get("sound_settings", None), "ia_to_human",
+                legacy_enabled=settings.get("transfer_alert_enabled", True),
+                legacy_duration=settings.get("transfer_alert_duration", 5))
             await ws_manager.broadcast("human_transfer_alert", {
                 "phone": phone, "enabled": ta_enabled, "duration": ta_duration})
             await ws_manager.broadcast("contact_ai_toggled", {

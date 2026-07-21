@@ -26,6 +26,13 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("inbox.manage",          "Criar/editar inboxes e membros"),
     ("channel.manage",        "Configurar canais/números"),
     ("settings.manage",       "Configurações globais"),
+    # Abas de "Configurações Gerais" — acesso granular por aba (a aba "Sons" é
+    # PESSOAL e não exige permissão). Quem tinha ``settings.manage`` recebeu as
+    # três na migração ``*_settings_tab_perms``; elas gateiam TAMBÉM a escrita,
+    # via ``config.settings.CONFIG_KEY_PERMISSION`` no PUT /api/config.
+    ("settings.general",      "Configurações: aba Geral (avisos de sistema no chat)"),
+    ("settings.advanced",     "Configurações: aba Avançado (domínio, execuções, auditoria)"),
+    ("settings.notifications", "Configurações: aba Notificações"),
     ("plugins.manage",        "Ativar/desativar/configurar plugins"),
     ("billing.manage",        "Recargas/saldo (Techify)"),
     # IA / agente — permissões granulares (substituem o antigo agent.manage,
@@ -119,6 +126,9 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "sandbox.use": ("core", _G_AI),
     # Configurações e sistema
     "settings.manage": ("core", _G_SETTINGS),
+    "settings.general": ("core", _G_SETTINGS),
+    "settings.advanced": ("core", _G_SETTINGS),
+    "settings.notifications": ("core", _G_SETTINGS),
     "plugins.manage": ("core", _G_SETTINGS),
     "billing.manage": ("core", _G_SETTINGS),
     "database.manage": ("core", _G_SETTINGS),

@@ -78,6 +78,27 @@ test('transferência: durationOverride do servidor vence o seed', () => {
   assert.equal(r.soundId, 'siren');
 });
 
+test('transferência: enabledOverride=true não ressuscita evento que o usuário desligou', () => {
+  // O gate do servidor é um AND, não um override: o atendente pode silenciar
+  // para si mesmo mesmo com o alerta ligado no padrão da equipe.
+  const user = { events: { ia_to_human: { enabled: false } } };
+  const r = resolveEvent('ia_to_human', { user, device: dev(), enabledOverride: true });
+  assert.equal(r.play, false);
+});
+
+test('transferência: duração do usuário vence o durationOverride do servidor', () => {
+  const user = { events: { assigned_to_me: { duration: 9 } } };
+  const r = resolveEvent('assigned_to_me', { user, device: dev(), durationOverride: 12 });
+  assert.equal(r.play, true);
+  assert.equal(r.duration, 9);
+});
+
+test('transferência: duração do padrão da equipe vence o durationOverride legado', () => {
+  const global = { events: { assigned_to_me: { duration: 8 } } };
+  const r = resolveEvent('assigned_to_me', { global, device: dev(), durationOverride: 12 });
+  assert.equal(r.duration, 8);
+});
+
 test('transferência: sem override, duração cai no seed (5s)', () => {
   const r = resolveEvent('assigned_to_me', { device: dev() });
   assert.equal(r.duration, 5);
