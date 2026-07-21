@@ -11,7 +11,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
-import { checkMediaFile, limitsSummary } from '../../../services/mediaLimits.js';
+import { checkMediaFile, limitsSummary, isVideoAttachment } from '../../../services/mediaLimits.js';
 
 /**
  * @param {Object} opts
@@ -112,22 +112,34 @@ export function useMediaUpload({
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
+  function requestVideoSend(file) {
+    if (!mediaAllowed(file, 'video')) return;
+    const previewUrl = URL.createObjectURL(file);
+    setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
+  }
+
   function handleDocSelected(e) {
     const file = e.target.files[0];
-    if (file && !sending && !pendingMedia) {
-      if (mode === 'private' || mediaAllowed(file, 'document')) {
-        setPendingMedia({ type: 'document', file, filename: file.name });
-      }
-    }
     if (docInputRef.current) docInputRef.current.value = '';
+    if (!file || sending || pendingMedia) return;
+    // Vídeo escolhido em "Documento": o canal pode não aceitar vídeo COMO
+    // documento (WhatsApp oficial) mas aceita como vídeo — então em vez de
+    // recusar o anexo, segue pelo caminho de vídeo (que ainda valida
+    // tamanho/formato/codec pelas regras de vídeo do canal).
+    if (mode !== 'private' && !sandbox
+        && isVideoAttachment(file, mediaLimits)
+        && checkMediaFile(file, 'document', mediaLimits)) {
+      requestVideoSend(file);
+      return;
+    }
+    if (mode === 'private' || mediaAllowed(file, 'document')) {
+      setPendingMedia({ type: 'document', file, filename: file.name });
+    }
   }
 
   function handleVideoSelected(e) {
     const file = e.target.files[0];
-    if (file && !sending && !pendingMedia && mediaAllowed(file, 'video')) {
-      const previewUrl = URL.createObjectURL(file);
-      setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
-    }
+    if (file && !sending && !pendingMedia) requestVideoSend(file);
     if (videoInputRef.current) videoInputRef.current.value = '';
   }
 

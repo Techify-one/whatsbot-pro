@@ -89,10 +89,14 @@ def validate_upload(filename: str, size: int, caps, kind: str) -> MediaVerdict:
     extensions = tuple(getattr(limits, "extensions", ()) or ())
     if extensions and ext not in extensions:
         allowed = "/".join(e.lstrip(".").upper() for e in extensions)
-        return MediaVerdict(
-            BAD_FORMAT,
-            f"Formato de {label.lower()} não suportado por este canal. "
-            f"Use {allowed}.")
+        msg = (f"Formato de {label.lower()} não suportado por este canal. "
+               f"Use {allowed}.")
+        # Vídeo anexado como documento: o canal aceita o arquivo, só não por esse
+        # caminho — aponta a saída em vez de só recusar.
+        if kind != "video" and ext in tuple(
+                getattr(limits_for(caps, "video"), "extensions", ()) or ()):
+            msg += " Para enviar um vídeo, use o anexo Vídeo."
+        return MediaVerdict(BAD_FORMAT, msg)
 
     max_bytes = getattr(limits, "max_bytes", 0) or 0
     if max_bytes and size > max_bytes:

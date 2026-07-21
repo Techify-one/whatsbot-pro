@@ -56,3 +56,12 @@ test('fmtSize / limitsSummary', () => {
   assert.match(limitsSummary('image', CLOUD.image), /JPG, JPEG, PNG.*até 5 MB/);
   assert.equal(limitsSummary('image', null), '');
 });
+
+test('isVideoAttachment reconhece vídeo por mime, por extensão do canal e por fallback', async () => {
+  const { isVideoAttachment } = await import('./mediaLimits.js');
+  assert.equal(isVideoAttachment({ name: 'clip', type: 'video/mp4' }, CLOUD), true);
+  assert.equal(isVideoAttachment({ name: 'clip.MP4', type: '' }, CLOUD), true);
+  assert.equal(isVideoAttachment({ name: 'clip.mkv', type: '' }, null), true);
+  assert.equal(isVideoAttachment({ name: 'doc.pdf', type: 'application/pdf' }, CLOUD), false);
+  assert.equal(isVideoAttachment(null, CLOUD), false);
+});

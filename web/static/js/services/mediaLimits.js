@@ -57,6 +57,30 @@ export function limitsSummary(kind, entry) {
   return `Este canal aceita ${label} em ${parts.join(' ')}.`;
 }
 
+// Containers de vídeo comuns — usados só quando o arquivo não traz mime type
+// (alguns navegadores/SOs entregam `type` vazio) e o canal não declara vídeo.
+const VIDEO_EXT_FALLBACK = ['mp4', '3gp', '3gpp', 'mov', 'm4v', 'mkv', 'webm', 'avi'];
+
+/**
+ * O arquivo escolhido é um VÍDEO? (mime `video/*`, ou extensão de container de
+ * vídeo — preferindo as que o próprio canal declara aceitar).
+ *
+ * Serve pra rotear um vídeo escolhido no anexo "Documento" para o caminho de
+ * vídeo: o canal pode não aceitar vídeo COMO DOCUMENTO (WhatsApp oficial) mas
+ * aceita como vídeo, então bloquear seria errado.
+ *
+ * @param {{name?:string, type?:string}} file
+ * @param {Object|null} mediaLimits
+ */
+export function isVideoAttachment(file, mediaLimits) {
+  if (!file) return false;
+  if (String(file.type || '').toLowerCase().startsWith('video/')) return true;
+  const ext = extOf(file.name).replace(/^\./, '');
+  if (!ext) return false;
+  const declared = extList(mediaLimits && mediaLimits.video).map(e => e.toLowerCase());
+  return declared.includes(ext) || VIDEO_EXT_FALLBACK.includes(ext);
+}
+
 /**
  * Avalia um arquivo escolhido contra os limites do canal.
  *
