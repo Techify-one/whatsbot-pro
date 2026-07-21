@@ -342,13 +342,15 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     (:func:`_default_ai_enabled`), so callers that don't pass it are byte-identical.
 
     ``assignee_user_id_seed`` (plano 71) is the channel's "atendente padrão para
-    novas conversas" (a human user_id) resolved by the caller. Like the AI seed it
-    only stamps a brand-new conversation (CREATE, event ``created``); a reopen NEVER
-    re-stamps (P2: respeita a reatribuição manual — o dono persiste porque para o
-    consumidor Curseduca o agrupamento reabre a MESMA conversa). ``None`` (default)
-    ⇒ nasce sem dono (fila "Não atribuídas"), byte-idêntico ao legado. Só chega no
-    ramo ``created`` (open); o ramo ``create_closed`` da regra "ignorar abertura"
-    não recebe dono.
+    novas conversas" (a human user_id) resolved by the caller. Applies in DOIS
+    momentos (P2 revisado 2026-07-21): (1) no nascimento — carimba a conversa nova
+    (CREATE, event ``created``); (2) na REABERTURA — quando uma conversa fechada
+    reabre "Não atribuída" (``assignee_user_id IS NULL``), reaplica o dono + IA off,
+    NUNCA sobrescrevendo uma atribuição existente. Cobre o fluxo Curseduca (a 2ª
+    dúvida do aluno reabre a mesma conversa que o fechamento deixou órfã). O reuse de
+    uma conversa JÁ ABERTA não é tocado (respeita o estado vivo). ``None`` (default)
+    ⇒ nunca carimba (fila "Não atribuídas"), byte-idêntico ao legado. O ramo
+    ``create_closed`` da regra "ignorar abertura" não recebe dono.
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(
@@ -366,7 +368,24 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
             assignee_user_id_seed=assignee_user_id_seed)
         return row, ("created" if created else None)
     if reopen_if_closed and conv["status"] == "closed":
-        return set_status(conv["id"], "open"), "reopened"
+        reopened = set_status(conv["id"], "open")
+        # plano 71 (P2 revisado, 2026-07-21): se a conversa REABRIU "Não atribuída"
+        # e o canal tem atendente padrão, aplica-o de novo (assignee + IA off + sem
+        # agente) — espelha o estado de nascimento. Cobre o fluxo Curseduca: a 1ª
+        # dúvida do aluno nasce atribuída ao Atendente X; ele fecha; a 2ª dúvida reabre
+        # a MESMA conversa (que o close deixou órfã) e ela precisa voltar pro
+        # Atendente X. NUNCA sobrescreve uma atribuição existente (só quando NULL), então
+        # respeita uma reatribuição manual que tenha sobrevivido ao fechamento
+        # (ex.: plano 67 mantém o dono). Reabrir uma conversa JÁ ABERTA (reuse) não
+        # passa por aqui — não mexe no estado vivo.
+        if (assignee_user_id_seed and reopened is not None
+                and reopened.get("assignee_user_id") is None):
+            reopened = _update(conv["id"], {
+                "assignee_user_id": assignee_user_id_seed,
+                "ai_active": 0,
+                "active_agent_key": None,
+            }) or reopened
+        return reopened, "reopened"
     return conv, None
 
 

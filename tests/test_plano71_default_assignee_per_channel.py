@@ -125,12 +125,12 @@ def test_channel_without_default_assignee_is_unchanged(build_app):
     assert conv["active_agent_key"] is not None
 
 
-# ── F4 E2E: reuso/reopen preserva o dono; nunca re-carimba (P2 = só no nascimento) ──
+# ── F4/F6 E2E: reuso preserva; reabertura "Não atribuída" reaplica (P2 revisado) ──
 
 def test_reuse_open_conversation_keeps_owner(build_app):
-    """Cenário Curseduca: uma 2ª dúvida do mesmo aluno reabre a MESMA conversa
-    (ainda aberta) → ela é reusada (transition=None) e o dono persiste. O carimbo
-    NÃO é reaplicado (o repo só o passa no ramo `created`)."""
+    """Cenário Curseduca: uma 2ª dúvida do mesmo aluno chega com a conversa AINDA
+    ABERTA → ela é reusada (transition=None) e o dono persiste. O carimbo NÃO é
+    reaplicado num reuse de conversa aberta (só no nascimento e na reabertura)."""
     built = build_app(["gowa"])
     _set_global(built, True)
     uid = _mk_user("p71_reuse@test.com")
@@ -145,10 +145,12 @@ def test_reuse_open_conversation_keeps_owner(build_app):
     assert conversation_repo.get(conv_id)["assignee_user_id"] == uid
 
 
-def test_reopen_does_not_restamp_default_assignee(build_app):
-    """P2 (só no nascimento): fechar (limpando o dono, comportamento legado) e
-    reabrir por nova mensagem NÃO re-carimba o atendente padrão — a conversa reabre
-    "Não atribuída", respeitando a reatribuição/limpeza manual."""
+def test_reopen_reassigns_default_when_unassigned(build_app):
+    """P2 revisado (F6) — O FLUXO CURSEDUCA: a 1ª dúvida nasce atribuída ao atendente
+    padrão; o atendente fecha (o close limpa o dono, comportamento legado); a 2ª
+    dúvida REABRE a mesma conversa, que voltaria "Não atribuída" — e agora é
+    RE-ATRIBUÍDA ao atendente padrão do canal + IA off. É exatamente o caso que o
+    usuário pediu (aluno recorrente reabre a mesma conversa)."""
     built = build_app(["gowa"])
     _set_global(built, True)
     uid = _mk_user("p71_reopen@test.com")
@@ -158,14 +160,18 @@ def test_reopen_does_not_restamp_default_assignee(build_app):
     conv_id = mem.add_message("user", "abre")["conversation_id"]
     assert conversation_repo.get(conv_id)["assignee_user_id"] == uid
 
-    # Fecha limpando o dono (default) → reabre por nova mensagem.
+    # Fecha limpando o dono (default) → conversa fica "Não atribuída".
     conversation_repo.set_status(conv_id, "closed")
     assert conversation_repo.get(conv_id)["assignee_user_id"] is None
+    # 2ª dúvida reabre a MESMA conversa → reaplica o atendente padrão + IA off.
     conv_id2 = mem.add_message("user", "reabre")["conversation_id"]
     assert conv_id2 == conv_id, "mesma conversa é reaberta, não uma nova"
-    assert conversation_repo.get(conv_id)["status"] == "open"
-    assert conversation_repo.get(conv_id)["assignee_user_id"] is None, \
-        "reopen NÃO deve re-carimbar o atendente padrão (P2 = só no nascimento)"
+    row = conversation_repo.get(conv_id)
+    assert row["status"] == "open"
+    assert row["assignee_user_id"] == uid, \
+        "reabertura de conversa Não atribuída deve reaplicar o atendente padrão (F6)"
+    assert row["ai_active"] == 0, "reabertura com atendente ⇒ IA off"
+    assert row["active_agent_key"] is None
 
 
 def test_reopen_preserves_manually_changed_owner(build_app):
