@@ -12,6 +12,7 @@ import {
   isUnassigned, isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
+  rowMatchesView, specNeedsServer,
 } from './conversationRows.js';
 
 // ── buildRows ──────────────────────────────────────────────────────
@@ -613,4 +614,118 @@ test('isVisibleInSidebar: a conversa ABERTA fica visível mesmo sem mensagem', (
   const byPhone = { phone: '5511', conversation_id: null, last_message_ts: 0 };
   assert.equal(isVisibleInSidebar(byPhone, 'phone:5511'), true);
   assert.equal(isVisibleInSidebar(byPhone, 'phone:5522'), false);
+});
+
+// ── convRowToSidebarRow: has_user_mention (plano 72 F1) ─────────────
+test('convRowToSidebarRow: mapeia has_user_mention (false no broadcast global)', () => {
+  // O payload de broadcast é ÚNICO p/ todos os clientes e não passa current_user_id →
+  // has_user_mention vem sempre false; por isso a aba Menções é dimensão de servidor.
+  assert.equal(convRowToSidebarRow(ENRICHED).has_user_mention, false);
+  assert.equal(convRowToSidebarRow({ ...ENRICHED, has_user_mention: true }).has_user_mention, true);
+});
+
+// ── rowMatchesView (plano 72 F1: reprodução client-side da WHERE do servidor) ──
+// Compõe os matchers puros EXATAMENTE como statusTagFiltered + displayedContacts
+// faziam antes do serverMode curto-circuitar o filtro no cliente.
+const VIEW = (over = {}) => ({
+  statusFilter: 'open', assignmentTab: 'all', tagFilter: [], advFilters: [], currentUserId: 7,
+  ...over,
+});
+
+test('rowMatchesView: aba de atribuição mine/unassigned/all', () => {
+  const mine = { conv_status: 'open', assignee_user_id: 7, active_agent_key: null };
+  const other = { conv_status: 'open', assignee_user_id: 9, active_agent_key: null };
+  const none = { conv_status: 'open', assignee_user_id: null, active_agent_key: null };
+  assert.equal(rowMatchesView(mine, VIEW({ assignmentTab: 'mine' }), NOW), true);
+  assert.equal(rowMatchesView(other, VIEW({ assignmentTab: 'mine' }), NOW), false); // outro atendente → fora (o BUG)
+  assert.equal(rowMatchesView(none, VIEW({ assignmentTab: 'mine' }), NOW), false);  // não atribuída → fora de Minhas
+  assert.equal(rowMatchesView(none, VIEW({ assignmentTab: 'unassigned' }), NOW), true);
+  assert.equal(rowMatchesView(mine, VIEW({ assignmentTab: 'unassigned' }), NOW), false);
+  assert.equal(rowMatchesView(other, VIEW({ assignmentTab: 'all' }), NOW), true);   // Todas não corta atribuição
+});
+
+test('rowMatchesView: chip de status (open/closed/all)', () => {
+  const open = { conv_status: 'open', assignee_user_id: null, active_agent_key: null };
+  const closed = { conv_status: 'closed', assignee_user_id: null, active_agent_key: null };
+  assert.equal(rowMatchesView(open, VIEW({ statusFilter: 'open' }), NOW), true);
+  assert.equal(rowMatchesView(closed, VIEW({ statusFilter: 'open' }), NOW), false);
+  assert.equal(rowMatchesView(closed, VIEW({ statusFilter: 'closed' }), NOW), true);
+  assert.equal(rowMatchesView(closed, VIEW({ statusFilter: 'all' }), NOW), true);
+});
+
+test('rowMatchesView: uma CLÁUSULA de status sobrepõe o chip (nunca AND vazio)', () => {
+  // chip "Abertas" + cláusula avançada "Fechada": a cláusula vence (mesmo precedente
+  // de statusTagFiltered), então uma conversa FECHADA casa e uma ABERTA é excluída.
+  const spec = VIEW({ statusFilter: 'open', advFilters: [{ dim: 'status', op: 'eq', value: 'closed' }] });
+  const closed = { conv_status: 'closed', assignee_user_id: null, active_agent_key: null };
+  const open = { conv_status: 'open', assignee_user_id: null, active_agent_key: null };
+  assert.equal(rowMatchesView(closed, spec, NOW), true);
+  assert.equal(rowMatchesView(open, spec, NOW), false);
+});
+
+test('rowMatchesView: funil de tag (confiável após F0)', () => {
+  const vip = { conv_status: 'open', assignee_user_id: null, active_agent_key: null, tags: ['vip'] };
+  const plain = { conv_status: 'open', assignee_user_id: null, active_agent_key: null, tags: [] };
+  assert.equal(rowMatchesView(vip, VIEW({ tagFilter: ['vip'] }), NOW), true);
+  assert.equal(rowMatchesView(plain, VIEW({ tagFilter: ['vip'] }), NOW), false);
+});
+
+test('rowMatchesView: dims avançadas channel/agent/ai/starter/contact_type', () => {
+  const base = { conv_status: 'open', assignee_user_id: null, active_agent_key: null };
+  const adv = (cl) => VIEW({ advFilters: [cl] });
+  assert.equal(rowMatchesView({ ...base, channel_id: 'wa' }, adv({ dim: 'channel', op: 'eq', value: 'wa' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, channel_id: 'tg' }, adv({ dim: 'channel', op: 'eq', value: 'wa' }), NOW), false);
+  assert.equal(rowMatchesView({ ...base, assignee_user_id: 5 }, adv({ dim: 'agent', op: 'eq', value: 'user:5' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, active_agent_key: 'bot' }, adv({ dim: 'agent', op: 'eq', value: 'ai:bot' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, conv_ai_active: 0 }, adv({ dim: 'ai', op: 'eq', value: 'off' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, conv_ai_active: 1 }, adv({ dim: 'ai', op: 'eq', value: 'off' }), NOW), false);
+  assert.equal(rowMatchesView({ ...base, origin: 'inbound' }, adv({ dim: 'starter', op: 'eq', value: 'customer' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, contact_type: 'telegram' }, adv({ dim: 'contact_type', op: 'eq', value: 'telegram' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, contact_type: 'whatsapp' }, adv({ dim: 'contact_type', op: 'eq', value: 'telegram' }), NOW), false);
+});
+
+test('rowMatchesView: AND composto — todas as dimensões precisam casar', () => {
+  const row = { conv_status: 'open', assignee_user_id: 7, active_agent_key: null, tags: ['vip'], channel_id: 'wa' };
+  const spec = VIEW({ assignmentTab: 'mine', tagFilter: ['vip'], advFilters: [{ dim: 'channel', op: 'eq', value: 'wa' }] });
+  assert.equal(rowMatchesView(row, spec, NOW), true);
+  assert.equal(rowMatchesView({ ...row, channel_id: 'tg' }, spec, NOW), false);  // canal errado → fora
+  assert.equal(rowMatchesView({ ...row, assignee_user_id: 9 }, spec, NOW), false); // outro atendente → fora
+});
+
+// ── specNeedsServer (plano 72 F1: dimensões que só o servidor decide) ──
+test('specNeedsServer: aba Menções → true', () => {
+  assert.equal(specNeedsServer({ assignmentTab: 'mentions', advFilters: [] }), true);
+});
+
+test('specNeedsServer: cláusula cattr:* → true (3-valued / lexical)', () => {
+  assert.equal(specNeedsServer({ assignmentTab: 'all',
+    advFilters: [{ dim: 'cattr:contact:cpf', op: 'ne', value: '1' }] }), true);
+  assert.equal(specNeedsServer({ assignmentTab: 'all',
+    advFilters: [{ dim: 'cattr:conversation:plano', op: 'gt', value: '5' }] }), true);
+});
+
+test('specNeedsServer: cláusula activity → true (last_message_ts vs last_activity_at)', () => {
+  assert.equal(specNeedsServer({ assignmentTab: 'all',
+    advFilters: [{ dim: 'activity', op: 'gt', value: '3' }] }), true);
+});
+
+test('specNeedsServer: mine/all + open puro → false', () => {
+  assert.equal(specNeedsServer({ assignmentTab: 'mine', advFilters: [] }), false);
+  assert.equal(specNeedsServer({ assignmentTab: 'all', advFilters: [] }), false);
+});
+
+test('specNeedsServer: tag/channel/status/agent/conv_label confiáveis (após F0) → false', () => {
+  assert.equal(specNeedsServer({ assignmentTab: 'all', advFilters: [
+    { dim: 'tag', op: 'eq', value: 'vip' },
+    { dim: 'channel', op: 'eq', value: 'wa' },
+    { dim: 'status', op: 'eq', value: 'closed' },
+    { dim: 'agent', op: 'eq', value: 'user:5' },
+    { dim: 'conv_label', op: 'eq', value: 'x' },
+  ] }), false);
+});
+
+test('specNeedsServer: spec nulo/indefinido/vazio → false (defensivo)', () => {
+  assert.equal(specNeedsServer(null), false);
+  assert.equal(specNeedsServer(undefined), false);
+  assert.equal(specNeedsServer({}), false);
 });

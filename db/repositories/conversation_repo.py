@@ -639,16 +639,20 @@ def latest_channel_id_by_contact(contact_ids: list[int]) -> dict[int, str | None
 
 def get_row_for_broadcast(conv_id: int) -> dict | None:
     """One enriched conversation row in the EXACT shape of a ``/api/atendimentos``
-    list item — ``get_with_channel`` plus the conversation labels (plano 28).
+    list item — ``get_with_channel`` plus the conversation labels AND contact tags
+    (plano 28 / plano 72 F0).
 
     This is the single source of the ``conversation_upsert`` WS payload, so a
     row pushed live is byte-for-byte what a refetch would return. ``get_with_channel``
-    alone omits ``labels`` (only ``list_conversations`` runs ``_attach_labels``), which
-    would make an upserted row diverge from a fetched one — this closes that gap."""
+    alone omits ``labels`` (conversation labels) AND ``contact_tags`` (contact tags),
+    which ``list_filtered``/``list_conversations`` both attach (L468/L488) — leaving
+    them off made an upserted row diverge from a fetched one on the `tag` dimension,
+    so the client's live insert-gate could never trust tags (plano 72 A1). Attaching
+    both here closes that gap and makes `tag`/`conv_label` reliable in the gate."""
     row = get_with_channel(conv_id)
     if row is None:
         return None
-    return _attach_labels([row])[0]
+    return _attach_contact_tags(_attach_labels([row]))[0]
 
 
 def mark_conversation_read(conv_id: int) -> list[str]:

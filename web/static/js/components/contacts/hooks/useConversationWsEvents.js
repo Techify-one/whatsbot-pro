@@ -25,7 +25,7 @@ import { playTransferAlert } from '../../../utils/alertSound.js';
 import { optimisticDupIndex, dropSuperseded } from '../../../services/messages.js';
 import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
-import { upsertConversationRow, convRowToSidebarRow } from '../../../services/conversationRows.js';
+import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
 import { useWebSocket } from '../../../hooks/useWebSocket.js';
 
@@ -61,6 +61,9 @@ export function useConversationWsEvents(opts) {
     reloadOpenThread,
     // usuário logado — filtra `mention_created` (colaboração estilo Chatwoot)
     currentUserId,
+    // plano 72 F3/F4 — espelho fresco da VIEW (serverMode + filtros). Ref porque os
+    // handlers são useCallback([]) e só leem refs; escrito em render pelo filters hook.
+    viewSpecRef,
   } = opts;
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
@@ -152,6 +155,13 @@ export function useConversationWsEvents(opts) {
         setContacts(prev => prev.map(c =>
           isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
         ));
+        // plano 72 F8 — DROP-GATE das Menções (leitura). Na aba Menções (serverMode) ler
+        // a menção da conversa aberta a tira da view server-filtrada (has_mention→false),
+        // mas o patch acima só zera o flag sem remover a linha → ela fica presa (lista N
+        // vs badge N-1). Ler a menção não emite WS, então nada auto-cura: refetch
+        // reconcilia (mesmo padrão do F4 p/ dimensão de servidor).
+        const vsR = viewSpecRef && viewSpecRef.current;
+        if (vsR && vsR.serverMode && vsR.assignmentTab === 'mentions') scheduleListRefetch();
       }
     };
     document.addEventListener('visibilitychange', handler);
@@ -185,6 +195,36 @@ export function useConversationWsEvents(opts) {
           ? prev.filter(c => c.conversation_id !== row.conversation_id)
           : prev);
         return;
+      }
+      // plano 72 F3 — INSERT-GATE. Quando a lista NÃO é re-filtrada no cliente (serverMode
+      // OU modo BUSCA), ela está em paridade com o que o SERVIDOR devolveu. Como o
+      // conversation_upsert sai a CADA mensagem visível, sem gate ele injeta linhas
+      // forasteiras — em serverMode: conversa de outro atendente / não atribuída / status
+      // errado (o bug da Atendente); em BUSCA: qualquer conversa que não casa o termo "sobe" no
+      // resultado a cada mensagem (o vazamento na busca reportado). Este gate só decide a
+      // INSERÇÃO de linha AUSENTE; NUNCA descarta linha presente (respeita A3/plano 28 D4 —
+      // o snapshot do upsert é stale p/ status/assignee). A remoção de linha que saiu da
+      // view vem dos eventos de membership dedicados (F4, só em serverMode).
+      const vs = viewSpecRef && viewSpecRef.current;
+      const searchingNow = !!(searchRef && searchRef.current);
+      if (searchingNow || (vs && vs.serverMode)) {
+        const present = contactsRef.current.some(c => c.conversation_id === row.conversation_id);
+        if (!present) {
+          // Modo BUSCA: a lista é server-filtrada pelo TERMO (nome/telefone/conteúdo) e o
+          // cliente não reproduz essa busca. Uma linha AUSENTE não é inserida às cegas —
+          // ela reaparece se casar num próximo refetch/re-busca. (Não disparamos refetch
+          // aqui p/ não resetar a rolagem das páginas já carregadas da busca — plano 62 F6.)
+          if (searchingNow) return;
+          // serverMode: dimensões que o payload fino não decide (menções/cattr/activity)
+          // → o servidor decide via refetch server-filtrado (debounced 250ms).
+          if (specNeedsServer(vs)) { scheduleListRefetch(); return; }
+          // Não casa a view atual → NÃO insere (o conserto do vazamento por filtro). Sem
+          // exceção "always-admit-open": a conversa aberta de outro atendente não ganha
+          // linha na sidebar (é o que o servidor faz); o painel direito segue via contactData.
+          if (!rowMatchesView(row, vs, Date.now() / 1000)) return;
+          // casa → cai no upsert normal abaixo (INSERT).
+        }
+        // Linha PRESENTE: segue no merge normal (preview/unread) abaixo — nunca descarta aqui.
       }
       // Se a conversa está ABERTA e a aba visível, o operador já está vendo tudo →
       // considerar lida: zera o badge LOCALMENTE (sem flash verde de nota privada
@@ -235,6 +275,17 @@ export function useConversationWsEvents(opts) {
       if (convId != null && selectedConvIdRef.current === convId) return;  // já estou nela
       setContacts(prev => prev.map(c =>
         c.conversation_id === convId ? { ...c, has_user_mention: true } : c));
+      // plano 72 F7 — INSERT-GATE das Menções. Na aba Menções (serverMode) a lista vem
+      // server-filtrada por has_mention=true; a conversa recém-mencionada e AUSENTE não é
+      // inserida pelo prev.map acima (só patcha presentes) e NÃO há conversation_upsert
+      // p/ nota privada (papel painel-only) que dispararia o F3. Sem isto, a menção fica
+      // INVISÍVEL na própria aba Menções até trocar de aba/F5 (lista N vs badge N+1).
+      // has_user_mention é por-usuário → só o servidor decide: refetch server-filtrado.
+      const vsM = viewSpecRef && viewSpecRef.current;
+      if (vsM && vsM.serverMode && vsM.assignmentTab === 'mentions'
+          && convId != null && !contactsRef.current.some(c => c.conversation_id === convId)) {
+        scheduleListRefetch();
+      }
       const who = data.actor_name ? `${data.actor_name} mencionou você` : 'Você foi mencionado';
       const body = data.preview ? `${who}: ${data.preview}` : who;
       notify(body, { kind: 'info' });
@@ -294,7 +345,26 @@ export function useConversationWsEvents(opts) {
     if (isConversationAttributeWrite(data)) {
       setConvAttrPatch({ conversation_id: convId, custom_attributes: data.fields.custom_attributes, ts: Date.now() });
     }
-    setContacts(prev => applyConversationEvent(prev, data));
+    // plano 72 F4 — DROP-GATE. Uma mudança de membership (assign/resolve/status/IA/
+    // labels/atributo) pode tirar a linha da view atual. `applyConversationEvent` só
+    // PATCHA a linha presente (nunca a remove), então em serverMode ela permanecia
+    // poluindo a aba (ex.: reatribuir a outro atendente / resolver na aba Minhas+Abertas).
+    // Aqui, DEPOIS do patch, removemos as linhas-alvo que SAÍRAM da view — nas dimensões
+    // que o cliente decide (status/aba/tag/etc.). Nas que só o servidor decide (menções/
+    // cattr/activity) delegamos ao refetch server-filtrado. A rede de segurança abaixo
+    // (traz linhas PRA DENTRO num status change) permanece.
+    const vs = viewSpecRef && viewSpecRef.current;
+    const serverGate = !!(vs && vs.serverMode);
+    const needsServer = serverGate && specNeedsServer(vs);
+    if (needsServer) scheduleListRefetch();
+    setContacts(prev => {
+      let next = applyConversationEvent(prev, data);
+      if (serverGate && !needsServer) {
+        const now = Date.now() / 1000;
+        next = next.filter(c => !eventTargetsRow(c, data) || rowMatchesView(c, vs, now));
+      }
+      return next;
+    });
     // Membership safety net: a status change can move a conversation INTO the active
     // (client-side) status filter. The patch above only touches rows already loaded —
     // if the (re)opened conversation isn't in the list yet (e.g. it was closed and
@@ -421,9 +491,23 @@ export function useConversationWsEvents(opts) {
     if (!contactTagsUpdated) return;
     const { phone, tags } = contactTagsUpdated;
     if (!phone) return;
-    setContacts(prev => prev.map(c =>
-      c.phone === phone ? { ...c, tags } : c
-    ));
+    // plano 72 F4 — mudar as tags do CONTATO pode tirar suas linhas de um funil de tag
+    // ativo. Em serverMode, DEPOIS de aplicar as novas tags, removemos as linhas deste
+    // telefone que não casam mais a view (`tag` é confiável após F0). Nas dimensões que
+    // só o servidor decide (menções/cattr/activity), refetch. Fora de serverMode: patch
+    // simples como antes (o displayedContacts client-side reavalia o funil).
+    const vs = viewSpecRef && viewSpecRef.current;
+    const serverGate = !!(vs && vs.serverMode);
+    const needsServer = serverGate && specNeedsServer(vs);
+    if (needsServer) scheduleListRefetch();
+    setContacts(prev => {
+      const patched = prev.map(c => c.phone === phone ? { ...c, tags } : c);
+      if (serverGate && !needsServer) {
+        const now = Date.now() / 1000;
+        return patched.filter(c => c.phone !== phone || rowMatchesView(c, vs, now));
+      }
+      return patched;
+    });
     if (phone === selectedRef.current) {
       setContactData(prev => prev ? { ...prev, tags } : prev);
     }

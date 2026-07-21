@@ -34,6 +34,9 @@ export function useBulkSelection({
   contactsRef, displayedRef, showArchivedRef,
   setContacts, sortContacts, setContactData,
   setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
+  // plano 72 F5 — reconcilia a lista server-filtrada após um bulk otimista de
+  // membership (no-op fora de serverMode). Default no-op p/ callers antigos.
+  reconcileAfterMembershipChange = () => {},
 }) {
   const [selectionMode, setSelectionMode] = useState(false);
   // Selection keyed per CONVERSATION row (rowKeyFor), so two conversations of the
@@ -78,7 +81,10 @@ export function useBulkSelection({
           }
         : c
     ));
-  }, [_selectedRows, setContacts]);
+    // plano 72 F5: em serverMode as linhas patchadas podem ter saído da view — refetch
+    // server-filtrado reconcilia a membership com o servidor.
+    reconcileAfterMembershipChange();
+  }, [_selectedRows, setContacts, reconcileAfterMembershipChange]);
 
   // Assign an attendant across all selected conversations at once. Takes the same
   // payload as the per-conversation picker (AssigneeList → assignAgent), via the
@@ -115,7 +121,10 @@ export function useBulkSelection({
       }
       return { ...c, assignee_user_id: null, active_agent_key: null };
     }));
-  }, [_selectedRows, setContacts]);
+    // plano 72 F5: em serverMode as linhas reatribuídas podem ter saído da view (ex.:
+    // atribuir a OUTRO atendente na aba Minhas) — refetch server-filtrado reconcilia.
+    reconcileAfterMembershipChange();
+  }, [_selectedRows, setContacts, reconcileAfterMembershipChange]);
 
   const handleBulkArchive = useCallback(async () => {
     // Arquivo por CONVERSA (plano 54): uma chamada por conversation_id selecionado.

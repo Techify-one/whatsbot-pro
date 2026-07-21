@@ -67,6 +67,10 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
   // ao canal certo (multicanal), em vez de fundir/abrir o atendimento de outro canal.
   const newConvChannelRef = useRef(null);
+  // plano 72: espelho fresco da VIEW atual (serverMode + status/aba/tags/avançado +
+  // usuário), escrito em render pelo hook de filtros e lido pelos handlers de WS
+  // (useCallback([]) que só leem refs) para gatear insert/drop das linhas em serverMode.
+  const viewSpecRef = useRef(null);
 
   // ── Sidebar geometry (self-contained) ──────────────────────────────
   const { sidebarHidden, sidebarWidth, isResizing, isDesktop, startResize } = useSidebarResize();
@@ -84,11 +88,38 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     showChannel, channelOptions,
   } = list;
 
+  // plano 72 F5 — após um patch OTIMISTA de membership (toggle IA / bulk IA / bulk
+  // assign) a linha pode ter saído da view server-filtrada. Em serverMode a lista está
+  // em paridade com a WHERE do servidor (a contagem já é server-side), então um refetch
+  // server-filtrado reconcilia a membership. Fora de serverMode é no-op — o
+  // `displayedContacts` client-side já reavalia a aba sobre as linhas patchadas.
+  // `serverFilterRef` já foi sincronizado em render, então `fetchContacts` lê os params
+  // certos. Chamado DEPOIS dos awaits do POST, logo o backend já commitou a mudança.
+  const reconcileAfterMembershipChange = useCallback(() => {
+    if (viewSpecRef.current && viewSpecRef.current.serverMode) {
+      fetchContacts(searchRef.current);
+    }
+  }, [fetchContacts, searchRef]);
+
+  // plano 72 F8 — ao LER uma menção (abrir a conversa) na aba Menções em serverMode, a
+  // conversa deixa a view server-filtrada (has_mention→false), mas o clear otimista do
+  // badge só zera o flag sem remover a linha (lista N vs badge N-1). Ler a menção NÃO
+  // emite WS, então nada auto-cura → um refetch server-filtrado reconcilia a lista com a
+  // contagem. Escopado à aba Menções (specNeedsServer): no-op em qualquer outra view, p/
+  // não refazer a lista a cada conversa aberta. Passado ao selection-hook (site primário
+  // de leitura, que não tem acesso ao scheduleListRefetch do ws-hook).
+  const reconcileMentionsOnRead = useCallback(() => {
+    const vs = viewSpecRef.current;
+    if (vs && vs.serverMode && vs.assignmentTab === 'mentions') fetchContacts(searchRef.current);
+  }, [fetchContacts, searchRef]);
+
   // ── Selection / open thread / detail load ──────────────────────────
   const selection = useConversationSelection({
     contacts, loading, setContacts, contactsRef,
     pageVisibleRef, newConvChannelRef,
     initialContactId, initialConversationId, initialScrollMsgId,
+    // plano 72 F8: refetch a aba Menções (serverMode) ao ler a menção da conversa aberta.
+    reconcileMentionsOnRead,
   });
   const {
     selected, setSelected,
@@ -109,6 +140,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const actions = useConversationActions({
     setContacts, sortContacts, setContactData,
     setSelected, setSelectedConvId, selectedRef, selectedConvIdRef,
+    // plano 72 F5: refetch server-filtrado após toggle IA otimista (reconcilia membership).
+    reconcileAfterMembershipChange,
   });
   const {
     globalTags, setGlobalTags,
@@ -125,6 +158,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     contactsRef, displayedRef, showArchivedRef,
     setContacts, sortContacts, setContactData,
     setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
+    // plano 72 F5: refetch server-filtrado após bulk IA / bulk assign otimistas.
+    reconcileAfterMembershipChange,
   });
   const {
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
@@ -158,6 +193,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     // escreve os params em `serverFilterRef` e refaz a lista ao mudar um filtro.
     serverFilterRef,
     fetchContacts,
+    // plano 72 F2: o hook escreve a view atual aqui (em render) para os handlers de WS
+    // reproduzirem a decisão do servidor no insert/drop das linhas em serverMode.
+    viewSpecRef,
   });
   const {
     statusFilter, setStatusFilter,
@@ -224,6 +262,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     pageVisibleRef,
     reloadOpenThread,
     currentUserId,
+    // plano 72 F3/F4: view atual (serverMode + filtros) p/ gatear insert/drop das linhas.
+    viewSpecRef,
   });
 
   // Search box: clear the phone-check error as the operator types (preserves the

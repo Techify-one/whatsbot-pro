@@ -304,15 +304,56 @@ def test_plano28_conversation_upsert_ecst_at_ingest_and_batch(build_app, monkeyp
     assert t0.get("origin") == "inbound"
     assert t0.get("status") == "open"
     assert (t0.get("last_message_ts") or 0) == 0, "t=0 upsert must carry last_message_ts=0"
-    # list-item shape: channel + labels present (get_row_for_broadcast attaches labels).
+    # list-item shape: channel + labels + contact_tags present (get_row_for_broadcast
+    # attaches both — plano 72 F0). contact_tags parity makes the client's live
+    # insert/drop-gate trust the `tag` dimension.
     assert "channel_id" in t0 and "labels" in t0, f"upsert must be a full list row; keys={sorted(t0)[:8]}"
     assert isinstance(t0.get("labels"), list)
+    assert "contact_tags" in t0, f"upsert must carry contact_tags (plano 72 F0); keys={sorted(t0)}"
+    assert isinstance(t0.get("contact_tags"), list)
 
     # ── Drain the batch → a later upsert carries the REAL preview (ts>0). ──
     _drain_orchestrator(built, "default", phone)
     upserts2 = [p for (n, p) in seen if n == "conversation_upsert"]
     assert any((p.get("last_message_ts") or 0) > 0 and p.get("id") == conv_id for p in upserts2), \
         "batch add_message must emit a conversation_upsert with the real preview (last_message_ts>0)"
+
+
+def test_plano72_broadcast_row_carries_contact_tags(build_app):
+    """Plano 72 F0: ``get_row_for_broadcast`` must attach the CONTACT TAGS (not only
+    the conversation labels), so the ``conversation_upsert`` payload is byte-for-byte
+    what ``list_filtered``/``list_conversations`` return on the `tag` dimension. Without
+    this the client's live insert-gate (F3) sees ``contact_tags: []`` on every push and
+    would wrongly drop a tagged conversation whenever a tag funnel is active (A1)."""
+    built = build_app(["gowa"], settings_overrides={"auto_reply": False, "message_batch_delay": 0})
+    _reset_ai_cache()
+
+    from db.repositories import contact_repo, conversation_repo, tag_repo
+
+    phone = "5511955550072"
+    r = built.client.post("/api/webhook/gowa/default",
+                          json=_text_payload(phone, "p72_tags_1", "olá tags"))
+    assert r.status_code == 200, r.text
+
+    contact = contact_repo.get_by_phone(phone)
+    conv = conversation_repo.get_latest_for_contact(contact["id"])
+    conv_id = conv["id"]
+
+    # A row for a contact with NO tags → empty list (not missing key).
+    row0 = conversation_repo.get_row_for_broadcast(conv_id)
+    assert row0 is not None
+    assert row0.get("contact_tags") == [], f"untagged contact → []; got {row0.get('contact_tags')!r}"
+
+    # Tag the CONTACT → the broadcast row must carry it (parity with list_filtered).
+    assert tag_repo.create("vip", "#f00")
+    tag_repo.set_contact_tags(contact["id"], ["vip"])
+    row1 = conversation_repo.get_row_for_broadcast(conv_id)
+    assert row1 is not None
+    assert row1.get("contact_tags") == ["vip"], (
+        f"broadcast row must reflect the contact's tags (plano 72 F0); "
+        f"got {row1.get('contact_tags')!r}")
+    # Conversation labels stay a SEPARATE field (not fused with contact tags).
+    assert isinstance(row1.get("labels"), list)
 
 
 def test_plano28_panel_only_role_emits_no_upsert(build_app, monkeypatch):

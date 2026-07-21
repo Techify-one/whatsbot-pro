@@ -37,6 +37,10 @@ export function useConversationSelection({
   contacts, loading, setContacts, contactsRef,
   pageVisibleRef, newConvChannelRef,
   initialContactId, initialConversationId, initialScrollMsgId = null,
+  // plano 72 F8 — reconcilia a aba Menções (serverMode) ao ler a menção da conversa
+  // aberta (a leitura tira a linha da view, mas o clear otimista só zera o flag).
+  // No-op fora da aba Menções. Default no-op p/ callers antigos.
+  reconcileMentionsOnRead = () => {},
 }) {
   const [selected, setSelected] = useState(null);          // open thread's phone (contact-level ops)
   const [selectedConvId, setSelectedConvId] = useState(null);   // open thread's conversation id
@@ -185,6 +189,10 @@ export function useConversationSelection({
       setContacts(prev => prev.map(c =>
         isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
       ));
+      // plano 72 F8: se estamos na aba Menções (serverMode), ler a menção da conversa
+      // aberta a remove da view server-filtrada — refetch reconcilia lista×badge (no-op
+      // em qualquer outra view).
+      reconcileMentionsOnRead();
     }
     const convId = selectedConvId;
     // Atendimento novo sem conversation_id ainda: escopa o getContact ao canal

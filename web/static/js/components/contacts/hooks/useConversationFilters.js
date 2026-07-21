@@ -38,7 +38,7 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
  * @param {boolean} [opts.searching] - há um termo de busca ativo na barra lateral.
  * @param {boolean} [opts.showArchived]
  */
-export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null }) {
+export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
@@ -77,6 +77,16 @@ export function useConversationFilters({ contacts, search = '', selected, select
           search, searching, statusFilter, tagFilter, advFilters,
           archived: showArchived, assignmentTab }) }
       : null;
+  }
+
+  // plano 72 F2 — espelho fresco da VIEW p/ os handlers de WS (que só leem refs).
+  // Escrito em RENDER pela mesma razão do `serverFilterRef` acima (idempotente, sem
+  // efeito colateral externo). Carrega `serverMode` + as dimensões que `rowMatchesView`/
+  // `specNeedsServer` precisam para gatear insert/drop das linhas.
+  if (viewSpecRef) {
+    viewSpecRef.current = {
+      serverMode, statusFilter, assignmentTab, tagFilter, advFilters, currentUserId,
+    };
   }
 
   // Quais atendimentos entram na sidebar (plano 28) — regra em `isVisibleInSidebar`.

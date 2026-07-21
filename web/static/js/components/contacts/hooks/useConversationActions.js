@@ -33,6 +33,9 @@ import { resolveConversation } from '../../../utils/resolveConversation.js';
 export function useConversationActions({
   setContacts, sortContacts, setContactData,
   setSelected, setSelectedConvId, selectedRef, selectedConvIdRef,
+  // plano 72 F5 — reconcilia a lista server-filtrada após um patch otimista de
+  // membership (no-op fora de serverMode). Default no-op p/ callers antigos.
+  reconcileAfterMembershipChange = () => {},
 }) {
   const [globalTags, setGlobalTags] = useState({});
   // Identity + users for the "assign attendant" submenu (degrade gracefully on 403).
@@ -65,8 +68,12 @@ export function useConversationActions({
             }
           : c
       ));
+      // plano 72 F5: em serverMode o patch acima pode ter deixado a linha fora da view
+      // (ex.: ligar IA numa aba Não-atribuídas, ou desligar numa aba de um agente IA
+      // específico) — o refetch server-filtrado reconcilia a membership com o servidor.
+      reconcileAfterMembershipChange();
     }
-  }, [setContacts]);
+  }, [setContacts, reconcileAfterMembershipChange]);
 
   // Plano 49: por CONVERSA quando a linha tem conversation_id (número em 2 canais =
   // 2 linhas, badges independentes); fallback por phone só na linha legada sem

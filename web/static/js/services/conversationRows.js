@@ -212,6 +212,61 @@ export function matchesTags(c, tagFilter) {
   return tagFilter.some(t => ctags.includes(t));
 }
 
+// ── View membership + server-only dimensions (plano 72) ─────────────
+// In serverMode (plano 69) the sidebar list is served by /api/atendimentos/filter
+// (the SAME WHERE as the count) and the client stops re-filtering. The real-time
+// layer never knew that WHERE, so `conversation_upsert` inserted filter-blind rows
+// (the reported bug). These two pure helpers let the WS layer reproduce the server's
+// decision for the dimensions it CAN judge, and delegate the rest to a refetch.
+
+/**
+ * Whether a row satisfies the CURRENT view — composes the existing pure matchers
+ * EXACTLY as `statusTagFiltered` + `displayedContacts` did before serverMode
+ * short-circuited client filtering (see useConversationFilters). This is the
+ * authoritative client-side reproduction of the server's WHERE for the dimensions
+ * the client can decide (status / tag funnel / advanced clauses / assignment tab).
+ *
+ * A status clause in the advanced filter overrides the status chip (same precedence
+ * as `statusTagFiltered`), so chip "Abertas" + cláusula "Fechada" never AND to empty.
+ *
+ * @param {Record<string, any>} c - the conversation row.
+ * @param {{ statusFilter: string, assignmentTab: string, tagFilter: string[], advFilters: Array<{dim:string,op:string,value:any}>, currentUserId: number|null }} spec
+ * @param {number} now - current time in unix SECONDS (= Date.now()/1000) for the activity dim.
+ * @returns {boolean}
+ */
+export function rowMatchesView(c, spec, now) {
+  const { statusFilter, assignmentTab, tagFilter, advFilters, currentUserId } = spec;
+  const hasStatusClause = (advFilters || []).some(
+    cl => cl.dim === 'status' && cl.value !== '' && cl.value != null);
+  if (!hasStatusClause && !matchesStatus(c, statusFilter)) return false;
+  if (!matchesTags(c, tagFilter)) return false;
+  if (!matchesAdvFilters(c, advFilters, now)) return false;
+  if (!matchesAssignment(c, assignmentTab, currentUserId)) return false;
+  return true;
+}
+
+/**
+ * Which dimensions the `conversation_upsert` payload can't decide with fidelity, so
+ * the client delegates to the server via a refetch instead of inserting/dropping
+ * blindly (plano 72 A2/A4). After F0, `tag`/`conv_label` are reliable and NOT here.
+ *   • assignmentTab 'mentions' — `has_user_mention` is PER-USER, but the broadcast
+ *     row is a SINGLE payload for all clients (`literal(False)` for everyone), so the
+ *     client can never judge it.
+ *   • cattr:* clauses — server's 3-valued NULL logic + lexical (string) comparison
+ *     diverge from the client's JS admit/numeric-date comparison.
+ *   • activity clause — client reads `last_message_ts`, server reads `last_activity_at`
+ *     against its own clock → boundary/skew divergence.
+ * @param {{ assignmentTab?: string, advFilters?: Array<{dim?: string}> }} spec
+ * @returns {boolean}
+ */
+export function specNeedsServer(spec) {
+  if (!spec) return false;
+  if (spec.assignmentTab === 'mentions') return true;              // A2: per-user, broadcast global
+  return (spec.advFilters || []).some(cl =>
+    (typeof cl.dim === 'string' && cl.dim.startsWith('cattr:'))    // A4: 3-valued / lexical
+    || cl.dim === 'activity');                                     // A4: last_message_ts vs last_activity_at + skew
+}
+
 // ── Saved-filter spec helpers ──────────────────────────────────────
 // A filter preset is the full snapshot {statusFilter, sortBy, tagFilter,
 // advFilters}. `normalizeSpec` drops the ephemeral clause ids and sorts
@@ -542,6 +597,12 @@ export function convRowToSidebarRow(p) {
     unread_count: p.unread_count,
     unread_ai_count: p.unread_ai_count,
     has_unread_mention: p.has_unread_mention,
+    // Menção INTERNA (nota privada) ao usuário logado. No broadcast GLOBAL vem sempre
+    // `false` (has_user_mention é por-usuário; get_row_for_broadcast não passa
+    // current_user_id) — por isso a aba Menções é decidida pelo servidor
+    // (`specNeedsServer`), não pelo gate local. Mapeado por completude/paridade com
+    // `buildRows`, que já carrega este campo (plano 72 F1).
+    has_user_mention: !!p.has_user_mention,
     is_pinned: p.is_pinned,
     is_archived: p.is_archived,
     origin: p.origin,
