@@ -1,32 +1,20 @@
 /**
- * Plays a two-tone siren alert using the Web Audio API.
- * @param {number} [seconds=5] - Duration in seconds.
+ * plano 63 F2 — shim fino sobre o motor unificado (`soundEngine`).
+ *
+ * Antes: criava um `new AudioContext()` POR disparo (vazamento) e tocava a sirene
+ * com gain FIXO 0.3 (ignorava qualquer preferência). Agora delega ao motor, que
+ * usa um AudioContext singleton e resolve som/volume/duração pelas 3 camadas.
+ *
+ * Os DOIS call sites reais (transferência IA→humano e atribuição entre atendentes)
+ * chamam `soundEngine.playEvent('ia_to_human' | 'assigned_to_me', ...)` direto —
+ * cada um tem sua própria preferência. Este shim (padrão: evento IA→humano) fica
+ * só para chamadores legados que importem `playTransferAlert`.
+ */
+import { playEvent } from './soundEngine.js';
+
+/**
+ * @param {number} [seconds=5] - Duração do alerta em segundos.
  */
 export function playTransferAlert(seconds = 5) {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const duration = seconds;
-  const beepOn = 0.3;
-  const beepOff = 0.2;
-  const cycle = beepOn + beepOff;
-  const freqs = [880, 660];
-
-  let t = ctx.currentTime;
-  let i = 0;
-  while (t - ctx.currentTime < duration) {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.value = freqs[i % 2];
-    osc.type = 'square';
-    gain.gain.setValueAtTime(0.3, t);
-    gain.gain.setValueAtTime(0, t + beepOn);
-    osc.start(t);
-    osc.stop(t + beepOn);
-    t += cycle;
-    i++;
-  }
-
-  // Close context after alert finishes
-  setTimeout(() => ctx.close(), (duration + 0.5) * 1000);
+  playEvent('ia_to_human', { durationOverride: seconds });
 }

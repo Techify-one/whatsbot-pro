@@ -1141,6 +1141,88 @@ r = client.delete(f"/api/me/conversation-filters/{_fid}")
 check("DELETE saved-filter (404) -> 404", r.status_code == 404)
 
 # ═══════════════════════════════════════════════════════════════════
+#  15a3. Sons de notificação configuráveis (plano 63)
+# ═══════════════════════════════════════════════════════════════════
+section("Sons de notificação (plano 63)")
+
+# Catálogo estático
+r = client.get("/api/sounds/catalog")
+check("GET /api/sounds/catalog -> 200", r.status_code == 200)
+_cat = r.json()["data"]
+check("catalog tem 4 eventos", len(_cat["events"]) == 4)
+check("catalog tem 7 sons", len(_cat["sounds"]) == 7)
+check("catalog new_message notification/one-shot",
+      any(e["key"] == "new_message" and e["duration_applies"] is False for e in _cat["events"]))
+check("catalog ia_to_human alert/duration",
+      any(e["key"] == "ia_to_human" and e["duration_applies"] is True for e in _cat["events"]))
+
+# sound_settings exposto no GET /api/config (padrão global)
+r = client.get("/api/config")
+_ss = r.json()["data"].get("sound_settings")
+check("GET /api/config -> sound_settings presente", isinstance(_ss, dict))
+check("sound_settings master default ON", _ss.get("master_enabled") is True)
+check("sound_settings new_message volume 0.6", _ss["events"]["new_message"]["volume"] == 0.6)
+
+# PUT /api/config sound_settings — normaliza (fail-open): som inválido e volume
+# fora de faixa são descartados/clampados; não corrompe.
+r = client.put("/api/config", json={"sound_settings": {
+    "master_enabled": False,
+    "events": {"new_message": {"sound": "blip", "volume": 5, "enabled": True, "lixo": 1},
+               "evento_falso": {"x": 1}},
+}})
+check("PUT /api/config sound_settings -> 200", r.status_code == 200)
+_ss2 = client.get("/api/config").json()["data"]["sound_settings"]
+check("global norm: master off", _ss2["master_enabled"] is False)
+check("global norm: volume clampado a 1.0", _ss2["events"]["new_message"]["volume"] == 1.0)
+check("global norm: som válido mantido", _ss2["events"]["new_message"]["sound"] == "blip")
+check("global norm: evento falso descartado", "evento_falso" not in _ss2["events"])
+# Restaura o padrão global para não afetar asserts seguintes
+client.put("/api/config", json={"sound_settings": {
+    "master_enabled": True,
+    "events": {"new_message": {"enabled": True, "sound": "ding", "volume": 0.6}},
+}})
+
+# GET /api/me/sound-prefs (modo aberto → uid=None): override vazio + global + catálogo
+r = client.get("/api/me/sound-prefs")
+check("GET /api/me/sound-prefs -> 200", r.status_code == 200)
+_sp = r.json()["data"]
+check("me/sound-prefs: prefs esparso vazio", _sp["prefs"] == {})
+check("me/sound-prefs: global_default com eventos", bool(_sp["global_default"]["events"]))
+check("me/sound-prefs: catálogo embutido", len(_sp["catalog"]["events"]) == 4)
+
+# PUT override esparso (uid=None) — junk descartado, volume clampado
+r = client.put("/api/me/sound-prefs", json={"prefs": {
+    "events": {"mention": {"sound": "chime", "volume": -3, "enabled": False, "nope": 1},
+               "ia_to_human": {"volume": 0.4, "duration": 999},
+               "bogus": {"z": 1}},
+}})
+check("PUT /api/me/sound-prefs -> 200", r.status_code == 200)
+_saved = r.json()["data"]["prefs"]
+check("user override: volume clampado a 0.0", _saved["events"]["mention"]["volume"] == 0.0)
+check("user override: duração clampada a 30", _saved["events"]["ia_to_human"]["duration"] == 30)
+check("user override: evento inválido descartado", "bogus" not in _saved["events"])
+check("user override: esparso (sem new_message)", "new_message" not in _saved["events"])
+
+# GET persiste o override (uid=None)
+r = client.get("/api/me/sound-prefs")
+check("GET me/sound-prefs -> override persistido",
+      r.json()["data"]["prefs"]["events"]["mention"]["sound"] == "chime")
+
+# PUT com prefs não-dict → fail-open para {}
+r = client.put("/api/me/sound-prefs", json={"prefs": "lixo"})
+check("PUT me/sound-prefs (não-dict) -> {} fail-open", r.json()["data"]["prefs"] == {})
+
+# Repo unit: caminho uid REAL (ON CONFLICT) + isolamento entre usuários
+from db.repositories import user_sound_pref_repo as _uspr
+_uspr.upsert(4242, {"master_enabled": False, "events": {"new_message": {"volume": 0.1}}})
+check("repo uid real: get devolve override",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.1)
+_uspr.upsert(4242, {"events": {"new_message": {"volume": 0.9}}})  # overwrite (ON CONFLICT)
+check("repo uid real: upsert sobrescreve",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.9)
+check("repo isolamento: outro uid sem override", _uspr.get(4343) is None)
+
+# ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
 # ═══════════════════════════════════════════════════════════════════
 section("Quick Replies")

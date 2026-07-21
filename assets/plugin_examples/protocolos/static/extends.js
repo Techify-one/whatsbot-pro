@@ -13,7 +13,7 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { ResolveForm } from '/plugins/protocolos/static/resolve_form.js';
-import { RelinkModal } from '/plugins/protocolos/static/relink_modal.js';
+import { RelinkGate } from '/plugins/protocolos/static/relink_gate.js';
 import { ProtocolosTab } from '/plugins/protocolos/static/protocolos_tab.js';
 // Helper do core p/ resolver o assignee atual da conversa (seed do rótulo "atendente").
 // Carrega auth como qualquer chamada core.
@@ -102,7 +102,7 @@ export default function register(api) {
     if (atendenteDef) {
       let cur = atend && atend.assignee_user_id;
       if (cur === undefined) {
-        try { const c = await getConversation(atend.id); cur = (c && c.ok && c.data) ? c.data.assignee_user_id : null; }
+        try { const c = await getConversation(atend.id); const cv = (c && c.ok && c.data) ? c.data.conversation : null; cur = cv ? cv.assignee_user_id : null; }
         catch (_) { cur = null; }
       }
       initialValues[atendenteDef.key] = (cur == null ? '' : cur);
@@ -154,47 +154,16 @@ export default function register(api) {
       Protocolos
     </a>` : null));
 
-  // 4) Popup "vincular ao protocolo anterior" (plano 49): ao ABRIR uma conversa cujo
-  //    contato fechou um protocolo há pouco (janela configurável no backend), pergunta
-  //    se este atendimento faz parte do anterior. O evento ui.conversation.opened
-  //    dispara a CADA mount do ContactDetail, então um guard em memória por previous.id
-  //    evita repetir na mesma sessão (P7/gotcha 5). Tudo best-effort: nunca quebra a
-  //    abertura da conversa.
-  const askedRelink = new Set();   // previous.id já perguntados nesta sessão
-  api.on('ui.conversation.opened', async ({ conversationId, phone }) => {
-    try {
-      if (!can('edit')) return;                    // sem editar → não oferece o vínculo
-      if (!conversationId) return;
-      // O evento traz conversationId/phone; a sugestão é por contato → resolve o contato.
-      let contactId = null;
-      try {
-        const c = await getConversation(conversationId);
-        contactId = (c && c.ok && c.data) ? c.data.contact_id : null;
-      } catch (_) { contactId = null; }
-      if (contactId == null) return;
-
-      const s = await getJson(`${apiBase}/contacts/${contactId}/relink-suggestion`);
-      const data = (s && s.ok && s.data) || null;
-      if (!data || !data.suggest || !data.previous) return;   // fora da janela / desligado
-      const prevId = data.previous.id;
-      if (askedRelink.has(prevId)) return;         // já perguntei por este anterior
-      askedRelink.add(prevId);
-      const currentOpenId = (data.current_open && data.current_open.id) || null;
-
-      const doRelink = () => api.http.post(`/protocolos/${prevId}/relink`,
-        { current_open_id: currentOpenId });
-      const doCloseAll = () => resolveAndCloseAll(api, apiBase, conversationId, currentOpenId);
-
-      const outcome = await api.ui.openModal((close) => html`
-        <${RelinkModal} previous=${data.previous} secondsSinceClose=${data.seconds_since_close}
-          doRelink=${doRelink} doCloseAll=${doCloseAll} onDone=${(o) => close(o)} />`);
-
-      // (a) sucesso: deep-link opcional pra aba Protocolos abrindo o anterior reaberto
-      //     (mesmo precedente do "Resolver e ir ao protocolo").
-      if (outcome === 'relinked') {
-        history.pushState(null, '', `/protocolos?detail=${prevId}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }
-    } catch (_) { /* popup best-effort — a abertura da conversa nunca é bloqueada */ }
-  });
+  // 4) Continuidade de protocolo (bloqueante, dentro do chat): quando o contato fechou um
+  //    protocolo há pouco (janela configurável), o auto_link ADIA a abertura de um novo
+  //    protocolo no backend e este overlay OBRIGA o atendente a decidir antes de usar o
+  //    chat — faz parte do anterior / é um novo protocolo / fechar tudo. Renderizado no slot
+  //    `chat.header.banner` (dentro do painel `relative` do chat) com `absolute inset-0`:
+  //    cobre só o chat desta conversa, então a lista continua clicável (dá pra trocar de
+  //    conversa; a decisão fica pendente e reaparece ao voltar). O componente é remontado a
+  //    cada conversa, então cada uma resolve a própria sugestão.
+  api.addSlot('chat.header.banner', (ctx) => (
+    (can('edit') && ctx && ctx.conversationId)
+      ? html`<${RelinkGate} conversationId=${ctx.conversationId} api=${api} />`
+      : null));
 }

@@ -19,8 +19,8 @@ import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
-import { playTransferAlert } from '../../utils/alertSound.js';
-import { getNotifPref, playNotificationSound, showBrowserNotification } from '../../utils/notifications.js';
+import * as soundEngine from '../../utils/soundEngine.js';
+import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
 import { Toaster } from './Toaster.js';
@@ -209,7 +209,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
       if (data.version) setQrVersion(data.version);
     }, []),
     onGowaStatus: useCallback((data) => setNotification(data.message), []),
-    onConfigSaved: useCallback(() => { setNotification('Configurações salvas!'); reloadConfig(); }, [reloadConfig]),
+    onConfigSaved: useCallback(() => { setNotification('Configurações salvas!'); reloadConfig(); soundEngine.reloadPrefs(); }, [reloadConfig]),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
     onChatPresence: useCallback((data) => setChatPresence(data), []),
     onAiTyping: useCallback((data) => setAiTyping(data), []),
@@ -225,7 +225,10 @@ export function App({ onLogout, hasPassword, currentUser }) {
         : !(cfg && cfg.transfer_alert_enabled === false);
       if (!enabled) return;
       const duration = (data && data.duration) || cfg?.transfer_alert_duration || 5;
-      playTransferAlert(duration);
+      // plano 63 F2 — motor unificado (som/volume da sirene agora configuráveis).
+      // O servidor já silenciou acima (`if (!enabled) return`); passamos a duração
+      // resolvida como override.
+      soundEngine.playEvent('ia_to_human', { enabledOverride: enabled, durationOverride: duration });
     }, []),
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),
     onMessagesRead: useCallback((data) => setMessagesRead(data), []),
@@ -296,6 +299,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
     return () => window.removeEventListener('whatsbot:notif-prefs', onPrefs);
   }, []);
 
+  // plano 63 — carrega o override de som do usuário + o padrão global da equipe
+  // no boot (antes disso o motor usa os code-seeds, nunca fica mudo). A tela
+  // "Notificações e sons" chama reloadPrefs() após salvar.
+  useEffect(() => { soundEngine.reloadPrefs(); }, []);
+
   // Tab-title badge — gated by the "tab notification" preference.
   useEffect(() => {
     const tabBadge = getNotifPref('tab');
@@ -324,7 +332,10 @@ export function App({ onLogout, hasPassword, currentUser }) {
     // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
     // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
     if (m.silent) return;
-    if (getNotifPref('sound')) playNotificationSound();
+    // plano 63 F2 — o motor resolve as 3 camadas (usuário/global/dispositivo). O
+    // interruptor per-device (`whatsbot_notif_sound`) é checado DENTRO do motor,
+    // então o gate legado `getNotifPref('sound')` sai daqui (evita gate duplo).
+    soundEngine.playEvent('new_message');
     const away = document.hidden || !document.hasFocus();
     if (getNotifPref('browser') && away) {
       let preview = (m.content || '').trim();

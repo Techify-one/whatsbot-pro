@@ -861,6 +861,24 @@ conversation_label_links = atendimento_label_links
 saved_conversation_filters = saved_atendimento_filters
 
 
+# Preferências de som POR-USUÁRIO (plano 63). Override ESPARSO do padrão global
+# ``config.sound_settings``: ``prefs`` guarda só os campos que o usuário
+# sobrescreveu (mesma forma de ``sound_settings.events`` + ``master_enabled``);
+# eventos/sons novos caem no default global automaticamente. ``user_id`` é NULL no
+# modo aberto (sem identidade, antes do 1º admin) → preferência compartilhada
+# naquela instalação. Chave de upsert = índice único em ``user_id``. Molde:
+# ``saved_atendimento_filters`` (FK lógica NULL-safe, payload JSON nativo).
+user_sound_prefs = Table(
+    "user_sound_prefs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = open-mode/shared
+    Column("prefs", _json_type(), nullable=False),             # override esparso: {master_enabled?, events:{<key>:{...}}}
+    Column("updated_at", Float, nullable=False),
+)
+Index("ux_user_sound_prefs_user", user_sound_prefs.c.user_id, unique=True)
+
+
 # Set of core table names — used by the SQLite → Postgres migration helper to
 # distinguish what belongs to the app vs. plugin-owned tables.
 CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)

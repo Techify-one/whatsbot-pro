@@ -18,7 +18,7 @@ from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import audit_purge_loop, empty_conversation_sweep_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, account as account_routes, audit as audit_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -693,6 +693,7 @@ def create_app(
     conversations_routes.register_routes(app, deps)
     conversation_labels_routes.register_routes(app, deps)
     saved_filters_routes.register_routes(app, deps)
+    sound_prefs_routes.register_routes(app, deps)
     account_routes.register_routes(app, deps)
     webhook.register_routes(app, deps)
     logs.register_routes(app, deps)

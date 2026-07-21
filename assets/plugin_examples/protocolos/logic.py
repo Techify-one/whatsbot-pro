@@ -951,7 +951,7 @@ def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
         with make_plugin_db() as conn:
             conn.execute(
                 text("UPDATE plugin_protocolos_protocolos SET status = 'aberto', "
-                     "closed_at = NULL, updated_at = :ts WHERE id = :id"),
+                     "closed_at = NULL, relink_reviewed = 0, updated_at = :ts WHERE id = :id"),
                 {"ts": ts, "id": atid},
             )
     except IntegrityError:
@@ -977,7 +977,8 @@ def _discard_protocolo(atid: int) -> None:
 
 
 def relink_to_previous(previous_id: int, current_open_id: int | None = None,
-                        actor: str | None = None) -> tuple[dict | None, str | None]:
+                        actor: str | None = None,
+                        conversation_id: int | None = None) -> tuple[dict | None, str | None]:
     """Vincula o atendimento atual ao protocolo ANTERIOR (plano 49): move os ciclos do
     protocolo novo para o anterior, descarta o novo e reabre o anterior.
 
@@ -993,26 +994,43 @@ def relink_to_previous(previous_id: int, current_open_id: int | None = None,
     if prev["status"] != "fechado":
         return None, "O protocolo anterior não está fechado."
     contact_id = prev["contact_id"]
+    # O ``current_open_id`` que vem do frontend pode estar DEFASADO: o ``auto_link`` abre
+    # um protocolo novo ao chegar/enviar mensagem, e isso pode acontecer DEPOIS que o popup
+    # calculou a sugestão (o id chega nulo ou velho). Por isso validamos o que veio (guard
+    # defensivo de contato-errado) mas a FONTE DA VERDADE do "aberto a absorver" é o
+    # protocolo aberto ATUAL do contato no banco — senão o ``reopen`` do anterior colidiria
+    # com o aberto novo ("Já existe um protocolo aberto para este contato").
     if current_open_id is not None and current_open_id != previous_id:
         cur = get_protocolo(current_open_id)
-        if not cur:
-            return None, "Protocolo a absorver não encontrado."
-        if cur["contact_id"] != contact_id:
+        if cur and cur["contact_id"] != contact_id:
             return None, "O protocolo anterior não pertence a este contato."
-        if cur["status"] != "aberto":
-            return None, "O protocolo a absorver não está aberto."
+        # cur inexistente/não-aberto → ignora o id e resolve pelo estado atual do banco.
+    actual = _select_open_protocolo(contact_id)
+    absorb_id = actual["id"] if (actual and actual["id"] != previous_id) else None
+    if absorb_id is not None:
         ts = now()
         with make_plugin_db() as conn:
             conn.execute(
                 text("UPDATE plugin_protocolos_atendimentos "
                      "SET protocolo_id = :prev, updated_at = :ts "
                      "WHERE protocolo_id = :cur"),
-                {"prev": previous_id, "cur": current_open_id, "ts": ts},
+                {"prev": previous_id, "cur": absorb_id, "ts": ts},
             )
-        _discard_protocolo(current_open_id)
+        _discard_protocolo(absorb_id)
     at, err = reopen_protocolo(previous_id)
     if err:
         return None, err
+    # Garante que a conversa ATUAL fique vinculada ao protocolo reaberto. No caso deferido
+    # (auto_link adiado) não houve ciclo/protocolo novo para absorver, então é aqui que o
+    # ciclo desta conversa nasce no anterior. ``ensure_open_cycle`` é idempotente (reusa o
+    # ciclo aberto se já existir — ex.: foi movido acima).
+    if conversation_id is not None:
+        try:
+            _atd = conversation_repo.get(conversation_id)
+            if _atd:
+                ensure_open_cycle(conversation_id, _atd["contact_id"], previous_id)
+        except Exception as e:  # noqa: BLE001 — vínculo best-effort, não quebra o relink
+            logger.debug("protocolos: ensure_open_cycle no relink falhou: %s", e)
     _emit_proto_notice("protocolo_relinked",
                        conversation_id=_latest_conversation_of_protocolo(previous_id),
                        contact_id=contact_id,
@@ -1054,8 +1072,57 @@ def relink_suggestion_for_contact(contact_id: int) -> dict:
         "assignee_name": prev.get("assignee_name") or "",
         "atendimentos_count": _count_atendimentos_of_protocolo(prev["id"]),
     }
-    out["suggest"] = bool(0 <= secs <= window_min * 60)
+    # Só sugere quando NÃO há protocolo aberto (o auto_link agora ADIA a abertura durante
+    # a janela — o protocolo novo só nasce se o atendente escolher "É um novo protocolo")
+    # e o anterior ainda não foi revisado (decisão de "Fechar tudo" marca revisado).
+    out["suggest"] = bool(current is None
+                          and not prev.get("relink_reviewed")
+                          and 0 <= secs <= window_min * 60)
     return out
+
+
+def _defer_open_for_relink(contact_id: int) -> bool:
+    """True quando NÃO se deve auto-abrir um protocolo agora: o contato fechou um protocolo
+    há pouco (dentro da janela, ainda não revisado) e o popup de continuidade vai perguntar
+    ao atendente — o protocolo novo só nasce se ele escolher "É um novo protocolo". Espelha
+    a condição de ``relink_suggestion_for_contact`` (suggest)."""
+    if not relink_prompt_enabled():
+        return False
+    if _select_open_protocolo(contact_id):
+        return False  # já há um aberto → fluxo normal (não é re-engajamento a decidir)
+    prev = get_last_closed_protocolo_for_contact(contact_id)
+    if not prev or prev.get("closed_at") is None or prev.get("relink_reviewed"):
+        return False
+    secs = now() - float(prev["closed_at"])
+    return 0 <= secs <= relink_window_minutes() * 60
+
+
+def mark_relink_reviewed(protocolo_id: int) -> None:
+    """Marca o protocolo como "já decidido no popup de continuidade" — para de sugerir e de
+    adiar a abertura de um novo protocolo para este re-engajamento (usado no "Fechar tudo")."""
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_protocolos SET relink_reviewed = 1, "
+                 "updated_at = :ts WHERE id = :id"),
+            {"ts": now(), "id": protocolo_id},
+        )
+
+
+def open_new_protocolo(conversation_id: int) -> tuple[dict | None, str | None]:
+    """Ação "É um novo protocolo" do popup de continuidade: abre AGORA o protocolo novo do
+    contato desta conversa (o ``auto_link`` foi adiado até esta decisão) + garante o ciclo
+    aberto. A partir daqui existe um protocolo aberto, então a sugestão para de aparecer."""
+    atend = conversation_repo.get(conversation_id)
+    if not atend:
+        return None, "Conversa não encontrada."
+    contact_id = atend["contact_id"]
+    contact = contact_repo.get(contact_id) or {}
+    at = ensure_protocolo_for_contact(
+        contact_id, phone=contact.get("phone", ""), name=_contact_name(contact),
+        conversation_id=conversation_id, announce_open=True)
+    ensure_open_cycle(conversation_id, contact_id, at["id"])
+    _broadcast_changed(contact_id, at["id"])
+    return at, None
 
 
 def _conversation_ids_of_protocolo(atid: int) -> list[int]:
@@ -2244,6 +2311,8 @@ def on_inbound(ctx, payload: dict) -> None:
         contact, atend = _resolve_target(payload)
         if not atend:
             return
+        if _defer_open_for_relink(contact["id"]):
+            return  # ADIA a abertura — o popup de continuidade decide (abre só se "novo")
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True)
@@ -2261,12 +2330,73 @@ def on_outbound(ctx, payload: dict) -> None:
         contact, atend = _resolve_target(payload)
         if not atend:
             return
+        if _defer_open_for_relink(contact["id"]):
+            return  # ADIA a abertura — o popup de continuidade decide (abre só se "novo")
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True)
         ensure_cycle_exists(atend["id"], contact["id"], at["id"])
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos.on_outbound falhou: %s", e)
+
+
+def on_conversation_deleted(ctx, payload: dict) -> None:
+    """``conversation.deleted`` (o core deletou uma conversa) → fecha o ciclo órfão do
+    plugin e finaliza o protocolo se ele não tiver mais nenhum ciclo aberto.
+
+    Sem isto, deletar a conversa no core deixava o protocolo pendurado em ``aberto`` no
+    Kanban para sempre (o ciclo ficava com ``ended_at`` NULL apontando para uma conversa
+    que não existe mais). Fechamento QUIET: não envia avaliação nem valida obrigatórios —
+    não há como continuar um atendimento cuja conversa sumiu."""
+    try:
+        conv_id = (payload or {}).get("conversation_id") or (payload or {}).get("id")
+        if not conv_id:
+            return
+        ts = now()
+        affected: set[int] = set()
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text("SELECT protocolo_id FROM plugin_protocolos_atendimentos "
+                     "WHERE conversation_id = :cv AND ended_at IS NULL"),
+                {"cv": conv_id}).mappings().all()
+            for r in rows:
+                if r["protocolo_id"] is not None:
+                    affected.add(int(r["protocolo_id"]))
+            if rows:
+                conn.execute(
+                    text("UPDATE plugin_protocolos_atendimentos SET ended_at = :ts, "
+                         "updated_at = :ts WHERE conversation_id = :cv AND ended_at IS NULL"),
+                    {"ts": ts, "cv": conv_id})
+        for pid in affected:
+            _finalize_protocolo_if_no_open_cycle(pid, ts)
+    except Exception as e:  # noqa: BLE001 — handler nunca quebra o pipeline
+        logger.debug("protocolos.on_conversation_deleted falhou: %s", e)
+
+
+def _finalize_protocolo_if_no_open_cycle(protocolo_id: int, ts: float) -> None:
+    """Finaliza (QUIET) um protocolo ``aberto`` que ficou sem nenhum ciclo aberto —
+    limpeza de órfão (conversa deletada). Direto no banco: sem avaliação e sem gate de
+    obrigatórios. No-op se o protocolo já está fechado ou ainda tem ciclo aberto (o
+    contato ainda tem uma conversa viva vinculada)."""
+    contact_id = None
+    with make_plugin_db() as conn:
+        proto = conn.execute(
+            text("SELECT contact_id, status FROM plugin_protocolos_protocolos WHERE id = :id"),
+            {"id": protocolo_id}).mappings().first()
+        if not proto or proto["status"] != "aberto":
+            return
+        open_left = conn.execute(
+            text("SELECT COUNT(*) FROM plugin_protocolos_atendimentos "
+                 "WHERE protocolo_id = :id AND ended_at IS NULL"),
+            {"id": protocolo_id}).scalar()
+        if open_left and int(open_left) > 0:
+            return
+        conn.execute(
+            text("UPDATE plugin_protocolos_protocolos SET status = 'fechado', "
+                 "closed_at = :ts, updated_at = :ts WHERE id = :id AND status = 'aberto'"),
+            {"ts": ts, "id": protocolo_id})
+        contact_id = proto["contact_id"]
+    _broadcast_changed(contact_id, protocolo_id)
 
 
 def on_startup(ctx, payload: dict) -> None:
