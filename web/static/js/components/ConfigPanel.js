@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { hasPermission } from '../utils/permissions.js';
+import { getNotifPref, setNotifPref } from '../utils/notifications.js';
 
 const html = htm.bind(h);
 
@@ -42,6 +43,16 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [publicBaseUrl, setPublicBaseUrl] = useState('');
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+  // Som de notificação (mensagem nova / menção) — preferência PER-DEVICE em
+  // localStorage (não vai no PUT /api/config). Reexpõe o interruptor que sumiu
+  // quando a tela de notificações migrou para um plugin removível (plano 63 F0).
+  // A tela dedicada "Notificações e sons" (por evento) chega na F3.
+  const [notifSoundEnabled, setNotifSoundEnabled] = useState(false);
+  useEffect(() => { setNotifSoundEnabled(getNotifPref('sound')); }, []);
+  function toggleNotifSound(on) {
+    setNotifSoundEnabled(on);
+    setNotifPref('sound', on);   // per-device; aplica na hora (evento whatsbot:notif-prefs)
+  }
 
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
   // (avisos | notificacoes | avancado). Roda uma vez, quando o
@@ -94,9 +105,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
     const result = await onSave(data);
     if (result !== false) {
       setSaveSuccess(true);
-      setWebPassword('');
-      setWebPasswordConfirm('');
-      setRemovePassword(false);
       setTimeout(() => setSaveSuccess(false), 3000);
     }
   }
@@ -178,6 +186,18 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
 
       <!-- Section: Notificações -->
       <${Section} id="notificacoes" title="Notificações">
+        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked=${notifSoundEnabled}
+              onChange=${(e) => toggleNotifSound(e.target.checked)}
+              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+            />
+            Som de notificação
+          </label>
+          <span class="text-xs text-wa-secondary">Toca um som neste dispositivo ao chegar uma mensagem nova ou uma menção. Preferência local (deste navegador). Ajustes por evento (som, volume e duração) ficam em <span class="font-semibold">Notificações e sons</span>, no menu ⚙️.</span>
+        </div>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
             <input

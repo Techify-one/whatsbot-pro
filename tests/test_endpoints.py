@@ -939,6 +939,163 @@ check("POST /send-document -> 200", r.status_code == 200)
 check("POST /send-document -> gowa called", mock_gowa_client.send_file.called)
 
 # ═══════════════════════════════════════════════════════════════════
+#  10c. Contact send video (plano 65)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Send Video")
+
+# GOWA (always-open) routes kind="video" to send_file — no Cloud validation.
+mock_gowa_client.send_file.reset_mock()
+fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100
+r = client.post(
+    "/api/contacts/5511999990001/send-video",
+    files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+    data={"caption": "Vídeo teste"},
+)
+check("POST /send-video -> 200", r.status_code == 200)
+check("POST /send-video -> gowa send_file called", mock_gowa_client.send_file.called)
+
+# Video validator policy — declared BY THE PROVIDER (plano 65), never by name.
+# A channel declaring VideoLimits is enforced; one declaring none never blocks;
+# a windowed channel from a plugin that predates media_limits falls back to the
+# legacy Cloud limits (retrocompat).
+from types import SimpleNamespace as _NS
+from channels import video_validate as _vv
+from channels.base import VideoLimits as _VL
+_declared = _NS(session_window_hours=24, media_limits={"video": _VL(
+    max_bytes=16 * 1024 * 1024, extensions=(".mp4", ".3gp", ".3gpp"),
+    video_codecs=("h264",), audio_codecs=("aac",), max_audio_streams=1)})
+_legacy = _NS(session_window_hours=24)          # plugin sem media_limits
+_open = _NS(session_window_hours=0)             # GOWA/Telegram: sem limites
+check("video_limits: no declaration + always-open -> None",
+      _vv.video_limits(_open) is None)
+check("video_limits: no declaration + windowed -> legacy Cloud fallback",
+      _vv.video_limits(_legacy) is _vv.LEGACY_CLOUD_VIDEO_LIMITS)
+check("video_limits: declared wins over fallback",
+      _vv.video_limits(_declared).max_bytes == 16 * 1024 * 1024)
+check("validate_video: no limits -> ok (any file)",
+      _vv.validate_video("/tmp/whatever.mkv", _open).ok)
+check("validate_video: declared + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _declared).reason == _vv.BAD_FORMAT)
+check("validate_video: legacy fallback + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _legacy).reason == _vv.BAD_FORMAT)
+# Oversized mp4 (>16 MB) -> too_big, under both declared and fallback policy.
+import tempfile as _tf, os as _os
+_big = _os.path.join(_tf.gettempdir(), "wac_big_test.mp4")
+with open(_big, "wb") as _fh:
+    _fh.truncate(16 * 1024 * 1024 + 1)
+check("validate_video: declared + >16MB -> too_big",
+      _vv.validate_video(_big, _declared).reason == _vv.TOO_BIG)
+check("validate_video: legacy fallback + >16MB -> too_big",
+      _vv.validate_video(_big, _legacy).reason == _vv.TOO_BIG)
+check("validate_video: too_big message cites the declared cap",
+      "16 MB" in _vv.validate_video(_big, _declared).message)
+# A provider declaring a different cap is honoured (no Meta numbers in the core).
+_small = _NS(media_limits={"video": _VL(max_bytes=1024)})
+check("validate_video: custom cap honoured (1 KB)",
+      _vv.validate_video(_big, _small).reason == _vv.TOO_BIG)
+_os.remove(_big)
+
+# Pré-validação genérica de anexo (imagem/áudio/documento) — mesma regra
+# policy-vs-mechanism: os números vêm do provider, o core só avalia/descreve.
+from channels import media_limits as _ml
+from channels.base import MediaLimits as _ML
+_cloudish = _NS(session_window_hours=24, media_limits={
+    "image": _ML(max_bytes=5 * 1024 * 1024, extensions=(".jpg", ".jpeg", ".png")),
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf", ".txt")),
+    "video": _VL(max_bytes=16 * 1024 * 1024),
+})
+check("media_limits: canal sem declaração -> sem limites (nada bloqueia)",
+      _ml.limits_for(_open, "image") is None
+      and _ml.validate_upload("x.exe", 10 ** 9, _open, "document").ok)
+check("media_limits: imagem fora do formato -> bad_format",
+      _ml.validate_upload("foto.gif", 10, _cloudish, "image").reason == _ml.BAD_FORMAT)
+check("media_limits: imagem acima do cap -> too_big",
+      _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").reason
+      == _ml.TOO_BIG)
+check("media_limits: mensagem de too_big cita o cap declarado",
+      "5 MB" in _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").message)
+check("media_limits: imagem conforme -> ok",
+      _ml.validate_upload("foto.PNG", 1024, _cloudish, "image").ok)
+check("media_limits: documento fora da lista -> bad_format",
+      _ml.validate_upload("a.zip", 10, _cloudish, "document").reason == _ml.BAD_FORMAT)
+check("media_limits: documento conforme -> ok",
+      _ml.validate_upload("a.pdf", 10 * 1024 * 1024, _cloudish, "document").ok)
+_hint = _NS(session_window_hours=24, media_limits={
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf",)),
+    "video": _VL(max_bytes=16 * 1024 * 1024, extensions=(".mp4",)),
+    "audio": _ML(max_bytes=16 * 1024 * 1024, extensions=(".ogg",)),
+})
+check("media_limits: arquivo no anexo errado aponta o anexo certo (vídeo)",
+      "use o anexo Vídeo" in _ml.validate_upload("c.mp4", 10, _hint, "document").message)
+check("media_limits: arquivo no anexo errado aponta o anexo certo (áudio)",
+      "use o anexo Áudio" in _ml.validate_upload("v.ogg", 10, _hint, "document").message)
+check("media_limits: extensão que nenhum kind aceita não ganha dica",
+      "use o anexo" not in _ml.validate_upload("a.zip", 10, _hint, "document").message)
+check("media_limits: kind sem declaração no canal -> ok",
+      _ml.validate_upload("v.ogg", 10 ** 9, _cloudish, "audio").ok)
+_desc = _ml.describe(_cloudish, video_transcode_available=True)
+check("media_limits.describe: expõe cap+extensões por tipo",
+      _desc["image"]["max_bytes"] == 5 * 1024 * 1024
+      and ".png" in _desc["image"]["extensions"])
+check("media_limits.describe: video carrega o flag de transcode",
+      _desc["video"]["transcode"] is True
+      and _ml.describe(_cloudish)["video"]["transcode"] is False)
+check("media_limits.describe: canal sem limites -> {} (painel não bloqueia nada)",
+      _ml.describe(_open) == {})
+
+# Áudio codec-aware: o provider declara os codecs por container (a Meta só aceita
+# ogg com OPUS), o core valida com ffprobe e recodifica em vez de deixar falhar.
+import shutil as _shutil, subprocess as _subprocess
+from channels import audio_transcode as _at, audio_validate as _av
+from channels.base import AudioLimits as _AL
+_AUDIO = _AL(
+    max_bytes=16 * 1024 * 1024,
+    extensions=(".mp3", ".m4a", ".ogg"),
+    codecs=("aac", "mp3"),
+    codecs_by_ext=((".ogg", ("opus",)), (".mp3", ("mp3",))),
+    transcode_targets=(".ogg", ".m4a"),
+)
+_audioish = _NS(session_window_hours=24, media_limits={"audio": _AUDIO})
+check("audio_validate: canal com MediaLimits simples não opta por codec/transcode",
+      _av.audio_limits(_cloudish) is None and _av.validate_audio("x.ogg", _cloudish).ok)
+check("audio_validate: canal sem limites -> ok",
+      _av.audio_limits(_open) is None and _av.validate_audio("x.ogg", _open).ok)
+check("audio_validate: container fora da lista -> bad_format",
+      _av.validate_audio("/tmp/x.wav", _audioish).reason == _av.BAD_FORMAT)
+check("AudioLimits.codecs_for: regra por container, com fallback no conjunto geral",
+      _AUDIO.codecs_for(".ogg") == ("opus",) and _AUDIO.codecs_for(".m4a") == ("aac", "mp3"))
+check("audio_transcode: alvo é o 1º container declarado pelo provider que o core encoda",
+      _at._target_ext(_AUDIO) == ".ogg"
+      and _at._target_ext(_AL(extensions=(".amr",))) is None)
+check("audio_transcode: bitrate cabe no cap declarado (e respeita os limites sãos)",
+      _at._bitrate_kbps(60 * 60, 1024 * 1024) == _at._MIN_KBPS
+      and _at._bitrate_kbps(1, 16 * 1024 * 1024) == _at._MAX_KBPS)
+check("audio_transcode: provider que proíbe re-encode nunca é recodificado",
+      _at.transcode_to_limits("/tmp/x.ogg", _AL(extensions=(".ogg",), transcode=False)) is None)
+_desc_a = _ml.describe(_audioish, audio_transcode_available=True)
+check("media_limits.describe: áudio carrega o flag de transcode",
+      _desc_a["audio"]["transcode"] is True
+      and _ml.describe(_audioish)["audio"]["transcode"] is False)
+
+# Ida-e-volta real com ffmpeg (o caso que motivou tudo: Ogg/Vorbis é recusado
+# pela Meta e vira Ogg/Opus). Pulado quando não há ffmpeg no ambiente.
+if _at.available() and _shutil.which("ffprobe"):
+    _ogg = _os.path.join(_tf.gettempdir(), "wb_test_vorbis.ogg")
+    _rc = _subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-c:a", "libvorbis", _ogg],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL).returncode
+    if _rc == 0:
+        check("audio_validate: ogg/vorbis (recusado pela Meta) -> bad_codec",
+              _av.validate_audio(_ogg, _audioish).reason == _av.BAD_CODEC)
+        _out = _at.transcode_to_limits(_ogg, _AUDIO)
+        check("audio_transcode: ogg/vorbis vira ogg/opus e passa a validar",
+              bool(_out) and _av.validate_audio(_out, _audioish).ok)
+        if _out:
+            _os.remove(_out)
+    _os.remove(_ogg)
+
+# ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Presence")
@@ -1139,6 +1296,88 @@ r = client.delete(f"/api/me/conversation-filters/{_fid}")
 check("DELETE saved-filter -> 200", r.status_code == 200)
 r = client.delete(f"/api/me/conversation-filters/{_fid}")
 check("DELETE saved-filter (404) -> 404", r.status_code == 404)
+
+# ═══════════════════════════════════════════════════════════════════
+#  15a3. Sons de notificação configuráveis (plano 63)
+# ═══════════════════════════════════════════════════════════════════
+section("Sons de notificação (plano 63)")
+
+# Catálogo estático
+r = client.get("/api/sounds/catalog")
+check("GET /api/sounds/catalog -> 200", r.status_code == 200)
+_cat = r.json()["data"]
+check("catalog tem 4 eventos", len(_cat["events"]) == 4)
+check("catalog tem 7 sons", len(_cat["sounds"]) == 7)
+check("catalog new_message notification/one-shot",
+      any(e["key"] == "new_message" and e["duration_applies"] is False for e in _cat["events"]))
+check("catalog ia_to_human alert/duration",
+      any(e["key"] == "ia_to_human" and e["duration_applies"] is True for e in _cat["events"]))
+
+# sound_settings exposto no GET /api/config (padrão global)
+r = client.get("/api/config")
+_ss = r.json()["data"].get("sound_settings")
+check("GET /api/config -> sound_settings presente", isinstance(_ss, dict))
+check("sound_settings master default ON", _ss.get("master_enabled") is True)
+check("sound_settings new_message volume 0.6", _ss["events"]["new_message"]["volume"] == 0.6)
+
+# PUT /api/config sound_settings — normaliza (fail-open): som inválido e volume
+# fora de faixa são descartados/clampados; não corrompe.
+r = client.put("/api/config", json={"sound_settings": {
+    "master_enabled": False,
+    "events": {"new_message": {"sound": "blip", "volume": 5, "enabled": True, "lixo": 1},
+               "evento_falso": {"x": 1}},
+}})
+check("PUT /api/config sound_settings -> 200", r.status_code == 200)
+_ss2 = client.get("/api/config").json()["data"]["sound_settings"]
+check("global norm: master off", _ss2["master_enabled"] is False)
+check("global norm: volume clampado a 1.0", _ss2["events"]["new_message"]["volume"] == 1.0)
+check("global norm: som válido mantido", _ss2["events"]["new_message"]["sound"] == "blip")
+check("global norm: evento falso descartado", "evento_falso" not in _ss2["events"])
+# Restaura o padrão global para não afetar asserts seguintes
+client.put("/api/config", json={"sound_settings": {
+    "master_enabled": True,
+    "events": {"new_message": {"enabled": True, "sound": "ding", "volume": 0.6}},
+}})
+
+# GET /api/me/sound-prefs (modo aberto → uid=None): override vazio + global + catálogo
+r = client.get("/api/me/sound-prefs")
+check("GET /api/me/sound-prefs -> 200", r.status_code == 200)
+_sp = r.json()["data"]
+check("me/sound-prefs: prefs esparso vazio", _sp["prefs"] == {})
+check("me/sound-prefs: global_default com eventos", bool(_sp["global_default"]["events"]))
+check("me/sound-prefs: catálogo embutido", len(_sp["catalog"]["events"]) == 4)
+
+# PUT override esparso (uid=None) — junk descartado, volume clampado
+r = client.put("/api/me/sound-prefs", json={"prefs": {
+    "events": {"mention": {"sound": "chime", "volume": -3, "enabled": False, "nope": 1},
+               "ia_to_human": {"volume": 0.4, "duration": 999},
+               "bogus": {"z": 1}},
+}})
+check("PUT /api/me/sound-prefs -> 200", r.status_code == 200)
+_saved = r.json()["data"]["prefs"]
+check("user override: volume clampado a 0.0", _saved["events"]["mention"]["volume"] == 0.0)
+check("user override: duração clampada a 30", _saved["events"]["ia_to_human"]["duration"] == 30)
+check("user override: evento inválido descartado", "bogus" not in _saved["events"])
+check("user override: esparso (sem new_message)", "new_message" not in _saved["events"])
+
+# GET persiste o override (uid=None)
+r = client.get("/api/me/sound-prefs")
+check("GET me/sound-prefs -> override persistido",
+      r.json()["data"]["prefs"]["events"]["mention"]["sound"] == "chime")
+
+# PUT com prefs não-dict → fail-open para {}
+r = client.put("/api/me/sound-prefs", json={"prefs": "lixo"})
+check("PUT me/sound-prefs (não-dict) -> {} fail-open", r.json()["data"]["prefs"] == {})
+
+# Repo unit: caminho uid REAL (ON CONFLICT) + isolamento entre usuários
+from db.repositories import user_sound_pref_repo as _uspr
+_uspr.upsert(4242, {"master_enabled": False, "events": {"new_message": {"volume": 0.1}}})
+check("repo uid real: get devolve override",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.1)
+_uspr.upsert(4242, {"events": {"new_message": {"volume": 0.9}}})  # overwrite (ON CONFLICT)
+check("repo uid real: upsert sobrescreve",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.9)
+check("repo isolamento: outro uid sem override", _uspr.get(4343) is None)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
@@ -5016,6 +5255,17 @@ check("POST /sandbox/send (no phone) -> 400", r.status_code == 400)
 
 r = client.post("/api/sandbox/send", json={"phone": "test", "message": ""})
 check("POST /sandbox/send (no msg) -> 400", r.status_code == 400)
+
+# Sandbox video (plano 65) — stored locally, agent reacts to the caption.
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=ProcessResult(
+                      reply="Vi o vídeo", tool_calls=[]))):
+    r = client.post(
+        "/api/sandbox/send-video",
+        files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+        data={"phone": "sandbox_test", "caption": "olha isso"},
+    )
+    check("POST /sandbox/send-video -> 200", r.status_code == 200)
 
 r = client.post("/api/sandbox/clear", json={"phone": "sandbox_test"})
 check("POST /sandbox/clear -> 200", r.status_code == 200)

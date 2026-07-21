@@ -130,6 +130,16 @@ def register_routes(app, deps):
                 # não dependerem de normalizar por conta própria.
                 if key == "public_base_url" and isinstance(value, str):
                     value = value.strip().rstrip("/")
+                # plano 63 — padrão GLOBAL de som: normaliza/valida o JSON antes de
+                # persistir (fail-open: campos/sons/eventos desconhecidos são
+                # descartados; volume 0..1; duração 1..30). Um payload inválido nunca
+                # corrompe a config — cai no seed via normalize().
+                if key == "sound_settings":
+                    from server import sound_catalog
+                    from config.settings import SOUND_SETTINGS_SEED
+                    norm = sound_catalog.normalize(value, sparse=False)
+                    value = norm if norm.get("events") else sound_catalog.normalize(
+                        SOUND_SETTINGS_SEED, sparse=False)
                 audit_before[key] = settings.get(key)
                 settings[key] = value
                 audit_after[key] = value

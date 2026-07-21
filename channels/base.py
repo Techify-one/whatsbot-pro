@@ -15,6 +15,81 @@ from typing import Optional
 from channels.events import InboundEvent
 
 
+@dataclasses.dataclass(frozen=True)
+class MediaLimits:
+    """Size/container constraints a provider enforces for a media kind.
+
+    The generic sibling of :class:`VideoLimits` (which adds codec rules on top):
+    the PROVIDER declares, the core only evaluates — see ``channels.media_limits``.
+    A kind with no declared limits is never blocked (GOWA/Telegram accept anything
+    the linked device accepts).
+
+    ``extensions`` empty = any container. ``max_bytes`` 0 = no size cap.
+    """
+    max_bytes: int = 0
+    extensions: tuple = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class AudioLimits:
+    """The audio constraints a provider's API enforces — codec-aware.
+
+    Same policy/mechanism split as :class:`VideoLimits`: the PROVIDER declares the
+    containers/codecs/cap, the core only evaluates (``channels.audio_validate``)
+    and, when the file does not conform, re-encodes it (``channels.audio_transcode``).
+    A channel that declares a plain :class:`MediaLimits` for ``"audio"`` (or nothing)
+    keeps the old extension+size behaviour — declaring ``AudioLimits`` is what opts
+    a provider into codec inspection and transcoding.
+
+    Why codecs matter: the WhatsApp Cloud API accepts ``audio/ogg`` **only with the
+    OPUS codec** (Ogg/Vorbis is refused), so extension alone cannot tell a
+    deliverable ``.ogg`` from a rejected one.
+
+    ``codecs`` is the accepted set for containers with no specific rule;
+    ``codecs_by_ext`` overrides it per container as ``((".ogg", ("opus",)), …)`` (a
+    tuple of pairs, not a dict, to keep the dataclass frozen/hashable).
+    ``transcode_targets`` is the provider's preferred OUTPUT container order for a
+    re-encode; empty falls back to ``extensions``.
+    """
+    max_bytes: int = 0
+    extensions: tuple = ()
+    codecs: tuple = ()
+    codecs_by_ext: tuple = ()
+    transcode: bool = True
+    transcode_targets: tuple = ()
+
+    def codecs_for(self, ext: str) -> tuple:
+        """Accepted codecs for a container, falling back to the flat ``codecs``."""
+        ext = (ext or "").lower()
+        for entry_ext, codecs in self.codecs_by_ext or ():
+            if str(entry_ext).lower() == ext:
+                return tuple(codecs or ())
+        return tuple(self.codecs or ())
+
+
+@dataclasses.dataclass(frozen=True)
+class VideoLimits:
+    """The video constraints a provider's API enforces (plano 65 — desacoplamento).
+
+    POLICY lives here, declared BY THE PROVIDER; the MECHANISM (ffprobe validation
+    + ffmpeg transcode) stays generic in ``channels.video_validate`` /
+    ``channels.video_transcode``. The core never hardcodes a provider's numbers and
+    never checks provider name — a channel whose capabilities declare no
+    ``VideoLimits`` is simply not validated (GOWA/Telegram deliver arbitrary mp4).
+
+    WhatsApp Cloud declares 16 MB / mp4-3gp / H.264 / AAC / one audio track; a
+    future provider with different rules declares its own and everything downstream
+    (validation messages, transcode bitrate target) follows.
+    """
+    max_bytes: int
+    extensions: tuple = (".mp4",)
+    video_codecs: tuple = ("h264",)
+    audio_codecs: tuple = ("aac",)
+    max_audio_streams: int = 1
+    # Whether a non-conforming file may be re-encoded to fit instead of blocked.
+    transcode: bool = True
+
+
 @dataclasses.dataclass
 class ChannelCapabilities:
     qr: bool = False
@@ -47,6 +122,13 @@ class ChannelCapabilities:
     # send — so ``create_channel`` rejects it. Drives validation by CAPABILITY,
     # never by provider name. Tuple (immutable) so it is safe as a default.
     required_credentials: tuple = ()
+    # Per-media-kind constraints the provider's API enforces, e.g.
+    # ``{"video": VideoLimits(max_bytes=16*1024*1024, ...)}`` (plano 65). The
+    # PROVIDER declares, the core validates/transcodes generically — same pattern as
+    # ``required_credentials``. ``None``/missing kind = no constraint for that kind.
+    # Providers that predate this field fall back to the legacy Cloud defaults in
+    # ``channels.video_validate`` when they are windowed (retrocompat).
+    media_limits: Optional[dict] = None
 
 
 @dataclasses.dataclass

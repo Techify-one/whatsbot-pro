@@ -368,6 +368,48 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
+    @app.post("/api/sandbox/send-video",
+              dependencies=[Depends(require_permission("sandbox.use"))])
+    async def sandbox_send_video(
+        phone: str = Form(...),
+        caption: str = Form(""),
+        video: UploadFile = File(...),
+    ):
+        """Process a video message through the agent pipeline (local, no GOWA).
+
+        Video is not transcribed/described; the raw clip is stored and the agent
+        reacts to the caption (mirrors the received-media flow — plano 65)."""
+        phone = phone.strip()
+        if not phone:
+            return _err("Campo 'phone' é obrigatório.")
+        filename = video.filename or "video.mp4"
+        rel_path = _save_upload(video, await video.read(), filename)
+        caption = caption or ""
+
+        logger.info("[Sandbox] Video from %s: %s", phone, filename)
+        exec_id = await astart_execution(phone, "sandbox")
+        try:
+            await atrack_step("webhook_received", {"phone": phone, "media": "video"})
+            contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
+            contact.add_message("user", caption, media_type="video", media_path=rel_path)
+            await _broadcast_user_message(phone, caption, media_type="video", media_path=rel_path)
+
+            replies = await _sandbox_reply(phone)
+            await atrack_step("response_sent", {
+                "phone": phone, "reply_preview": "\n".join(replies)[:200],
+            })
+            await aend_execution(exec_id)
+        except Exception as e:
+            logger.error("[Sandbox] Error processing video: %s", e)
+            await aend_execution(exec_id, error=str(e))
+            return _err(f"Erro ao processar vídeo: {e}", status=500)
+
+        await _after_send()
+        return _ok({"replies": replies, "phone": phone})
+
     @app.post("/api/sandbox/clear",
               dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_clear(body: dict):

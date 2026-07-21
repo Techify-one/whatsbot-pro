@@ -180,6 +180,77 @@ def test_relink_without_current_just_reopens(build_app):
     assert _count_open(cid) == 1
 
 
+def test_relink_absorbs_current_open_even_when_id_stale(build_app):
+    """Corrida do ``auto_link``: o popup calcula a sugestão ANTES de o auto_link abrir o
+    protocolo novo, então o frontend manda ``current_open_id`` nulo/defasado. O relink deve
+    resolver o aberto ATUAL do contato pelo banco e absorvê-lo — senão o reopen do anterior
+    colidia com o novo aberto ('Já existe um protocolo aberto para este contato')."""
+    built = build_app(["gowa", "protocolos"])
+    c = built.client
+    plogic = _logic()
+    cid = 990501
+    now = time.time()
+    prev = _seed_protocolo(cid, status="fechado", closed_at=now - 60)
+    new_open = _seed_protocolo(cid, status="aberto", closed_at=None)  # o que o auto_link abriu
+    cyc = _seed_ciclo(new_open, 772001, cid)
+
+    # Frontend manda SEM current_open_id (defasado) — antes disto dava 409.
+    r = c.post(f"/api/plugins/protocolos/protocolos/{prev}/relink", json={})
+    assert r.status_code == 200, r.text
+    assert plogic.get_protocolo(prev)["status"] == "aberto"
+    assert plogic.get_protocolo(new_open) is None          # novo absorvido/descartado
+    assert _count_open(cid) == 1                            # 1 aberto (o anterior reaberto)
+    with get_engine().connect() as conn:
+        pid = conn.execute(text(
+            "SELECT protocolo_id FROM plugin_protocolos_atendimentos WHERE id=:i"),
+            {"i": cyc}).scalar()
+    assert int(pid) == prev                                 # ciclo repontado p/ o anterior
+
+
+def test_suggest_during_window(build_app):
+    """Dentro da janela (protocolo fechado há pouco, não revisado) a sugestão aparece —
+    ela é consumida no momento de RESOLVER o atendimento."""
+    built = build_app(["gowa", "protocolos"])
+    plogic = _logic()
+    cid = 990601
+    _seed_protocolo(cid, status="fechado", closed_at=time.time() - 120)
+    assert plogic.relink_suggestion_for_contact(cid)["suggest"] is True
+
+
+def test_open_protocol_still_suggests(build_app):
+    """A mensagem do cliente SEMPRE abre um protocolo novo — logo, no momento de resolver
+    existe um protocolo aberto E um anterior fechado: a pergunta continua valendo."""
+    built = build_app(["gowa", "protocolos"])
+    plogic = _logic()
+    cid = 990602
+    _seed_protocolo(cid, status="fechado", closed_at=time.time() - 120)
+    _seed_protocolo(cid, status="aberto", closed_at=None)
+    assert plogic.relink_suggestion_for_contact(cid)["suggest"] is True
+
+
+def test_reviewed_stops_suggest(build_app):
+    """Protocolo anterior marcado como revisado → para de sugerir (não repergunta)."""
+    built = build_app(["gowa", "protocolos"])
+    plogic = _logic()
+    cid = 990603
+    prev = _seed_protocolo(cid, status="fechado", closed_at=time.time() - 120)
+    assert plogic.relink_suggestion_for_contact(cid)["suggest"] is True
+    plogic.mark_relink_reviewed(prev)
+    assert plogic.relink_suggestion_for_contact(cid)["suggest"] is False
+
+
+def test_reopen_clears_reviewed_flag(build_app):
+    """Reabrir um protocolo limpa o relink_reviewed (fica fresco para um futuro ciclo)."""
+    built = build_app(["gowa", "protocolos"])
+    plogic = _logic()
+    cid = 990604
+    prev = _seed_protocolo(cid, status="fechado", closed_at=time.time() - 120)
+    plogic.mark_relink_reviewed(prev)
+    at, err = plogic.reopen_protocolo(prev)
+    assert err is None and at["status"] == "aberto"
+    assert not plogic.get_protocolo(prev).get("relink_reviewed")
+
+
 def test_relink_rejects_not_closed_wrong_contact_and_missing(build_app):
     built = build_app(["gowa", "protocolos"])
     c = built.client

@@ -3,6 +3,12 @@
 // os personalizados), "Iniciar atendimento" (abre o chat no hub de atendimentos) e
 // importar/exportar contatos via CSV. Acessível pelo menu da lista de atendimentos.
 //
+// Paginação: 15 contatos por página, numa barra fixa no rodapé (sticky — acompanha a
+// rolagem): "Exibindo X - Y de N contatos" à esquerda; à direita Primeira/Anterior, o
+// campo "ir para a página" + "de N páginas" e Próxima/Última. Servida pelo
+// envelope {items, total, has_more} de GET /api/contacts?limit&offset&sort=name. A
+// página vive na URL como ?page=N (1-indexed). Substituiu o scroll infinito do plano 50.
+//
 // Deep-link: abrir o detalhe reflete na URL como /contacts/{id} (id do contato);
 // back/forward reabre/fecha o painel. A lista em si fica em /contacts.
 import { h } from 'preact';
@@ -15,8 +21,7 @@ import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
 import { useContactSubtitle } from './contacts/hooks/useContactSubtitle.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
-import { useInfiniteScroll, useScrollSentinel } from '../hooks/useInfiniteScroll.js';
-import { readParams, writeParams, str, json } from '../services/urlState.js';
+import { readParams, writeParams, str, int, json } from '../services/urlState.js';
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
@@ -32,8 +37,13 @@ import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
-// Lote fixo carregado a cada rolagem (scroll infinito).
+// Contatos por página (paginação clássica Primeira/Anterior/Próxima/Última — não mais
+// scroll infinito).
 const PAGE_SIZE = 15;
+
+// Botão da barra de paginação (mesmo visual dos botões de página da tela de Auditoria).
+const PAGE_BTN = 'px-2.5 py-1 rounded border border-wa-border text-wa-text hover:bg-wa-hover '
+  + 'disabled:opacity-30 disabled:cursor-not-allowed transition-colors whitespace-nowrap';
 
 // Casefold + strip accents (espelha o `_fold` do backend) para a busca casar
 // independente de acento/caixa.
@@ -289,10 +299,12 @@ function ContactRow({ c, onOpenDetail, onStartConversation }) {
   `;
 }
 
-// Deep-link do estado da lista de contatos (Plano 24): busca + filtro avançado
-// na query legível. `adv` guarda só as cláusulas (JSON), omitido quando vazio.
+// Deep-link do estado da lista de contatos (Plano 24): busca + filtro avançado +
+// página na query legível. `adv` guarda só as cláusulas (JSON), omitido quando vazio.
+// `page` é 1-indexed na URL (o estado interno é 0-indexed) e some quando é a 1ª.
 const CONTACTS_URL_SCHEMA = [
   str('search', ''),
+  int('page', 1),
   json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
 ];
 
@@ -301,9 +313,13 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const canImport = hasPermission(currentUser, 'contact.import');
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
-  // plano 62 F3: `search` reflete o input NA HORA (UX); `debouncedSearch` é o que
-  // alimenta o fetch (resetKey/fetchPage) — 1 request por pausa de digitação.
+  // plano 62 F3: `search` reflete o input NA HORA (UX + URL); `debouncedSearch` é o que
+  // alimenta o fetch — 1 request por pausa de digitação.
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(0);              // página atual, 0-indexed
+  const [contacts, setContacts] = useState([]);     // itens da página atual
+  const [total, setTotal] = useState(0);            // universo (p/ contar as páginas)
+  const [loading, setLoading] = useState(true);
   const [reloadTick, setReloadTick] = useState(0);  // plano 50: força refetch (delete/import)
   const [detail, setDetail] = useState(null); // contato aberto no painel
   const [showCreate, setShowCreate] = useState(false);
@@ -325,13 +341,15 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     read: () => readParams(window.location.search, CONTACTS_URL_SCHEMA),
     apply: (s) => {
       setSearch(s.search);
+      setPage(Math.max(0, (s.page || 1) - 1));
       setAdvFilters(Array.isArray(s.adv) ? s.adv.map((f, i) => ({ ...f, id: `u${i}` })) : []);
     },
     serialize: () => writeParams({
       search,
+      page: page + 1,
       adv: (advFilters || []).map(({ id, ...rest }) => rest),
     }, CONTACTS_URL_SCHEMA),
-    deps: [search, advFilters],
+    deps: [search, page, advFilters],
   });
 
   // plano 62 F3: debounce de 300ms entre digitar e disparar a busca no servidor.
@@ -340,17 +358,11 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     return () => clearTimeout(t);
   }, [search]);
 
-  // plano 50 — SCROLL INFINITO com LOTE FIXO. A busca vai pro servidor (q + paginação
-  // + ordem alfabética via sort=name); o servidor SEMPRE devolve um lote de PAGE_SIZE,
-  // nunca a tabela inteira. Os filtros avançados (atributos/etiquetas) são aplicados no
-  // cliente sobre os itens JÁ carregados — rolar carrega o próximo lote e filtra também.
-  // plano 62 F3: cada fetch aborta o anterior ainda em voo (busca redigitada durante
-  // um request lento) — libera o slot do browser; o guard `alive` do useInfiniteScroll
-  // já protege o estado contra respostas velhas. AbortError não é erro de UI.
   // plano 69 F6 — filtro avançado server-side: quando TODAS as cláusulas são
-  // expressáveis (tag/contact_type/cattr:contact:*), mandamos ao servidor (que corta a
-  // lista E o total), e NÃO re-filtramos no cliente. Cláusula não coberta (ex.: etiqueta
-  // "≠") ⇒ fallback cliente sobre os itens carregados (com a sentinela sempre viva).
+  // expressáveis (tag/contact_type/cattr:contact:*), mandamos ao servidor, que corta a
+  // lista E o `total` — a paginação passa a contar o universo JÁ filtrado. Cláusula não
+  // coberta (ex.: etiqueta "≠") ⇒ fallback cliente sobre a página carregada (e aí sim
+  // uma página pode exibir MENOS de 15 linhas, porque o total ainda é o não-filtrado).
   const filterServerMode = useMemo(
     () => advFilters.length > 0 && isContactFilterServerExpressible(advFilters),
     [advFilters]);
@@ -361,29 +373,55 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     () => (filterParams ? JSON.stringify(filterParams) : ''),
     [filterParams]);
 
+  // PAGINAÇÃO CLÁSSICA (15 por página). A busca vai pro servidor (q + limit/offset +
+  // ordem alfabética via sort=name); o servidor devolve SEMPRE uma página de PAGE_SIZE
+  // mais o `total` do universo, nunca a tabela inteira.
+  // plano 62 F3: cada fetch aborta o anterior ainda em voo (página trocada ou busca
+  // redigitada durante um request lento) — libera o slot do browser. AbortError não é
+  // erro de UI e não pode zerar a lista: o request abortado simplesmente não escreve.
   const listAbortRef = useRef(null);
-  const fetchPage = useCallback((offset) => {
+  useEffect(() => {
+    let alive = true;
     if (listAbortRef.current) listAbortRef.current.abort();
     const ctrl = new AbortController();
     listAbortRef.current = ctrl;
-    return getContacts(debouncedSearch, false,
-      { limit: PAGE_SIZE, offset, sort: 'name', signal: ctrl.signal,
-        filters: filterParams || undefined })
+    setLoading(true);
+    getContacts(debouncedSearch, false, {
+      limit: PAGE_SIZE, offset: page * PAGE_SIZE, sort: 'name',
+      signal: ctrl.signal, filters: filterParams || undefined,
+    })
       .then((res) => {
-        if (res && res.ok) { setError(null); return { items: (res.data && res.data.items) || [], hasMore: !!(res.data && res.data.has_more) }; }
-        setError((res && res.error) || 'Falha ao carregar contatos');
-        return { items: [], hasMore: false };
+        if (!alive) return;
+        if (res && res.ok) {
+          setError(null);
+          setContacts((res.data && res.data.items) || []);
+          setTotal((res.data && res.data.total) || 0);
+        } else {
+          setError((res && res.error) || 'Falha ao carregar contatos');
+          setContacts([]);
+          setTotal(0);
+        }
       })
       .catch((e) => {
-        if (e && e.name === 'AbortError') return { items: [], hasMore: false };
+        if (!alive || (e && e.name === 'AbortError')) return;
         setError(String(e));
-        return { items: [], hasMore: false };
-      });
-  }, [debouncedSearch, filterKey]);
+        setContacts([]);
+        setTotal(0);
+      })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [debouncedSearch, page, reloadTick, filterKey]);
 
-  const {
-    items: contacts, setItems: setContacts, loading, loadingMore, hasMore, loadMore,
-  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${debouncedSearch}|${reloadTick}|${filterKey}`, keyOf: (c) => c.id });
+  // Busca/filtros/reload (delete/import) sempre voltam pra 1ª página — senão o usuário
+  // ficaria numa página que não existe mais no novo universo de resultados. Observa a
+  // busca JÁ debounced (o `search` cru zeraria a página a cada tecla).
+  const firstLoad = useRef(true);
+  useEffect(() => {
+    // No mount a página vem da URL (deep-link); só resets POSTERIORES zeram.
+    if (firstLoad.current) { firstLoad.current = false; return; }
+    setPage(0);
+    // eslint-disable-next-line
+  }, [debouncedSearch, filterKey, advFilters, reloadTick]);
 
   // reload após ações (delete/import) força a 1ª página de novo.
   const reload = useCallback(() => setReloadTick((t) => t + 1), []);
@@ -519,9 +557,24 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     return contacts.filter((c) => matchesAdvFilters(c, advFilters, now));
   }, [contacts, advFilters, filterServerMode]);
 
-  // Sentinela de fim de lista: rolar até o fim carrega o próximo LOTE (scroll infinito).
-  const sentinelRef = useRef(null);
-  useScrollSentinel(sentinelRef, loadMore, hasMore);
+  // Total de páginas (mínimo 1), se ainda há página seguinte e a faixa exibida
+  // ("Exibindo 31 - 45 de 69 contatos") — sempre sobre o universo do SERVIDOR.
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const hasNext = (page + 1) * PAGE_SIZE < total;
+  const rangeFrom = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const rangeTo = Math.min(total, (page + 1) * PAGE_SIZE);
+
+  // Campo "ir para a página": editável enquanto se digita, aplicado no Enter/blur com
+  // clamp em [1, totalPages]. Um valor inválido volta pra página atual.
+  const [pageInput, setPageInput] = useState('1');
+  useEffect(() => { setPageInput(String(page + 1)); }, [page]);
+  const commitPageInput = useCallback(() => {
+    const n = parseInt(pageInput, 10);
+    if (Number.isNaN(n)) { setPageInput(String(page + 1)); return; }
+    const target = Math.min(Math.max(1, n), totalPages) - 1;
+    setPage(target);
+    setPageInput(String(target + 1));
+  }, [pageInput, page, totalPages]);
 
   // Abre o chat do contato no hub. Resolve o atendimento ativo (se houver) e navega
   // por /conversations/{id}; sem atendimento ainda, cai na raiz do hub.
@@ -662,14 +715,17 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
         <div class="text-center text-red-400 py-8 text-[14px]">${error}</div>
       ` : loading ? html`
         <div class="text-center text-wa-secondary py-12 animate-pulse-slow text-[14px]">Carregando contatos...</div>
-      ` : pageItems.length === 0 ? html`
-        <div class="text-center text-wa-secondary py-12 text-[14px]">
-          ${(search || advFilters.length) ? 'Nenhum contato encontrado.' : 'Nenhum contato ainda.'}
-        </div>
       ` : html`
-        <!-- Lista -->
+        <!-- Lista + barra de paginação. A barra é filha DESTE container (e não irmã
+             dele) de propósito: sticky bottom-0 só flutua enquanto o bloco que a
+             contém ainda tem altura abaixo, então ficar dentro da lista é o que a faz
+             acompanhar a rolagem em vez de aparecer só no fim. -->
         <div class="flex flex-col gap-3">
-          ${pageItems.map((c) => html`
+          ${pageItems.length === 0 ? html`
+            <div class="text-center text-wa-secondary py-12 text-[14px]">
+              ${(search || advFilters.length) ? 'Nenhum contato encontrado.' : 'Nenhum contato ainda.'}
+            </div>
+          ` : pageItems.map((c) => html`
             <${ContactRow}
               key=${c.id}
               c=${c}
@@ -677,18 +733,61 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
               onStartConversation=${startConversation}
             />
           `)}
+
+          <!-- Paginação: 15 contatos por página. Sempre visível (sticky no rodapé da
+               área de rolagem), inclusive quando um filtro do cliente esvazia a página
+               atual — senão o usuário ficaria preso sem como voltar. -->
+          ${total > 0 ? html`
+            <div class="sticky bottom-0 z-[60] -mx-1 px-1 pt-2 pb-1">
+              <div class="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-wa-border bg-wa-panel shadow-lg text-xs text-wa-secondary">
+                <!-- Esquerda: faixa exibida no universo total (server-side). -->
+                <span class="truncate">
+                  Exibindo ${rangeFrom} - ${rangeTo} de ${total} contatos
+                </span>
+                <!-- Direita: navegação + a página atual num campo editável ("ir para"). -->
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick=${() => setPage(0)}
+                    disabled=${page === 0}
+                    title="Primeira página"
+                    class=${PAGE_BTN}
+                  >« <span class="hidden md:inline">Primeira</span></button>
+                  <button
+                    onClick=${() => setPage((p) => Math.max(0, p - 1))}
+                    disabled=${page === 0}
+                    title="Página anterior"
+                    class=${PAGE_BTN}
+                  >‹ <span class="hidden md:inline">Anterior</span></button>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value=${pageInput}
+                    onInput=${(e) => setPageInput(e.target.value)}
+                    onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } }}
+                    onBlur=${commitPageInput}
+                    title="Ir para a página"
+                    aria-label="Ir para a página"
+                    class="wa-field w-[52px] text-center text-xs rounded border border-wa-border px-1 py-1 outline-none focus:border-wa-teal transition-colors"
+                  />
+                  <span class="whitespace-nowrap">de ${totalPages} páginas</span>
+                  <button
+                    onClick=${() => setPage((p) => p + 1)}
+                    disabled=${!hasNext}
+                    title="Próxima página"
+                    class=${PAGE_BTN}
+                  ><span class="hidden md:inline">Próxima</span> ›</button>
+                  <button
+                    onClick=${() => setPage(totalPages - 1)}
+                    disabled=${!hasNext}
+                    title="Última página"
+                    class=${PAGE_BTN}
+                  ><span class="hidden md:inline">Última</span> »</button>
+                </div>
+              </div>
+            </div>
+          ` : null}
         </div>
       `}
-
-      <!-- plano 69 F6 (fim do dead-end): a sentinela é renderizada SEMPRE que há mais
-           páginas — inclusive no ramo "Nenhum contato encontrado". Antes ela só vinha
-           junto da lista, então um filtro cliente que não casasse nada na página atual
-           travava o scroll (a sentinela sumia mesmo com mais páginas) e as seguintes
-           com matches nunca carregavam. -->
-      ${(!error && !loading && hasMore) ? html`
-        <div ref=${sentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
-          ${loadingMore ? 'Carregando mais…' : ''}
-        </div>` : null}
 
       ${detail ? html`
         <${ContactDetailOverlay}

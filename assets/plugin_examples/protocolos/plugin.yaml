@@ -1,6 +1,6 @@
 id: protocolos
 name: Protocolos
-version: 1.16.0
+version: 1.17.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o

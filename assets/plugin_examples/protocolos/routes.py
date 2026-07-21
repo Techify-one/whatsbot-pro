@@ -331,10 +331,33 @@ async def relink_protocolo(previous_id: int, request: Request):
         body = {}
     cur = body.get("current_open_id")
     cur = int(cur) if cur not in (None, "") else None
-    at, err = logic.relink_to_previous(previous_id, current_open_id=cur, actor=(name or None))
+    conv = body.get("conversation_id")
+    conv = int(conv) if conv not in (None, "") else None
+    at, err = logic.relink_to_previous(previous_id, current_open_id=cur,
+                                       actor=(name or None), conversation_id=conv)
     if err:
         return _err(err, status=404 if "encontrado" in err else 409)
     return {"ok": True, "data": {"protocolo": at}}
+
+
+@router.post("/conversas/{conversation_id}/open-new-protocolo",
+             dependencies=[plugin_permission("edit")])
+async def open_new_protocolo(conversation_id: int):
+    """Ação "É um novo protocolo" do popup de continuidade: abre AGORA o protocolo novo
+    desta conversa (o auto_link foi adiado até esta decisão)."""
+    at, err = logic.open_new_protocolo(conversation_id)
+    if err:
+        return _err(err, status=404 if "encontrada" in err else 409)
+    return {"ok": True, "data": {"protocolo": at}}
+
+
+@router.post("/protocolos/{previous_id}/relink-reviewed",
+             dependencies=[plugin_permission("edit")])
+async def relink_reviewed(previous_id: int):
+    """Ação "Fechar tudo" do popup de continuidade: marca o protocolo anterior como revisado
+    para não reperguntar (a conversa é fechada pelo frontend via setConversationStatus)."""
+    logic.mark_relink_reviewed(previous_id)
+    return {"ok": True, "data": {"protocolo_id": previous_id}}
 
 
 @router.post("/protocolos/{atid}/assign", dependencies=[plugin_permission("assign")])

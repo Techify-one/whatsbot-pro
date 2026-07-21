@@ -20,8 +20,8 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { markAsRead } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
-import { showBrowserNotification, playNotificationSound, getNotifPref } from '../../../utils/notifications.js';
-import { playTransferAlert } from '../../../utils/alertSound.js';
+import { showBrowserNotification, getNotifPref } from '../../../utils/notifications.js';
+import * as soundEngine from '../../../utils/soundEngine.js';
 import { optimisticDupIndex, dropSuperseded } from '../../../services/messages.js';
 import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
@@ -290,7 +290,7 @@ export function useConversationWsEvents(opts) {
       const body = data.preview ? `${who}: ${data.preview}` : who;
       notify(body, { kind: 'info' });
       if (getNotifPref('browser')) showBrowserNotification('WhatsBot — menção', body);
-      if (getNotifPref('sound')) playNotificationSound();
+      soundEngine.playEvent('mention');  // plano 63 F2 — som próprio da menção (gate per-device dentro do motor)
       return;
     }
     const cid = data && data.contact_id;
@@ -389,8 +389,12 @@ export function useConversationWsEvents(opts) {
   const onAgentTransferAlert = useCallback((data) => {
     const uid = currentUserIdRef.current;
     if (uid == null || !data || data.assignee_user_id !== uid) return;
-    if (data.enabled === false) return;
-    playTransferAlert(data.duration || 5);
+    // plano 63 F2 — motor unificado: som/volume configuráveis por atendente; o
+    // servidor manda `enabled`/`duration` (autoridade) como override.
+    soundEngine.playEvent('assigned_to_me', {
+      enabledOverride: data.enabled !== false,
+      durationOverride: data.duration,
+    });
   }, []);
   useWebSocket({ onConversationChanged, onAgentTransferAlert, onWsConnect });
 

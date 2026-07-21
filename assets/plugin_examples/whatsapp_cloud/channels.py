@@ -38,6 +38,88 @@ from channels.events import InboundEvent
 
 logger = logging.getLogger(__name__)
 
+# ── Limites de mídia da Meta (plano 65 + pré-validação de anexo) ─────────────
+# A POLÍTICA é do provider e mora aqui; o core só executa (valida tamanho/formato
+# genericamente, inspeciona codec com ffprobe e recomprime com ffmpeg). Números do
+# WhatsApp Cloud API (docs "Supported Media Types"):
+#   imagem     5 MB   · JPEG/PNG
+#   áudio     16 MB   · AAC/AMR/MP3/M4A/OGG(opus)
+#   vídeo     16 MB   · MP4/3GP, vídeo H.264, áudio AAC, 1 faixa de áudio
+#   documento 100 MB  · PDF/TXT/DOC(X)/XLS(X)/PPT(X)
+#   figurinha 500 KB  · WebP
+# Fora disso a Meta RECUSA o envio — o painel usa estes números pra bloquear o
+# anexo na hora (popup) em vez de deixar o envio falhar.
+# Import defensivo: num core anterior ao plano 65 ``VideoLimits`` não existe — o
+# plugin continua carregando e o core cai no seu fallback legado.
+try:
+    from channels.base import VideoLimits
+
+    _MEDIA_LIMITS = {
+        "video": VideoLimits(
+            max_bytes=16 * 1024 * 1024,
+            extensions=(".mp4", ".3gp", ".3gpp"),
+            video_codecs=("h264",),
+            audio_codecs=("aac",),
+            max_audio_streams=1,
+        ),
+    }
+    try:
+        # Core mais novo: os demais tipos também são declarados pelo provider.
+        from channels.base import MediaLimits
+
+        _MEDIA_LIMITS.update({
+            "image": MediaLimits(
+                max_bytes=5 * 1024 * 1024,
+                extensions=(".jpg", ".jpeg", ".png"),
+            ),
+            "audio": MediaLimits(
+                max_bytes=16 * 1024 * 1024,
+                extensions=(".aac", ".amr", ".mp3", ".m4a", ".mp4", ".ogg"),
+            ),
+            "document": MediaLimits(
+                max_bytes=100 * 1024 * 1024,
+                extensions=(".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx",
+                            ".ppt", ".pptx"),
+            ),
+            "sticker": MediaLimits(
+                max_bytes=500 * 1024,
+                extensions=(".webp",),
+            ),
+        })
+    except ImportError:  # pragma: no cover - core sem MediaLimits
+        pass
+    try:
+        # Core com transcode de áudio: declaramos os CODECS além do container, o
+        # que habilita a recodificação server-side. A regra que motiva isso é da
+        # Meta: `audio/ogg` só é aceito com OPUS — um Ogg/Vorbis passa em qualquer
+        # checagem de extensão e ainda assim é recusado no envio. Declarando isso,
+        # o core reencoda pra Ogg/Opus em vez de deixar o envio falhar.
+        from channels.base import AudioLimits
+
+        _MEDIA_LIMITS["audio"] = AudioLimits(
+            max_bytes=16 * 1024 * 1024,
+            extensions=(".aac", ".amr", ".mp3", ".m4a", ".mp4", ".ogg"),
+            # Aceitos quando o container não tem regra própria (AAC em .m4a/.mp4,
+            # MP3 em .mp3, AMR em .amr).
+            codecs=("aac", "mp3", "amr_nb", "amr_wb"),
+            codecs_by_ext=(
+                (".ogg", ("opus",)),          # Meta: base audio/ogg não é suportado
+                (".mp3", ("mp3",)),
+                (".aac", ("aac",)),
+                (".m4a", ("aac",)),
+                (".mp4", ("aac",)),
+                (".amr", ("amr_nb", "amr_wb")),
+            ),
+            transcode=True,
+            # Ordem de preferência da saída: Opus (formato nativo de áudio do
+            # WhatsApp, melhor voz por byte), depois AAC, depois MP3.
+            transcode_targets=(".ogg", ".m4a", ".mp3"),
+        )
+    except ImportError:  # pragma: no cover - core sem AudioLimits
+        pass
+except ImportError:  # pragma: no cover - core antigo
+    _MEDIA_LIMITS = None
+
 GRAPH_BASE = "https://graph.facebook.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 HTTP_TIMEOUT = 20.0
@@ -76,6 +158,9 @@ class WhatsAppCloudChannel(Channel):
                 # core webhook handshake needs verify_token). The core rejects
                 # creating one without them — see channels.base.required_credentials.
                 required_credentials=("access_token", "phone_number_id", "verify_token"),
+                # Limites de vídeo da Meta — o core valida/recomprime a partir daqui
+                # (plano 65). ``**`` para não passar a chave em core antigo.
+                **({"media_limits": _MEDIA_LIMITS} if _MEDIA_LIMITS else {}),
             ),
         )
         self.registry = registry

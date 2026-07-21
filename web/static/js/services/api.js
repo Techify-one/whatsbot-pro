@@ -156,6 +156,10 @@ export async function sandboxSendDocument(phone, file, caption = '') {
   return uploadRequest('/api/sandbox/send-document', { phone, caption, document: file });
 }
 
+export async function sandboxSendVideo(phone, file, caption = '') {
+  return uploadRequest('/api/sandbox/send-video', { phone, caption, video: file });
+}
+
 // ── Contacts ──────────────────────────────────────────────────────
 
 // `opts` (plano 50 F5/F7): { limit, offset, sort } ativam a paginação server-side — a
@@ -396,6 +400,11 @@ export async function sendPrivateAudio(phone, blob, filename = 'voice.ogg', opts
 export async function sendDocument(phone, file, caption = '', conversationId = null, channelId = null) {
   return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-document`,
     { document: file, caption, ..._scopeFields(conversationId, channelId) });
+}
+
+export async function sendVideo(phone, file, caption = '', conversationId = null, channelId = null) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-video`,
+    { video: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
 // Anexos como NOTA PRIVADA (só no painel). Espelham sendPrivateAudio e aceitam

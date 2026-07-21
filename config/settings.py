@@ -87,6 +87,35 @@ from dataclasses import dataclass
 _NO_SEED = object()
 
 
+# ── Sons de notificação configuráveis (plano 63) ───────────────────────────────
+# Camada GLOBAL (padrão da equipe, definido pelo admin) das preferências de som.
+# É UMA config key JSON (herda GET/PUT/allowlist/auditoria de graça). A camada
+# POR-USUÁRIO mora na tabela ``user_sound_prefs`` (override esparso); a camada
+# POR-DISPOSITIVO mora em localStorage (multiplicador de volume/mudo local). A
+# resolução 3-tier fail-open é feita no cliente (``web/static/js/utils/soundEngine.js``).
+#
+# Os IDs de ``sound`` (ding/chime/…) casam com as receitas sintetizadas do
+# ``soundEngine.js`` e com o catálogo em ``server/routes/sound_prefs.py`` (fonte
+# única dos metadados servidos por ``GET /api/sounds/catalog``). Os dois eventos de
+# transferência só carregam ``sound``/``volume`` aqui — ``enabled``/``duration``
+# deles seguem nas keys legadas ``transfer_alert_*``/``agent_transfer_alert_*``.
+#
+# Padrão (plano 63 · decisões do usuário 2026-07-20): master LIGADO com volume
+# modesto (0.6) — hoje os atendentes reclamam de NÃO conseguir ligar o som; nascer
+# ON resolve a dor e é reversível por usuário. As sirenes de transferência nascem
+# em 0.6 (antes gain fixo 0.3, agora respeitado pelo slider) atendendo ao pedido
+# de "diminuir" — cada atendente calibra no preview da tela "Notificações e sons".
+SOUND_SETTINGS_SEED: dict = {
+    "master_enabled": True,
+    "events": {
+        "new_message":    {"enabled": True, "sound": "ding",  "volume": 0.6},
+        "mention":        {"enabled": True, "sound": "chime", "volume": 0.8},
+        "ia_to_human":    {"sound": "siren", "volume": 0.6},
+        "assigned_to_me": {"sound": "siren", "volume": 0.6},
+    },
+}
+
+
 @dataclass(frozen=True)
 class ConfigKey:
     key: str
@@ -222,6 +251,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # ``web/static/js/components/shell/App.js``); a chave é exposta no GET só para o
     # cliente ler esse gate de som futuro.
     ConfigKey("notify_private_messages", default=False, exposed=True, writable=True),
+    # plano 63 — padrão GLOBAL (equipe) de som de notificação (JSON). Exposto no
+    # GET /api/config e editável via PUT (special-case de normalização no route).
+    # Overrides por usuário vivem em ``user_sound_prefs``; por dispositivo, em
+    # localStorage. Ver ``SOUND_SETTINGS_SEED`` acima.
+    ConfigKey("sound_settings", default=SOUND_SETTINGS_SEED, exposed=True, writable=True),
     # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
     ConfigKey("inactivity_timeout_min", default=30),
     ConfigKey("response_delay_min", default=1.0),

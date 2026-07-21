@@ -25,6 +25,7 @@ import RuntimePanel from '../RuntimePanel.js';
 import UsersManager from '../UsersManager.js';
 import AuditLog from '../AuditLog.js';
 import AgentEngine from '../ai/AgentEngine.js';
+import SoundSettings from '../SoundSettings.js';
 import { PageHeader } from './GearMenu.js';
 import { hasPermission } from '../../utils/permissions.js';
 
@@ -101,6 +102,14 @@ export function ScreenRouter({
     return html`<div class="w-full p-4">
         <${PageHeader} title="Configurações de IA" onBack=${() => setTab('contacts')} />
         <${AgentEngine} initialEntity=${entFor('ai')} currentUser=${currentUser} />
+      </div>`;
+  }
+  if (tab === 'sounds') {
+    // Som é PESSOAL — sem gate. O modo admin (editar o padrão da equipe) só
+    // aparece dentro da tela para quem tem settings.manage.
+    return html`<div class="w-full p-4">
+        <${PageHeader} title="Notificações e sons" onBack=${() => setTab('contacts')} />
+        <${SoundSettings} config=${config} onSaveConfig=${handleSave} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'plugins') {
