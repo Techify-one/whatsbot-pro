@@ -12,6 +12,8 @@ description: >-
 short_description: >-
   Widget de chat embarcável para sites. Cole o snippet, escolha os domínios autorizados e a IA/atendente responde ao vivo pelo navegador.
 author: WhatsBot
+frontend_extends: /plugins/website/static/extends.js
+frontend_api_version: "1.0"
 entry:
   channels: channels
   routes: routes

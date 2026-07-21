@@ -157,7 +157,7 @@ def get_session(session_token: str) -> Optional[dict]:
     with make_plugin_db() as conn:
         row = conn.execute(
             text("SELECT session_token, channel_id, chat_id, identifier, "
-                 "hmac_verified, created_at, last_seen "
+                 "hmac_verified, client_seq, created_at, last_seen "
                  "FROM plugin_website_sessions WHERE session_token = :t"),
             {"t": session_token}).mappings().first()
     return dict(row) if row else None
@@ -203,6 +203,83 @@ def mark_identified(session_token: str, identifier: str) -> None:
                  "SET identifier = :id, hmac_verified = 1, last_seen = :now "
                  "WHERE session_token = :t"),
             {"id": identifier, "now": _now(), "t": session_token})
+
+
+# ── Friendly visitor naming ("{canal} - Cliente N") ───────────────────────
+#
+# A widget contact is keyed by an opaque session token (``wsess_…``). Left as-is
+# the panel shows that token as the contact name. Instead we label each visitor
+# "{nome do canal} - Cliente {N}", with N a per-channel counter that starts at 1
+# and grows as new visitors send their FIRST message. The number is assigned
+# lazily (first inbound message) and persisted on the session so the name stays
+# stable across that visitor's later messages.
+
+def _channel_display_name(channel_id: str) -> str:
+    """The channel's operator-facing name (fallback ``"Site"``)."""
+    from db.repositories import channel_repo
+    try:
+        row = channel_repo.get(channel_id)
+    except Exception:  # noqa: BLE001
+        row = None
+    name = (row or {}).get("display_name") if row else None
+    return (name or "").strip() or "Site"
+
+
+def _next_channel_seq(conn, channel_id: str) -> int:
+    """Atomically hand out the next per-channel visitor number (race-safe)."""
+    from sqlalchemy import text
+    row = conn.execute(
+        text("INSERT INTO plugin_website_counters (channel_id, next_seq) "
+             "VALUES (:c, 1) "
+             "ON CONFLICT (channel_id) DO UPDATE "
+             "SET next_seq = plugin_website_counters.next_seq + 1 "
+             "RETURNING next_seq"),
+        {"c": channel_id}).first()
+    return int(row[0]) if row else 1
+
+
+def assign_client_seq(session_token: str, channel_id: str) -> int:
+    """Return the session's stable client number, assigning the next per-channel
+    value on first call. The counter bump and the session write share one
+    transaction; the ``client_seq IS NULL`` guard makes a concurrent double-assign
+    for the same session a no-op (it re-reads the winner)."""
+    from plugins.context import make_plugin_db
+    from sqlalchemy import text
+    with make_plugin_db() as conn:
+        row = conn.execute(
+            text("SELECT client_seq FROM plugin_website_sessions "
+                 "WHERE session_token = :t"),
+            {"t": session_token}).first()
+        if row and row[0] is not None:
+            return int(row[0])
+        seq = _next_channel_seq(conn, channel_id)
+        updated = conn.execute(
+            text("UPDATE plugin_website_sessions SET client_seq = :s "
+                 "WHERE session_token = :t AND client_seq IS NULL "
+                 "RETURNING client_seq"),
+            {"s": seq, "t": session_token}).first()
+        if updated and updated[0] is not None:
+            return int(updated[0])
+        # Lost the race for this session — another request assigned it. Re-read.
+        row = conn.execute(
+            text("SELECT client_seq FROM plugin_website_sessions "
+                 "WHERE session_token = :t"),
+            {"t": session_token}).first()
+        return int(row[0]) if row and row[0] is not None else seq
+
+
+def client_display_name(session_token: str, channel_id: str) -> str:
+    """The friendly "{nome do canal} - Contato {N}" label for a visitor.
+
+    Fail-open: any DB hiccup returns ``""`` so the caller falls back to the core
+    default (the raw session token) instead of breaking the inbound path."""
+    try:
+        seq = assign_client_seq(session_token, channel_id)
+        return f"{_channel_display_name(channel_id)} - Contato {seq}"
+    except Exception:  # noqa: BLE001
+        logger.warning("[website] could not build client name for %s",
+                       session_token, exc_info=True)
+        return ""
 
 
 # ── Rate limit (in-memory sliding window per IP / per session) ────────────
