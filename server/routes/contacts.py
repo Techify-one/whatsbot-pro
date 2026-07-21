@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from channels.contact_type import resolve_contact_type
+from channels import media_limits, video_validate, video_transcode
 from agent import group_mentions
 from server import system_notices
 from server.authz import (current_user, permission_denied, can_access_inbox,
@@ -255,6 +257,26 @@ def register_routes(app, deps):
         return _err(
             "Fora da janela de 24h: só é possível enviar um template aprovado.",
             status=409, data={"reason": "session_window_closed"})
+
+    def _media_limits_block(channel_id: str, kind: str, filename: str, size: int):
+        """Guard for the media limits the CHANNEL declares (tamanho/formato).
+
+        Returns a 413/415 ``_err`` when the upload cannot be delivered by this
+        channel (WhatsApp Cloud: 5 MB JPEG/PNG, 16 MB áudio, 100 MB PDF/DOC/…),
+        or ``None`` when it is fine — which is always the case for a channel that
+        declares no limits for the kind (GOWA/Telegram). Capability-driven, never
+        by provider name; the numbers live in the provider plugin.
+
+        Runs BEFORE the upload is written to disk, so a blocked send leaves no
+        orphan file. Video has its own path (validate → transcode → block) because
+        it also inspects codecs and may re-encode instead of blocking.
+        """
+        verdict = media_limits.validate_upload(
+            filename, size, outbound.capabilities(channel_id), kind)
+        if verdict.ok:
+            return None
+        status = 413 if verdict.reason == media_limits.TOO_BIG else 415
+        return _err(verdict.message, status=status, data={"reason": verdict.reason})
 
     async def _send_read_receipts(phone: str, msg_ids: list[str], channel_id: str = "default"):
         """Send read receipts via the conversation's channel (best-effort, plano 38 F3).
@@ -719,6 +741,12 @@ def register_routes(app, deps):
                 # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
                 data["revoke_supported"] = outbound.supports(channel, "revoke")
                 data["edit_supported"] = outbound.supports(channel, "edit_message")
+                # Limites de mídia DECLARADOS pelo canal (o provider é dono dos
+                # números): o compositor bloqueia o anexo fora do padrão com um
+                # popup em vez de deixar o envio falhar no provider.
+                data["media_limits"] = media_limits.describe(
+                    outbound.capabilities(channel),
+                    video_transcode_available=video_transcode.available())
             else:
                 _page = message_repo.get_all(
                     contact_id, limit=page_limit + 1, before_id=before_id)
@@ -1769,8 +1797,14 @@ def register_routes(app, deps):
             if block:
                 return block
         suffix = Path(image.filename or "img.png").suffix or ".png"
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await image.read()
+        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
+        if not is_sandbox:
+            block = _media_limits_block(
+                channel_id, "image", image.filename or f"img{suffix}", len(content))
+            if block:
+                return block
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         dest.write_bytes(content)
         # R14: shared operator media-send tail (send → persist → broadcast → emit).
         _u = current_user(request)
@@ -1812,8 +1846,14 @@ def register_routes(app, deps):
             if block:
                 return block
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         content = await audio.read()
+        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
+        if not is_sandbox:
+            block = _media_limits_block(
+                channel_id, "audio", audio.filename or f"voice{suffix}", len(content))
+            if block:
+                return block
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         dest.write_bytes(content)
         # R14: shared media-send tail. Audio sends with no caption, persists
         # "[Áudio]" / emits empty text, and runs the operator-audio transcription
@@ -1860,8 +1900,13 @@ def register_routes(app, deps):
         safe_name = Path(filename).name
         suffix = Path(safe_name).suffix
         stem = Path(safe_name).stem or "arquivo"
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
         content = await document.read()
+        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
+        if not is_sandbox:
+            block = _media_limits_block(channel_id, "document", safe_name, len(content))
+            if block:
+                return block
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
         dest.write_bytes(content)
         text_content = f"[Documento enviado: {safe_name}]"
         if caption.strip():
@@ -1881,6 +1926,102 @@ def register_routes(app, deps):
             return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
         logger.info("[Send] Document sent to %s: %s", phone, safe_name)
         return _ok({"message": "Documento enviado."})
+
+    @app.post("/api/contacts/{phone}/send-video")
+    async def send_video_to_contact(
+        phone: str,
+        request: Request,
+        video: UploadFile = File(...),
+        caption: str = Form(""),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+    ):
+        """Send a video to a contact (operator-initiated) — plano 65.
+
+        Routes ``kind="video"`` to the channel (WhatsApp Cloud already builds
+        ``type:"video"``; GOWA/Telegram degrade to file/sendVideo). The upload is
+        validated against the ``VideoLimits`` the CHANNEL declares (plano 65 —
+        WhatsApp Cloud declares mp4/3gp, H.264/AAC, ≤16 MB; GOWA/Telegram declare
+        none and are never blocked); a non-conforming file is transcoded when ffmpeg
+        is present (F5B) and otherwise blocked with a clear message (F5A). Never
+        keys off provider name — the policy comes from the provider.
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        denied_inbox = await _inbox_send_denied(
+            request, conversation_id=conversation_id, channel_id=channel_id)
+        if denied_inbox:
+            return denied_inbox
+        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
+        channel_id = _channel_for(phone, conversation_id, channel_id)
+        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
+        # sandbox stays local so it is never gated (mirrors /send text).
+        if not is_sandbox:
+            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
+            if block:
+                return block
+        suffix = Path(video.filename or "video.mp4").suffix or ".mp4"
+        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        content = await video.read()
+        dest.write_bytes(content)
+
+        # Validate against the Cloud limits (no-op for always-open channels). On a
+        # windowed channel a non-conforming file is transcoded (if ffmpeg) or
+        # blocked. Runs off-thread (ffprobe/ffmpeg are blocking).
+        if not is_sandbox:
+            caps = outbound.capabilities(channel_id)
+            verdict = await asyncio.to_thread(video_validate.validate_video, str(dest), caps)
+            if not verdict.ok:
+                # Re-encode toward the limits THIS channel declared (plano 65).
+                limits = video_validate.video_limits(caps)
+                transcoded = await asyncio.to_thread(
+                    video_transcode.transcode_to_limits, str(dest), limits)
+                if transcoded:
+                    # Move the transcoded mp4 into the outbox so its media_path
+                    # resolves for the panel render; drop the original upload.
+                    new_dest = statics_outbox_dir / f"{int(time.time() * 1000)}.mp4"
+                    try:
+                        os.replace(transcoded, new_dest)
+                    except OSError:
+                        import shutil as _shutil
+                        _shutil.move(transcoded, str(new_dest))
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    dest = new_dest
+                else:
+                    # Block (F5A): remove the orphan upload and return a clear error.
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    status = 413 if verdict.reason == video_validate.TOO_BIG else 415
+                    return _err(verdict.message, status=status,
+                                data={"reason": verdict.reason})
+
+        # R14: shared operator media-send tail (send → persist → broadcast → emit).
+        _u = current_user(request)
+        result = await messaging.send_media(
+            channel_id=channel_id, phone=phone, kind="video", dest=dest,
+            is_sandbox=is_sandbox, content=caption or "[Vídeo]", emit_text=caption,
+            caption=caption, error_label="vídeo",
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None))
+        if not result["ok"]:
+            verb = "Falha" if result["kind"] == "send" else "Erro"
+            # Meta rejects a codec ffprobe could not inspect (131053) — surface it
+            # as a friendly hint instead of the raw provider string (F5A).
+            err = result["error"] or ""
+            if "131053" in err:
+                return _err(
+                    "O WhatsApp recusou o vídeo (codec/formato). "
+                    "Reexporte em MP4 H.264/AAC e tente novamente.",
+                    status=422, data={"reason": "bad_codec"})
+            return _err(f"{verb} ao enviar vídeo: {err}", status=500)
+        logger.info("[Send] Video sent to %s", phone)
+        return _ok({"message": "Vídeo enviado."})
 
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict, request: Request):

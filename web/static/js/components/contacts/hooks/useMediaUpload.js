@@ -10,6 +10,8 @@
 // same blob/object-URL handling, same `session_window_closed` steering.
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
+import { notify } from '../../../services/notify.js';
+import { checkMediaFile, limitsSummary, isVideoAttachment } from '../../../services/mediaLimits.js';
 
 /**
  * @param {Object} opts
@@ -25,20 +27,24 @@ import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../.
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {()=>void} opts.openTemplatePicker
+ * @param {Object|null} opts.mediaLimits - limites por tipo declarados pelo canal.
  */
 export function useMediaUpload({
   api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
-  setContactData, updateMsgByLocalId, openTemplatePicker,
+  setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits = null,
 }) {
   const [sending, setSending] = useState(false);
+  // Anexo recusado pelas regras do canal: `{reason, message, detail}` → popup.
+  const [rejection, setRejection] = useState(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  // pendingMedia: { type: 'image'|'audio'|'document', file?, blob?, filename?, previewUrl? }
+  // pendingMedia: { type: 'image'|'audio'|'document'|'video', file?, blob?, filename?, previewUrl? }
   const [pendingMedia, setPendingMedia] = useState(null);
-  // Caption typed in the media-confirmation overlay (image/document only).
+  // Caption typed in the media-confirmation overlay (image/document/video).
   const [mediaCaption, setMediaCaption] = useState('');
   const fileInputRef = useRef(null);
   const docInputRef = useRef(null);
+  const videoInputRef = useRef(null);
   const attachMenuRef = useRef(null);
 
   // Close the attach menu on outside click
@@ -72,8 +78,30 @@ export function useMediaUpload({
     docInputRef.current?.click();
   }
 
+  function pickVideo() {
+    setAttachMenuOpen(false);
+    videoInputRef.current?.click();
+  }
+
+  // Pré-validação do anexo contra os limites que o CANAL declara (tamanho/formato
+  // — no WhatsApp oficial, as regras da Meta). Fora do padrão: abre o popup e o
+  // anexo nem entra na fila de envio, então nunca vira bolha com erro.
+  // Sandbox e nota privada não saem para o provedor → não são validados.
+  function mediaAllowed(file, kind) {
+    if (sandbox) return true;
+    const bad = checkMediaFile(file, kind, mediaLimits);
+    if (!bad) return true;
+    setRejection(bad);
+    return false;
+  }
+
+  function dismissRejection() {
+    setRejection(null);
+  }
+
   function requestImageSend(file) {
     if (!file || sending || pendingMedia) return;
+    if (mode !== 'private' && !mediaAllowed(file, 'image')) return;
     const previewUrl = URL.createObjectURL(file);
     setPendingMedia({ type: 'image', file, previewUrl });
   }
@@ -84,12 +112,35 @@ export function useMediaUpload({
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
+  function requestVideoSend(file) {
+    if (!mediaAllowed(file, 'video')) return;
+    const previewUrl = URL.createObjectURL(file);
+    setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
+  }
+
   function handleDocSelected(e) {
     const file = e.target.files[0];
-    if (file && !sending && !pendingMedia) {
+    if (docInputRef.current) docInputRef.current.value = '';
+    if (!file || sending || pendingMedia) return;
+    // Vídeo escolhido em "Documento": o canal pode não aceitar vídeo COMO
+    // documento (WhatsApp oficial) mas aceita como vídeo — então em vez de
+    // recusar o anexo, segue pelo caminho de vídeo (que ainda valida
+    // tamanho/formato/codec pelas regras de vídeo do canal).
+    if (mode !== 'private' && !sandbox
+        && isVideoAttachment(file, mediaLimits)
+        && checkMediaFile(file, 'document', mediaLimits)) {
+      requestVideoSend(file);
+      return;
+    }
+    if (mode === 'private' || mediaAllowed(file, 'document')) {
       setPendingMedia({ type: 'document', file, filename: file.name });
     }
-    if (docInputRef.current) docInputRef.current.value = '';
+  }
+
+  function handleVideoSelected(e) {
+    const file = e.target.files[0];
+    if (file && !sending && !pendingMedia) requestVideoSend(file);
+    if (videoInputRef.current) videoInputRef.current.value = '';
   }
 
   function handlePaste(e) {
@@ -107,6 +158,11 @@ export function useMediaUpload({
 
   // Audio path: the recorder hook produces { type:'audio', blob, filename, previewUrl }.
   function setPendingAudio(item) {
+    if (item && mode !== 'private'
+        && !mediaAllowed({ name: item.filename, size: item.blob && item.blob.size }, 'audio')) {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      return;
+    }
     setPendingMedia(item);
   }
 
@@ -122,6 +178,12 @@ export function useMediaUpload({
     // contato — então ignora a janela de 24h.
     const isPrivate = mode === 'private';
     const isPrivateAudio = pendingMedia.type === 'audio' && isPrivate;
+    // Video has no private-note path — it always goes to the contact.
+    if (pendingMedia.type === 'video' && isPrivate) {
+      notify('Vídeo não pode ser enviado como nota privada.', { kind: 'error' });
+      cancelPendingMedia();
+      return;
+    }
     // 24h window closed (WhatsApp Cloud): media also requires a template.
     if (sessionClosed && !isPrivate) {
       cancelPendingMedia();
@@ -177,6 +239,10 @@ export function useMediaUpload({
       optimistic = { ...base, content: docContent,
                      media_type: 'document', media_path: localUrl };
       sendPromise = api.sendDocument(phone, media.file, caption, conversationId, channelId);
+    } else if (media.type === 'video') {
+      optimistic = { ...base, content: caption || '[Vídeo]',
+                     media_type: 'video', media_path: localUrl };
+      sendPromise = api.sendVideo(phone, media.file, caption, conversationId, channelId);
     } else if (isPrivateAudio) {
       // Panel-only audio note (role private_note). "IA lê" / "IA responde no chat"
       // toggles ride along so the backend can transcribe + optionally run the AI.
@@ -226,12 +292,34 @@ export function useMediaUpload({
           updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
         }
       } else {
-        updateMsgByLocalId(localId, () => sandbox
-          ? { _status: res.ok ? null : 'failed' }
-          : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
-        if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
-            && conversationId != null) {
-          openTemplatePicker();
+        const limitReason = (res && !res.ok && res.data
+          && ['too_big', 'bad_format', 'bad_codec'].includes(res.data.reason))
+          ? res.data.reason : null;
+        if (limitReason) {
+          // Recusa por regra do canal que só dá pra saber no servidor (ex.: codec do
+          // vídeo, ou transcode indisponível). Some com a bolha otimista — nada foi
+          // enviado — e mostra o mesmo popup da pré-validação, em vez de deixar uma
+          // mensagem "falhou" no fio.
+          setContactData(prev => (prev && prev.messages) ? {
+            ...prev,
+            messages: prev.messages.filter(m => m._localId !== localId),
+          } : prev);
+          setRejection({
+            reason: limitReason === 'too_big' ? 'too_big' : 'bad_format',
+            message: res.error || 'Arquivo não compatível com este canal.',
+            detail: limitsSummary(media.type, mediaLimits && mediaLimits[media.type]),
+          });
+        } else {
+          updateMsgByLocalId(localId, () => sandbox
+            ? { _status: res.ok ? null : 'failed' }
+            : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+          if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
+              && conversationId != null) {
+            openTemplatePicker();
+          } else if (res && !res.ok && res.error) {
+            // Falha de envio genérica (rede/provedor) segue como toast.
+            notify(res.error, { kind: 'error' });
+          }
         }
       }
     } catch (err) {
@@ -245,10 +333,11 @@ export function useMediaUpload({
     sending,
     attachMenuOpen, setAttachMenuOpen, attachMenuRef,
     pendingMedia, setPendingMedia, setPendingAudio,
+    rejection, dismissRejection,
     mediaCaption, setMediaCaption,
-    fileInputRef, docInputRef,
-    handleAttachClick, pickImage, pickDocument,
-    handleFileSelected, handleDocSelected, handlePaste,
+    fileInputRef, docInputRef, videoInputRef,
+    handleAttachClick, pickImage, pickDocument, pickVideo,
+    handleFileSelected, handleDocSelected, handleVideoSelected, handlePaste,
     requestImageSend, cancelPendingMedia, confirmPendingMedia,
   };
 }

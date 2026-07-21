@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, sendImage, sendAudio, sendDocument } from '../../services/api.js';
+import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../../services/api.js';
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
@@ -53,7 +53,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
-    sendText: sendMessage, sendImage, sendAudio, sendDocument,
+    sendText: sendMessage, sendImage, sendAudio, sendDocument, sendVideo,
     ...(api || {}),
   };
 
@@ -97,6 +97,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   //  • editSupported: só mostra "Editar" quando o canal edita e não é sandbox.
   const revokeSupported = sandbox || !(contact && contact.revoke_supported === false);
   const editSupported = !sandbox && !!(contact && contact.edit_supported);
+  // Limites de mídia declarados pelo canal (tamanho/formato). O compositor usa
+  // pra bloquear o anexo incompatível com um popup ANTES de tentar enviar. Canal
+  // sem limites (GOWA/Telegram) manda `{}` e nada é bloqueado.
+  const mediaLimits = (!sandbox && contact && contact.media_limits) || null;
 
   // ── Hooks ──────────────────────────────────────────────────────
   // Message actions own `updateMsgByLocalId` (shared by composer + media).
@@ -129,7 +133,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
     mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
     aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
-    setContactData, updateMsgByLocalId, openTemplatePicker,
+    setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits,
   });
 
   const audio = useAudioRecorder({

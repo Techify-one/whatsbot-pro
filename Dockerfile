@@ -10,9 +10,10 @@ ENV PYTHONUNBUFFERED=1
 # ConfigKey default (8090) while the healthcheck probes 8080 → "unhealthy".
 ENV WHATSBOT_WEB_PORT=8080
 
-# Install curl and unzip for downloading GOWA
+# Install curl and unzip for downloading GOWA; ffmpeg (+ffprobe) for video
+# validation/transcode to the WhatsApp Cloud limits (plano 65 F5B).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl unzip && \
+    apt-get install -y --no-install-recommends curl unzip ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Download and install GOWA binary for Linux

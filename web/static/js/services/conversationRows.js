@@ -496,6 +496,9 @@ export function shapeConvData(d) {
     // "unknown/legacy" → shows).
     revoke_supported: d.revoke_supported,
     edit_supported: d.edit_supported,
+    // Limites de mídia declarados pelo canal (tamanho/formato por tipo) — o
+    // compositor bloqueia o anexo incompatível antes de enviar.
+    media_limits: d.media_limits || null,
   };
 }
 

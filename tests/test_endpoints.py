@@ -939,6 +939,100 @@ check("POST /send-document -> 200", r.status_code == 200)
 check("POST /send-document -> gowa called", mock_gowa_client.send_file.called)
 
 # ═══════════════════════════════════════════════════════════════════
+#  10c. Contact send video (plano 65)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Send Video")
+
+# GOWA (always-open) routes kind="video" to send_file — no Cloud validation.
+mock_gowa_client.send_file.reset_mock()
+fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100
+r = client.post(
+    "/api/contacts/5511999990001/send-video",
+    files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+    data={"caption": "Vídeo teste"},
+)
+check("POST /send-video -> 200", r.status_code == 200)
+check("POST /send-video -> gowa send_file called", mock_gowa_client.send_file.called)
+
+# Video validator policy — declared BY THE PROVIDER (plano 65), never by name.
+# A channel declaring VideoLimits is enforced; one declaring none never blocks;
+# a windowed channel from a plugin that predates media_limits falls back to the
+# legacy Cloud limits (retrocompat).
+from types import SimpleNamespace as _NS
+from channels import video_validate as _vv
+from channels.base import VideoLimits as _VL
+_declared = _NS(session_window_hours=24, media_limits={"video": _VL(
+    max_bytes=16 * 1024 * 1024, extensions=(".mp4", ".3gp", ".3gpp"),
+    video_codecs=("h264",), audio_codecs=("aac",), max_audio_streams=1)})
+_legacy = _NS(session_window_hours=24)          # plugin sem media_limits
+_open = _NS(session_window_hours=0)             # GOWA/Telegram: sem limites
+check("video_limits: no declaration + always-open -> None",
+      _vv.video_limits(_open) is None)
+check("video_limits: no declaration + windowed -> legacy Cloud fallback",
+      _vv.video_limits(_legacy) is _vv.LEGACY_CLOUD_VIDEO_LIMITS)
+check("video_limits: declared wins over fallback",
+      _vv.video_limits(_declared).max_bytes == 16 * 1024 * 1024)
+check("validate_video: no limits -> ok (any file)",
+      _vv.validate_video("/tmp/whatever.mkv", _open).ok)
+check("validate_video: declared + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _declared).reason == _vv.BAD_FORMAT)
+check("validate_video: legacy fallback + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _legacy).reason == _vv.BAD_FORMAT)
+# Oversized mp4 (>16 MB) -> too_big, under both declared and fallback policy.
+import tempfile as _tf, os as _os
+_big = _os.path.join(_tf.gettempdir(), "wac_big_test.mp4")
+with open(_big, "wb") as _fh:
+    _fh.truncate(16 * 1024 * 1024 + 1)
+check("validate_video: declared + >16MB -> too_big",
+      _vv.validate_video(_big, _declared).reason == _vv.TOO_BIG)
+check("validate_video: legacy fallback + >16MB -> too_big",
+      _vv.validate_video(_big, _legacy).reason == _vv.TOO_BIG)
+check("validate_video: too_big message cites the declared cap",
+      "16 MB" in _vv.validate_video(_big, _declared).message)
+# A provider declaring a different cap is honoured (no Meta numbers in the core).
+_small = _NS(media_limits={"video": _VL(max_bytes=1024)})
+check("validate_video: custom cap honoured (1 KB)",
+      _vv.validate_video(_big, _small).reason == _vv.TOO_BIG)
+_os.remove(_big)
+
+# Pré-validação genérica de anexo (imagem/áudio/documento) — mesma regra
+# policy-vs-mechanism: os números vêm do provider, o core só avalia/descreve.
+from channels import media_limits as _ml
+from channels.base import MediaLimits as _ML
+_cloudish = _NS(session_window_hours=24, media_limits={
+    "image": _ML(max_bytes=5 * 1024 * 1024, extensions=(".jpg", ".jpeg", ".png")),
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf", ".txt")),
+    "video": _VL(max_bytes=16 * 1024 * 1024),
+})
+check("media_limits: canal sem declaração -> sem limites (nada bloqueia)",
+      _ml.limits_for(_open, "image") is None
+      and _ml.validate_upload("x.exe", 10 ** 9, _open, "document").ok)
+check("media_limits: imagem fora do formato -> bad_format",
+      _ml.validate_upload("foto.gif", 10, _cloudish, "image").reason == _ml.BAD_FORMAT)
+check("media_limits: imagem acima do cap -> too_big",
+      _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").reason
+      == _ml.TOO_BIG)
+check("media_limits: mensagem de too_big cita o cap declarado",
+      "5 MB" in _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").message)
+check("media_limits: imagem conforme -> ok",
+      _ml.validate_upload("foto.PNG", 1024, _cloudish, "image").ok)
+check("media_limits: documento fora da lista -> bad_format",
+      _ml.validate_upload("a.zip", 10, _cloudish, "document").reason == _ml.BAD_FORMAT)
+check("media_limits: documento conforme -> ok",
+      _ml.validate_upload("a.pdf", 10 * 1024 * 1024, _cloudish, "document").ok)
+check("media_limits: kind sem declaração no canal -> ok",
+      _ml.validate_upload("v.ogg", 10 ** 9, _cloudish, "audio").ok)
+_desc = _ml.describe(_cloudish, video_transcode_available=True)
+check("media_limits.describe: expõe cap+extensões por tipo",
+      _desc["image"]["max_bytes"] == 5 * 1024 * 1024
+      and ".png" in _desc["image"]["extensions"])
+check("media_limits.describe: video carrega o flag de transcode",
+      _desc["video"]["transcode"] is True
+      and _ml.describe(_cloudish)["video"]["transcode"] is False)
+check("media_limits.describe: canal sem limites -> {} (painel não bloqueia nada)",
+      _ml.describe(_open) == {})
+
+# ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Presence")
@@ -5098,6 +5192,17 @@ check("POST /sandbox/send (no phone) -> 400", r.status_code == 400)
 
 r = client.post("/api/sandbox/send", json={"phone": "test", "message": ""})
 check("POST /sandbox/send (no msg) -> 400", r.status_code == 400)
+
+# Sandbox video (plano 65) — stored locally, agent reacts to the caption.
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=ProcessResult(
+                      reply="Vi o vídeo", tool_calls=[]))):
+    r = client.post(
+        "/api/sandbox/send-video",
+        files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+        data={"phone": "sandbox_test", "caption": "olha isso"},
+    )
+    check("POST /sandbox/send-video -> 200", r.status_code == 200)
 
 r = client.post("/api/sandbox/clear", json={"phone": "sandbox_test"})
 check("POST /sandbox/clear -> 200", r.status_code == 200)
