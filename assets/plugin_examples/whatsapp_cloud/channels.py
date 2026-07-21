@@ -88,6 +88,35 @@ try:
         })
     except ImportError:  # pragma: no cover - core sem MediaLimits
         pass
+    try:
+        # Core com transcode de áudio: declaramos os CODECS além do container, o
+        # que habilita a recodificação server-side. A regra que motiva isso é da
+        # Meta: `audio/ogg` só é aceito com OPUS — um Ogg/Vorbis passa em qualquer
+        # checagem de extensão e ainda assim é recusado no envio. Declarando isso,
+        # o core reencoda pra Ogg/Opus em vez de deixar o envio falhar.
+        from channels.base import AudioLimits
+
+        _MEDIA_LIMITS["audio"] = AudioLimits(
+            max_bytes=16 * 1024 * 1024,
+            extensions=(".aac", ".amr", ".mp3", ".m4a", ".mp4", ".ogg"),
+            # Aceitos quando o container não tem regra própria (AAC em .m4a/.mp4,
+            # MP3 em .mp3, AMR em .amr).
+            codecs=("aac", "mp3", "amr_nb", "amr_wb"),
+            codecs_by_ext=(
+                (".ogg", ("opus",)),          # Meta: base audio/ogg não é suportado
+                (".mp3", ("mp3",)),
+                (".aac", ("aac",)),
+                (".m4a", ("aac",)),
+                (".mp4", ("aac",)),
+                (".amr", ("amr_nb", "amr_wb")),
+            ),
+            transcode=True,
+            # Ordem de preferência da saída: Opus (formato nativo de áudio do
+            # WhatsApp, melhor voz por byte), depois AAC, depois MP3.
+            transcode_targets=(".ogg", ".m4a", ".mp3"),
+        )
+    except ImportError:  # pragma: no cover - core sem AudioLimits
+        pass
 except ImportError:  # pragma: no cover - core antigo
     _MEDIA_LIMITS = None
 

@@ -31,6 +31,43 @@ class MediaLimits:
 
 
 @dataclasses.dataclass(frozen=True)
+class AudioLimits:
+    """The audio constraints a provider's API enforces — codec-aware.
+
+    Same policy/mechanism split as :class:`VideoLimits`: the PROVIDER declares the
+    containers/codecs/cap, the core only evaluates (``channels.audio_validate``)
+    and, when the file does not conform, re-encodes it (``channels.audio_transcode``).
+    A channel that declares a plain :class:`MediaLimits` for ``"audio"`` (or nothing)
+    keeps the old extension+size behaviour — declaring ``AudioLimits`` is what opts
+    a provider into codec inspection and transcoding.
+
+    Why codecs matter: the WhatsApp Cloud API accepts ``audio/ogg`` **only with the
+    OPUS codec** (Ogg/Vorbis is refused), so extension alone cannot tell a
+    deliverable ``.ogg`` from a rejected one.
+
+    ``codecs`` is the accepted set for containers with no specific rule;
+    ``codecs_by_ext`` overrides it per container as ``((".ogg", ("opus",)), …)`` (a
+    tuple of pairs, not a dict, to keep the dataclass frozen/hashable).
+    ``transcode_targets`` is the provider's preferred OUTPUT container order for a
+    re-encode; empty falls back to ``extensions``.
+    """
+    max_bytes: int = 0
+    extensions: tuple = ()
+    codecs: tuple = ()
+    codecs_by_ext: tuple = ()
+    transcode: bool = True
+    transcode_targets: tuple = ()
+
+    def codecs_for(self, ext: str) -> tuple:
+        """Accepted codecs for a container, falling back to the flat ``codecs``."""
+        ext = (ext or "").lower()
+        for entry_ext, codecs in self.codecs_by_ext or ():
+            if str(entry_ext).lower() == ext:
+                return tuple(codecs or ())
+        return tuple(self.codecs or ())
+
+
+@dataclasses.dataclass(frozen=True)
 class VideoLimits:
     """The video constraints a provider's API enforces (plano 65 — desacoplamento).
 

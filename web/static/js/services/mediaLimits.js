@@ -57,28 +57,43 @@ export function limitsSummary(kind, entry) {
   return `Este canal aceita ${label} em ${parts.join(' ')}.`;
 }
 
-// Containers de vídeo comuns — usados só quando o arquivo não traz mime type
-// (alguns navegadores/SOs entregam `type` vazio) e o canal não declara vídeo.
-const VIDEO_EXT_FALLBACK = ['mp4', '3gp', '3gpp', 'mov', 'm4v', 'mkv', 'webm', 'avi'];
+// Containers comuns por tipo — usados só quando o arquivo não traz mime type
+// (alguns navegadores/SOs entregam `type` vazio) e o canal não declara o tipo.
+const EXT_FALLBACK = {
+  video: ['mp4', '3gp', '3gpp', 'mov', 'm4v', 'mkv', 'webm', 'avi'],
+  audio: ['ogg', 'opus', 'mp3', 'm4a', 'aac', 'wav', 'amr', 'flac', 'wma', 'oga', 'weba'],
+};
 
 /**
- * O arquivo escolhido é um VÍDEO? (mime `video/*`, ou extensão de container de
- * vídeo — preferindo as que o próprio canal declara aceitar).
+ * O arquivo escolhido é do tipo `kind`? (mime `<kind>/*`, ou extensão de
+ * container do tipo — preferindo as que o próprio canal declara aceitar).
  *
- * Serve pra rotear um vídeo escolhido no anexo "Documento" para o caminho de
- * vídeo: o canal pode não aceitar vídeo COMO DOCUMENTO (WhatsApp oficial) mas
- * aceita como vídeo, então bloquear seria errado.
+ * Serve pra rotear um arquivo escolhido no anexo "Documento" para o caminho
+ * certo: o canal pode não aceitar vídeo/áudio COMO DOCUMENTO (WhatsApp oficial
+ * só aceita PDF/Office/TXT como documento) mas aceita como vídeo/áudio, então
+ * bloquear o anexo seria errado.
  *
  * @param {{name?:string, type?:string}} file
+ * @param {string} kind - 'video' | 'audio'
  * @param {Object|null} mediaLimits
  */
-export function isVideoAttachment(file, mediaLimits) {
+export function isAttachmentOfKind(file, kind, mediaLimits) {
   if (!file) return false;
-  if (String(file.type || '').toLowerCase().startsWith('video/')) return true;
+  if (String(file.type || '').toLowerCase().startsWith(`${kind}/`)) return true;
   const ext = extOf(file.name).replace(/^\./, '');
   if (!ext) return false;
-  const declared = extList(mediaLimits && mediaLimits.video).map(e => e.toLowerCase());
-  return declared.includes(ext) || VIDEO_EXT_FALLBACK.includes(ext);
+  const declared = extList(mediaLimits && mediaLimits[kind]).map(e => e.toLowerCase());
+  return declared.includes(ext) || (EXT_FALLBACK[kind] || []).includes(ext);
+}
+
+/** @deprecated use `isAttachmentOfKind(file, 'video', mediaLimits)`. */
+export function isVideoAttachment(file, mediaLimits) {
+  return isAttachmentOfKind(file, 'video', mediaLimits);
+}
+
+/** O arquivo escolhido é um ÁUDIO? Ver `isAttachmentOfKind`. */
+export function isAudioAttachment(file, mediaLimits) {
+  return isAttachmentOfKind(file, 'audio', mediaLimits);
 }
 
 /**
@@ -108,9 +123,10 @@ export function checkMediaFile(file, kind, mediaLimits) {
   const entry = mediaLimits && mediaLimits[kind];
   if (!entry) return null;
 
-  // Vídeo com transcode disponível no servidor: um arquivo fora do padrão ainda
-  // pode ser recomprimido, então não bloqueia aqui (o servidor decide).
-  if (kind === 'video' && entry.transcode) return null;
+  // Tipo com transcode disponível no servidor (vídeo, e áudio quando o canal
+  // declara codecs): um arquivo fora do padrão ainda pode ser recodificado,
+  // então não bloqueia aqui — o servidor decide.
+  if (entry.transcode) return null;
 
   const label = KIND_LABEL[kind] || 'Arquivo';
   const detail = limitsSummary(kind, entry);

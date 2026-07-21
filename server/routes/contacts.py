@@ -20,7 +20,8 @@ from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from channels.contact_type import resolve_contact_type
-from channels import media_limits, video_validate, video_transcode
+from channels import (audio_transcode, audio_validate, media_limits,
+                      video_validate, video_transcode)
 from agent import group_mentions
 from server import system_notices
 from server.authz import (current_user, permission_denied, can_access_inbox,
@@ -746,7 +747,8 @@ def register_routes(app, deps):
                 # popup em vez de deixar o envio falhar no provider.
                 data["media_limits"] = media_limits.describe(
                     outbound.capabilities(channel),
-                    video_transcode_available=video_transcode.available())
+                    video_transcode_available=video_transcode.available(),
+                    audio_transcode_available=audio_transcode.available())
             else:
                 _page = message_repo.get_all(
                     contact_id, limit=page_limit + 1, before_id=before_id)
@@ -1847,14 +1849,49 @@ def register_routes(app, deps):
                 return block
         suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
         content = await audio.read()
-        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
-        if not is_sandbox:
+        # Canal que declara AudioLimits (codec-aware) segue o caminho do vídeo:
+        # grava → valida (ffprobe) → recodifica com ffmpeg → só bloqueia se não
+        # der. Canal com MediaLimits simples (ou nenhum) mantém o bloqueio
+        # barato ANTES de gravar (sem órfão no disco). Dirigido pelo que o
+        # PROVIDER declara, nunca por nome de provider.
+        caps = outbound.capabilities(channel_id) if not is_sandbox else None
+        alimits = audio_validate.audio_limits(caps) if caps is not None else None
+        if not is_sandbox and alimits is None:
             block = _media_limits_block(
                 channel_id, "audio", audio.filename or f"voice{suffix}", len(content))
             if block:
                 return block
         dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
         dest.write_bytes(content)
+
+        if alimits is not None:
+            verdict = await asyncio.to_thread(audio_validate.validate_audio, str(dest), caps)
+            if not verdict.ok:
+                # Recodifica para o container/codec que ESTE canal declarou
+                # (ex.: Ogg/Vorbis → Ogg/Opus, o único ogg que a Meta aceita).
+                transcoded = await asyncio.to_thread(
+                    audio_transcode.transcode_to_limits, str(dest), alimits)
+                if transcoded:
+                    new_dest = (statics_outbox_dir
+                                / f"{int(time.time() * 1000)}{Path(transcoded).suffix}")
+                    try:
+                        os.replace(transcoded, new_dest)
+                    except OSError:
+                        import shutil as _shutil
+                        _shutil.move(transcoded, str(new_dest))
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    dest = new_dest
+                else:
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    status = 413 if verdict.reason == audio_validate.TOO_BIG else 415
+                    return _err(verdict.message, status=status,
+                                data={"reason": verdict.reason})
         # R14: shared media-send tail. Audio sends with no caption, persists
         # "[Áudio]" / emits empty text, and runs the operator-audio transcription
         # tail (audio_transcription_mode in sent/both) inside the service.

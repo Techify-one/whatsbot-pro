@@ -50,6 +50,32 @@ test('vídeo acima do teto de entrada bloqueia mesmo com transcode', () => {
   assert.equal(bad.reason, 'too_big');
 });
 
+test('áudio com transcode disponível não bloqueia (servidor recodifica)', () => {
+  const entry = { max_bytes: 16 * 1024 * 1024, extensions: ['.mp3', '.ogg'] };
+  // Sem transcode o formato estranho é barrado no compositor…
+  assert.equal(
+    checkMediaFile({ name: 'voz.wav', size: 1024 }, 'audio', { audio: entry }).reason,
+    'bad_format');
+  // …com transcode ligado o servidor conserta, então o painel deixa passar.
+  assert.equal(
+    checkMediaFile({ name: 'voz.wav', size: 1024 }, 'audio',
+      { audio: { ...entry, transcode: true } }),
+    null);
+});
+
+test('isAttachmentOfKind reconhece áudio por mime, por extensão do canal e por fallback', async () => {
+  const { isAttachmentOfKind, isAudioAttachment } = await import('./mediaLimits.js');
+  const limits = { audio: { max_bytes: 16 * 1024 * 1024, extensions: ['.ogg', '.mp3'] } };
+  // mime explícito
+  assert.equal(isAttachmentOfKind({ name: 'x', type: 'audio/ogg' }, 'audio', null), true);
+  // extensão declarada pelo canal, sem mime (browser entregou type vazio)
+  assert.equal(isAttachmentOfKind({ name: 'voz.ogg', type: '' }, 'audio', limits), true);
+  // fallback de container comum, canal sem declaração
+  assert.equal(isAudioAttachment({ name: 'voz.wav', type: '' }, null), true);
+  // não-áudio continua sendo documento
+  assert.equal(isAudioAttachment({ name: 'doc.pdf', type: 'application/pdf' }, limits), false);
+});
+
 test('fmtSize / limitsSummary', () => {
   assert.equal(fmtSize(512 * 1024), '512 KB');
   assert.equal(fmtSize(16 * 1024 * 1024), '16 MB');

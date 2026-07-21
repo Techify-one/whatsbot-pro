@@ -19,7 +19,7 @@ from db.repositories import (conversation_repo, custom_attribute_repo, contact_r
                              message_repo, user_repo, agent_repo, mention_repo)
 from db.repositories.custom_attribute_validate import validate_value
 from server.avatars import avatar_version
-from channels import media_limits, video_transcode
+from channels import audio_transcode, media_limits, video_transcode
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
@@ -397,7 +397,8 @@ def register_routes(app, deps):
             # — o compositor bloqueia anexo fora do padrão antes de enviar.
             "media_limits": media_limits.describe(
                 outbound.capabilities(channel_id),
-                video_transcode_available=video_transcode.available()),
+                video_transcode_available=video_transcode.available(),
+                audio_transcode_available=audio_transcode.available()),
         })
 
     @app.post("/api/atendimentos/{conv_id}/status")

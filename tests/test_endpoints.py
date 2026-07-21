@@ -1020,6 +1020,17 @@ check("media_limits: documento fora da lista -> bad_format",
       _ml.validate_upload("a.zip", 10, _cloudish, "document").reason == _ml.BAD_FORMAT)
 check("media_limits: documento conforme -> ok",
       _ml.validate_upload("a.pdf", 10 * 1024 * 1024, _cloudish, "document").ok)
+_hint = _NS(session_window_hours=24, media_limits={
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf",)),
+    "video": _VL(max_bytes=16 * 1024 * 1024, extensions=(".mp4",)),
+    "audio": _ML(max_bytes=16 * 1024 * 1024, extensions=(".ogg",)),
+})
+check("media_limits: arquivo no anexo errado aponta o anexo certo (vídeo)",
+      "use o anexo Vídeo" in _ml.validate_upload("c.mp4", 10, _hint, "document").message)
+check("media_limits: arquivo no anexo errado aponta o anexo certo (áudio)",
+      "use o anexo Áudio" in _ml.validate_upload("v.ogg", 10, _hint, "document").message)
+check("media_limits: extensão que nenhum kind aceita não ganha dica",
+      "use o anexo" not in _ml.validate_upload("a.zip", 10, _hint, "document").message)
 check("media_limits: kind sem declaração no canal -> ok",
       _ml.validate_upload("v.ogg", 10 ** 9, _cloudish, "audio").ok)
 _desc = _ml.describe(_cloudish, video_transcode_available=True)
@@ -1031,6 +1042,58 @@ check("media_limits.describe: video carrega o flag de transcode",
       and _ml.describe(_cloudish)["video"]["transcode"] is False)
 check("media_limits.describe: canal sem limites -> {} (painel não bloqueia nada)",
       _ml.describe(_open) == {})
+
+# Áudio codec-aware: o provider declara os codecs por container (a Meta só aceita
+# ogg com OPUS), o core valida com ffprobe e recodifica em vez de deixar falhar.
+import shutil as _shutil, subprocess as _subprocess
+from channels import audio_transcode as _at, audio_validate as _av
+from channels.base import AudioLimits as _AL
+_AUDIO = _AL(
+    max_bytes=16 * 1024 * 1024,
+    extensions=(".mp3", ".m4a", ".ogg"),
+    codecs=("aac", "mp3"),
+    codecs_by_ext=((".ogg", ("opus",)), (".mp3", ("mp3",))),
+    transcode_targets=(".ogg", ".m4a"),
+)
+_audioish = _NS(session_window_hours=24, media_limits={"audio": _AUDIO})
+check("audio_validate: canal com MediaLimits simples não opta por codec/transcode",
+      _av.audio_limits(_cloudish) is None and _av.validate_audio("x.ogg", _cloudish).ok)
+check("audio_validate: canal sem limites -> ok",
+      _av.audio_limits(_open) is None and _av.validate_audio("x.ogg", _open).ok)
+check("audio_validate: container fora da lista -> bad_format",
+      _av.validate_audio("/tmp/x.wav", _audioish).reason == _av.BAD_FORMAT)
+check("AudioLimits.codecs_for: regra por container, com fallback no conjunto geral",
+      _AUDIO.codecs_for(".ogg") == ("opus",) and _AUDIO.codecs_for(".m4a") == ("aac", "mp3"))
+check("audio_transcode: alvo é o 1º container declarado pelo provider que o core encoda",
+      _at._target_ext(_AUDIO) == ".ogg"
+      and _at._target_ext(_AL(extensions=(".amr",))) is None)
+check("audio_transcode: bitrate cabe no cap declarado (e respeita os limites sãos)",
+      _at._bitrate_kbps(60 * 60, 1024 * 1024) == _at._MIN_KBPS
+      and _at._bitrate_kbps(1, 16 * 1024 * 1024) == _at._MAX_KBPS)
+check("audio_transcode: provider que proíbe re-encode nunca é recodificado",
+      _at.transcode_to_limits("/tmp/x.ogg", _AL(extensions=(".ogg",), transcode=False)) is None)
+_desc_a = _ml.describe(_audioish, audio_transcode_available=True)
+check("media_limits.describe: áudio carrega o flag de transcode",
+      _desc_a["audio"]["transcode"] is True
+      and _ml.describe(_audioish)["audio"]["transcode"] is False)
+
+# Ida-e-volta real com ffmpeg (o caso que motivou tudo: Ogg/Vorbis é recusado
+# pela Meta e vira Ogg/Opus). Pulado quando não há ffmpeg no ambiente.
+if _at.available() and _shutil.which("ffprobe"):
+    _ogg = _os.path.join(_tf.gettempdir(), "wb_test_vorbis.ogg")
+    _rc = _subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-c:a", "libvorbis", _ogg],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL).returncode
+    if _rc == 0:
+        check("audio_validate: ogg/vorbis (recusado pela Meta) -> bad_codec",
+              _av.validate_audio(_ogg, _audioish).reason == _av.BAD_CODEC)
+        _out = _at.transcode_to_limits(_ogg, _AUDIO)
+        check("audio_transcode: ogg/vorbis vira ogg/opus e passa a validar",
+              bool(_out) and _av.validate_audio(_out, _audioish).ok)
+        if _out:
+            _os.remove(_out)
+    _os.remove(_ogg)
 
 # ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence

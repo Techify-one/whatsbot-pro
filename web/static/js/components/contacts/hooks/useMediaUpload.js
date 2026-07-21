@@ -11,7 +11,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
-import { checkMediaFile, limitsSummary, isVideoAttachment } from '../../../services/mediaLimits.js';
+import { checkMediaFile, limitsSummary, isAttachmentOfKind } from '../../../services/mediaLimits.js';
 
 /**
  * @param {Object} opts
@@ -118,19 +118,36 @@ export function useMediaUpload({
     setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
   }
 
+  // Áudio escolhido como ARQUIVO (anexo "Documento") — o gravador tem seu próprio
+  // caminho (`setPendingAudio`). Mesma forma de item: o File já é um Blob.
+  function requestAudioSend(file) {
+    if (!mediaAllowed({ name: file.name, size: file.size }, 'audio')) return;
+    setPendingMedia({
+      type: 'audio', blob: file, filename: file.name,
+      previewUrl: URL.createObjectURL(file),
+    });
+  }
+
   function handleDocSelected(e) {
     const file = e.target.files[0];
     if (docInputRef.current) docInputRef.current.value = '';
     if (!file || sending || pendingMedia) return;
-    // Vídeo escolhido em "Documento": o canal pode não aceitar vídeo COMO
-    // documento (WhatsApp oficial) mas aceita como vídeo — então em vez de
-    // recusar o anexo, segue pelo caminho de vídeo (que ainda valida
-    // tamanho/formato/codec pelas regras de vídeo do canal).
+    // Vídeo/áudio escolhido em "Documento": o canal pode não aceitar esse
+    // arquivo COMO documento (o WhatsApp oficial só aceita PDF/Office/TXT) mas
+    // aceita como vídeo/áudio — então em vez de recusar o anexo, segue pelo
+    // caminho daquele tipo (que ainda valida tamanho/formato/codec pelas regras
+    // que o CANAL declara para ele). Dirigido pelos limites declarados, sem
+    // conhecer provider nenhum.
     if (mode !== 'private' && !sandbox
-        && isVideoAttachment(file, mediaLimits)
         && checkMediaFile(file, 'document', mediaLimits)) {
-      requestVideoSend(file);
-      return;
+      if (isAttachmentOfKind(file, 'video', mediaLimits)) {
+        requestVideoSend(file);
+        return;
+      }
+      if (isAttachmentOfKind(file, 'audio', mediaLimits)) {
+        requestAudioSend(file);
+        return;
+      }
     }
     if (mode === 'private' || mediaAllowed(file, 'document')) {
       setPendingMedia({ type: 'document', file, filename: file.name });

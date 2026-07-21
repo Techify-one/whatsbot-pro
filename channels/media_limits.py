@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 
 from channels import video_validate
-from channels.base import MediaLimits, VideoLimits
+from channels.base import AudioLimits, MediaLimits, VideoLimits
 
 # Kinds the panel can attach. "sticker" has no panel path yet but a provider may
 # already declare it, so describing it costs nothing.
@@ -38,6 +38,15 @@ _KIND_LABEL = {
     "audio": "Áudio",
     "document": "Documento",
     "sticker": "Figurinha",
+}
+
+# Artigo do rótulo, para a dica "Para enviar UM vídeo / UMA imagem, use o anexo …".
+_KIND_ARTICLE = {
+    "image": "uma",
+    "video": "um",
+    "audio": "um",
+    "document": "um",
+    "sticker": "uma",
 }
 
 
@@ -70,7 +79,7 @@ def limits_for(caps, kind: str):
     if kind == "video":
         return video_validate.video_limits(caps)
     declared = (getattr(caps, "media_limits", None) or {}).get(kind)
-    return declared if isinstance(declared, (MediaLimits, VideoLimits)) else None
+    return declared if isinstance(declared, (MediaLimits, VideoLimits, AudioLimits)) else None
 
 
 def validate_upload(filename: str, size: int, caps, kind: str) -> MediaVerdict:
@@ -91,11 +100,17 @@ def validate_upload(filename: str, size: int, caps, kind: str) -> MediaVerdict:
         allowed = "/".join(e.lstrip(".").upper() for e in extensions)
         msg = (f"Formato de {label.lower()} não suportado por este canal. "
                f"Use {allowed}.")
-        # Vídeo anexado como documento: o canal aceita o arquivo, só não por esse
-        # caminho — aponta a saída em vez de só recusar.
-        if kind != "video" and ext in tuple(
-                getattr(limits_for(caps, "video"), "extensions", ()) or ()):
-            msg += " Para enviar um vídeo, use o anexo Vídeo."
+        # Arquivo anexado pelo caminho errado (vídeo/áudio como documento): o canal
+        # aceita o arquivo, só não por esse caminho — aponta a saída em vez de só
+        # recusar. Varre os outros kinds declarados, sem privilegiar nenhum.
+        for other in KINDS:
+            if other == kind:
+                continue
+            if ext in tuple(getattr(limits_for(caps, other), "extensions", ()) or ()):
+                label_other = _KIND_LABEL.get(other, other)
+                msg += (f" Para enviar {_KIND_ARTICLE.get(other, 'um')} "
+                        f"{label_other.lower()}, use o anexo {label_other}.")
+                break
         return MediaVerdict(BAD_FORMAT, msg)
 
     max_bytes = getattr(limits, "max_bytes", 0) or 0
@@ -108,7 +123,8 @@ def validate_upload(filename: str, size: int, caps, kind: str) -> MediaVerdict:
     return MediaVerdict(OK)
 
 
-def describe(caps, *, video_transcode_available: bool = False) -> dict:
+def describe(caps, *, video_transcode_available: bool = False,
+             audio_transcode_available: bool = False) -> dict:
     """JSON-serializable view of a channel's media limits, for the panel.
 
     Shape: ``{kind: {max_bytes, extensions: [".mp4", …], transcode: bool}}`` —
@@ -116,9 +132,12 @@ def describe(caps, *, video_transcode_available: bool = False) -> dict:
     channel blocks nothing" and the panel skips its pre-check entirely.
 
     ``transcode`` tells the panel whether an oversized/odd file may still be
-    re-encoded server-side (video only, and only when ffmpeg is present); when it
-    is True the panel must NOT block on that kind's limits — the server can fix it.
+    re-encoded server-side (video and audio, and only when the provider declared
+    codec-aware limits AND ffmpeg is present); when it is True the panel must NOT
+    block on that kind's limits — the server can fix it.
     """
+    transcodable = {"video": video_transcode_available,
+                    "audio": audio_transcode_available}
     out: dict = {}
     for kind in KINDS:
         limits = limits_for(caps, kind)
@@ -128,8 +147,8 @@ def describe(caps, *, video_transcode_available: bool = False) -> dict:
             "max_bytes": int(getattr(limits, "max_bytes", 0) or 0),
             "extensions": list(getattr(limits, "extensions", ()) or ()),
         }
-        if kind == "video":
+        if kind in transcodable:
             entry["transcode"] = bool(
-                getattr(limits, "transcode", False) and video_transcode_available)
+                getattr(limits, "transcode", False) and transcodable[kind])
         out[kind] = entry
     return out
