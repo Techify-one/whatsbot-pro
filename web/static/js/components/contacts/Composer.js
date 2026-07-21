@@ -4,6 +4,7 @@ import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { EmojiPicker } from './EmojiPicker.js';
+import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
 
@@ -47,6 +48,7 @@ export function Composer({
     handleAttachClick, pickImage, pickDocument, pickVideo,
     handleFileSelected, handleDocSelected, handleVideoSelected,
     handlePaste, cancelPendingMedia, confirmPendingMedia,
+    rejection, dismissRejection,
   } = media;
   const { recording, recordDuration, handleMicClick } = audio;
 
@@ -85,6 +87,9 @@ export function Composer({
       class="hidden"
       onChange=${handleVideoSelected}
     />
+
+    <!-- Anexo recusado pelas regras do canal (tamanho/formato) -->
+    <${MediaRejectedModal} rejection=${rejection} onClose=${dismissRejection} />
 
     <!-- Media confirmation overlay -->
     ${pendingMedia && canSend ? html`

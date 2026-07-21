@@ -1,16 +1,23 @@
-"""Video validation against the WhatsApp Cloud API limits (plano 65).
+"""Generic video validation against provider-declared limits (plano 65).
 
-Capability-driven, never by provider name: the strict Cloud limits (mp4/3gp,
-H.264/AAC, ≤1 audio stream, ≤16 MB) only apply to *windowed* channels
-(``session_window_hours > 0`` — the WhatsApp Cloud API). Always-open channels
-(GOWA/Telegram, ``session_window_hours == 0``) render/deliver arbitrary mp4 as
-a file, so they get a permissive verdict here.
+Policy vs mechanism: the numbers (max bytes, container extensions, codecs) are
+NOT the core's — they are declared by each provider in
+``ChannelCapabilities.media_limits["video"]`` as a ``VideoLimits`` (see
+``channels.base``). This module only *evaluates* a file against whatever limits
+the channel declared. It never checks provider name, and a channel that declares
+no video limits (GOWA/Telegram — they deliver arbitrary mp4 as a file) gets an
+immediate permissive verdict.
 
-Codec/audio-stream checks require ``ffprobe`` on PATH. When it is absent (the
-production Docker image today — see Dockerfile), validation degrades to
-extension + size only, exactly like ``_gif_to_mp4`` degrades without ffmpeg.
-A codec the panel could not inspect then falls to the Meta ``131053`` error,
-which the caller surfaces as a friendly message (plano 65 F5A).
+Retrocompat: a provider plugin built before ``media_limits`` existed declares
+nothing, so a *windowed* channel (``session_window_hours > 0``, i.e. the WhatsApp
+Cloud API) falls back to ``LEGACY_CLOUD_VIDEO_LIMITS`` below — an older installed
+copy of the whatsapp_cloud plugin keeps being validated and transcoded exactly as
+before. New/updated plugins declare their own and the fallback is never reached.
+
+Codec/audio-stream checks require ``ffprobe`` on PATH. When it is absent,
+validation degrades to extension + size only, exactly like ``_gif_to_mp4``
+degrades without ffmpeg. A codec the panel could not inspect then falls to the
+Meta ``131053`` error, which the caller surfaces as a friendly message (F5A).
 """
 
 import json
@@ -20,13 +27,23 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from channels.base import VideoLimits
+
 logger = logging.getLogger(__name__)
 
-# Cloud API hard limits.
-MAX_VIDEO_BYTES = 16 * 1024 * 1024          # 16 MB (upload and link)
-ALLOWED_EXTENSIONS = (".mp4", ".3gp", ".3gpp")
-ALLOWED_VIDEO_CODECS = ("h264",)            # Meta: H.264 video
-ALLOWED_AUDIO_CODECS = ("aac",)             # Meta: AAC audio
+# Retrocompat fallback ONLY (see module docstring): the WhatsApp Cloud limits, used
+# for windowed channels whose provider plugin does not declare ``media_limits`` yet.
+# The authoritative copy lives in the whatsapp_cloud plugin.
+LEGACY_CLOUD_VIDEO_LIMITS = VideoLimits(
+    max_bytes=16 * 1024 * 1024,
+    extensions=(".mp4", ".3gp", ".3gpp"),
+    video_codecs=("h264",),
+    audio_codecs=("aac",),
+    max_audio_streams=1,
+)
+
+# Kept as a module constant for callers/tests that reference the legacy cap.
+MAX_VIDEO_BYTES = LEGACY_CLOUD_VIDEO_LIMITS.max_bytes
 
 # Structured rejection reasons (the route maps these to HTTP status + PT-BR text).
 OK = "ok"
@@ -46,10 +63,35 @@ class VideoVerdict:
         return self.reason == OK
 
 
+def video_limits(caps) -> VideoLimits | None:
+    """The video policy for a channel, or ``None`` when it imposes none.
+
+    Resolution order: what the provider declared → legacy Cloud fallback for a
+    windowed provider that predates ``media_limits`` → no limits. Never keys off
+    provider name.
+    """
+    declared = (getattr(caps, "media_limits", None) or {}).get("video")
+    if declared is not None:
+        return declared
+    if getattr(caps, "session_window_hours", 0):
+        return LEGACY_CLOUD_VIDEO_LIMITS
+    return None
+
+
 def is_windowed(caps) -> bool:
-    """True when the channel enforces the Cloud 24h window — the discriminator
-    for applying the strict Cloud video limits. Never checks provider name."""
+    """Deprecated alias kept for callers written before ``video_limits`` (plano 65).
+
+    True when the channel enforces a customer-care session window."""
     return bool(getattr(caps, "session_window_hours", 0))
+
+
+def _fmt_size(num_bytes: int) -> str:
+    """Human size for the rejection message (the cap comes from the provider, so
+    it is not necessarily a round number of MB)."""
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.0f} KB"
+    mb = num_bytes / (1024 * 1024)
+    return f"{mb:.0f} MB" if abs(mb - round(mb)) < 0.05 else f"{mb:.1f} MB"
 
 
 def _ffprobe_streams(path: str) -> list[dict] | None:
@@ -72,30 +114,32 @@ def _ffprobe_streams(path: str) -> list[dict] | None:
 
 
 def validate_video(path: str, caps) -> VideoVerdict:
-    """Validate ``path`` for the given channel capabilities.
+    """Validate ``path`` against the video limits the channel declares.
 
-    Always-open channels get an immediate ``OK`` (they deliver any mp4 as a
-    file). Windowed (Cloud) channels are checked for extension, size, and — when
-    ffprobe is available — video/audio codec and audio-stream count.
+    A channel with no declared limits gets an immediate ``OK``. Otherwise the file
+    is checked for extension, size, and — when ffprobe is available — video/audio
+    codec and audio-stream count.
     """
-    # Always-open providers (GOWA/Telegram) have no Cloud limits.
-    if not is_windowed(caps):
+    limits = video_limits(caps)
+    if limits is None:
         return VideoVerdict(OK)
 
     ext = os.path.splitext(path)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
+    if limits.extensions and ext not in limits.extensions:
+        allowed = "/".join(e.lstrip(".").upper() for e in limits.extensions)
         return VideoVerdict(
             BAD_FORMAT,
-            "Formato de vídeo não suportado pelo WhatsApp. Use MP4 (H.264/AAC).")
+            f"Formato de vídeo não suportado por este canal. Use {allowed}.")
 
     try:
         size = os.path.getsize(path)
     except OSError:
         size = 0
-    if size > MAX_VIDEO_BYTES:
+    if limits.max_bytes and size > limits.max_bytes:
         return VideoVerdict(
             TOO_BIG,
-            "Vídeo acima do limite de 16 MB do WhatsApp. Reduza o tamanho e tente novamente.")
+            f"Vídeo acima do limite de {_fmt_size(limits.max_bytes)} deste canal. "
+            "Reduza o tamanho e tente novamente.")
 
     streams = _ffprobe_streams(path)
     if streams is None:
@@ -106,22 +150,27 @@ def validate_video(path: str, caps) -> VideoVerdict:
                     if s.get("codec_type") == "video"]
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
 
-    if video_codecs and not any(c in ALLOWED_VIDEO_CODECS for c in video_codecs):
+    codec_hint = (f"Use {'/'.join(e.lstrip('.').upper() for e in limits.extensions)} "
+                  f"com vídeo {'/'.join(c.upper() for c in limits.video_codecs)} "
+                  f"e áudio {'/'.join(c.upper() for c in limits.audio_codecs)}."
+                  ) if limits.video_codecs and limits.audio_codecs else ""
+
+    if limits.video_codecs and video_codecs \
+            and not any(c in limits.video_codecs for c in video_codecs):
+        return VideoVerdict(
+            BAD_CODEC, f"Codec de vídeo não suportado. {codec_hint}".strip(),
+            codec_checked=True)
+    if limits.max_audio_streams and len(audio_streams) > limits.max_audio_streams:
         return VideoVerdict(
             BAD_CODEC,
-            "Codec de vídeo não suportado. Use MP4 com vídeo H.264 e áudio AAC.",
+            f"O vídeo tem mais de uma faixa de áudio; este canal aceita apenas "
+            f"{limits.max_audio_streams}.",
             codec_checked=True)
-    if len(audio_streams) > 1:
-        return VideoVerdict(
-            BAD_CODEC,
-            "O vídeo tem mais de uma faixa de áudio; o WhatsApp aceita apenas uma.",
-            codec_checked=True)
-    if audio_streams:
+    if limits.audio_codecs and audio_streams:
         audio_codecs = [s.get("codec_name", "") for s in audio_streams]
-        if not any(c in ALLOWED_AUDIO_CODECS for c in audio_codecs):
+        if not any(c in limits.audio_codecs for c in audio_codecs):
             return VideoVerdict(
-                BAD_CODEC,
-                "Codec de áudio não suportado. Use MP4 com vídeo H.264 e áudio AAC.",
+                BAD_CODEC, f"Codec de áudio não suportado. {codec_hint}".strip(),
                 codec_checked=True)
 
     return VideoVerdict(OK, codec_checked=True)

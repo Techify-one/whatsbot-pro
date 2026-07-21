@@ -11,11 +11,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
-
-// Client-side input ceiling (matches the server transcode teto). Larger inputs
-// are refused up front; conforming/oversized-but-convertible files pass and the
-// server decides (block vs. transcode) per channel capability — plano 65.
-const MAX_VIDEO_INPUT_BYTES = 200 * 1024 * 1024;
+import { checkMediaFile, limitsSummary } from '../../../services/mediaLimits.js';
 
 /**
  * @param {Object} opts
@@ -31,13 +27,16 @@ const MAX_VIDEO_INPUT_BYTES = 200 * 1024 * 1024;
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {()=>void} opts.openTemplatePicker
+ * @param {Object|null} opts.mediaLimits - limites por tipo declarados pelo canal.
  */
 export function useMediaUpload({
   api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
-  setContactData, updateMsgByLocalId, openTemplatePicker,
+  setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits = null,
 }) {
   const [sending, setSending] = useState(false);
+  // Anexo recusado pelas regras do canal: `{reason, message, detail}` → popup.
+  const [rejection, setRejection] = useState(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   // pendingMedia: { type: 'image'|'audio'|'document'|'video', file?, blob?, filename?, previewUrl? }
   const [pendingMedia, setPendingMedia] = useState(null);
@@ -84,8 +83,25 @@ export function useMediaUpload({
     videoInputRef.current?.click();
   }
 
+  // Pré-validação do anexo contra os limites que o CANAL declara (tamanho/formato
+  // — no WhatsApp oficial, as regras da Meta). Fora do padrão: abre o popup e o
+  // anexo nem entra na fila de envio, então nunca vira bolha com erro.
+  // Sandbox e nota privada não saem para o provedor → não são validados.
+  function mediaAllowed(file, kind) {
+    if (sandbox) return true;
+    const bad = checkMediaFile(file, kind, mediaLimits);
+    if (!bad) return true;
+    setRejection(bad);
+    return false;
+  }
+
+  function dismissRejection() {
+    setRejection(null);
+  }
+
   function requestImageSend(file) {
     if (!file || sending || pendingMedia) return;
+    if (mode !== 'private' && !mediaAllowed(file, 'image')) return;
     const previewUrl = URL.createObjectURL(file);
     setPendingMedia({ type: 'image', file, previewUrl });
   }
@@ -99,21 +115,18 @@ export function useMediaUpload({
   function handleDocSelected(e) {
     const file = e.target.files[0];
     if (file && !sending && !pendingMedia) {
-      setPendingMedia({ type: 'document', file, filename: file.name });
+      if (mode === 'private' || mediaAllowed(file, 'document')) {
+        setPendingMedia({ type: 'document', file, filename: file.name });
+      }
     }
     if (docInputRef.current) docInputRef.current.value = '';
   }
 
   function handleVideoSelected(e) {
     const file = e.target.files[0];
-    if (file && !sending && !pendingMedia) {
-      if (file.size > MAX_VIDEO_INPUT_BYTES) {
-        notify('Vídeo muito grande (máx. 200 MB). Reduza o arquivo e tente novamente.',
-          { kind: 'error' });
-      } else {
-        const previewUrl = URL.createObjectURL(file);
-        setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
-      }
+    if (file && !sending && !pendingMedia && mediaAllowed(file, 'video')) {
+      const previewUrl = URL.createObjectURL(file);
+      setPendingMedia({ type: 'video', file, filename: file.name, previewUrl });
     }
     if (videoInputRef.current) videoInputRef.current.value = '';
   }
@@ -133,6 +146,11 @@ export function useMediaUpload({
 
   // Audio path: the recorder hook produces { type:'audio', blob, filename, previewUrl }.
   function setPendingAudio(item) {
+    if (item && mode !== 'private'
+        && !mediaAllowed({ name: item.filename, size: item.blob && item.blob.size }, 'audio')) {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      return;
+    }
     setPendingMedia(item);
   }
 
@@ -262,16 +280,34 @@ export function useMediaUpload({
           updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
         }
       } else {
-        updateMsgByLocalId(localId, () => sandbox
-          ? { _status: res.ok ? null : 'failed' }
-          : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
-        if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
-            && conversationId != null) {
-          openTemplatePicker();
-        } else if (res && !res.ok && res.error) {
-          // Surface a clear rejection (e.g. video blocked: too big / bad format /
-          // codec — plano 65 F5A) instead of a silent failed bubble.
-          notify(res.error, { kind: 'error' });
+        const limitReason = (res && !res.ok && res.data
+          && ['too_big', 'bad_format', 'bad_codec'].includes(res.data.reason))
+          ? res.data.reason : null;
+        if (limitReason) {
+          // Recusa por regra do canal que só dá pra saber no servidor (ex.: codec do
+          // vídeo, ou transcode indisponível). Some com a bolha otimista — nada foi
+          // enviado — e mostra o mesmo popup da pré-validação, em vez de deixar uma
+          // mensagem "falhou" no fio.
+          setContactData(prev => (prev && prev.messages) ? {
+            ...prev,
+            messages: prev.messages.filter(m => m._localId !== localId),
+          } : prev);
+          setRejection({
+            reason: limitReason === 'too_big' ? 'too_big' : 'bad_format',
+            message: res.error || 'Arquivo não compatível com este canal.',
+            detail: limitsSummary(media.type, mediaLimits && mediaLimits[media.type]),
+          });
+        } else {
+          updateMsgByLocalId(localId, () => sandbox
+            ? { _status: res.ok ? null : 'failed' }
+            : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+          if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
+              && conversationId != null) {
+            openTemplatePicker();
+          } else if (res && !res.ok && res.error) {
+            // Falha de envio genérica (rede/provedor) segue como toast.
+            notify(res.error, { kind: 'error' });
+          }
         }
       }
     } catch (err) {
@@ -285,6 +321,7 @@ export function useMediaUpload({
     sending,
     attachMenuOpen, setAttachMenuOpen, attachMenuRef,
     pendingMedia, setPendingMedia, setPendingAudio,
+    rejection, dismissRejection,
     mediaCaption, setMediaCaption,
     fileInputRef, docInputRef, videoInputRef,
     handleAttachClick, pickImage, pickDocument, pickVideo,

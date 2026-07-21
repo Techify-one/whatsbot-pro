@@ -6,10 +6,13 @@ guarded by ``shutil.which("ffmpeg")`` so it is a no-op when ffmpeg is absent
 is missing the caller falls back to blocking the send with a clear message
 (plano 65 F5A).
 
-The target is MP4 H.264/AAC ≤ 16 MB. Bitrate is computed from the input
-duration so the output fits under the Cloud limit, with a downscale cap for
-oversized frames. Input is bounded (duration/size teto) so a pathological file
-never pins the worker.
+This is pure MECHANISM: the target size comes from the ``VideoLimits`` the
+CHANNEL declares (plano 65 — desacoplamento), not from a constant baked into the
+core. The output container/codecs are MP4 H.264/AAC because that is the
+universally accepted encode; bitrate is computed from the input duration so the
+output fits under the declared cap, with a downscale cap for oversized frames.
+Input is bounded (duration/size teto) so a pathological file never pins the
+worker.
 """
 
 import json
@@ -22,7 +25,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from channels.video_validate import MAX_VIDEO_BYTES
+from channels.base import VideoLimits
+from channels.video_validate import LEGACY_CLOUD_VIDEO_LIMITS
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +36,8 @@ MAX_INPUT_BYTES = 200 * 1024 * 1024        # 200 MB
 MAX_INPUT_DURATION_S = 300                 # 5 minutes
 FFMPEG_TIMEOUT_S = 180
 
-# Leave headroom below the hard 16 MB cap so container/muxing overhead still fits.
-_TARGET_BYTES = int(MAX_VIDEO_BYTES * 0.92)
+# Leave headroom below the declared cap so container/muxing overhead still fits.
+_HEADROOM = 0.92
 _AUDIO_BITRATE_KBPS = 128
 _MIN_VIDEO_BITRATE_KBPS = 200
 _MAX_LONG_EDGE = 1280                       # downscale cap (720p-ish long edge)
@@ -73,13 +77,19 @@ def _probe_meta(path: str) -> Optional[dict]:
         return None
 
 
-def transcode_to_cloud_mp4(path: str) -> Optional[str]:
-    """Transcode ``path`` to an MP4 H.264/AAC ≤ 16 MB and return the temp path.
+def transcode_to_limits(path: str, limits: Optional[VideoLimits] = None) -> Optional[str]:
+    """Transcode ``path`` to an MP4 H.264/AAC fitting ``limits`` and return the temp path.
 
-    Returns ``None`` when ffmpeg is absent, the input exceeds the safety ceilings,
-    or the transcode fails/does not fit — the caller then blocks the send (F5A).
-    The caller owns cleanup of the returned temp file.
+    ``limits`` is the policy the CHANNEL declared (``ChannelCapabilities.media_limits``);
+    when omitted the legacy Cloud limits are used so pre-plano-65 callers keep working.
+
+    Returns ``None`` when ffmpeg is absent, the provider forbids re-encoding, the
+    input exceeds the safety ceilings, or the transcode fails/does not fit — the
+    caller then blocks the send (F5A). The caller owns cleanup of the temp file.
     """
+    limits = limits or LEGACY_CLOUD_VIDEO_LIMITS
+    if not limits.transcode or not limits.max_bytes:
+        return None
     if not available():
         return None
     try:
@@ -97,8 +107,9 @@ def transcode_to_cloud_mp4(path: str) -> Optional[str]:
 
     # Target video bitrate so audio+video fit under _TARGET_BYTES. Fall back to a
     # conservative constant when the duration is unknown.
+    target_bytes = int(limits.max_bytes * _HEADROOM)
     if duration and duration > 0:
-        total_kbps = (_TARGET_BYTES * 8) / duration / 1000.0
+        total_kbps = (target_bytes * 8) / duration / 1000.0
         video_kbps = int(total_kbps - _AUDIO_BITRATE_KBPS)
     else:
         video_kbps = 1200
@@ -129,7 +140,7 @@ def transcode_to_cloud_mp4(path: str) -> Optional[str]:
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=FFMPEG_TIMEOUT_S)
         if proc.returncode == 0 and os.path.isfile(out) \
-                and 0 < os.path.getsize(out) <= MAX_VIDEO_BYTES:
+                and 0 < os.path.getsize(out) <= limits.max_bytes:
             return out
         # Did not fit or failed — discard the partial output.
         if os.path.isfile(out):
@@ -145,3 +156,10 @@ def transcode_to_cloud_mp4(path: str) -> Optional[str]:
             except OSError:
                 pass
     return None
+
+
+def transcode_to_cloud_mp4(path: str) -> Optional[str]:
+    """Deprecated alias kept for pre-plano-65 callers: transcodes to the legacy
+    Cloud limits. New code passes the channel's declared ``VideoLimits`` to
+    ``transcode_to_limits``."""
+    return transcode_to_limits(path, LEGACY_CLOUD_VIDEO_LIMITS)
