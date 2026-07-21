@@ -1826,53 +1826,6 @@ def register_routes(app, deps):
                     "msg_id": result.get("msg_id"),
                     "media_path": result.get("media_path")})
 
-    @app.post("/api/contacts/{phone}/send-video")
-    async def send_video_to_contact(
-        phone: str,
-        request: Request,
-        video: UploadFile = File(...),
-        caption: str = Form(""),
-        conversation_id: str = Form(""),
-        channel_id: str = Form(""),
-    ):
-        """Send a video to a contact (operator-initiated) — plano 64 · F9.
-
-        Espelha ``/send-image``: mesma ordem de gates, mesmo tail compartilhado.
-        Providers sem vídeo nativo degradam para documento dentro do próprio
-        ``send_media`` (o ``else`` catch-all de cada provider)."""
-        denied = permission_denied(request, "conversation.reply")
-        if denied:
-            return denied
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
-        if denied_inbox:
-            return denied_inbox
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
-        if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
-            if block:
-                return block
-        safe_name = Path(video.filename or "video.mp4").name
-        dest = statics_outbox_dir / unique_media_name(
-            video.content_type, safe_name, default_ext=".mp4")
-        content = await video.read()
-        dest.write_bytes(content)
-        _u = current_user(request)
-        result = await messaging.send_media(
-            channel_id=channel_id, phone=phone, kind="video", dest=dest,
-            is_sandbox=is_sandbox, content=caption, emit_text=caption,
-            caption=caption, filename=safe_name, error_label="vídeo",
-            sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
-        if not result["ok"]:
-            verb = "Falha" if result["kind"] == "send" else "Erro"
-            return _err(f"{verb} ao enviar vídeo: {result['error']}", status=500)
-        logger.info("[Send] Video sent to %s", phone)
-        return _ok({"message": "Vídeo enviado.",
-                    "msg_id": result.get("msg_id"),
-                    "media_path": result.get("media_path")})
-
     @app.post("/api/contacts/{phone}/send-audio")
     async def send_audio_to_contact(
         phone: str,
