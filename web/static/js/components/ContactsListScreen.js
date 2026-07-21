@@ -683,7 +683,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
       <!-- plano 69 F6 (fim do dead-end): a sentinela é renderizada SEMPRE que há mais
            páginas — inclusive no ramo "Nenhum contato encontrado". Antes ela só vinha
            junto da lista, então um filtro cliente que não casasse nada na página atual
-           travava o scroll (a sentinela sumia com `hasMore=true`) e as páginas seguintes
+           travava o scroll (a sentinela sumia mesmo com mais páginas) e as seguintes
            com matches nunca carregavam. -->
       ${(!error && !loading && hasMore) ? html`
         <div ref=${sentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
