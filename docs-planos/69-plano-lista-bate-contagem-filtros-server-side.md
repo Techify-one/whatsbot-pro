@@ -188,11 +188,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** `node --test` verde cobrindo as 4 abas + colisões; o mesmo params serve `/count` e `/filter` (byte-idêntico).
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `conversationFilterSpec.js` ganhou `buildListParams(spec)` (= `buildCountParams` + cláusula da aba), `assignmentParams(spec)` e `isListServerExpressible(spec)`. `buildCountParams` **intocado** (segue devolvendo os 4 contadores do spec-base). 7 testes novos em `conversationFilterSpec.test.js`.
+- **Como foi feito / decisões:** a aba é **view selector**, fora do count (que já traz mine/unassigned/mentions do spec-base). Mapeamento: `mine`→`assignee=me` (servidor resolve "me" via sessão — sem precisar de `currentUserId` no cliente), `unassigned`→`agent=none`+`agent__op=equal_to` (bate EXATO com `count_tab_counts.unassigned`=ambos-null; o `__op` é obrigatório porque `from_params` relê `none` como `is_not_present`), `mentions`→`has_mention=true` (F0). `isListServerExpressible` detecta a colisão aba×adv (só `unassigned`+adv-`agent`), caindo no cliente p/ lista E contagem juntas (D4).
+- **Problemas / pendências:** nenhuma. O wiring que consome esses builders (rotear a sidebar) é a F2.
+- **Verificação:** `node --test conversationFilterSpec.test.js` → 12 passed (5 antigos + 7 novos: all==base, mine/unassigned/mentions, colisão→false, mine/mentions nunca colidem, searching zera a aba).
 
 ---
 
