@@ -1822,7 +1822,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
         logger.info("[Send] Image sent to %s", phone)
-        return _ok({"message": "Imagem enviada."})
+        return _ok({"message": "Imagem enviada.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-video")
     async def send_video_to_contact(
@@ -1867,7 +1869,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar vídeo: {result['error']}", status=500)
         logger.info("[Send] Video sent to %s", phone)
-        return _ok({"message": "Vídeo enviado."})
+        return _ok({"message": "Vídeo enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-audio")
     async def send_audio_to_contact(
@@ -1954,7 +1958,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
         logger.info("[Send] Audio sent to %s", phone)
-        return _ok({"message": "Áudio enviado."})
+        return _ok({"message": "Áudio enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-document")
     async def send_document_to_contact(
@@ -2011,7 +2017,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
         logger.info("[Send] Document sent to %s: %s", phone, safe_name)
-        return _ok({"message": "Documento enviado."})
+        return _ok({"message": "Documento enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-video")
     async def send_video_to_contact(

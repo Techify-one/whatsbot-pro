@@ -8,6 +8,7 @@ import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
 import { clampFlyoutOffset } from './menuLayout.js';
+import { dragHasFiles } from './hooks/useDropZone.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
 import { Slot } from '../../plugins/Slot.js';
 
@@ -125,7 +126,7 @@ function highlightParts(text, query) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
@@ -151,6 +152,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   const selectedSet = new Set(selectedKeys || []);
   // For the bulk-tag toggle indicator: does every selected conversation have this tag?
   const selectedContacts = (contacts || []).filter(c => selectedSet.has(rowKeyFor(c)));
+
+  // Arrastar arquivos direto para uma conversa da lista (plano 64 · F11). O
+  // drop NÃO envia às cegas (P7): abre a conversa com a prévia já montada, e o
+  // operador confirma. `dragOverKey` realça a linha sob o cursor.
+  const [dragOverKey, setDragOverKey] = useState(null);
+  const dropEnabled = !selectionMode && typeof onDropFiles === 'function';
   const allSelectedHaveTag = (name) =>
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
@@ -533,9 +540,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${rowKeyFor(c)}
                   onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
+                  onDragOver=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                    setDragOverKey(rowKeyFor(c));
+                  } : null}
+                  onDragLeave=${dropEnabled ? () => setDragOverKey(k => (k === rowKeyFor(c) ? null : k)) : null}
+                  onDrop=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverKey(null);
+                    const files = e.dataTransfer && e.dataTransfer.files;
+                    if (files && files.length) onDropFiles(c, files);
+                  } : null}
                   onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
-                    (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
+                    dragOverKey === rowKeyFor(c) ? 'bg-wa-teal/25 outline outline-2 outline-wa-teal -outline-offset-2'
+                      : (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
                       : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
                 >

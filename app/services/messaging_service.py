@@ -213,7 +213,7 @@ class MessagingService:
         media send), ``error_label`` (PT-BR wording), and ``transcribe_audio`` (the
         audio-only tail). ``dest`` is the already-written ``Path``.
 
-        Returns ``{"ok": True, "msg_id": ...}`` on success or
+        Returns ``{"ok": True, "msg_id": ..., "media_path": ...}`` on success or
         ``{"ok": False, "error": ..., "kind": "send"|"unexpected"}`` when the send
         failed (the error bubble was already broadcast). The route maps that to the
         same ``_err``/``_ok`` envelopes it returned before.
@@ -304,7 +304,7 @@ class MessagingService:
                     },
                 })
 
-        return {"ok": True, "msg_id": msg_id}
+        return {"ok": True, "msg_id": msg_id, "media_path": rel_path}
 
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 

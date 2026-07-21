@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
@@ -241,6 +241,19 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
   // ── New-conversation / channel picker ───────────────────────────────
   const picker = useChannelPicker({ selectContact, fetchContacts, setSearch, newConvChannelRef });
+
+  // Arrastar arquivos para uma linha da sidebar (plano 64 · F11). Abre aquela
+  // conversa e entrega os arquivos ao painel, que monta a prévia — nada é
+  // enviado sem confirmação (P7). O handoff é um estado com `token` para o
+  // painel consumir uma vez só (soltar os MESMOS arquivos duas vezes seguidas
+  // ainda dispara, porque o token muda).
+  const [droppedFiles, setDroppedFiles] = useState(null);
+  const dropTokenRef = useRef(0);
+  const handleRowDropFiles = useCallback((row, files) => {
+    selectContact(row);
+    dropTokenRef.current += 1;
+    setDroppedFiles({ token: dropTokenRef.current, phone: row.phone, files });
+  }, [selectContact]);
   const {
     checkingPhone, checkPhoneError, setCheckPhoneError,
     channelPicker, setChannelPicker,
@@ -328,6 +341,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           selected=${selectedKey}
           showChannel=${showChannel}
           onSelect=${selectContact}
+          onDropFiles=${handleRowDropFiles}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
           aiRespondingState=${aiRespondingState}
@@ -397,6 +411,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 loadOlder=${loadOlder}
                 loadingOlder=${loadingOlder}
                 hasMore=${contactData && contactData.has_more}
+                droppedFiles=${droppedFiles}
+                onDroppedFilesConsumed=${() => setDroppedFiles(null)}
               />`
           }
           ${openPanel === 'contact' && selected && canReadContact ? html`

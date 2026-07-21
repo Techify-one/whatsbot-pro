@@ -913,6 +913,14 @@ r = client.post(
 )
 check("POST /send-image -> 200", r.status_code == 200)
 check("POST /send-image -> gowa called", mock_gowa_client.send_image.called)
+# plano 64 · F12 — ids opcionais no envelope (a UI reconcilia por _localId
+# quando ausentes, então isto é aditivo e não-quebrante).
+_img_data = r.json().get("data") or {}
+check("send-image -> _ok traz media_path",
+      str(_img_data.get("media_path", "")).startswith("statics/outbox/"))
+check("send-image -> _ok tem a chave msg_id", "msg_id" in _img_data)
+check("send-image -> mensagem original preservada",
+      _img_data.get("message") == "Imagem enviada.")
 
 # ═══════════════════════════════════════════════════════════════════
 #  10. Contact send audio

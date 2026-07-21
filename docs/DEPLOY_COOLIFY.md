@@ -21,7 +21,7 @@ O que **sobrevive** a um redeploy (está no Postgres externo): as **configuraç�
 dos plugins (`config` chaves `plugin.<id>.*`), os **dados** (`plugin_<id>_*`), o
 histórico de migrations e as linhas de `plugins`. O que **se perde** (está no disco
 do container): o **código** dos plugins em `storages/plugins/<id>/`, a **sessão do
-WhatsApp/GOWA** em `storages/` e a **mídia enviada** em `statics/senditems/`.
+WhatsApp/GOWA** em `storages/` e a **mídia enviada** em `statics/outbox/`.
 
 ## Antes de tudo: qual é o **build pack** no Coolify?
 
@@ -44,7 +44,7 @@ Persistent Storage**, adicione dois mounts persistentes:
 | Mount no container | Cobre |
 |---|---|
 | `/app/storages` | código dos plugins (`storages/plugins/`) **+** sessão do WhatsApp/GOWA **+** sessões dos números com proxy dedicado (`storages/gowa_ch_<canal>/` — plano 52) |
-| `/app/statics` (ou ao menos `/app/statics/senditems`) | mídia enviada pelo operador |
+| `/app/statics` (ou ao menos `/app/statics/outbox`) | mídia enviada pelo operador |
 
 Em qualquer dos casos, feito isso um redeploy passa a preservar tudo — o bootstrap
 deixa de reinicializar a pasta porque ela não está mais vazia.

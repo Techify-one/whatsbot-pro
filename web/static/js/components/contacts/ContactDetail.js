@@ -47,7 +47,7 @@ const SelectManyIcon = () => html`
 // reply-quote lookup and the dialogs (delete / improve / template / context menu)
 // stay here; everything composer-related lives in the hooks/components.
 
-export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -150,6 +150,19 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     disabled: !canReply || media.sending || (sessionClosed && composer.mode !== 'private'),
     onFiles: (files, sendMode) => media.requestFilesDrop(files, sendMode),
   });
+
+  // Arquivos soltos numa linha da sidebar (plano 64 · F11): o `Contacts` já
+  // trocou para esta conversa e nos entrega o lote. Só consome quando o telefone
+  // bate — evita despejar na conversa errada se o painel ainda não trocou.
+  const consumedDropRef = useRef(0);
+  useEffect(() => {
+    if (!droppedFiles || droppedFiles.token === consumedDropRef.current) return;
+    if (droppedFiles.phone !== phone) return;
+    consumedDropRef.current = droppedFiles.token;
+    if (canReply) media.requestFilesDrop(droppedFiles.files, 'media');
+    if (onDroppedFilesConsumed) onDroppedFilesConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [droppedFiles, phone, canReply]);
 
   // ── Seleção em lote (plano 51 · 04 F1) ─────────────────────────
   // As mensagens completas resolvidas do Set de chaves + os itens de ação vindos

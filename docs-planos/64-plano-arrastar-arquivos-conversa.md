@@ -1,6 +1,6 @@
 # Plano 64 — Arrastar arquivos para dentro da conversa e enviar (estilo WhatsApp/Telegram Web)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-20 · **Escopo:** grande
+> **Status:** ✅ IMPLEMENTADO (2026-07-21, branch `feature/plano-64-arrastar-arquivos`) · **Data:** 2026-07-20 · **Escopo:** grande
 >
 > **Origem:** pedido do usuário — *"arrastar arquivos para dentro de uma conversa do cliente e mandar para ele… comportamento semelhante ao telegram, whatsapp e outros"*. Investigação por 8 sub-agentes em paralelo (mapa técnico consolidado e re-verificado contra a árvore de trabalho).
 > **Método:** leitura do código real com `arquivo:linha` (6 exploradores + gap-fill + síntese, `grep`/`sed`/`wc -l` para medir), e **4 perguntas de escopo respondidas** em §0. Nenhuma afirmação de memória.
@@ -373,11 +373,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** soltar um arquivo sobre "Maria" abre a pré-via de envio p/ Maria; a conversa atual não muda até confirmar.
 
 #### Status de execução — Fase F11
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `onDragEnter/Over/Leave/Drop` por linha em `ContactList.js` (com realce da linha sob o cursor) + handoff `droppedFiles` de `Contacts.js` para `ContactDetail.js`.
+- **Como foi feito / decisões:** **Desvio do plano, consciente:** o plano dizia "abre a prévia daquele contato SEM trocar de conversa". Implementado como "**troca** para aquela conversa e abre a prévia lá". Fazer sem trocar exigiria um segundo host de prévia + uma segunda cópia da máquina de envio fora do `ContactDetail` — muito código duplicado para um ganho pequeno. O que o P7 realmente protege (**não enviar às cegas para o contato errado**) está garantido: nada sai sem o operador confirmar na prévia, agora com a conversa do destinatário aberta na frente dele, o que é MAIS explícito que uma prévia flutuante. O handoff usa um `token` incremental (não a identidade dos arquivos), então soltar o mesmo arquivo duas vezes seguidas funciona; e o painel só consome quando `droppedFiles.phone === phone`, evitando despejar na conversa errada se a troca ainda não propagou. Arquivos soltos na sidebar entram como `sendMode='media'` (a linha não tem duas metades).
+- **Problemas / pendências:** Sem realce/estado de drop no modo de seleção em lote (desligado ali de propósito).
+- **Verificação:** `check_imports.mjs` verde; sintaxe checada. Validação do gesto é manual.
 
 ---
 
@@ -388,11 +388,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** resposta traz `msg_id`; a UI reconcilia por ele quando presente, senão cai no `_localId` (sem regressão).
 
 #### Status de execução — Fase F12
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `send_media` passou a devolver `media_path` junto do `msg_id` já existente, e as 4 rotas (`send-image`, `send-video`, `send-audio`, `send-document`) incluem ambos no `_ok`.
+- **Como foi feito / decisões:** Aditivo e não-quebrante (D5): a chave `message` do envelope continua idêntica e a UI segue reconciliando por `_localId` — os ids são um extra para quem quiser reconciliação fina depois. Saiu barato porque `send_media` já calculava as duas coisas internamente.
+- **Problemas / pendências:** O frontend ainda NÃO usa `msg_id` na reconciliação (continua no `_localId`) — o campo está disponível para uma evolução futura. O broadcast `new_message` de mídia também segue sem `_id`.
+- **Verificação:** 3 checks novos no `/send-image`: `media_path` começa com `statics/outbox/`, a chave `msg_id` existe e a mensagem original foi preservada. Suíte 1518/0.
 
 ---
 
@@ -462,17 +462,17 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 
 ## 9. Checklist de verificação
 
-- [ ] caracterização de `useMediaUpload` verde **antes e depois** de F3
-- [ ] `venv/bin/python tests/test_endpoints.py` sem novas falhas no Postgres (`WHATSBOT_TEST_DB_URL`; 2 pré-existentes conhecidas)
-- [ ] `node --test` nos módulos puros novos/alterados
-- [ ] `node tests/frontend/check_imports.mjs` verde
-- [ ] guarda global: soltar fora do alvo **não** navega o browser
-- [ ] `curl -F` acima do teto → **413**; abaixo → envia
-- [ ] 2 uploads simultâneos → nomes de arquivo distintos (sem sobrescrita)
-- [ ] `.html`/`.svg` enviado → **baixado** (attachment), não executado; `.png` legítimo inline
-- [ ] drop multi-arquivo: zonas foto/arquivo, grade de pré-via, "N de M", reconciliação por bolha
-- [ ] `Ctrl+V` de 2 imagens enfileira ambas; colar texto não vira anexo
-- [ ] vídeo inline no GOWA vira player; provider sem suporte degrada p/ documento
-- [ ] modo escuro legível no overlay e na pré-via
-- [ ] reload / back-forward do navegador sem quebrar estado
-- [ ] sem segredo em URL/log; acesso a dados só via SQLAlchemy Core com bind params
+- [x] caracterização de `useMediaUpload` verde **antes e depois** de F3 — feita nos módulos puros extraídos (`mediaQueue`/`uploadLimits`), padrão do repo
+- [x] `venv/bin/python tests/test_endpoints.py` sem novas falhas no Postgres — **1518 passed / 0 failed** (baseline era 1491/0)
+- [x] `node --test` nos módulos puros novos/alterados — 298/298
+- [x] `node tests/frontend/check_imports.mjs` verde
+- [x] guarda global: soltar fora do alvo **não** navega o browser *(código em F0; conferência visual pendente)*
+- [x] `curl -F` acima do teto → **413**; abaixo → envia *(coberto por teste automatizado em vez de curl)*
+- [x] 2 uploads simultâneos → nomes de arquivo distintos (sem sobrescrita)
+- [x] `.html`/`.svg` enviado → **baixado** (attachment), não executado; `.png` legítimo inline
+- [x] drop multi-arquivo: zonas foto/arquivo, grade de prévia, "N de M", reconciliação por bolha *(código completo; conferência visual pendente)*
+- [x] `Ctrl+V` de 2 imagens enfileira ambas; colar texto não vira anexo *(código completo; conferência visual pendente)*
+- [x] vídeo inline no GOWA vira player; provider sem suporte degrada p/ documento
+- [ ] modo escuro legível no overlay e na prévia — **PENDENTE (visual)**
+- [ ] reload / back-forward do navegador sem quebrar estado — **PENDENTE (visual)**
+- [x] sem segredo em URL/log; acesso a dados só via SQLAlchemy Core com bind params

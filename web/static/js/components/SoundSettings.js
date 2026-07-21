@@ -52,6 +52,30 @@ function VolumeSlider({ value, onInput, onChange, label }) {
     </div>`;
 }
 
+// Modal de confirmação in-app (mesmo padrão de CustomAttributesManager/RolesManager
+// — substitui o confirm() nativo do navegador, que não segue o tema).
+function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = false,
+                       busy = false, onConfirm, onClose }) {
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-sm"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[15px] font-medium text-wa-text">${title}</div>
+          <button class="text-wa-secondary hover:text-wa-text text-xl leading-none" onClick=${onClose}>×</button>
+        </div>
+        <div class="text-[13px] text-wa-secondary mb-4 break-words">${message}</div>
+        <div class="flex gap-2 justify-end">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onClose} disabled=${busy}>Cancelar</button>
+          <button
+            class=${`px-4 py-2 rounded-md text-[14px] text-white transition-opacity disabled:opacity-50 ${danger ? 'bg-red-600 hover:opacity-90' : 'bg-wa-teal hover:opacity-90'}`}
+            onClick=${onConfirm} disabled=${busy}>${busy ? 'Aguarde…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ── Biblioteca de sons importados ─────────────────────────────────────────────
 // Qualquer atendente logado importa (decisão do produto). O servidor recusa o que
 // não for áudio e o que passar de 1 MB; aqui damos o feedback antes de subir.
@@ -60,7 +84,10 @@ function SoundLibrary({ sounds, onChanged, onPreview }) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [renaming, setRenaming] = useState(null);   // {id, name}
+  // Edição inline do nome: `id` é o id de CATÁLOGO (`custom:<n>`), o mesmo que
+  // identifica a linha na lista; `num` é o id numérico que vai na URL da API.
+  const [renaming, setRenaming] = useState(null);   // {id, num, name}
+  const [confirmDelete, setConfirmDelete] = useState(null);  // {id, num, label}
 
   const custom = (sounds || []).filter(s => s.kind === 'file');
 
@@ -93,20 +120,24 @@ function SoundLibrary({ sounds, onChanged, onPreview }) {
     setBusy(false);
   }
 
-  async function remove(id) {
+  async function remove() {
+    if (!confirmDelete) return;
     setBusy(true);
     try {
-      await fetch(`/api/sounds/library/${id}`, { method: 'DELETE', headers: authHeaders() });
+      await fetch(`/api/sounds/library/${confirmDelete.num}`, {
+        method: 'DELETE', headers: authHeaders(),
+      });
       await onChanged();
     } catch (_) { /* ignore */ }
+    setConfirmDelete(null);
     setBusy(false);
   }
 
   async function commitRename() {
-    if (!renaming) return;
+    if (!renaming || !renaming.name.trim()) return;
     setBusy(true);
     try {
-      await fetch(`/api/sounds/library/${renaming.id}`, {
+      await fetch(`/api/sounds/library/${renaming.num}`, {
         method: 'PUT',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ name: renaming.name }),
@@ -146,6 +177,17 @@ function SoundLibrary({ sounds, onChanged, onPreview }) {
       </div>
       ${err ? html`<span class="text-[12px] text-red-500">${err}</span>` : null}
 
+      ${confirmDelete ? html`
+        <${ConfirmModal}
+          title="Excluir som importado"
+          message=${`Excluir "${confirmDelete.label}"? Quem estiver usando este som volta a ouvir o som padrão do evento.`}
+          confirmLabel="Excluir"
+          danger
+          busy=${busy}
+          onConfirm=${remove}
+          onClose=${() => setConfirmDelete(null)} />
+      ` : null}
+
       ${custom.length ? html`
         <div class="flex flex-col gap-2 mt-1">
           ${custom.map(s => html`
@@ -166,9 +208,11 @@ function SoundLibrary({ sounds, onChanged, onPreview }) {
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                   Ouvir
                 </button>
-                <button type="button" onClick=${() => setRenaming({ id: s.id.split(':')[1], name: s.label })}
+                <button type="button"
+                  onClick=${() => setRenaming({ id: s.id, num: s.id.split(':')[1], name: s.label })}
                   class="text-[12px] text-wa-secondary hover:text-wa-text underline decoration-dotted">Renomear</button>
-                <button type="button" onClick=${() => remove(s.id.split(':')[1])} disabled=${busy}
+                <button type="button" disabled=${busy}
+                  onClick=${() => setConfirmDelete({ id: s.id, num: s.id.split(':')[1], label: s.label })}
                   class="text-[12px] text-red-500 hover:text-red-600">Excluir</button>
               `}
             </div>`)}
