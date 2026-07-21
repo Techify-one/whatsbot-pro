@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -17,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Ensure project root is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from server import upload_limits  # noqa: E402  (plano 64 — tetos de upload)
 
 # Load-bearing (plano 13): the test's Settings() resolves data_dir to the repo
 # root, so create_app reads the REAL storages/plugins + assets/plugin_examples.
@@ -1094,6 +1097,60 @@ if _at.available() and _shutil.which("ffprobe"):
         if _out:
             _os.remove(_out)
     _os.remove(_ogg)
+
+# ═══════════════════════════════════════════════════════════════════
+#  10d. Upload hardening (plano 64 · F1/F2)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Upload hardening (plano 64)")
+
+# F1 — dois uploads "no mesmo instante" nunca se sobrescrevem: o nome em disco
+# leva entropia própria (uuid), não só o milissegundo.
+mock_gowa_client.send_image.reset_mock()
+for _ in range(2):
+    client.post(
+        "/api/contacts/5511999990001/send-image",
+        files={"image": ("mesma.png", io.BytesIO(fake_png), "image/png")},
+    )
+_paths = [c.args[1] if len(c.args) > 1 else c.kwargs.get("image_path")
+          for c in mock_gowa_client.send_image.call_args_list]
+check("2 uploads seguidos -> nomes em disco distintos",
+      len(_paths) == 2 and _paths[0] != _paths[1])
+check("nome em disco tem entropia (ms_uuid)",
+      all(re.match(r"^\d+_[0-9a-f]{8}\.png$", Path(p).name) for p in _paths))
+
+# F1 — a extensão vem do MIME validado, não do nome do cliente: um .html
+# enviado como documento NUNCA nasce como .html em statics/outbox (XSS).
+mock_gowa_client.send_file.reset_mock()
+r = client.post(
+    "/api/contacts/5511999990001/send-document",
+    files={"document": ("payload.html", io.BytesIO(b"<script>alert(1)</script>"),
+                        "text/html")},
+)
+check("POST /send-document (.html) -> 200", r.status_code == 200)
+_doc_call = mock_gowa_client.send_file.call_args
+_doc_path = _doc_call.args[1] if len(_doc_call.args) > 1 else _doc_call.kwargs.get("file_path")
+check("documento .html não vira .html em disco",
+      not Path(_doc_path).name.lower().endswith(".html"))
+check("documento .html vira .bin em disco", Path(_doc_path).name.endswith(".bin"))
+check("nome ORIGINAL preservado para o contato",
+      _doc_call.kwargs.get("filename") == "payload.html")
+
+# F2 — teto de corpo: acima do limite responde 413 antes de ler o arquivo.
+_over = b"\x00" * (upload_limits.MAX_UPLOAD_BYTES + 1024)
+r = client.post(
+    "/api/contacts/5511999990001/send-image",
+    files={"image": ("grande.png", io.BytesIO(_over), "image/png")},
+)
+check("upload acima do teto -> 413", r.status_code == 413)
+check("413 -> envelope {ok:false,error}",
+      r.json().get("ok") is False and "MB" in (r.json().get("error") or ""))
+del _over
+
+r = client.post(
+    "/api/contacts/5511999990001/send-image",
+    files={"image": ("ok.png", io.BytesIO(fake_png), "image/png")},
+)
+check("upload abaixo do teto -> segue o fluxo normal", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence

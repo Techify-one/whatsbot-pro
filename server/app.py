@@ -24,6 +24,7 @@ from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, bootstrap_gowa_upgrade, discover_and_load, PluginRegistry
 from server.persistence_check import ensure_storage_persistence
+from server.upload_limits import MAX_UPLOAD_BYTES, is_upload_path, too_large_response
 from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services, set_channel_runtime as _set_channel_runtime, set_deps as _set_deps
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
@@ -558,6 +559,21 @@ def create_app(
             return await call_next(request)
         finally:
             reset_current_actor(_actor_token)
+
+    @app.middleware("http")
+    async def upload_size_limit(request: Request, call_next):
+        # Plano 64 · F2 — recusa um upload grande demais ANTES de lê-lo na RAM.
+        # Só olha o Content-Length declarado (barato); um cliente que mente sobre
+        # ele ainda passa, mas o teto do navegador + este gate cobrem o caso real
+        # (arrastar um arquivo enorme por engano).
+        if request.method == "POST" and is_upload_path(request.url.path):
+            raw_len = request.headers.get("content-length")
+            try:
+                if raw_len is not None and int(raw_len) > MAX_UPLOAD_BYTES:
+                    return too_large_response()
+            except ValueError:
+                pass
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

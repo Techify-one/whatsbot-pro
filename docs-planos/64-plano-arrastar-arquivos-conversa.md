@@ -188,11 +188,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um `.pdf` e soltar sobre a sidebar/área vazia **não** abre o PDF nem recarrega; o app permanece na conversa. `node tests/frontend/check_imports.mjs` verde.
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(escolhas e porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou pra depois)_
-- **Verificação:** _(testes rodados + verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Guarda global de `dragover`/`drop` no `window` adicionada em `web/static/js/components/shell/App.js` (novo `useEffect`, antes do effect de `popstate`).
+- **Como foi feito / decisões:** Um único par de listeners que só chama `preventDefault()` quando `dataTransfer.types` inclui `Files` — assim arrastar texto/seleção dentro do app continua funcionando. Não filtra por alvo: as zonas de drop reais recebem o evento antes (bubbling) e fazem o seu trabalho; a guarda só mata o default de navegar.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `node tests/frontend/check_imports.mjs` verde; suíte de endpoints 1500/0 (não afetada).
 
 ---
 
@@ -205,11 +205,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** dois POSTs de imagem "no mesmo instante" (teste) geram arquivos distintos em `statics/outbox/`; `venv/bin/python tests/test_endpoints.py` sem **novas** falhas (2 pré-existentes conhecidas).
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Novo módulo `server/upload_names.py` (`extension_for` + `unique_media_name`) e as 6 gravações em disco migradas: `send-image`, `send-audio`, `send-document`, `private-audio`, `private-image/document` (`server/routes/contacts.py`) e `_save_upload` (`server/routes/sandbox.py`).
+- **Como foi feito / decisões:** Nome em disco = `{ms}_{uuid4[:8]}{ext}`. A extensão vem do **MIME validado** (`mimetypes.guess_extension` + overrides para `audio/ogg→.ogg`, `image/jpeg→.jpg`, etc.); o sufixo do cliente só é consultado quando o MIME é ausente/genérico (`application/octet-stream`), e nos dois caminhos uma allow-list negativa (`DANGEROUS_EXTENSIONS`: html/svg/js/php/…) força `.bin`. O nome ORIGINAL continua indo ao contato (o `filename` passado ao canal não mudou) — só o nome em disco foi reescrito.
+- **Problemas / pendências:** Nenhuma. Arquivos já gravados com o nome antigo seguem servíveis (nada foi renomeado retroativamente).
+- **Verificação:** 6 checks novos em `tests/test_endpoints.py` (seção "Upload hardening (plano 64)"): 2 uploads seguidos geram nomes distintos com formato `ms_uuid8.ext`; `.html` enviado como documento nasce `.bin` em disco mas mantém `payload.html` para o contato. Suíte 1500/0.
 
 ---
 
@@ -221,11 +221,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `curl -F image=@60mb.bin .../send-image` → **413**; 40 MB → segue o fluxo normal. Sem segredo no log.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Novo `server/upload_limits.py` (`MAX_UPLOAD_BYTES`=50 MB, `MAX_FILES_PER_DROP`=10, `is_upload_path`, `too_large_response`) + middleware `upload_size_limit` em `server/app.py`.
+- **Como foi feito / decisões:** Middleware escopado por regex nos paths de upload (send-image/audio/video/document, private-*, contacts/import, sandbox/*) que recusa com **413** olhando só o `Content-Length` declarado — barato e antes de qualquer leitura de corpo. Constantes hardcoded (P1) e espelhadas no cliente em `web/static/js/services/uploadLimits.js`.
+- **Problemas / pendências:** Um cliente que mente no `Content-Length` (chunked) ainda passa — cobrir isso exigiria contar bytes no stream, o que só faz sentido junto com a troca de `await file.read()` por streaming (P2, adiado).
+- **Verificação:** 2 checks novos: corpo acima do teto → 413 com envelope `{ok:false,error}`; abaixo do teto → 200 normal. Suíte 1500/0.
 
 ---
 

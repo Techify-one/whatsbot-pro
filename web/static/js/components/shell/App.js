@@ -174,6 +174,26 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // before the rest of the app reads window.location.
   useEffect(() => { redirectLegacyPath(); }, []);
 
+  // Plano 64 · F0 — guarda global de arrastar-e-soltar. Sem ela, soltar um
+  // arquivo FORA de uma zona de drop faz o navegador navegar para o arquivo e
+  // destruir o estado do app (perda do que estava digitado/aberto). Os dois
+  // listeners só cancelam o default do navegador; as zonas de drop reais
+  // (overlay da conversa, linha da sidebar) continuam recebendo o evento
+  // normalmente — elas rodam antes, na fase de bubbling.
+  useEffect(() => {
+    function swallow(e) {
+      if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+        e.preventDefault();
+      }
+    }
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallow);
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallow);
+    };
+  }, []);
+
   useEffect(() => {
     function onPopState() {
       redirectLegacyPath();
