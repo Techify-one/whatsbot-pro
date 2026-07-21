@@ -294,11 +294,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** buscar um gastador fora da 1ª página o encontra; ordenar por tokens/nome reordena o ranking inteiro (não só o carregado).
 
 #### Status de execução — Fase 7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `usage_repo.by_contact` ganhou `q`/`sort`/`order` (helpers `_sort_expr` allowlist + `_search_clause`); `count_by_contact` ganhou `q` (o total reflete a busca). `/api/usage/by-contact` aceita `q`/`sort`/`order` e os repassa. `CostsDashboard.js` — busca com debounce (300ms) → servidor; `fetchPage` manda `q`/`sort`/`order`; `resetKey` inclui busca+ordenação; `pageItems = contacts` (fim do `filter`/comparador cliente). Cards de resumo intactos.
+- **Como foi feito / decisões:** `sort` é allowlist (`cost_usd`/`total_tokens`/`prompt_tokens`/`completion_tokens`/`call_count`/`name`; default `cost_usd`), nunca SQL cru; tiebreaker `contact_id` no ORDER BY (empates não causam dup/gap ao paginar). Busca por `name ilike`/`phone like`. `count_by_contact(q)` garante `total` == universo buscado.
+- **Problemas / pendências:** nenhuma. Resumo (agregados do período) segue period-wide por design (não conta a busca) — correto.
+- **Verificação:** `node --check` OK; `pytest test_plano69` → 9 passed (novo: q isola + total=2; custo desc default; tokens asc/desc reordena o ranking; buscar por nome acha, total=1).
 
 ---
 

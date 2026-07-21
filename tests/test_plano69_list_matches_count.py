@@ -231,3 +231,35 @@ def test_contacts_no_filter_is_unchanged(build_app):
     page = built.client.get("/api/contacts?limit=500").json()["data"]
     assert isinstance(page.get("items"), list) and isinstance(page.get("total"), int)
     assert page["total"] == len(page["items"]) or page["has_more"] is True
+
+
+# ── F7 — Custos: busca + ordenação server-side ─────────────────────────────
+
+def test_usage_by_contact_search_and_sort_server_side(build_app):
+    """F7: `/api/usage/by-contact` filters (q) and sorts (sort/order) server-side; the
+    total reflects the search, so a spender outside the first page is still found."""
+    from db.repositories import contact_repo, usage_repo
+
+    built = build_app(["gowa"])
+    _auth(built, "p69_usage@test.com")
+    a = contact_repo.get_or_create("5511969069001"); contact_repo.update(a["id"], name="ZZUSG Alpha")
+    b = contact_repo.get_or_create("5511969069002"); contact_repo.update(b["id"], name="ZZUSG Bravo")
+    usage_repo.add(a["id"], "text", "m", 10, 5, 15, 0.10)    # menos tokens, MAIS custo
+    usage_repo.add(b["id"], "text", "m", 100, 50, 150, 0.01)  # MAIS tokens, menos custo
+
+    # q isola nosso conjunto; o total reflete a busca.
+    page = built.client.get("/api/usage/by-contact?q=ZZUSG&limit=50").json()["data"]
+    assert {x["phone"] for x in page["items"]} == {a["phone"], b["phone"]}
+    assert page["total"] == 2
+    # default = custo desc → Alpha (0.10) antes de Bravo (0.01)
+    assert [x["phone"] for x in page["items"]] == [a["phone"], b["phone"]]
+
+    # ordenar por tokens asc/desc reordena o RANKING (não só o carregado)
+    asc = built.client.get("/api/usage/by-contact?q=ZZUSG&sort=total_tokens&order=asc&limit=50").json()["data"]
+    assert [x["phone"] for x in asc["items"]] == [a["phone"], b["phone"]]     # 15, 150
+    desc = built.client.get("/api/usage/by-contact?q=ZZUSG&sort=total_tokens&order=desc&limit=50").json()["data"]
+    assert [x["phone"] for x in desc["items"]] == [b["phone"], a["phone"]]    # 150, 15
+
+    # buscar um gastador pelo nome o encontra (total = 1)
+    only = built.client.get("/api/usage/by-contact?q=Bravo&limit=50").json()["data"]
+    assert [x["phone"] for x in only["items"]] == [b["phone"]] and only["total"] == 1
