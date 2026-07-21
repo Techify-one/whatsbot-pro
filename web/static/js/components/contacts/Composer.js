@@ -71,12 +71,14 @@ export function Composer({
       ref=${fileInputRef}
       type="file"
       accept="image/*"
+      multiple
       class="hidden"
       onChange=${handleFileSelected}
     />
     <input
       ref=${docInputRef}
       type="file"
+      multiple
       class="hidden"
       onChange=${handleDocSelected}
     />
@@ -94,11 +96,11 @@ export function Composer({
     <!-- Media confirmation overlay -->
     ${pendingMedia && canSend ? html`
       <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
-        ${pendingMedia.type === 'image' ? html`
+        ${pendingMedia.kind === 'image' ? html`
           <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
-        ` : pendingMedia.type === 'video' ? html`
+        ` : pendingMedia.kind === 'video' ? html`
           <video src=${pendingMedia.previewUrl} controls class="max-h-[220px] max-w-full rounded-[8px] bg-black"></video>
-        ` : pendingMedia.type === 'document' ? html`
+        ` : pendingMedia.kind === 'document' ? html`
           <div class="flex items-center gap-[8px] bg-wa-inputBg border border-wa-border rounded-[8px] px-[14px] py-[10px] max-w-full">
             <span class="text-[22px]">📄</span>
             <span class="text-[14px] text-wa-text break-all">${pendingMedia.filename}</span>
@@ -108,7 +110,7 @@ export function Composer({
             <${AudioPlayer} src=${pendingMedia.previewUrl} isLocalBlob=${true} />
           </div>
         `}
-        ${pendingMedia.type !== 'audio' ? html`
+        ${pendingMedia.kind !== 'audio' ? html`
           <input
             type="text"
             class="wa-field w-full max-w-[420px] rounded-[8px] px-[12px] py-[8px] text-[14px] border border-wa-border"
@@ -118,7 +120,7 @@ export function Composer({
             onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmPendingMedia(); } }}
           />
         ` : ''}
-        ${(pendingMedia.type === 'audio' && mode === 'private') ? html`
+        ${(pendingMedia.kind === 'audio' && mode === 'private') ? html`
           <div class="flex items-center gap-[16px] flex-wrap justify-center">
             <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA processa o áudio como instrução.">
               <input type="checkbox" class="sr-only peer" checked=${aiReadPrivate}

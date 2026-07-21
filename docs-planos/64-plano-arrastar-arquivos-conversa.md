@@ -238,11 +238,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** escolhendo 2 arquivos pelo seletor (com `multiple`), ambos aparecem na fila e são enviados; caracterização verde antes e depois.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `useMediaUpload` passou de `pendingMedia` (objeto) para `pendingQueue` (lista). As 3 guardas de "só 1" saíram. `pendingMedia` continua exportado como shim (= 1º item da fila). Inputs de arquivo ganharam `multiple`.
+- **Como foi feito / decisões:** A **caracterização** foi feita extraindo a lógica pura para módulos novos e testando-a com `node --test` (o repo não tem harness de hook/preact — todos os 15 testes de frontend existentes são de módulos puros, então criar um seria um desvio de padrão): `web/static/js/services/mediaQueue.js` (classificação `kind`/`sendMode`, montagem dos itens, rótulo de progresso) e `web/static/js/services/uploadLimits.js` (tetos). O hook virou casca fina em volta deles. Cada item carrega `kind` (era `type`) — o Composer foi ajustado.
+- **Problemas / pendências:** Não há teste automatizado do hook em si (só dos módulos puros que ele orquestra); a verificação do wiring é manual.
+- **Verificação:** 26 checks novos em `mediaQueue.test.js`. Suíte de frontend 298/298, endpoints 1500/0, `check_imports.mjs` verde.
 
 ---
 
@@ -256,11 +256,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `Ctrl+V` com 2 imagens enfileira as 2; colar um trecho de texto **não** vira anexo; seletor com `multiple` enfileira vários.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `requestDocumentSend` exportado, `requestFilesDrop(files, sendMode)` como porta de entrada única (drop, colar e seletor passam por ela) e `handlePaste` unificado.
+- **Como foi feito / decisões:** `requestFilesDrop` valida tetos → classifica cada `File` por `file.type` + a zona do gesto → enfileira com `filename` SEMPRE preenchido (`filenameFor` tem default por kind, matando o `[Documento enviado: undefined]`). O paste deixou as 5 limitações antigas: aceita qualquer tipo de arquivo, TODOS os itens do clipboard, não é bloqueado por fila cheia e só faz `preventDefault` quando havia arquivo (colar texto segue nativo). Áudio/PDF/zip caem em documento nas DUAS zonas — `/send-audio` é nota de voz PTT sem legenda, então anexar um `.mp3` por lá seria errado.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** Testes de `classifyFile`/`filenameFor`/`buildQueueItems` cobrem as duas zonas, arquivo sem `type` e lista vazia/nula.
 
 ---
 
@@ -273,11 +273,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** fila de 5 mostra "Enviando 3 de 5…"; cada bolha ótica reconcilia; falha no 3º segue a política de P4 (não trava os demais / marca o 3º).
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `sendOne(item, caption)` fatorado do corpo de `confirmPendingMedia`; `confirmQueue()` itera com `for…await`; estado `sentCount`/`sendTotal` + `sendProgressLabel`.
+- **Como foi feito / decisões:** Sequencial (D6): pseudo-progresso de graça, sem colisão de nome e falha parcial simples. **P4 = continuar**: item falho vira bolha `failed` e o lote segue; ao fim, um toast resume ("2 de 5 arquivos falharam"). Exceção: `session_window_closed` vale para a conversa inteira → para o lote e abre o seletor de template. **Legenda compartilhada vai só no PRIMEIRO item** (repetir a mesma legenda em 5 arquivos poluiria a conversa; mesmo critério do Telegram). Vídeo degrada para documento quando a API efetiva não expõe `sendVideo` — o que cobre o sandbox e o *arity trap* do `Sandbox.js` sem tocar nele (nenhum argumento posicional novo foi introduzido).
+- **Problemas / pendências:** `fetch` não dá progresso por bytes (P5, decidido): a granularidade é o arquivo.
+- **Verificação:** Endpoints 1500/0; frontend 298/298.
 
 ---
 
