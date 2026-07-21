@@ -9,9 +9,10 @@ additionally validated against active filterable conversation definitions.
 
 from db.filters.registry import FilterError, DIMENSIONS, OPS, CATTR_PREFIX
 from db.filters.spec import FilterSpec, Clause
-from db.filters.translate import build_where, available_dimensions
+from db.filters.translate import build_where, build_contact_where, available_dimensions
 
 __all__ = [
     "FilterError", "DIMENSIONS", "OPS", "CATTR_PREFIX",
-    "FilterSpec", "Clause", "build_where", "available_dimensions",
+    "FilterSpec", "Clause", "build_where", "build_contact_where",
+    "available_dimensions",
 ]

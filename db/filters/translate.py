@@ -38,6 +38,52 @@ def build_where(spec, ctx: FilterContext):
     return or_(*clauses) if spec.match == "or" else and_(*clauses)
 
 
+# Ops allowed on the contact-scope `tag` dim (membership + its negation).
+_CONTACT_LABEL_OPS = frozenset({"equal_to", "in", "not_equal_to"})
+
+
+def build_contact_where(spec, ctx: FilterContext):
+    """WHERE over the ``contacts`` table for the Contatos screen (plano 69 F5b).
+
+    A CONTACT-scoped sibling of :func:`build_where`. The conversation engine's clauses
+    reference ``conversations.c.*`` (the wrong base for a contacts query — e.g. ``labels``
+    emits ``conversations.c.contact_id.in_(…)``), so here only the dims that make sense
+    for a contact are translated, all against ``contacts.c.*``: ``tag``/``labels``
+    (membership), ``contact_type`` and ``cattr:contact:<key>``. Same allowlist + bind-param
+    safety as the conversation engine (reuses ``_scalar_clause``/``_contact_cattr_clause``)."""
+    clauses = [_contact_clause(c, ctx) for c in spec.clauses]
+    clauses = [c for c in clauses if c is not None]
+    if not clauses:
+        return None
+    return or_(*clauses) if spec.match == "or" else and_(*clauses)
+
+
+def _contact_clause(clause, ctx: FilterContext):
+    key = clause.attribute_key
+    op = clause.operator
+    values = clause.values or []
+    if key.startswith(f"{CATTR_PREFIX}contact:"):
+        return _contact_cattr_clause(key[len(f"{CATTR_PREFIX}contact:"):], op, values, ctx)
+    if key in ("tag", "labels"):
+        return _contact_labels_clause(op, values)
+    if key == "contact_type":
+        _check_op("contact_type", DIMENSIONS["contact_type"].ops, op)
+        return _scalar_clause(contacts.c.contact_type, op, [str(v) for v in values])
+    raise FilterError(f"Atributo não filtrável em contatos: {key!r}.")
+
+
+def _contact_labels_clause(op: str, values: list):
+    _check_op("tag", _CONTACT_LABEL_OPS, op)
+    names = [str(v) for v in values if str(v).strip()]
+    if not names:
+        raise FilterError("Filtro de etiquetas requer ao menos um valor.")
+    sub = (select(contact_tags.c.contact_id)
+           .join(tags, tags.c.id == contact_tags.c.tag_id)
+           .where(tags.c.name.in_(names)))
+    hit = contacts.c.id.in_(sub)
+    return not_(hit) if op == "not_equal_to" else hit
+
+
 def _check_op(dim_key: str, allowed: frozenset, op: str) -> None:
     if op not in OPS:
         raise FilterError(f"Operador desconhecido: {op!r}.")

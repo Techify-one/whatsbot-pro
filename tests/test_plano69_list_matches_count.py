@@ -137,3 +137,75 @@ def test_has_mention_without_user_is_constant_false(build_app):
     counts = conversation_repo.count_tab_counts(where, current_user_id=None)
     assert rows == []
     assert counts["all"] == 0 and counts["mentions"] == 0
+
+
+# ── F5b — Contatos: filtro avançado server-side ────────────────────────────
+
+def test_contacts_filter_by_tag_total_reflects_filter(build_app):
+    """F5b: ``/api/contacts?tag=X`` lista só os contatos com a etiqueta e o ``total``
+    reflete o FILTRO (não a página) — a lista bate com o total, como no hub."""
+    from db.repositories import contact_repo, tag_repo
+
+    built = build_app(["gowa"])
+    _auth(built, "p69_contacts_tag@test.com")
+    tag_repo.create("p69tag", "#123456")
+    tagged = []
+    for i in range(3):
+        c = contact_repo.get_or_create(f"5511965069{i:04d}")
+        tag_repo.add_contact_tag(c["id"], "p69tag")
+        tagged.append(c["phone"])
+    ctrl = contact_repo.get_or_create("5511965069900")["phone"]  # sem a etiqueta
+
+    page = built.client.get("/api/contacts?tag=p69tag&limit=50").json()["data"]
+    phones = {c["phone"] for c in page["items"]}
+    assert set(tagged) <= phones, (tagged, phones)
+    assert ctrl not in phones
+    assert page["total"] == 3, page["total"]
+    assert len(page["items"]) == page["total"]  # cabem numa página → lista == total
+
+    # ``total`` é do universo filtrado, não da janela: limit=1 mantém total=3.
+    p2 = built.client.get("/api/contacts?tag=p69tag&limit=1").json()["data"]
+    assert p2["total"] == 3 and len(p2["items"]) == 1
+
+    # ``ne`` (não é nenhuma) exclui os 3 etiquetados.
+    p3 = built.client.get(
+        "/api/contacts?tag=p69tag&tag__op=not_equal_to&limit=500").json()["data"]
+    assert set(tagged).isdisjoint({c["phone"] for c in p3["items"]})
+
+
+def test_contacts_filter_by_contact_type_narrows(build_app):
+    """F5b: ``/api/contacts?contact_type=telegram`` narrows the set and the total drops
+    below the unfiltered total."""
+    from db.repositories import contact_repo
+
+    built = build_app(["gowa"])
+    _auth(built, "p69_contacts_type@test.com")
+    tel = [contact_repo.get_or_create(f"5511966069{i:04d}", contact_type="telegram")["phone"]
+           for i in range(2)]
+
+    all_page = built.client.get("/api/contacts?limit=500").json()["data"]
+    tel_page = built.client.get("/api/contacts?contact_type=telegram&limit=500").json()["data"]
+    assert tel_page["total"] >= 2
+    assert tel_page["total"] < all_page["total"], "o filtro tem de estreitar o universo"
+    assert all(c.get("contact_type") == "telegram" for c in tel_page["items"])
+    assert set(tel) <= {c["phone"] for c in tel_page["items"]}
+
+
+def test_contacts_filter_unknown_cattr_is_400(build_app):
+    """F5b: a non-filterable contact attribute key is rejected (400, not 500)."""
+    built = build_app(["gowa"])
+    _auth(built, "p69_contacts_bad@test.com")
+    r = built.client.get("/api/contacts?cattr:contact:naoexiste=x&limit=50")
+    assert r.status_code == 400, r.text
+
+
+def test_contacts_no_filter_is_unchanged(build_app):
+    """F5b guard: no filter param ⇒ byte-identical to the pre-plano-69 path."""
+    from db.repositories import contact_repo
+
+    built = build_app(["gowa"])
+    _auth(built, "p69_contacts_nofilter@test.com")
+    contact_repo.get_or_create("5511967069001")
+    page = built.client.get("/api/contacts?limit=500").json()["data"]
+    assert isinstance(page.get("items"), list) and isinstance(page.get("total"), int)
+    assert page["total"] == len(page["items"]) or page["has_more"] is True

@@ -259,11 +259,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** `curl /api/contacts?contact_type=telegram` devolve só os do tipo com `total` real; suíte verde no Postgres.
 
 #### Status de execução — Fase 5b
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (backend; front é a F6)
+- **O que foi feito:** `db/filters/translate.py` ganhou `build_contact_where` (+ `_contact_clause`/`_contact_labels_clause`), exportado em `db/filters/__init__.py`. `contact_repo.list_contacts_page`/`list_contacts` aceitam `filter_where=` (aplicado à lista E ao COUNT). `server/routes/contacts.py`: helper `_contact_filter_where(request)` extrai só os params de dim de contato (tag/contact_type/cattr:contact:*), compila via `db.filters`, e o `GET /api/contacts` passa o WHERE nos dois caminhos (legado + paginado), mapeando `FilterError`→400. Testes novos no `test_plano69_list_matches_count.py`.
+- **Como foi feito / decisões:** P3 resolvida por **tradutor dedicado de escopo-contato** (não forçar o engine de conversa, cujo `labels` referencia `conversations.c.contact_id`). Reusa a MESMA gramática de params planos (`db.filters.spec.from_params`, com `__op` override e split por vírgula), então o contrato é idêntico ao `/atendimentos/filter` — a F6 serializa igual. `contact_type`/`cattr:contact:*` já eram `contacts.c.*` no engine (reusados via `_scalar_clause`/`_contact_cattr_clause`); só `tag`/`labels` reescrito para `contacts.c.id.in_(…)` (+ `not_equal_to`=negação). `filter_where` entra no WHERE da lista E do COUNT ⇒ `total`/`has_more` refletem o filtro.
+- **Problemas / pendências:** front (enviar `advFilters` + matar o falso-vazio do scroll) é a **F6**. Serializador de clauses no `api.js`/`ContactsListScreen` fica na F6.
+- **Verificação:** `pytest tests/test_plano69_list_matches_count.py -q` → 7 passed. Cobre: `?tag=X` (lista⊆tag, `total`=filtro, `limit=1` mantém total, `ne` exclui), `?contact_type=telegram` (estreita, `total`<total geral), cattr desconhecido→400, sem filtro = shape intacto.
 
 ---
 

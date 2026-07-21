@@ -340,7 +340,7 @@ def _decorate_content_matches(conn, results: list, q: str, include_messages: boo
 
 def list_contacts(q: str = "", archived: bool = False,
                   inbox_ids: list[int] | None = None, *,
-                  include_messages: bool = True) -> list[dict]:
+                  include_messages: bool = True, filter_where=None) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts.
 
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7): ``None``
@@ -353,16 +353,20 @@ def list_contacts(q: str = "", archived: bool = False,
     :func:`list_contacts_page` (plano 50 F5).
 
     ``include_messages=False`` (plano 62 F5) tira a busca por conteúdo de mensagem
-    da cláusula ``q`` — para telas que não renderizam o trecho casado."""
+    da cláusula ``q`` — para telas que não renderizam o trecho casado.
+
+    ``filter_where`` (plano 69 F5b): WHERE avançado já compilado (``db.filters``
+    ``build_contact_where``) — ``None`` = sem filtro (retrocompatível)."""
     return list_contacts_page(q, archived, inbox_ids, limit=None, offset=0,
-                              include_messages=include_messages)["items"]
+                              include_messages=include_messages,
+                              filter_where=filter_where)["items"]
 
 
 def list_contacts_page(q: str = "", archived: bool = False,
                        inbox_ids: list[int] | None = None, *,
                        limit: int | None = None, offset: int = 0,
                        sort: str = "recency",
-                       include_messages: bool = True) -> dict:
+                       include_messages: bool = True, filter_where=None) -> dict:
     """Página de contatos (plano 50 F5) → ``{items, total, has_more}``.
 
     ``limit=None`` ⇒ tudo (``total=len``, ``has_more=False``). ``limit`` set ⇒
@@ -373,7 +377,13 @@ def list_contacts_page(q: str = "", archived: bool = False,
     linhas da página.
 
     ``include_messages=False`` remove o ramo de conteúdo de mensagem da busca
-    (mais barato; a tela que não mostra o trecho casado não precisa dele)."""
+    (mais barato; a tela que não mostra o trecho casado não precisa dele).
+
+    ``filter_where`` (plano 69 F5b): um ``ColumnElement`` já compilado por
+    ``db.filters.build_contact_where`` (tag/contact_type/cattr:contact:*). Como só
+    referencia ``contacts.c.*`` + subqueries (nunca os LATERALs), entra no ``WHERE``
+    da lista E do COUNT — então o ``total``/``has_more`` refletem o filtro, igual ao
+    ``q_clause``. ``None`` = sem filtro (caminho byte-idêntico ao antigo)."""
     if inbox_ids is not None and not inbox_ids:
         return {"items": [], "total": 0, "has_more": False}  # sem inbox → nada
 
@@ -384,6 +394,8 @@ def list_contacts_page(q: str = "", archived: bool = False,
             archived=archived, inbox_ids=inbox_ids, sort=sort)
         if q_clause is not None:
             stmt = stmt.where(q_clause)
+        if filter_where is not None:
+            stmt = stmt.where(filter_where)
         if limit is not None:
             stmt = stmt.limit(limit).offset(offset)
         rows = conn.execute(stmt).mappings().all()
@@ -398,6 +410,8 @@ def list_contacts_page(q: str = "", archived: bool = False,
             archived=archived, inbox_ids=inbox_ids)
         if q_clause is not None:
             count_stmt = count_stmt.where(q_clause)
+        if filter_where is not None:
+            count_stmt = count_stmt.where(filter_where)
         total = conn.execute(count_stmt).scalar() or 0
         return {"items": results, "total": total,
                 "has_more": (offset + len(results)) < total}
