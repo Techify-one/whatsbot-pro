@@ -290,11 +290,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um arquivo mostra as 2 metades; soltar em cima envia como foto/vídeo, embaixo como arquivo; `dragleave` some o overlay.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Hook novo `hooks/useDropZone.js` + componente `DropOverlay.js`, ligados na raiz do `ContactDetail` (que ganhou `relative` + os 4 handlers de drag).
+- **Como foi feito / decisões:** Contagem de profundidade (`drag depth`) num ref para o overlay não piscar ao cruzar filhos. A zona é decidida pela metade da raiz sob o cursor (`clientY` vs meio do `getBoundingClientRect`), e `setZone` com o mesmo valor não re-renderiza (bail-out do preact), então mover o cursor dentro da mesma metade é de graça. O overlay é `pointer-events-none` — se capturasse o ponteiro, entrar nele geraria `dragleave` na raiz e piscaria. O drop faz `stopPropagation` para a guarda global (F0) não vê-lo como "soltou fora". Desligado quando o operador não pode responder, quando a janela de 24h está fechada (só template resolve) ou com lote em voo. Cores: `bg-black/70` + `text-white` + `wa-teal` — o overlay é escuro nos dois temas por construção (é uma camada sobre a conversa), então não depende do modo.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `check_imports.mjs` verde; sintaxe dos módulos `html\`\`` checada com `node --input-type=module --check`. Validação visual do arrasto é manual (não há harness de DOM).
 
 ---
 
@@ -307,11 +307,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** dropar 3 arquivos abre a grade; remover 1 deixa 2; `Esc` cancela; legenda vai junto; dark mode legível.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Componente novo `MediaQueuePreview.js` substitui o overlay de confirmação de 1 item no `Composer`: grade de miniaturas com scroll horizontal, remoção por item, legenda compartilhada, `Esc` para cancelar e botão "Enviar (N)".
+- **Como foi feito / decisões:** Item ÚNICO de imagem mantém a prévia grande de antes (não regride a UX de 1 arquivo); ≥2 itens viram filmstrip de 84px. Vídeo mostra o primeiro frame via `<video muted preload=metadata>` + play sobreposto; documento mostra ícone + extensão + nome. Áudio continua com o `AudioPlayer` inteiro e sem legenda. O `Esc` só cancela quando não há lote em voo. Como a fila é esvaziada ao confirmar (as bolhas óticas já estão no fio), o "Enviando N de M…" ganhou uma faixa própria no Composer.
+- **Problemas / pendências:** **P6 (semear a legenda com o texto já digitado) NÃO foi implementado** — o texto do composer e a legenda seguem separados. Era "nice-to-have" e mexer nisso arriscaria perder o rascunho do operador ao cancelar o lote.
+- **Verificação:** `check_imports.mjs` verde; suíte de frontend 298/298.
 
 ---
 
@@ -323,11 +323,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um arquivo de 80 MB mostra toast e não sobe; arrastar 15 arquivos envia 10 e avisa do corte.
 
 #### Status de execução — Fase F8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Validação de tamanho/quantidade no cliente, dentro de `requestFilesDrop`.
+- **Como foi feito / decisões:** Implementada junto com F4 (é a primeira coisa que a porta de entrada única faz), via `applyUploadLimits`/`limitsMessage` de `services/uploadLimits.js` — puros e testados. Arquivo acima de 50 MB é descartado com toast; acima de 10 arquivos trunca e avisa. O teto de 10 vale para a FILA inteira, não por gesto (soltar 6 + 6 não acumula 12).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** 14 checks em `uploadLimits.test.js` (limite exato, limite+1, corte por quantidade contando só o que passou no tamanho, mensagens).
 
 ---
 
@@ -340,11 +340,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `.mp4` na zona "Foto/vídeo" no GOWA chega como vídeo tocável; no provider sem `/send/video`, chega como documento (sem erro).
 
 #### Status de execução — Fase F9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `send_video` em `gowa/client.py`, `elif kind == "video"` em `gowa_channel.py`, rota `POST /api/contacts/{phone}/send-video`, `api.sendVideo` e `sendVideo` no `_api` do `ContactDetail`.
+- **Como foi feito / decisões:** Confirmei por inspeção do binário (`grep -a -o '/send/[a-z-]+' bin/gowa`) que `/send/video` existe. Mesmo assim a chamada degrada: um `GOWASendError` de tipo `api` (ex.: 404 num GOWA antigo) cai em `send_file`, então o vídeo chega como documento em vez de falhar. Telegram (`_MEDIA_METHOD`) e WhatsApp Cloud já mapeavam vídeo; o widget trata qualquer kind. No frontend, `kind='video'` degrada para documento quando a API efetiva não expõe `sendVideo` — é o que cobre o sandbox.
+- **Problemas / pendências:** O sandbox não ganhou rota de vídeo (vídeo solto lá vira documento, sem erro).
+- **Verificação:** 4 checks novos ("Contacts — Send Video"): 200, `send_video` chamado, extensão `.mp4` vinda do MIME, e a linha persistida com `media_type=video`. Suíte 1505/0.
 
 ---
 

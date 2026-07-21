@@ -449,6 +449,47 @@ class GOWAClient:
         except Exception as e:
             raise GOWASendError(f"Erro ao enviar imagem: {e}", error_type="unknown")
 
+    def send_video(self, phone: str, video_path: str, caption: str = "") -> dict:
+        """Send a video via POST /send/video (plano 64 · F9).
+
+        Mirrors :meth:`send_image` but with the longer timeout of
+        :meth:`send_file` — vídeo é grande e o upload ao WhatsApp demora.
+        Raises GOWASendError on failure.
+        """
+        phone = self._format_target(phone)
+        url = f"{self.base_url}/send/video"
+        mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                with open(video_path, "rb") as f:
+                    files = {"video": (Path(video_path).name, f, mime)}
+                    data = {"phone": phone}
+                    if caption:
+                        data["caption"] = caption
+                    resp = client.post(url, headers=self._headers, data=data, files=files)
+                    resp.raise_for_status()
+                    return resp.json() if resp.text else {}
+        except httpx.ConnectError:
+            raise GOWASendError(
+                "WhatsApp não está acessível. Verifique se o serviço está rodando.",
+                error_type="network",
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                body = e.response.json()
+                detail = body.get("message", body.get("error", ""))
+            except Exception:
+                pass
+            msg = f"Erro da API do WhatsApp (HTTP {e.response.status_code})"
+            if detail:
+                msg += f": {detail}"
+            raise GOWASendError(msg, error_type="api")
+        except GOWASendError:
+            raise
+        except Exception as e:
+            raise GOWASendError(f"Erro ao enviar vídeo: {e}", error_type="unknown")
+
     def send_file(self, phone: str, file_path: str, caption: str = "",
                   filename: str | None = None) -> dict:
         """Send an arbitrary file (document) to a phone number or group via multipart/form-data.

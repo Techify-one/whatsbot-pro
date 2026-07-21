@@ -18,6 +18,8 @@ import { useReverseInfiniteScroll } from '../../hooks/useInfiniteScroll.js';
 import { useComposer } from './hooks/useComposer.js';
 import { useAudioRecorder } from './hooks/useAudioRecorder.js';
 import { useMediaUpload } from './hooks/useMediaUpload.js';
+import { useDropZone } from './hooks/useDropZone.js';
+import { DropOverlay } from './DropOverlay.js';
 import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
 import { useMessageActions, myReaction, selectionKey } from './hooks/useMessageActions.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
@@ -138,6 +140,15 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   const audio = useAudioRecorder({
     onRecorded: (item) => media.setPendingAudio(item),
+  });
+
+  // Arrastar arquivos para dentro da conversa (plano 64 · F6). A zona é a raiz
+  // do painel — o limite exato da conversa. Desligada quando o operador não
+  // pode responder, quando a janela de 24h está fechada (só template resolve)
+  // ou enquanto um lote está em voo.
+  const drop = useDropZone({
+    disabled: !canReply || media.sending || (sessionClosed && composer.mode !== 'private'),
+    onFiles: (files, sendMode) => media.requestFilesDrop(files, sendMode),
   });
 
   // ── Seleção em lote (plano 51 · 04 F1) ─────────────────────────
@@ -405,7 +416,14 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   }
 
   return html`
-    <div class="flex flex-col h-full">
+    <div
+      class="flex flex-col h-full relative"
+      ref=${drop.rootRef}
+      onDragEnter=${drop.dropHandlers.onDragEnter}
+      onDragOver=${drop.dropHandlers.onDragOver}
+      onDragLeave=${drop.dropHandlers.onDragLeave}
+      onDrop=${drop.dropHandlers.onDrop}
+    >
       <!-- Header -->
       <div class="h-[59px] flex items-center pl-4 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0">
         <button onClick=${onBack} class="lg:hidden text-wa-icon hover:text-wa-text mr-2 shrink-0">
@@ -615,6 +633,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           onCancel=${() => actions.setEditDialog(null)}
         />
       ` : ''}
+      ${drop.dragging ? html`<${DropOverlay} zone=${drop.zone} />` : ''}
     </div>
   `;
 }

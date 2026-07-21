@@ -17,7 +17,7 @@ import logging
 from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.br_phone import br_phone_variants
 from channels.events import InboundEvent
-from gowa.client import extract_msg_id
+from gowa.client import GOWASendError, extract_msg_id
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +306,18 @@ class GOWAChannel(Channel):
                 res = self._client.send_image(chat_id, path_or_url, caption=caption)
             elif kind == "audio":
                 res = self._client.send_audio(chat_id, path_or_url)
+            elif kind == "video":
+                # /send/video existe no binário atual; um GOWA mais antigo
+                # responderia 404 — nesse caso degrada para documento (entregue,
+                # só que como anexo) em vez de falhar o envio.
+                try:
+                    res = self._client.send_video(chat_id, path_or_url, caption=caption)
+                except GOWASendError as e:
+                    if getattr(e, "error_type", "") != "api":
+                        raise
+                    logger.warning("gowa /send/video indisponível (%s) — enviando como documento", e)
+                    res = self._client.send_file(chat_id, path_or_url, caption=caption,
+                                                 filename=filename)
             else:
                 res = self._client.send_file(chat_id, path_or_url, caption=caption,
                                              filename=filename)

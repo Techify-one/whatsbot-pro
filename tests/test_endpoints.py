@@ -955,7 +955,17 @@ r = client.post(
     data={"caption": "Vídeo teste"},
 )
 check("POST /send-video -> 200", r.status_code == 200)
-check("POST /send-video -> gowa send_file called", mock_gowa_client.send_file.called)
+# plano 64 · F9: o GOWA passou a ter /send/video, então o vídeo vai NATIVO
+# (antes do plano 64 este caminho degradava para send_file).
+check("POST /send-video -> gowa send_video chamado", mock_gowa_client.send_video.called)
+_vid_call = mock_gowa_client.send_video.call_args
+_vid_path = _vid_call.args[1] if len(_vid_call.args) > 1 else _vid_call.kwargs.get("video_path")
+check("vídeo gravado com extensão vinda do MIME", str(_vid_path).endswith(".mp4"))
+check("vídeo em disco tem entropia (plano 64 · F1)",
+      re.match(r"^\d+_[0-9a-f]{8}\.mp4$", Path(_vid_path).name) is not None)
+_vid_msgs = client.get("/api/contacts/5511999990001").json()["data"]["messages"]
+check("vídeo persiste com media_type=video",
+      any(m.get("media_type") == "video" for m in _vid_msgs))
 
 # Video validator policy — declared BY THE PROVIDER (plano 65), never by name.
 # A channel declaring VideoLimits is enforced; one declaring none never blocks;
@@ -1099,6 +1109,7 @@ if _at.available() and _shutil.which("ffprobe"):
     _os.remove(_ogg)
 
 # ═══════════════════════════════════════════════════════════════════
+#  10d. Upload hardening (plano 64 · F1/F2)
 #  10d. Upload hardening (plano 64 · F1/F2)
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Upload hardening (plano 64)")
@@ -1472,6 +1483,12 @@ check("import recusado -> nada gravado",
 _cat2 = client.get("/api/sounds/catalog").json()["data"]
 check("catálogo inclui o som importado",
       any(s["id"] == _snd["id"] and s["kind"] == "file" for s in _cat2["sounds"]))
+# E o catálogo embutido em /api/me/sound-prefs também — é POR ELE que a tela
+# (seletor + lista de importados) e o motor de som carregam. Sem isso o som
+# importado não aparece em lugar nenhum nem toca (regressão corrigida).
+_cat3 = client.get("/api/me/sound-prefs").json()["data"]["catalog"]
+check("me/sound-prefs: catálogo inclui o som importado",
+      any(s["id"] == _snd["id"] and s.get("kind") == "file" for s in _cat3["sounds"]))
 
 # Uma preferência pode apontar para o som importado (normalize aceita custom:<n>).
 r = client.put("/api/me/sound-prefs", json={"prefs": {"events": {"new_message": {"sound": _snd["id"]}}}})

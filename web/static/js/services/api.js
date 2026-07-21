@@ -376,6 +376,13 @@ export async function sendImage(phone, file, caption = '', conversationId = null
     { image: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
+// Vídeo inline (plano 64 · F9). Espelha sendImage; provider sem vídeo nativo
+// degrada para documento no backend.
+export async function sendVideo(phone, file, caption = '', conversationId = null, channelId = null) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-video`,
+    { video: file, caption, ..._scopeFields(conversationId, channelId) });
+}
+
 export async function sendAudio(phone, blob, filename = 'voice.ogg', conversationId = null, channelId = null) {
   // Preserve the filename: uploadRequest names Blob parts by `.name` (default
   // 'file'), so wrap a bare Blob in a File carrying `filename`.

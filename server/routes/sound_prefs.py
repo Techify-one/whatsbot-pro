@@ -190,9 +190,12 @@ def register_routes(app, deps):
         uid = _user_id(request)
         prefs = await asyncio.to_thread(user_sound_pref_repo.get, uid)
         return _ok({
+            # O catálogo vai COM a biblioteca importada: é por aqui que a tela
+            # (seletor de som + lista de importados) e o motor de som carregam —
+            # sem isso um som importado não aparece em lugar nenhum nem toca.
             "prefs": sound_catalog.normalize(prefs or {}, sparse=True),
             "global_default": _global_default(),
-            "catalog": sound_catalog.catalog(),
+            "catalog": await _catalog_with_library(),
         })
 
     @app.put("/api/me/sound-prefs")
