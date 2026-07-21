@@ -41,6 +41,12 @@ PER_CHANNEL_AI_KEYS = (
     "transfer_alert_duration",
     "ai_sequential_enabled",
     "ai_sequential_delay",
+    # plano 71: "atendente padrão para novas conversas" — um user_id humano que
+    # carimba o assignee no nascimento da conversa (que então nasce com a IA off).
+    # Channel-only (sem equivalente global). ``value()`` já lê qualquer chave do
+    # sub-objeto ``ai``; esta entrada documenta a intenção (e habilita o
+    # ``ChannelSettingsView`` a expô-la, embora só o nascimento a leia via ``value``).
+    "default_assignee_user_id",
 )
 
 _CACHE: dict[str, tuple[dict, float]] = {}

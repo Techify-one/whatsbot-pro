@@ -113,13 +113,20 @@ def _global_ai_enabled() -> bool:
 def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_id: int,
                          opened_at: float | None, ai_active: int | None,
                          is_archived: int, active_agent_key: str | None,
-                         origin: str | None, status: str = "open") -> dict:
+                         origin: str | None, status: str = "open",
+                         assignee_user_id: int | None = None) -> dict:
     """Insert a conversation row on an EXISTING transaction ``conn`` and return it.
 
     Shared by :func:`create` (opens its own txn) and :func:`_create_open_atomic`
     (checks-then-inserts inside one txn to close the brand-new-contact race).
     ``status`` defaults to ``"open"``; the "ignorar abertura" rule inserts a
-    brand-new thread already ``"closed"`` (plano regex: contato novo não abre atendimento)."""
+    brand-new thread already ``"closed"`` (plano regex: contato novo não abre atendimento).
+
+    ``assignee_user_id`` (plano 71) is the channel's "atendente padrão para novas
+    conversas" — a human user_id stamped ONLY at CREATE. ``None`` (default) keeps
+    the legacy behaviour: the conversation nasce sem dono (fila "Não atribuídas").
+    The caller that passes it also seeds ``ai_active=0`` (atendente humano ⇒ IA
+    off ⇒ sem agente, pela regra abaixo); we do NOT re-derive that here."""
     now = time.time()
     opened = opened_at if opened_at is not None else now
     if ai_active is None:
@@ -147,6 +154,7 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
         display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
         contact_inbox_id=contact_inbox_id, status=status, is_archived=is_archived,
         ai_active=ai_active, active_agent_key=active_agent_key, origin=origin,
+        assignee_user_id=assignee_user_id,
         opened_at=opened, last_activity_at=opened,
         custom_attributes={}, created_at=now, updated_at=now,
     ))
@@ -177,7 +185,8 @@ def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
 
 def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
                         opened_at: float | None, origin: str | None,
-                        ai_active_seed: int | None = None) -> tuple[dict, bool]:
+                        ai_active_seed: int | None = None,
+                        assignee_user_id_seed: int | None = None) -> tuple[dict, bool]:
     """Race-safe get-or-create of the OPEN conversation for (contact, inbox).
 
     Closes the brand-new-contact double-create: when two inbound messages of a
@@ -206,7 +215,7 @@ def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int
                 conn, inbox_id=inbox_id, contact_id=contact_id,
                 contact_inbox_id=contact_inbox_id, opened_at=opened_at,
                 ai_active=ai_active_seed, is_archived=0, active_agent_key=None,
-                origin=origin)
+                origin=origin, assignee_user_id=assignee_user_id_seed)
             return row, True
     except IntegrityError:
         # Loser of the open-conversation race (uq_atend_open_contact_inbox): the
@@ -298,7 +307,8 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
                            inbox_id: int = DEFAULT_INBOX_ID,
                            origin: str | None = None,
                            create_closed: bool = False,
-                           ai_active_seed: int | None = None) -> tuple[dict, str | None]:
+                           ai_active_seed: int | None = None,
+                           assignee_user_id_seed: int | None = None) -> tuple[dict, str | None]:
     """Like :func:`resolve_for_contact` but also reports the lifecycle transition.
 
     Returns ``(conv, event)`` where ``event`` is ``"created"`` (a brand-new
@@ -330,6 +340,15 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     ``ai_active`` ONLY on a brand-new conversation (CREATE); a reopen never re-seeds
     (preserves a manual pause). ``None`` keeps the legacy global fallback
     (:func:`_default_ai_enabled`), so callers that don't pass it are byte-identical.
+
+    ``assignee_user_id_seed`` (plano 71) is the channel's "atendente padrão para
+    novas conversas" (a human user_id) resolved by the caller. Like the AI seed it
+    only stamps a brand-new conversation (CREATE, event ``created``); a reopen NEVER
+    re-stamps (P2: respeita a reatribuição manual — o dono persiste porque para o
+    consumidor Curseduca o agrupamento reabre a MESMA conversa). ``None`` (default)
+    ⇒ nasce sem dono (fila "Não atribuídas"), byte-idêntico ao legado. Só chega no
+    ramo ``created`` (open); o ramo ``create_closed`` da regra "ignorar abertura"
+    não recebe dono.
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(
@@ -343,7 +362,8 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
             return row, None  # sem card "Conversa iniciada": conversa nasce fechada
         row, created = _create_open_atomic(
             inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
-            opened_at=opened_at, origin=origin, ai_active_seed=ai_active_seed)
+            opened_at=opened_at, origin=origin, ai_active_seed=ai_active_seed,
+            assignee_user_id_seed=assignee_user_id_seed)
         return row, ("created" if created else None)
     if reopen_if_closed and conv["status"] == "closed":
         return set_status(conv["id"], "open"), "reopened"

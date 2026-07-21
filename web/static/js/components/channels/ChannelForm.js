@@ -125,7 +125,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
 
         <div class="border-t border-wa-border pt-3">
           <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-          <${AiSettingsFields} value=${ai} onChange=${setAi}
+          <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users}
             sequentialDefault=${!!(descriptor && descriptor.ai_sequential_default)} />
         </div>
 

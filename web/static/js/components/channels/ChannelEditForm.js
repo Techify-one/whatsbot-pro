@@ -157,7 +157,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
 
           <div class="border-t border-wa-border pt-3">
             <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-            <${AiSettingsFields} value=${ai} onChange=${setAi} />
+            <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users} />
           </div>
 
           <div class="border-t border-wa-border pt-3">

@@ -190,6 +190,47 @@ class ContactMemory:
         except Exception:
             return self._default_ai_enabled
 
+    def _resolve_default_assignee(self) -> int | None:
+        """O "atendente padrão para novas conversas" do canal (plano 71): um
+        ``user_id`` humano que carimba ``assignee_user_id`` no NASCIMENTO de uma
+        conversa deste canal (que então nasce com a IA desligada). Lido fresh da
+        config do canal (``config['ai']['default_assignee_user_id']``, cache 30s do
+        ``ai_settings``), espelhando ``_resolve_ai_seed``.
+
+        Defensivo (fail-open → ``None`` = comportamento legado, sem dono):
+        - Coage para ``int`` positivo. ``None``/``""``/``"0"``/``0``/bool/inválido
+          ⇒ ``None``. A coerção malformada é ESPERADA (valor vem da UI/edição à mão),
+          então é tratada em silêncio — nada de traceback por mensagem.
+        - IGNORA um atendente inativo/removido (guarda P5). Usa
+          ``user_repo.is_active`` (1 coluna, indexado) em vez de ``get`` — este
+          método roda no caminho quente de ``add_message``; só pagam o custo canais
+          que de fato configuram o campo (canal sem o campo sai no early-return, sem
+          tocar o banco)."""
+        from channels import ai_settings
+        raw = ai_settings.value(self.channel_id, "default_assignee_user_id", None)
+        # bool é subclasse de int → int(True)==1 stamparia o user 1; barra explícito.
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return None
+        try:
+            uid = int(raw)
+        except (ValueError, TypeError):
+            return None  # config malformada (ex.: "abc") — coage quieto, sem traceback
+        if uid <= 0:
+            return None
+        try:
+            from db.repositories import user_repo
+            if not user_repo.is_active(uid):
+                return None
+        except Exception:
+            logger.exception("Falha ao validar atendente padrão %s do canal %s",
+                             uid, self.channel_id)
+            return None
+        return uid
+
     def _resolve_contact_type(self) -> str:
         """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
 
@@ -321,10 +362,18 @@ class ContactMemory:
             # config do canal vale em ≤30s, o TTL do cache do ai_settings). Only
             # applies on CREATE — a reopen never re-seeds.
             seed = 1 if self._resolve_ai_seed() else 0
+            # plano 71: se o canal tem um "atendente padrão para novas conversas",
+            # a conversa nasce carimbada com ele (assignee_user_id) e — como um humano
+            # assume 100% (D1) — nasce com a IA desligada (seed=0 ⇒ sem agente, pela
+            # regra do INSERT). O carimbo só vale no CREATE; o reopen NÃO re-carimba
+            # (o repo threada isso apenas no ramo `created`). None ⇒ legado (sem dono).
+            assignee_seed = self._resolve_default_assignee()
+            if assignee_seed:
+                seed = 0
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._source_id(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
-                ai_active_seed=seed)
+                ai_active_seed=seed, assignee_user_id_seed=assignee_seed)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)

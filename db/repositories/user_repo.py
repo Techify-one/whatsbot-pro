@@ -35,6 +35,20 @@ def get(user_id: int) -> dict | None:
     return _with_roles(dict(row)) if row else None
 
 
+def is_active(user_id: int) -> bool:
+    """Whether a user row exists AND is active — a single-column, indexed read.
+
+    Cheap alternative to :func:`get` for the plano-71 default-assignee guard, which
+    only needs ``is_active`` and must not pay the ``_with_roles`` roles+permissions
+    joins (:func:`get` fires 3 round-trips) on a hot per-message path. Returns False
+    for a missing OR inactive user (both mean "don't stamp")."""
+    with get_engine().connect() as conn:
+        val = conn.execute(
+            select(users.c.is_active).where(users.c.id == user_id)
+        ).scalar()
+    return bool(val)
+
+
 def get_by_email(email: str) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(

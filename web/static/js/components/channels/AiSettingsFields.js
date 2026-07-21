@@ -8,9 +8,12 @@ import { parseAudioModes, serializeAudioModes } from './constants.js';
 
 const html = htm.bind(h);
 
-export function AiSettingsFields({ value, onChange, sequentialDefault = true }) {
+export function AiSettingsFields({ value, onChange, sequentialDefault = true, users = [] }) {
   const ai = value || {};
   const set = (key, v) => onChange({ ...ai, [key]: v });
+  // Default human attendant for NEW conversations (plano 71). Stored as an int
+  // (or null) in ai.default_assignee_user_id; the <select> works in strings.
+  const assigneeVal = ai.default_assignee_user_id != null ? String(ai.default_assignee_user_id) : '';
   const num = (key, v, fallback) => {
     const n = parseFloat(v);
     set(key, isNaN(n) ? fallback : n);
@@ -37,6 +40,24 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true }) 
           class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
         Ativar a IA neste canal
       </label>
+
+      <!-- Atendente padrão para novas conversas (plano 71). SEMPRE visível — vale
+           mesmo com a IA do canal desligada (o consumidor Curseduca tem a IA off):
+           a conversa nova nasce atribuída a este humano e com a IA desligada. -->
+      <div>
+        <label class="block text-[12px] text-wa-secondary mb-1">Atendente padrão para novas conversas</label>
+        <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+          value=${assigneeVal}
+          onChange=${(e) => set('default_assignee_user_id', e.target.value ? parseInt(e.target.value, 10) : null)}>
+          <option value="">Nenhum (fila "Não atribuídas")</option>
+          ${users.map((u) => html`
+            <option key=${u.id} value=${u.id}>${u.name || u.email}</option>
+          `)}
+        </select>
+        ${assigneeVal ? html`
+          <span class="block text-[11px] text-wa-secondary mt-1">A conversa nasce atribuída a esta pessoa, com a IA desligada.</span>
+        ` : null}
+      </div>
 
       ${aiOn ? html`
         <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
