@@ -178,6 +178,24 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [setShowArchived, setSelected, setSelectedConvId]);
   useEffect(() => { setSelectionMode(false); setSelectedKeys([]); }, [showArchived]);
 
+  // Esc fecha, em camadas, o que estiver aberto no hub: primeiro o painel lateral
+  // (contato / atendimento), depois a própria conversa — volta ao estado "nenhuma
+  // conversa selecionada" (URL "/", só a sidebar + placeholder). Guardas:
+  // `defaultPrevented` respeita quem já consumiu a tecla (menus de autocomplete do
+  // compositor, prévia de mídia), e um overlay `.fixed.inset-0` no DOM significa
+  // modal aberto — ele tem o próprio Esc e tem precedência.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (document.querySelector('.fixed.inset-0')) return;
+      if (openPanel) { setOpenPanel(null); return; }
+      if (selectedRef.current == null && selectedConvIdRef.current == null) return;
+      selectContact(null);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPanel, setOpenPanel, selectContact, selectedRef, selectedConvIdRef]);
+
   // ── Filters + saved presets + derived sidebar list ──────────────────
   // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
   // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
