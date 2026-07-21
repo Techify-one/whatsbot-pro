@@ -182,6 +182,35 @@ export function isListServerExpressible(spec = EMPTY) {
   return true;
 }
 
+// ── plano 69 F6 — filtro avançado da tela CONTATOS (server-side) ────────────
+// A tela Contatos usa as MESMAS cláusulas {dim,op,value}, mas só as dims de contato
+// (tag/contact_type/cattr:contact:*). O backend (GET /api/contacts) entende a mesma
+// gramática de params planos, então reusamos `addClause`/`isServerExpressible`.
+
+/**
+ * Serializa as cláusulas de filtro de CONTATO nos params planos que o
+ * `/api/contacts` aceita (tag→labels, contact_type, cattr:contact:*). Sem archived/
+ * status (a tela Contatos os controla à parte).
+ * @param {any[]} advFilters
+ * @returns {Record<string, any>}
+ */
+export function buildContactFilterParams(advFilters = []) {
+  const params = {};
+  for (const cl of (advFilters || [])) addClause(params, cl);
+  return params;
+}
+
+/**
+ * Se TODAS as cláusulas de contato são expressáveis no servidor (sem colisão de dim
+ * nem operador não suportado, ex.: etiqueta "≠" cai no cliente). Fora disso, a tela
+ * filtra no cliente sobre os itens carregados (fallback).
+ * @param {any[]} advFilters
+ * @returns {boolean}
+ */
+export function isContactFilterServerExpressible(advFilters = []) {
+  return isServerExpressible({ advFilters });
+}
+
 /**
  * @param {{ advFilters?: any[] }} spec
  * @returns {boolean}

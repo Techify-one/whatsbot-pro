@@ -191,6 +191,28 @@ def test_contacts_filter_by_contact_type_narrows(build_app):
     assert set(tel) <= {c["phone"] for c in tel_page["items"]}
 
 
+def test_contacts_filter_accepts_frontend_param_shape(build_app):
+    """F6 contract: the exact params the frontend serializer emits
+    (`labels=` key, `contact_type__op=not_equal_to`) are accepted by the backend."""
+    from db.repositories import contact_repo, tag_repo
+
+    built = build_app(["gowa"])
+    _auth(built, "p69_contacts_shape@test.com")
+    tag_repo.create("p69shape", "#abcabc")
+    c = contact_repo.get_or_create("5511968069001", contact_type="telegram")
+    tag_repo.add_contact_tag(c["id"], "p69shape")
+
+    # `labels=` (not `tag=`) — the serializer maps tag → labels.
+    page = built.client.get("/api/contacts?labels=p69shape&limit=50").json()["data"]
+    assert c["phone"] in {x["phone"] for x in page["items"]}
+    assert page["total"] == 1, page["total"]
+
+    # contact_type "≠" via the __op override the serializer emits.
+    r = built.client.get("/api/contacts?contact_type=telegram&contact_type__op=not_equal_to&limit=500")
+    assert r.status_code == 200, r.text
+    assert all(x.get("contact_type") != "telegram" for x in r.json()["data"]["items"])
+
+
 def test_contacts_filter_unknown_cattr_is_400(build_app):
     """F5b: a non-filterable contact attribute key is rejected (400, not 500)."""
     built = build_app(["gowa"])

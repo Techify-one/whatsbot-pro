@@ -277,11 +277,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** filtrar por etiqueta que só casa contatos "no fim do alfabeto" os mostra (rolando); nunca mais "Nenhum contato encontrado" com `hasMore=true` sem carregar mais.
 
 #### Status de execução — Fase 6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `conversationFilterSpec.js` exporta `buildContactFilterParams(advFilters)` + `isContactFilterServerExpressible(advFilters)` (reusam `addClause`/`isServerExpressible`). `api.js` — `getContacts` aceita `opts.filters` (params planos). `ContactsListScreen.js` — `filterServerMode`/`filterParams`/`filterKey`; `fetchPage` manda `filters` ao servidor; `resetKey` inclui `filterKey` (mudar filtro refaz da página 0); `pageItems` NÃO re-filtra em serverMode; **sentinela renderizada SEMPRE que `hasMore`** (fora do ternário) — mata o falso-vazio que travava o scroll. Testes: 4 node (serializador) + 1 endpoint (shape `labels=`/`__op`).
+- **Como foi feito / decisões:** contrato = MESMA gramática de params do hub (o backend F5b usa `from_params`), então reusei os helpers em vez de um serializador novo. `tag` "≠" e dims duplicadas caem no **cliente** (`isContactFilterServerExpressible=false`) — mas agora com a sentinela viva, o scroll do fallback funciona (carrega e filtra as próximas páginas), fim do dead-end mesmo no cliente.
+- **Problemas / pendências:** `tag` "≠" não pagina server-side (limitação herdada do mapeamento `tag→labels`, que só faz membership); aceitável (fallback cliente correto). Badge opcional "N contatos" não feito (item 3, opcional).
+- **Verificação:** `node --check` OK; `node --test conversationFilterSpec.test.js` → 16 passed; `pytest test_plano69` → 8 passed (inclui o shape `labels=`/`contact_type__op` que o front emite).
 
 ---
 

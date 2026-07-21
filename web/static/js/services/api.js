@@ -169,6 +169,16 @@ export async function getContacts(q = '', archived = false, opts = {}) {
   if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
   if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
   if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
+  // plano 69 F6: filtros avançados de contato (tag/contact_type/cattr:contact:*) como
+  // params planos — o backend os aplica no WHERE da lista E do total (server-side).
+  if (opts.filters) {
+    for (const [k, v] of Object.entries(opts.filters)) {
+      if (v === undefined || v === null || v === '') continue;
+      const val = Array.isArray(v) ? v.join(',') : v;
+      if (val === '') continue;
+      params.push(`${encodeURIComponent(k)}=${encodeURIComponent(val)}`);
+    }
+  }
   const query = params.length ? `?${params.join('&')}` : '';
   // plano 62 F3: `opts.signal` (AbortSignal) cancela o request; abort rejeita
   // com AbortError — caller engole (não é erro de UI).

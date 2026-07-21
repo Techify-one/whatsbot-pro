@@ -23,6 +23,9 @@ import {
   getCustomAttributes,
 } from '../services/api.js';
 import { matchesAdvFilters } from '../services/conversationRows.js';
+import {
+  buildContactFilterParams, isContactFilterServerExpressible,
+} from '../services/conversationFilterSpec.js';
 import { contactTypeMeta, contactTypeBadge } from '../services/contactTypes.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 import { hasPermission } from '../utils/permissions.js';
@@ -344,13 +347,28 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   // plano 62 F3: cada fetch aborta o anterior ainda em voo (busca redigitada durante
   // um request lento) — libera o slot do browser; o guard `alive` do useInfiniteScroll
   // já protege o estado contra respostas velhas. AbortError não é erro de UI.
+  // plano 69 F6 — filtro avançado server-side: quando TODAS as cláusulas são
+  // expressáveis (tag/contact_type/cattr:contact:*), mandamos ao servidor (que corta a
+  // lista E o total), e NÃO re-filtramos no cliente. Cláusula não coberta (ex.: etiqueta
+  // "≠") ⇒ fallback cliente sobre os itens carregados (com a sentinela sempre viva).
+  const filterServerMode = useMemo(
+    () => advFilters.length > 0 && isContactFilterServerExpressible(advFilters),
+    [advFilters]);
+  const filterParams = useMemo(
+    () => (filterServerMode ? buildContactFilterParams(advFilters) : null),
+    [filterServerMode, advFilters]);
+  const filterKey = useMemo(
+    () => (filterParams ? JSON.stringify(filterParams) : ''),
+    [filterParams]);
+
   const listAbortRef = useRef(null);
   const fetchPage = useCallback((offset) => {
     if (listAbortRef.current) listAbortRef.current.abort();
     const ctrl = new AbortController();
     listAbortRef.current = ctrl;
     return getContacts(debouncedSearch, false,
-      { limit: PAGE_SIZE, offset, sort: 'name', signal: ctrl.signal })
+      { limit: PAGE_SIZE, offset, sort: 'name', signal: ctrl.signal,
+        filters: filterParams || undefined })
       .then((res) => {
         if (res && res.ok) { setError(null); return { items: (res.data && res.data.items) || [], hasMore: !!(res.data && res.data.has_more) }; }
         setError((res && res.error) || 'Falha ao carregar contatos');
@@ -361,11 +379,11 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
         setError(String(e));
         return { items: [], hasMore: false };
       });
-  }, [debouncedSearch]);
+  }, [debouncedSearch, filterKey]);
 
   const {
     items: contacts, setItems: setContacts, loading, loadingMore, hasMore, loadMore,
-  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${debouncedSearch}|${reloadTick}`, keyOf: (c) => c.id });
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: `${debouncedSearch}|${reloadTick}|${filterKey}`, keyOf: (c) => c.id });
 
   // reload após ações (delete/import) força a 1ª página de novo.
   const reload = useCallback(() => setReloadTick((t) => t + 1), []);
@@ -491,14 +509,15 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     push(null);
   }
 
-  // Filtros avançados (etiqueta/atributos personalizados) aplicados no CLIENTE sobre os
-  // itens já carregados. A busca por texto é server-side (`q`), então aqui só os filtros.
+  // plano 69 F6: quando o filtro é server-expressável, o servidor já cortou a lista +
+  // o total — NÃO re-filtrar (senão encolheria a página server-side). Só no fallback
+  // (dim/op não coberto, ex.: etiqueta "≠") filtramos no cliente sobre os carregados.
   // `matchesAdvFilters` lê `tags`/`custom_attributes` de cada contato (vêm no payload).
   const pageItems = useMemo(() => {
-    if (!advFilters.length) return contacts;
+    if (!advFilters.length || filterServerMode) return contacts;
     const now = Math.floor(Date.now() / 1000);
     return contacts.filter((c) => matchesAdvFilters(c, advFilters, now));
-  }, [contacts, advFilters]);
+  }, [contacts, advFilters, filterServerMode]);
 
   // Sentinela de fim de lista: rolar até o fim carrega o próximo LOTE (scroll infinito).
   const sentinelRef = useRef(null);
@@ -659,13 +678,17 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
             />
           `)}
         </div>
-
-        <!-- Scroll infinito (plano 50): sentinela carrega o próximo lote ao rolar até o fim. -->
-        ${hasMore ? html`
-          <div ref=${sentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
-            ${loadingMore ? 'Carregando mais…' : ''}
-          </div>` : null}
       `}
+
+      <!-- plano 69 F6 (fim do dead-end): a sentinela é renderizada SEMPRE que há mais
+           páginas — inclusive no ramo "Nenhum contato encontrado". Antes ela só vinha
+           junto da lista, então um filtro cliente que não casasse nada na página atual
+           travava o scroll (a sentinela sumia com `hasMore=true`) e as páginas seguintes
+           com matches nunca carregavam. -->
+      ${(!error && !loading && hasMore) ? html`
+        <div ref=${sentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
+          ${loadingMore ? 'Carregando mais…' : ''}
+        </div>` : null}
 
       ${detail ? html`
         <${ContactDetailOverlay}

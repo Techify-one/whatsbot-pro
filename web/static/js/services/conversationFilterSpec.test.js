@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCountParams, isServerExpressible, buildListParams, isListServerExpressible,
+  buildContactFilterParams, isContactFilterServerExpressible,
 } from './conversationFilterSpec.js';
 
 test('default open inbox builds an archived-scoped status count', () => {
@@ -108,4 +109,40 @@ test('mine/mentions tabs never collide with an advanced Agente clause', () => {
 test('searching disables the assignment clause (all tabs shown while searching)', () => {
   const spec = { search: 'x', searching: true, assignmentTab: 'mine', advFilters: [] };
   assert.deepEqual(buildListParams(spec), buildCountParams(spec));
+});
+
+// ── plano 69 F6 — filtro de CONTATOS → params do /api/contacts ─────────────
+
+test('buildContactFilterParams: tag/contact_type/cattr map to flat params', () => {
+  const adv = [
+    { dim: 'tag', op: 'eq', value: ['vip', 'lead'] },
+    { dim: 'contact_type', op: 'ne', value: 'telegram' },
+    { dim: 'cattr:contact:origem', op: 'contains', value: 'importado' },
+  ];
+  assert.equal(isContactFilterServerExpressible(adv), true);
+  assert.deepEqual(buildContactFilterParams(adv), {
+    labels: ['vip', 'lead'],
+    contact_type: 'telegram',
+    contact_type__op: 'not_equal_to',
+    'cattr:contact:origem__op': 'contains',
+    'cattr:contact:origem': 'importado',
+  });
+});
+
+test('contact tag "≠" (ne) is not server-expressible → client fallback', () => {
+  // The conversation `tag`→`labels` mapping only supports membership (eq); ne stays client.
+  assert.equal(isContactFilterServerExpressible(
+    [{ dim: 'tag', op: 'ne', value: ['vip'] }]), false);
+});
+
+test('duplicate contact dims (two tags) fall back to the client', () => {
+  assert.equal(isContactFilterServerExpressible([
+    { dim: 'tag', op: 'eq', value: ['vip'] },
+    { dim: 'tag', op: 'eq', value: ['lead'] },
+  ]), false);
+});
+
+test('empty contact filter is trivially expressible', () => {
+  assert.equal(isContactFilterServerExpressible([]), true);
+  assert.deepEqual(buildContactFilterParams([]), {});
 });
