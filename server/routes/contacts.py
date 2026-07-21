@@ -37,6 +37,34 @@ from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
 
 logger = logging.getLogger(__name__)
 
+# Contact-scope filter dims (plano 69 F5b). Everything else in the querystring
+# (q/archived/sort/limit/offset/include_messages) stays a native route param.
+_CONTACT_FILTER_KEYS = ("tag", "labels", "contact_type")
+
+
+def _contact_filter_where(request: Request):
+    """Build the advanced-filter WHERE (plano 69 F5b) from flat query params.
+
+    Pulls ONLY the contact-scope dims (tag/contact_type/cattr:contact:*) out of the
+    querystring and compiles them with ``db.filters.build_contact_where`` (contacts.c.*
+    scope, allowlisted + bind-param safe). ``None`` when no filter param is present
+    (byte-identical to the pre-plano-69 path). Raises ``FilterError`` on a bad
+    key/op/value (caller maps to 400)."""
+    from db.filters import build_contact_where
+    from db.filters.spec import from_params
+    from db.filters.translate import FilterContext
+    filt = {
+        k: v for k, v in dict(request.query_params).items()
+        if (k[:-4] if k.endswith("__op") else k) in _CONTACT_FILTER_KEYS
+        or (k[:-4] if k.endswith("__op") else k).startswith("cattr:contact:")
+    }
+    if not filt:
+        return None
+    spec = from_params(filt)
+    ctx = FilterContext(contact_cattr_keys=frozenset(
+        d["attribute_key"] for d in ca_repo.list_filterable("contact")))
+    return build_contact_where(spec, ctx)
+
 
 async def _emit_send_error(ws_manager, phone: str, content: str) -> None:
     """Broadcast a ``role:'error'`` message card for a failed send (R3 / B2).
@@ -249,17 +277,32 @@ def register_routes(app, deps):
     @app.get("/api/contacts")
     async def list_contacts(request: Request, q: str = "", archived: bool = False,
                             limit: int | None = None, offset: int = 0,
-                            sort: str = "recency"):
+                            sort: str = "recency", include_messages: bool = True):
         """List all contacts with summary info.
 
         Paginação (plano 50 F5): quando ``limit`` é informado, devolve o envelope
         ``{items, total, has_more}`` (cap ``CAP_LIST``). SEM ``limit`` mantém o shape
         legado (``data`` = lista). ``sort`` (F7): ``name`` = alfabético (tela /contacts),
-        default ``recency`` (sidebar). ``offset`` ≥ 0."""
+        default ``recency`` (sidebar). ``offset`` ≥ 0.
+
+        ``include_messages`` (plano 62 F5, default ``true`` por compat): com
+        ``false`` a busca ``q`` não olha o conteúdo das mensagens (só nome/
+        telefone/grupo/tag) e as linhas não ganham ``match_snippet`` — mais barato
+        para telas que não renderizam o trecho casado."""
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
         sort = "name" if sort == "name" else "recency"
+        # Filtro avançado server-side (plano 69 F5b): tag/contact_type/cattr:contact:*
+        # entram no MESMO WHERE da lista e do COUNT, então a lista bate com o total.
+        from db.filters import FilterError
+        try:
+            filter_where = _contact_filter_where(request)
+        except FilterError as e:
+            return _err(str(e), status=400)
+        except (TypeError, ValueError, KeyError, IndexError) as e:
+            logger.warning("Filtro de contatos inválido: %s", e)
+            return _err("Filtro inválido.", status=400)
         # Inbox-membership scoping (plano inboxes/canais §4.7): a sidebar
         # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
         # caixas que o usuário não acessa. Espelha GET /api/conversations.
@@ -267,7 +310,8 @@ def register_routes(app, deps):
         if limit is None:
             # Caminho legado: lista completa (retrocompatível).
             results = await asyncio.to_thread(
-                contact_repo.list_contacts, q, archived, inbox_ids)
+                contact_repo.list_contacts, q, archived, inbox_ids,
+                include_messages=include_messages, filter_where=filter_where)
             for c in results:
                 c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
             return _ok(results)
@@ -276,7 +320,8 @@ def register_routes(app, deps):
         off = clamp_offset(offset)
         page = await asyncio.to_thread(
             contact_repo.list_contacts_page, q, archived, inbox_ids,
-            limit=lim, offset=off, sort=sort)
+            limit=lim, offset=off, sort=sort, include_messages=include_messages,
+            filter_where=filter_where)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
         for c in page["items"]:

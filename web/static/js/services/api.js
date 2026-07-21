@@ -169,8 +169,20 @@ export async function getContacts(q = '', archived = false, opts = {}) {
   if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
   if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
   if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
+  // plano 69 F6: filtros avançados de contato (tag/contact_type/cattr:contact:*) como
+  // params planos — o backend os aplica no WHERE da lista E do total (server-side).
+  if (opts.filters) {
+    for (const [k, v] of Object.entries(opts.filters)) {
+      if (v === undefined || v === null || v === '') continue;
+      const val = Array.isArray(v) ? v.join(',') : v;
+      if (val === '') continue;
+      params.push(`${encodeURIComponent(k)}=${encodeURIComponent(val)}`);
+    }
+  }
   const query = params.length ? `?${params.join('&')}` : '';
-  return request('GET', `/api/contacts${query}`);
+  // plano 62 F3: `opts.signal` (AbortSignal) cancela o request; abort rejeita
+  // com AbortError — caller engole (não é erro de UI).
+  return request('GET', `/api/contacts${query}`, undefined, { signal: opts.signal });
 }
 
 // Exporta todos os contatos como CSV (download). Retorna o Blob ou null.
@@ -451,14 +463,16 @@ export async function updateContactTags(phone, tags) {
 // Conversation lifecycle: list with filters, fetch one, change status
 // (open/closed), assign to a user, and archive/unarchive.
 
-export async function listConversations(params = {}) {
+// `reqOpts` (plano 62 F3): { signal } opcional para cancelamento via AbortController
+// (um abort rejeita com AbortError — caller engole). Callers antigos não mudam.
+export async function listConversations(params = {}, reqOpts = {}) {
   const clean = {};
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
     clean[k] = v;
   }
   const qs = new URLSearchParams(clean).toString();
-  return request('GET', `/api/atendimentos${qs ? '?' + qs : ''}`);
+  return request('GET', `/api/atendimentos${qs ? '?' + qs : ''}`, undefined, reqOpts);
 }
 
 export async function getConversation(id) {
@@ -490,7 +504,7 @@ export async function deleteSavedFilter(id) {
 // from `params`, dropping empty values and URL-encoding keys (cattr:<key>) and
 // values correctly. AND between distinct params; a comma-separated value (e.g.
 // labels=vip,lead) is OR within that dimension.
-export async function filterConversations(params = {}) {
+export async function filterConversations(params = {}, reqOpts = {}) {
   const parts = [];
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
@@ -502,7 +516,9 @@ export async function filterConversations(params = {}) {
     }
   }
   const qs = parts.join('&');
-  return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`);
+  // `reqOpts` (plano 69 F2): { signal } opcional — a sidebar conversa-first agora
+  // pode ser servida por este endpoint e precisa cancelar o fetch anterior.
+  return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`, undefined, reqOpts);
 }
 
 export async function countConversations(params = {}) {

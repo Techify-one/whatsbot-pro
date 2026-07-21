@@ -83,6 +83,11 @@ export function useConversationWsEvents(opts) {
   // ref-based refetch shortly after — avoids the stale-closure/side-effect-in-reducer
   // fetch and the double-fetch race when two events fire together. Uses the stable
   // refs so a []-dep callback never reads a stale search/handle.
+  // plano 62 F6: com busca ativa (searchRef não-vazio) este refetch recarrega só a 1ª
+  // PÁGINA da busca (50 contatos) — barato, mas descarta as páginas já roladas, que o
+  // operador recupera rolando de novo. (Substituiu o cache de 30s da F3, que existia só
+  // porque a busca vinha inteira num payload.) Mesmo vale para o refetch de membership
+  // abaixo (onConversationChanged).
   const scheduleListRefetch = useCallback(() => {
     if (listRefetchTimer.current) clearTimeout(listRefetchTimer.current);
     listRefetchTimer.current = setTimeout(() => {

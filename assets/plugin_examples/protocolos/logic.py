@@ -2595,6 +2595,19 @@ def auto_assign_conversation_on_close_enabled() -> bool:
     return bool(config_repo.get(_general_key("auto_assign_conversation_on_close"), True))
 
 
+def resolve_keep_assignee_enabled() -> bool:
+    """Plano 67 — "resolver sem desatribuir o atendente" ligado? Default OFF: o core
+    limpa o ``assignee_user_id`` ao fechar, como sempre fez."""
+    return bool(config_repo.get(_general_key("resolve_keep_assignee"), False))
+
+
+def clear_assignee_on_close(ctx, value):
+    """``filter.conversation.clear_assignee_on_close`` (plano 67) — o core pergunta se
+    deve limpar o atendente humano ao FECHAR a conversa. Ligado ⇒ ``False`` (mantém o
+    atendente vinculado); desligado ⇒ devolve o ``value`` recebido (não interfere)."""
+    return False if resolve_keep_assignee_enabled() else value
+
+
 def relink_prompt_enabled() -> bool:
     """Popup "vincular ao protocolo anterior" ligado? (plano 49, default ON)."""
     return bool(config_repo.get(_general_key("relink_prompt_enabled"), True))
@@ -2613,6 +2626,7 @@ def relink_window_minutes() -> int:
 def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
+        "resolve_keep_assignee": resolve_keep_assignee_enabled(),
         "relink_prompt_enabled": relink_prompt_enabled(),
         "relink_window_minutes": relink_window_minutes(),
     }
@@ -2622,6 +2636,10 @@ def set_general_config(cfg: dict) -> dict:
     cfg = cfg or {}
     config_repo.set(_general_key("auto_assign_conversation_on_close"),
                     bool(cfg.get("auto_assign_conversation_on_close")))
+    # Plano 67: só grava quando presente (payload legado não zera o valor já gravado).
+    if "resolve_keep_assignee" in cfg:
+        config_repo.set(_general_key("resolve_keep_assignee"),
+                        bool(cfg.get("resolve_keep_assignee")))
     # Chaves do plano 49: só grava quando presentes (payloads antigos não zeram o default).
     if "relink_prompt_enabled" in cfg:
         config_repo.set(_general_key("relink_prompt_enabled"),

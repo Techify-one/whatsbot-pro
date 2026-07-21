@@ -28,6 +28,9 @@ import {
   getCustomAttributes,
 } from '../services/api.js';
 import { matchesAdvFilters } from '../services/conversationRows.js';
+import {
+  buildContactFilterParams, isContactFilterServerExpressible,
+} from '../services/conversationFilterSpec.js';
 import { contactTypeMeta, contactTypeBadge } from '../services/contactTypes.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 import { hasPermission } from '../utils/permissions.js';
@@ -310,6 +313,9 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const canImport = hasPermission(currentUser, 'contact.import');
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
+  // plano 62 F3: `search` reflete o input NA HORA (UX + URL); `debouncedSearch` é o que
+  // alimenta o fetch — 1 request por pausa de digitação.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(0);              // página atual, 0-indexed
   const [contacts, setContacts] = useState([]);     // itens da página atual
   const [total, setTotal] = useState(0);            // universo (p/ contar as páginas)
@@ -346,15 +352,44 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     deps: [search, page, advFilters],
   });
 
+  // plano 62 F3: debounce de 300ms entre digitar e disparar a busca no servidor.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // plano 69 F6 — filtro avançado server-side: quando TODAS as cláusulas são
+  // expressáveis (tag/contact_type/cattr:contact:*), mandamos ao servidor, que corta a
+  // lista E o `total` — a paginação passa a contar o universo JÁ filtrado. Cláusula não
+  // coberta (ex.: etiqueta "≠") ⇒ fallback cliente sobre a página carregada (e aí sim
+  // uma página pode exibir MENOS de 15 linhas, porque o total ainda é o não-filtrado).
+  const filterServerMode = useMemo(
+    () => advFilters.length > 0 && isContactFilterServerExpressible(advFilters),
+    [advFilters]);
+  const filterParams = useMemo(
+    () => (filterServerMode ? buildContactFilterParams(advFilters) : null),
+    [filterServerMode, advFilters]);
+  const filterKey = useMemo(
+    () => (filterParams ? JSON.stringify(filterParams) : ''),
+    [filterParams]);
+
   // PAGINAÇÃO CLÁSSICA (15 por página). A busca vai pro servidor (q + limit/offset +
   // ordem alfabética via sort=name); o servidor devolve SEMPRE uma página de PAGE_SIZE
-  // mais o `total` do universo, nunca a tabela inteira. Os filtros avançados
-  // (atributos/etiquetas) seguem aplicados no cliente sobre a página carregada — com
-  // filtro ativo, uma página pode exibir MENOS de 15 linhas.
+  // mais o `total` do universo, nunca a tabela inteira.
+  // plano 62 F3: cada fetch aborta o anterior ainda em voo (página trocada ou busca
+  // redigitada durante um request lento) — libera o slot do browser. AbortError não é
+  // erro de UI e não pode zerar a lista: o request abortado simplesmente não escreve.
+  const listAbortRef = useRef(null);
   useEffect(() => {
     let alive = true;
+    if (listAbortRef.current) listAbortRef.current.abort();
+    const ctrl = new AbortController();
+    listAbortRef.current = ctrl;
     setLoading(true);
-    getContacts(search, false, { limit: PAGE_SIZE, offset: page * PAGE_SIZE, sort: 'name' })
+    getContacts(debouncedSearch, false, {
+      limit: PAGE_SIZE, offset: page * PAGE_SIZE, sort: 'name',
+      signal: ctrl.signal, filters: filterParams || undefined,
+    })
       .then((res) => {
         if (!alive) return;
         if (res && res.ok) {
@@ -367,20 +402,26 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
           setTotal(0);
         }
       })
-      .catch((e) => { if (alive) { setError(String(e)); setContacts([]); setTotal(0); } })
+      .catch((e) => {
+        if (!alive || (e && e.name === 'AbortError')) return;
+        setError(String(e));
+        setContacts([]);
+        setTotal(0);
+      })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [search, page, reloadTick]);
+  }, [debouncedSearch, page, reloadTick, filterKey]);
 
   // Busca/filtros/reload (delete/import) sempre voltam pra 1ª página — senão o usuário
-  // ficaria numa página que não existe mais no novo universo de resultados.
+  // ficaria numa página que não existe mais no novo universo de resultados. Observa a
+  // busca JÁ debounced (o `search` cru zeraria a página a cada tecla).
   const firstLoad = useRef(true);
   useEffect(() => {
     // No mount a página vem da URL (deep-link); só resets POSTERIORES zeram.
     if (firstLoad.current) { firstLoad.current = false; return; }
     setPage(0);
     // eslint-disable-next-line
-  }, [search, advFilters, reloadTick]);
+  }, [debouncedSearch, filterKey, advFilters, reloadTick]);
 
   // reload após ações (delete/import) força a 1ª página de novo.
   const reload = useCallback(() => setReloadTick((t) => t + 1), []);
@@ -506,14 +547,15 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     push(null);
   }
 
-  // Filtros avançados (etiqueta/atributos personalizados) aplicados no CLIENTE sobre os
-  // itens já carregados. A busca por texto é server-side (`q`), então aqui só os filtros.
+  // plano 69 F6: quando o filtro é server-expressável, o servidor já cortou a lista +
+  // o total — NÃO re-filtrar (senão encolheria a página server-side). Só no fallback
+  // (dim/op não coberto, ex.: etiqueta "≠") filtramos no cliente sobre os carregados.
   // `matchesAdvFilters` lê `tags`/`custom_attributes` de cada contato (vêm no payload).
   const pageItems = useMemo(() => {
-    if (!advFilters.length) return contacts;
+    if (!advFilters.length || filterServerMode) return contacts;
     const now = Math.floor(Date.now() / 1000);
     return contacts.filter((c) => matchesAdvFilters(c, advFilters, now));
-  }, [contacts, advFilters]);
+  }, [contacts, advFilters, filterServerMode]);
 
   // Total de páginas (mínimo 1), se ainda há página seguinte e a faixa exibida
   // ("Exibindo 31 - 45 de 69 contatos") — sempre sobre o universo do SERVIDOR.
@@ -764,11 +806,11 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
           onClose=${() => setShowCreate(false)}
           onCreated=${async (phone) => {
             setShowCreate(false);
-            await reload();
-            // Abre o detalhe do contato recém-criado (resolve o id pela lista nova).
-            const res = await getContacts('', false);
-            const created = res && res.ok ? (res.data || []).find((c) => c.phone === phone) : null;
-            if (created) openDetail(created);
+            reload();
+            // plano 62 F3: abre o detalhe buscando SÓ o contato criado
+            // (GET /api/contacts/{phone}) em vez de re-baixar a lista completa.
+            const res = await getContact(phone, false, null, { limit: 1 });
+            if (res && res.ok && res.data && res.data.id != null) openDetail(res.data);
           }}
         />
       ` : null}

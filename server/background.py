@@ -215,13 +215,23 @@ async def avatar_fetch_task(deps):
         return
 
     while not state.stop_event.is_set():
+        # Plano 62 F7: the sweep used to run the heavy enriched list_contacts twice
+        # (active + archived) and then TWO enriched queries PER contact to resolve
+        # its channel (~29k queries/sweep). Now it's 1 cheap SELECT for the targets
+        # + 1 batch DISTINCT ON query for every contact's channel.
         try:
-            contacts = await asyncio.to_thread(contact_repo.list_contacts, "", False)
-            archived = await asyncio.to_thread(contact_repo.list_contacts, "", True)
-            all_contacts = contacts + archived
+            all_contacts = await asyncio.to_thread(contact_repo.list_avatar_targets)
         except Exception as e:
             logger.error("[Avatar] Failed to load contacts: %s", e)
             all_contacts = []
+
+        try:
+            channel_by_contact = await asyncio.to_thread(
+                conversation_repo.latest_channel_id_by_contact,
+                [c["id"] for c in all_contacts if c.get("id") is not None])
+        except Exception as e:
+            logger.error("[Avatar] Failed to resolve contact channels: %s", e)
+            channel_by_contact = {}
 
         changed = 0
         for c in all_contacts:
@@ -230,9 +240,9 @@ async def avatar_fetch_task(deps):
             phone = c.get("phone", "")
             if not phone:
                 continue
-            # Resolve the contact's channel; skip contacts with no conversation yet.
-            channel_id = await asyncio.to_thread(
-                conversation_repo.channel_id_for_contact, c.get("id"))
+            # Skip contacts with no conversation yet (absent from the batch map)
+            # or whose inbox/channel is gone (mapped to None).
+            channel_id = channel_by_contact.get(c.get("id"))
             if not channel_id:
                 continue
             try:
@@ -240,7 +250,10 @@ async def avatar_fetch_task(deps):
                     changed += 1
             except Exception as e:
                 logger.debug("[Avatar] refresh failed for %s: %s", phone, e)
-            # Rate limit to avoid overwhelming the provider
+            # Rate limit to avoid overwhelming the provider (per refresh attempt,
+            # like before). NOTE: with many contacts (e.g. ~14k) a full pass at
+            # 0.5s/contact takes longer than AVATAR_REFRESH_INTERVAL — the interval
+            # then acts as a floor between sweeps, not a fixed schedule.
             await asyncio.sleep(0.5)
 
         logger.info("[Avatar] Sweep done: %d updated (of %d contacts)",

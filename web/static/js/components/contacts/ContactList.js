@@ -133,8 +133,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
-  // há próxima página (modo conversa-first, sem busca). Usa o mesmo primitivo
-  // reutilizável `useScrollSentinel` das demais listas.
+  // há próxima página. plano 62 F6: os DOIS modos paginam (conversa-first e busca), então
+  // o gatilho é só `hasMore`. Usa o mesmo primitivo reutilizável `useScrollSentinel` das
+  // demais listas.
   const bottomSentinelRef = useRef(null);
   const listScrollRef = useRef(null);
   useScrollSentinel(
@@ -654,9 +655,21 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 </div>
               `)
         }
+        <!-- plano 69 F4: "mostrando X de Y" — só quando o TOTAL da aba (server-side)
+             supera o carregado. Verdadeiro agora que a lista é a filtrada (F2/F3);
+             some quando iguais. Legível no modo escuro (text-wa-secondary). -->
+        ${(() => {
+          const total = tabCounts ? Number(tabCounts[assignmentTab] ?? tabCounts.all ?? 0) : 0;
+          const loaded = contacts.length;
+          if (!total || total <= loaded) return null;
+          return html`<div class="text-center text-wa-secondary pt-3 pb-1 text-[11px]">
+            Mostrando ${loaded} de ${total}
+          </div>`;
+        })()}
         <!-- Sentinela do scroll infinito (plano 50 F8): dispara loadMore ao aproximar
-             do fim quando há mais páginas (modo conversa-first, sem busca). -->
-        ${hasMore && !search ? html`
+             do fim quando há mais páginas. plano 62 F6: vale também no modo BUSCA (que
+             agora pagina) — quem decide é só o hasMore. -->
+        ${hasMore ? html`
           <div ref=${bottomSentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
             ${loadingMore ? 'Carregando mais…' : ''}
           </div>` : null}

@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from db.engine import get_engine
 from db.repositories import conversation_query, conversation_label_repo
 from db.tables import (conversations, contacts, conversation_counters,
-                       messages, unread_msg_ids, conversation_label_links,
+                       inboxes, messages, unread_msg_ids, conversation_label_links,
                        mentions)
 
 logger = logging.getLogger(__name__)
@@ -565,6 +565,39 @@ def channel_id_for_contact(contact_id: int) -> str | None:
         return None
 
 
+def latest_channel_id_by_contact(contact_ids: list[int]) -> dict[int, str | None]:
+    """Batch version of :func:`channel_id_for_contact` (plano 62 F7).
+
+    ONE query resolves, for each contact, the ``channel_id`` of its MOST RECENT
+    conversation — same semantics as the one-by-one path: "most recent" is
+    ``last_activity_at DESC`` (:func:`get_latest_for_contact`) and the channel is
+    reached via ``atendimentos.inbox_id → inboxes.channel_id`` with an OUTER join
+    (:func:`conversation_query.enriched_from`), so a conversation whose inbox is
+    gone maps to ``None``. Contacts with no conversation are ABSENT from the
+    result (the caller skips them). Best-effort — returns ``{}`` on failure,
+    never raises. Uses Postgres ``DISTINCT ON (contact_id)``; ``id DESC`` breaks
+    ``last_activity_at`` ties deterministically."""
+    if not contact_ids:
+        return {}
+    try:
+        stmt = (
+            select(conversations.c.contact_id, inboxes.c.channel_id)
+            .select_from(conversations.outerjoin(
+                inboxes, inboxes.c.id == conversations.c.inbox_id))
+            .where(conversations.c.contact_id.in_(contact_ids))
+            .order_by(conversations.c.contact_id,
+                      conversations.c.last_activity_at.desc(),
+                      conversations.c.id.desc())
+            .distinct(conversations.c.contact_id)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        return {contact_id: channel_id for contact_id, channel_id in rows}
+    except Exception:
+        logger.debug("latest_channel_id_by_contact failed", exc_info=True)
+        return {}
+
+
 def get_row_for_broadcast(conv_id: int) -> dict | None:
     """One enriched conversation row in the EXACT shape of a ``/api/atendimentos``
     list item — ``get_with_channel`` plus the conversation labels (plano 28).
@@ -698,13 +731,20 @@ def _update(conv_id: int, values: dict) -> dict | None:
     return get(conv_id)
 
 
-def set_status(conv_id: int, status: str) -> dict | None:
+def set_status(conv_id: int, status: str, *, clear_assignee: bool = True) -> dict | None:
     """Set a conversation's status and the columns DERIVED from it (data write).
 
     Writes ``status`` plus the status-derived columns: on close, stamps
-    ``resolved_at`` AND drops the assignment (``assignee_user_id`` +
-    ``active_agent_key``) so the conversation leaves any agent's queue and lands
-    back as "Não atribuída"; on open, clears ``resolved_at``.
+    ``resolved_at`` AND drops the ACTIVE AI AGENT (``active_agent_key``) so the
+    conversation leaves the agent runtime; on open, clears ``resolved_at``.
+
+    The HUMAN assignee (``assignee_user_id``) is dropped on close ONLY when
+    ``clear_assignee`` is true (the default — legacy behavior: the conversation
+    lands back as "Não atribuída"). Callers may pass ``clear_assignee=False`` to
+    KEEP the current attendant assigned across the close (plano 67 — a plugin opts
+    into this via ``filter.conversation.clear_assignee_on_close`` in the service
+    layer). ``active_agent_key`` is ALWAYS cleared on close regardless — that drop
+    is what lets the reopen path fall back to the MARKED default agent.
 
     Plano 23 Fase B4: this stays a single status-derived data write (the inbound
     auto-reopen path ``resolve_for_contact_ex`` and test setup depend on the exact
@@ -716,8 +756,9 @@ def set_status(conv_id: int, status: str) -> dict | None:
     values = {"status": status}
     if status == "closed":
         values["resolved_at"] = time.time()
-        values["assignee_user_id"] = None
         values["active_agent_key"] = None
+        if clear_assignee:
+            values["assignee_user_id"] = None
     elif status == "open":
         values["resolved_at"] = None
     return _update(conv_id, values)

@@ -294,33 +294,53 @@ def _shape_contact_row(row, tags_list: list) -> dict:
     }
 
 
-def _apply_q_filter(conn, results: list, q: str, archived: bool) -> list:
-    """Filtra a lista já shaped pela busca textual ``q`` (nome/telefone/grupo/tag +
-    conteúdo de mensagem). Roda em Python DEPOIS do SELECT — por isso a paginação SQL
-    só vale SEM ``q`` (com ``q`` a página é fatiada em Python, ver ``list_contacts_page``)."""
-    ql = contact_search.fold(q)
-    # Also match by message content (normal, private notes, transcriptions),
-    # so the search bar finds a conversation by something that was said in it.
-    msg_matched = contact_search.contact_ids_matching_message(conn, ql, archived)
-    filtered = []
-    for c in results:
-        if (ql in contact_search.fold(c["name"])
-                or ql in c["phone"]
-                or ql in contact_search.fold(c.get("group_name", ""))
-                or any(ql in contact_search.fold(t) for t in c.get("tags", []))):
-            filtered.append(c)
-        elif c["id"] in msg_matched:
-            # Matched only by message content — show the matching excerpt so the
-            # operator sees why this conversation came up, and the message id so
-            # opening it can scroll straight to that message.
-            c["match_snippet"] = msg_matched[c["id"]]["snippet"]
-            c["match_msg_id"] = msg_matched[c["id"]]["id"]
-            filtered.append(c)
-    return filtered
+def _matched_by_contact_fields(c: dict, folded_q: str) -> bool:
+    """A row already matched ``q`` by name/phone/group_name/tag?
+
+    Mirrors the first branch of the pre-F5 Python filter EXACTLY (same fields,
+    same folding), because it decides the same thing it used to: whether the row
+    gets the content-match decoration. In the old code the decoration was the
+    ``elif`` — only a row that matched by NOTHING but message content carried a
+    ``match_snippet``. Runs over the rows of ONE page now (≤ ``limit``)."""
+    return (folded_q in contact_search.fold(c["name"])
+            or folded_q in c["phone"]
+            or folded_q in contact_search.fold(c.get("group_name", ""))
+            or any(folded_q in contact_search.fold(t) for t in c.get("tags", [])))
+
+
+def _decorate_content_matches(conn, results: list, q: str, include_messages: bool) -> None:
+    """Attach ``match_snippet``/``match_msg_id`` to the page rows that matched only
+    by message content (plano 62 F5 — in place of the old 5000-message scan).
+
+    Only the rows of the current page are considered, and only those that did NOT
+    match by name/phone/group/tag, so this is one indexed query over ≤ ``limit``
+    contact ids. The snippet itself is still built in Python (``match_snippet``
+    keeps the ORIGINAL accented text for display)."""
+    if not results or not include_messages:
+        return
+    folded_q = contact_search.fold(q)
+    if len(folded_q) < contact_search.MIN_SCAN_QUERY_LEN:
+        return  # 1-char search never touches message content (legacy guard)
+    pending = [c for c in results if not _matched_by_contact_fields(c, folded_q)]
+    if not pending:
+        return
+    rows = conn.execute(
+        contact_search.build_content_matches_query(q, [c["id"] for c in pending])
+    ).mappings().all()
+    by_contact = {r["contact_id"]: r for r in rows}
+    for c in pending:
+        hit = by_contact.get(c["id"])
+        if hit is None:
+            continue
+        # Show the matching excerpt so the operator sees why this conversation
+        # came up, and the message id so opening it can scroll to that message.
+        c["match_snippet"] = contact_search.match_snippet(hit["content"] or "", folded_q)
+        c["match_msg_id"] = hit["id"]
 
 
 def list_contacts(q: str = "", archived: bool = False,
-                  inbox_ids: list[int] | None = None) -> list[dict]:
+                  inbox_ids: list[int] | None = None, *,
+                  include_messages: bool = True, filter_where=None) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts.
 
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7): ``None``
@@ -330,51 +350,69 @@ def list_contacts(q: str = "", archived: bool = False,
 
     Retorna a lista COMPLETA (sem teto) — caminho legado para callers internos
     (varredura de avatares) e para o endpoint sem paginação. A versão paginada é
-    :func:`list_contacts_page` (plano 50 F5)."""
-    return list_contacts_page(q, archived, inbox_ids, limit=None, offset=0)["items"]
+    :func:`list_contacts_page` (plano 50 F5).
+
+    ``include_messages=False`` (plano 62 F5) tira a busca por conteúdo de mensagem
+    da cláusula ``q`` — para telas que não renderizam o trecho casado.
+
+    ``filter_where`` (plano 69 F5b): WHERE avançado já compilado (``db.filters``
+    ``build_contact_where``) — ``None`` = sem filtro (retrocompatível)."""
+    return list_contacts_page(q, archived, inbox_ids, limit=None, offset=0,
+                              include_messages=include_messages,
+                              filter_where=filter_where)["items"]
 
 
 def list_contacts_page(q: str = "", archived: bool = False,
                        inbox_ids: list[int] | None = None, *,
                        limit: int | None = None, offset: int = 0,
-                       sort: str = "recency") -> dict:
+                       sort: str = "recency",
+                       include_messages: bool = True, filter_where=None) -> dict:
     """Página de contatos (plano 50 F5) → ``{items, total, has_more}``.
 
-    ``limit=None`` ⇒ tudo (byte-idêntico ao legado; ``total=len``, ``has_more=False``).
-    ``limit`` set: SEM ``q`` pagina no SQL (``LIMIT/OFFSET`` + COUNT barato); COM ``q``
-    carrega tudo, filtra em Python e fatia a página (a busca corre post-SELECT, não dá
-    p/ paginar no SQL). ``total`` = universo (sem/uma busca), ``has_more`` = há página
-    seguinte."""
+    ``limit=None`` ⇒ tudo (``total=len``, ``has_more=False``). ``limit`` set ⇒
+    ``LIMIT/OFFSET`` no SQL + ``total`` por COUNT, COM ou SEM ``q``: desde o plano
+    62 F5 a busca é uma cláusula no ``WHERE`` (:func:`contact_search.build_q_clause`)
+    em vez de um filtro Python pós-SELECT, então o custo é por PÁGINA e não pelo
+    universo. ``match_snippet``/``match_msg_id`` são resolvidos depois, só para as
+    linhas da página.
+
+    ``include_messages=False`` remove o ramo de conteúdo de mensagem da busca
+    (mais barato; a tela que não mostra o trecho casado não precisa dele).
+
+    ``filter_where`` (plano 69 F5b): um ``ColumnElement`` já compilado por
+    ``db.filters.build_contact_where`` (tag/contact_type/cattr:contact:*). Como só
+    referencia ``contacts.c.*`` + subqueries (nunca os LATERALs), entra no ``WHERE``
+    da lista E do COUNT — então o ``total``/``has_more`` refletem o filtro, igual ao
+    ``q_clause``. ``None`` = sem filtro (caminho byte-idêntico ao antigo)."""
     if inbox_ids is not None and not inbox_ids:
         return {"items": [], "total": 0, "has_more": False}  # sem inbox → nada
 
-    with get_engine().connect() as conn:
-        if q:
-            # Busca: precisa de TODAS as linhas p/ o filtro Python; fatia a página depois.
-            stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
-            rows = conn.execute(stmt).mappings().all()
-            tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
-            results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
-            results = _apply_q_filter(conn, results, q, archived)
-            total = len(results)
-            if limit is not None:
-                results = results[offset:offset + limit]
-            return {"items": results, "total": total,
-                    "has_more": (offset + len(results)) < total}
+    q_clause = contact_search.build_q_clause(q, include_messages=include_messages)
 
-        # Sem busca: pagina no SQL (o ponto do plano — não trazer 100k linhas).
-        stmt = contact_search.build_list_contacts_query(archived=archived, inbox_ids=inbox_ids, sort=sort)
+    with get_engine().connect() as conn:
+        stmt = contact_search.build_list_contacts_query(
+            archived=archived, inbox_ids=inbox_ids, sort=sort)
+        if q_clause is not None:
+            stmt = stmt.where(q_clause)
+        if filter_where is not None:
+            stmt = stmt.where(filter_where)
         if limit is not None:
             stmt = stmt.limit(limit).offset(offset)
         rows = conn.execute(stmt).mappings().all()
         # N+1 fix: batch-load das tags de toda a página em UMA query.
         tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
         results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
+        if q_clause is not None:
+            _decorate_content_matches(conn, results, q, include_messages)
         if limit is None:
             return {"items": results, "total": len(results), "has_more": False}
-        total = conn.execute(
-            contact_search.build_count_contacts_query(archived=archived, inbox_ids=inbox_ids)
-        ).scalar() or 0
+        count_stmt = contact_search.build_count_contacts_query(
+            archived=archived, inbox_ids=inbox_ids)
+        if q_clause is not None:
+            count_stmt = count_stmt.where(q_clause)
+        if filter_where is not None:
+            count_stmt = count_stmt.where(filter_where)
+        total = conn.execute(count_stmt).scalar() or 0
         return {"items": results, "total": total,
                 "has_more": (offset + len(results)) < total}
 
@@ -383,3 +421,18 @@ def get_full_contact(phone: str) -> dict | None:
     """Get full contact data for API response (contact + info + observations)."""
     variants = _br_phone_variants(phone)
     return contact_query.get_full_contact(variants)
+
+
+def list_avatar_targets() -> list[dict]:
+    """Minimal contact listing for the background avatar sweep (plano 62 F7).
+
+    Returns ``id``/``phone``/``is_group``/``is_archived`` of ALL contacts
+    (archived included) in a single plain SELECT — no joins, no previews, no
+    tags. Replaces the two heavy :func:`list_contacts` calls (full enriched
+    query, active + archived) the sweep used to make every pass."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(contacts.c.id, contacts.c.phone,
+                   contacts.c.is_group, contacts.c.is_archived)
+        ).mappings().all()
+    return [dict(r) for r in rows]

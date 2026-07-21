@@ -31,8 +31,10 @@ they delegate (no double-emission). Payload shapes are preserved byte-for-byte �
 DTO normalization is C1's job.
 
 Filters: :func:`set_status` applies ``filter.conversation.before_status`` (relocated
-from the route, same semantics — ``None`` aborts a close); :func:`assign` applies
-the NEW ``filter.conversation.before_assign`` (``None`` aborts the assign).
+from the route, same semantics — ``None`` aborts a close) and, on a close,
+``filter.conversation.clear_assignee_on_close`` (bool, default ``True``; ``False``
+keeps the human attendant assigned — plano 67); :func:`assign` applies the NEW
+``filter.conversation.before_assign`` (``None`` aborts the assign).
 
 The service never imports ``server.app``; it reuses
 ``app.services.messaging_service.broadcast_and_emit`` (the generalized lift of
@@ -171,9 +173,12 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
 
     Owns the LIFECYCLE ORCHESTRATION the route used to do inline: applies
     ``filter.conversation.before_status`` on a close (a plugin may abort by
-    returning ``None`` → the caller raises the 403), persists the status via the
-    repo's status-derived data write (close also drops the assignment + stamps
-    ``resolved_at``; open clears ``resolved_at``), and emits — EXACTLY once each:
+    returning ``None`` → the caller raises the 403), then ``filter.conversation.
+    clear_assignee_on_close`` (default ``True``; a plugin returns ``False`` to KEEP
+    the human attendant assigned across the close — plano 67), persists the status
+    via the repo's status-derived data write (close always drops the active AI
+    agent + stamps ``resolved_at``, and drops the human assignee unless a plugin
+    kept it; open clears ``resolved_at``), and emits — EXACTLY once each:
       * ``conversation.status_changed`` (WS ``conversation_status_changed``),
       * ``conversation.reopened`` (additive, only on a closed→open transition),
       * the ``status_closed`` / ``status_open`` system-notice card.
@@ -184,6 +189,7 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
     conv_id = conv["id"]
     previous_status = conv.get("status")
 
+    clear_assignee = True
     if status == "closed":
         allowed = await apply_filter(
             "filter.conversation.before_status",
@@ -193,7 +199,19 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
         if allowed is None:
             return "blocked"
 
-    updated = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
+        # plano 67: a política default é limpar o assignee humano no fechamento
+        # (conversa volta a "Não atribuída"). Um plugin pode preservar o atendente
+        # retornando ``False`` neste filtro genérico. ``None`` (abort/ausente) cai
+        # no default seguro = limpar (byte-idêntico quando ninguém hooka).
+        keep = await apply_filter(
+            "filter.conversation.clear_assignee_on_close",
+            True,
+            ctx_extras={"conversation_id": conv_id, "user_id": actor_id},
+        )
+        clear_assignee = True if keep is None else bool(keep)
+
+    updated = await asyncio.to_thread(
+        conversation_repo.set_status, conv_id, status, clear_assignee=clear_assignee)
     if not updated:
         return None
 

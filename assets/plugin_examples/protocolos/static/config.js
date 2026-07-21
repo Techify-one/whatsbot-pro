@@ -76,7 +76,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   useEffect(() => { if (FIELD_TABS.includes(tab)) load(tab); }, [tab, load]);
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
-  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, relink_prompt_enabled: true, relink_window_minutes: 30 };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, relink_prompt_enabled: true, relink_window_minutes: 30 };
   const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
@@ -382,6 +382,19 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
               <span class="font-medium">Atribuir atendente à conversa ao finalizar protocolo</span>
               <span class="block text-[12px] text-wa-secondary mt-0.5">
                 Quando ativo, o atendente salvo no protocolo também aparece como atendente da conversa.
+              </span>
+            </span>
+          </label>
+          <label class="flex items-start gap-2 text-[13px] text-wa-text">
+            <input class="mt-0.5" type="checkbox"
+              checked=${general.resolve_keep_assignee === true}
+              disabled=${!canEdit}
+              onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), resolve_keep_assignee: e.target.checked }))} />
+            <span>
+              <span class="font-medium">Manter o atendente ao resolver a conversa</span>
+              <span class="block text-[12px] text-wa-secondary mt-0.5">
+                Por padrão o WhatsBot desatribui o atendente ao resolver. Com esta opção ativa a
+                conversa resolvida continua vinculada a quem atendeu.
               </span>
             </span>
           </label>

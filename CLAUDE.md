@@ -582,6 +582,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.reply.parts` | depois do split | `list[str]` | Nada é enviado | `phone` |
 | `filter.reply.part` | cada parte antes do GOWA (vale pra send manual também) | `str` | Aquela parte é pulada | `phone` |
 | `filter.authz.decision` | `authz.check`/`acheck` DEPOIS do RBAC | `dict {user, permission_key, allow}` | trata como `allow=False` (nega) | `permission_key` |
+| `filter.conversation.clear_assignee_on_close` | **NOVO (plano 67)** — `conversation_service.set_status` no fechamento, DEPOIS do `before_status` | `bool` (default `True` = limpar o atendente humano) | `None`/ausente ⇒ default seguro (limpa) | `conversation_id, user_id` |
 
 **Lifecycle events bypassam `filter.event.before_emit`** — `plugin.loaded/enabled/disabled/settings.changed` e `app.startup/shutdown` chamam `emit()` direto. Plugin não pode bloquear seu próprio carregamento.
 

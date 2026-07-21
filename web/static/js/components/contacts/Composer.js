@@ -1,9 +1,11 @@
 import { h } from 'preact';
+import { useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
 
 const html = htm.bind(h);
 
@@ -46,6 +48,17 @@ export function Composer({
     handlePaste, cancelPendingMedia, confirmPendingMedia,
   } = media;
   const { recording, recordDuration, handleMicClick } = audio;
+
+  // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
+  // with real bold/italic/strike/mono styling behind a transparent-text
+  // textarea. Keep the mirror scrolled in sync with the textarea so long
+  // messages (past the 6-line cap) line up.
+  const mirrorRef = useRef(null);
+  useEffect(() => {
+    if (mirrorRef.current && inputRef.current) {
+      mirrorRef.current.scrollTop = inputRef.current.scrollTop;
+    }
+  }, [input]);
 
   const hasText = input.trim().length > 0;
 
@@ -328,6 +341,12 @@ export function Composer({
               </div>
             `;
           })() : ''}
+          <div
+            ref=${mirrorRef}
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-[8px] px-[12px] py-[9px] border border-transparent text-[15px] leading-[20px] whitespace-pre-wrap break-words bg-wa-inputBg text-wa-text"
+            dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(input) }}
+          ></div>
           <textarea
             ref=${inputRef}
             rows="1"
@@ -335,8 +354,10 @@ export function Composer({
             onInput=${handleInputChange}
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
+            onScroll=${(e) => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.target.scrollTop; }}
             placeholder=${mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
-            class="w-full block bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
+            style="caret-color: rgb(var(--wa-text));"
+            class="relative z-[1] box-border w-full block bg-transparent text-transparent text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
           ></textarea>
         </div>
         ${hasText ? html`

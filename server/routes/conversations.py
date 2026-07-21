@@ -205,6 +205,10 @@ def register_routes(app, deps):
         has_more = len(rows) > spec.limit
         if has_more:
             rows = rows[:spec.limit]
+        # avatar_v por row (plano 69 F2): a sidebar conversa-first agora é servida por
+        # este endpoint e monta a foto com cache-bust igual ao /api/atendimentos.
+        for r in rows:
+            r["avatar_v"] = avatar_version(settings, r.get("contact_phone") or "")
         return _ok({"conversations": rows, "count": len(rows), "has_more": has_more})
 
     @app.get("/api/atendimentos/count")

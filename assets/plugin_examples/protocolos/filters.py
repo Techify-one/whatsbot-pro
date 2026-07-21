@@ -18,6 +18,11 @@ abriria protocolo — é impedida. O protocolo em si é pulado em ``logic.on_inb
 ``filter.message.notify``: quando a mensagem RECEBIDA casa a regra "ignorar abertura"
 (received/both), devolve ``False`` para que ela NÃO gere badge de não-lida, som nem alerta
 de nova mensagem (a mensagem continua salva e visível — só o aviso é suprimido).
+
+``filter.conversation.clear_assignee_on_close`` (plano 67): opt-in ao seam do core que
+decide se o atendente humano é desvinculado ao FECHAR a conversa. Com o setting
+``resolve_keep_assignee`` ligado devolve ``False`` (o atendente continua na conversa
+resolvida); desligado (default) devolve o valor recebido e o core limpa como sempre.
 """
 
 from . import logic
@@ -25,6 +30,7 @@ from . import logic
 FILTERS = {
     "filter.conversation.before_status": logic.before_status,
     "filter.conversation.before_reopen": logic.before_reopen,
+    "filter.conversation.clear_assignee_on_close": logic.clear_assignee_on_close,
     "filter.llm.messages": logic.suppress_ai_on_ignored,
     "filter.message.notify": logic.notify_on_ignored,
 }

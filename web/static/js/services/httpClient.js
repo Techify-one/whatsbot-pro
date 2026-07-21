@@ -82,17 +82,21 @@ export async function handleErrorResponse(res, { silent = false } = {}) {
  * @param {string} method - HTTP verb.
  * @param {string} path - Path beginning with `/` (relative to the app origin).
  * @param {unknown} [body] - JSON-serialisable body; omitted for GET/DELETE.
- * @param {{silent?: boolean}} [reqOpts] - `silent` suprime o toast de 403 (para
- *   reads best-effort de fundo). Não afeta o envelope retornado nem o caminho 401.
+ * @param {{silent?: boolean, signal?: AbortSignal|null}} [reqOpts] - `silent`
+ *   suprime o toast de 403 (para reads best-effort de fundo). Não afeta o
+ *   envelope retornado nem o caminho 401. `signal` (plano 62 F3) permite ao
+ *   caller cancelar o request via AbortController; um abort REJEITA a promise
+ *   com DOMException "AbortError" — o caller deve engolir (não é erro de UI).
  * @returns {Promise<any>} The parsed JSON envelope, or the 401 fallback.
  */
-export async function request(method, path, body, { silent = false } = {}) {
+export async function request(method, path, body, { silent = false, signal = null } = {}) {
   /** @type {RequestInit} */
   const opts = {
     method,
     headers: authHeaders({ 'Content-Type': 'application/json' }),
   };
   if (body) opts.body = JSON.stringify(body);
+  if (signal) opts.signal = signal;
   const res = await fetch(`${BASE}${path}`, opts);
   if (res.status === 401) {
     handleUnauthorized();

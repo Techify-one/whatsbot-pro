@@ -87,20 +87,24 @@ def register_routes(app, deps):
         return _ok(totals)
 
     @app.get("/api/usage/by-contact")
-    async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None, limit: int | None = None, offset: int = 0):
+    async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None, limit: int | None = None, offset: int = 0, q: str | None = None, sort: str | None = None, order: str | None = None):
         denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
+        # plano 69 F7: busca (q) + ordenação (sort/order) vão ao SERVIDOR — o ranking
+        # e o filtro valem sobre o conjunto inteiro do período, não só a página carregada.
         if limit is None:
             # Legado: lista completa (top gastadores, sem teto).
-            rows = await asyncio.to_thread(usage_repo.by_contact, start_ts, end_ts)
+            rows = await asyncio.to_thread(
+                usage_repo.by_contact, start_ts, end_ts, q=q, sort=sort, order=order)
             return _ok(rows)
-        # Paginado (plano 50 F9): top-N por custo + {items, total, has_more}.
+        # Paginado (plano 50 F9): top-N + {items, total, has_more} sobre o conjunto filtrado.
         lim, off = clamp_limit(limit, PAGE_LIST, CAP_LIST), clamp_offset(offset)
         items = await asyncio.to_thread(
-            usage_repo.by_contact, start_ts, end_ts, limit=lim, offset=off)
-        total = await asyncio.to_thread(usage_repo.count_by_contact, start_ts, end_ts)
+            usage_repo.by_contact, start_ts, end_ts, limit=lim, offset=off,
+            q=q, sort=sort, order=order)
+        total = await asyncio.to_thread(usage_repo.count_by_contact, start_ts, end_ts, q=q)
         return _ok({"items": items, "total": total, "has_more": (off + len(items)) < total})
 
     @app.get("/api/usage/contact/{phone}")

@@ -14,15 +14,27 @@
 // orchestrated by the container (it owns those setters), so this hook exposes
 // `setShowArchived` and reloads on the change without reaching into other hooks.
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
-import { getContacts, listConversations, listChannelsForFilter } from '../../../services/api.js';
+import { getContacts, listConversations, filterConversations, listChannelsForFilter } from '../../../services/api.js';
 import { buildRows, convRowToSidebarRow, sortContacts, distinctChannelCount } from '../../../services/conversationRows.js';
+import { rowKeyFor } from '../ContactList.js';
 
 /**
  * @param {Object} opts
  * @param {(...args:any[])=>void} [opts.onUnreadChange] - app-shell unread refresh.
  */
-// Tamanho de página da sidebar conversa-first (plano 50 F8).
+// Tamanho de página da sidebar — vale para os DOIS modos (conversa-first do plano 50 F8
+// e busca do plano 62 F6).
 const SIDEBAR_PAGE = 50;
+
+// plano 62 F6 — quantas páginas de contatos SEGUIDAS sem produzir linha podem ser
+// puladas automaticamente antes de declarar o fim da lista. O cruzamento da busca é
+// dirigido por CONTATOS, mas só emite linha para contato cujo atendimento está na janela
+// de `listConversations` (200) ou que não tem atendimento nenhum — então uma página
+// inteira pode não render linha alguma. Sem esse encadeamento o scroll TRAVA: o
+// IntersectionObserver só re-dispara quando o DOM muda, e uma página que não anexa nada
+// deixa a sentinela parada com `hasMore` ligado. Esgotado o crédito, encerramos a lista
+// (fim limpo) em vez de congelar.
+const SEARCH_EMPTY_PAGE_CHAIN = 3;
 
 export function useConversationList({ onUnreadChange }) {
   const [contacts, setContacts] = useState([]);  // sidebar rows (one per conversation)
@@ -39,10 +51,23 @@ export function useConversationList({ onUnreadChange }) {
   const showArchivedRef = useRef(false);
   const offsetRef = useRef(0);                  // plano 50 F8: cursor de paginação
   const loadingMoreRef = useRef(false);         // guarda contra loadMore concorrente
-  // Geração do fetch: a busca faz 2 roundtrips em SEQUÊNCIA (contatos → atendimentos
-  // daqueles contatos), então uma resposta lenta de um termo antigo pode chegar depois
-  // da de um termo novo. Só a geração mais recente pode escrever no estado.
-  const fetchGenRef = useRef(0);
+  const fetchSeqRef = useRef(0);                // plano 62 F3: token de sequência do fetch
+  const fetchAbortRef = useRef(null);           // plano 62 F3: aborta o fetch anterior
+  const loadMoreAbortRef = useRef(null);        // plano 62 F3: aborta o loadMore em voo
+  // plano 62 F6: a query que produziu a lista ATUALMENTE carregada ('' = conversa-first).
+  // É ela — não `searchRef`, que muda a cada tecla — que decide o modo do `loadMore`:
+  // durante os 300ms de debounce `searchRef` já é a query nova enquanto `offsetRef`/as
+  // linhas ainda são do modo anterior, e paginar por `searchRef` ali anexaria linhas de
+  // busca sobre a lista conversa-first com o cursor errado.
+  const loadedQueryRef = useRef('');
+  // plano 69 F2 — modo conversa-first server-filtrado: `serverFilterRef.current` guarda
+  // os params de `/api/atendimentos/filter` (buildListParams) quando o spec é
+  // server-expressável; `null` = caminho simples `/api/atendimentos`. É ESCRITO pelo hook
+  // de filtros a cada mudança de spec. `loadedServerFilterRef` congela os params da lista
+  // JÁ carregada, para o `loadMore` paginar a MESMA query (o serverFilterRef pode mudar
+  // durante a rolagem). Assim lista e contagem partem do mesmo WHERE (padrão do Kanban).
+  const serverFilterRef = useRef(null);
+  const loadedServerFilterRef = useRef(null);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -92,65 +117,111 @@ export function useConversationList({ onUnreadChange }) {
 
   // plano 50 F8 — SEM busca: conversa-first paginado (dirige por /api/atendimentos, que
   // já pagina; DOM cresce por página via scroll infinito, sem baixar TODOS os contatos).
-  // COM busca: caminho legado (buildRows cruzando getContacts(q) × conversas) — preserva
-  // a semântica de busca. Contatos SEM atendimento não aparecem no modo conversa-first
-  // (P3: tratados à parte / pela tela Contatos); aparecem no modo busca via buildRows.
+  // COM busca (plano 62 F6): buildRows cruzando getContacts(q) × conversas, agora com o
+  // universo de contatos PAGINADO no servidor — preserva a semântica de busca e o scroll
+  // infinito passa a valer nos dois modos. Contatos SEM atendimento não aparecem no modo
+  // conversa-first (P3: tratados à parte / pela tela Contatos); aparecem na busca.
   const fetchContacts = useCallback((q = '') => {
     offsetRef.current = 0;
+    // plano 62 F6 (fix da revisão): desliga a sentinela do scroll infinito ENQUANTO
+    // o fetch novo está em voo. Sem isso, um flick de scroll na janela entre trocar
+    // de modo (busca↔conversa-first) e a resposta chegar dispararia loadMore com o
+    // token NOVO mas o modo/cursor VELHO — poluindo a lista com linhas do modo errado.
+    // O has_more real volta do envelope no .then.
+    setHasMore(false);
     setLoading(true);
     const archivedView = showArchivedRef.current;
-    const gen = ++fetchGenRef.current;
-    const stale = () => gen !== fetchGenRef.current;
+    // plano 62 F3 — token de sequência: só a chamada MAIS RECENTE pode gravar estado,
+    // então uma resposta fora de ordem (busca lenta × limpar rápido) nunca sobrescreve
+    // a lista nova (mesmo princípio do guard `alive` acima). O request anterior ainda
+    // em voo também é abortado — libera o slot do browser; um AbortError é engolido
+    // (não é erro de UI), o token já protege o estado de qualquer forma.
+    const token = ++fetchSeqRef.current;
+    if (fetchAbortRef.current) fetchAbortRef.current.abort();
+    if (loadMoreAbortRef.current) loadMoreAbortRef.current.abort();
+    const ctrl = new AbortController();
+    fetchAbortRef.current = ctrl;
     if (q) {
-      // Modo busca (legado): lista completa filtrada × conversas.
+      // Modo busca — 1ª página. plano 62 F6: o universo de CONTATOS que casa `q` vem
+      // PAGINADO do servidor (envelope { items, total, has_more }); antes vinha inteiro
+      // num payload só (buscar 'a' baixava ~8,5k contatos ≈ 4 MB).
       // Plano 54: o arquivo é por CONVERSA, não por contato — a busca SEMPRE pede os
       // contatos não-arquivados (universo de riqueza: nome/avatar/tags + os contatos
       // sem atendimento). A view (caixa × arquivadas) é decidida pelo filtro de
       // ATENDIMENTOS; `buildRows` cruza os dois honrando `archivedView`.
-      //
-      // SEQUENCIAL (não mais em paralelo): os contatos vêm primeiro para que a 2ª
-      // chamada peça só os atendimentos DELES (`contact_ids`). Em paralelo a busca
-      // pedia as 200 conversas mais recentes e o `buildRows` descartava em silêncio o
-      // contato cujo atendimento estivesse fora dessa janela. O roundtrip extra é
-      // absorvido pelo debounce de 300ms.
-      getContacts(q, false).then((cRes) => {
-        if (!cRes || !cRes.ok) {
-          // Fallback: sem os contatos não há `contact_ids`, então mantém o
-          // comportamento antigo (janela das 200 mais recentes, só conversas).
-          return listConversations({ archived: archivedView, limit: 200 })
-            .then((vRes) => {
-              if (!vRes || !vRes.ok) return [];
-              return ((vRes.data && vRes.data.conversations) || []).map(convRowToSidebarRow);
-            });
+      // COMBINAÇÃO plano 62 F6 (contatos paginados) + eafb629/Leandro (atendimentos por
+      // `contact_ids`): 1º pede a PÁGINA de contatos que casa `q` (envelope
+      // { items, has_more } — não baixa mais os ~8,5k num payload só); depois pede os
+      // atendimentos EXATOS desses contatos (`contact_ids`), não a janela das 200 mais
+      // recentes que fazia o `buildRows` descartar em silêncio o contato cujo atendimento
+      // estivesse fora dela. Cada página busca os SEUS atendimentos, então o `loadMore`
+      // (loadSearchPage) repete o mesmo padrão — não há janela compartilhada entre páginas.
+      getContacts(q, false, { limit: SIDEBAR_PAGE, offset: 0, signal: ctrl.signal }).then((cRes) => {
+        if (token !== fetchSeqRef.current) return;  // resposta obsoleta — descarta
+        const env = (cRes && cRes.ok) ? (cRes.data || {}) : null;
+        // `items` só existe no envelope paginado; sem ele (falha do request) o cruzamento
+        // é pulado e a janela de atendimentos das 200 mais recentes vira a lista (fallback).
+        const contactList = env ? (env.items || []) : null;
+        // Busca OK que casa ZERO contatos → lista vazia direto, sem o 2º roundtrip (evita
+        // buscar 200 atendimentos que `buildRows([], …)` descartaria — caso comum: typo).
+        if (contactList && contactList.length === 0) {
+          loadedQueryRef.current = q;
+          setContacts([]); contactsRef.current = [];
+          setHasMore(false);
+          setLoading(false);
+          return;
         }
-        const matched = cRes.data || [];
-        if (!matched.length) return [];
-        const ids = matched.map(c => c.id).filter(id => id != null);
-        return listConversations({
-          archived: archivedView, contact_ids: ids.join(','), limit: 500,
-        }).then((vRes) => {
-          const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
-          return buildRows(matched, convs, { archivedView });
+        const ids = contactList ? contactList.map(c => c.id).filter(id => id != null) : [];
+        const convsP = ids.length
+          ? listConversations({ archived: archivedView, contact_ids: ids.join(','), limit: 500 },
+                               { signal: ctrl.signal })
+          : listConversations({ archived: archivedView, limit: 200 }, { signal: ctrl.signal });
+        return convsP.then((vRes) => {
+          if (token !== fetchSeqRef.current) return;
+          loadedQueryRef.current = q;
+          if (vRes && vRes.ok) {
+            const convs = (vRes.data && vRes.data.conversations) || [];
+            const rows = sortContacts(contactList
+              ? buildRows(contactList, convs, { archivedView })
+              : convs.map(convRowToSidebarRow));
+            setContacts(rows);
+            contactsRef.current = rows;
+            // Só paginamos quando o universo de contatos paginou de verdade — no fallback
+            // sem `contactList` não há cursor a avançar. O cursor conta CONTATOS lidos
+            // (unidade da paginação do servidor), não linhas.
+            setHasMore(!!(env && env.has_more) && !!contactList && contactList.length > 0);
+            offsetRef.current = contactList ? contactList.length : 0;
+          } else {
+            setContacts([]); contactsRef.current = [];
+            setHasMore(false);
+          }
+          setLoading(false);
         });
-      }).then((rows) => {
-        if (stale()) return;
-        const sorted = sortContacts(rows);
-        setContacts(sorted);
-        contactsRef.current = sorted;
+      }).catch((e) => {
+        if (token !== fetchSeqRef.current || (e && e.name === 'AbortError')) return;
+        setContacts([]); contactsRef.current = [];
         setHasMore(false);
         setLoading(false);
-      }).catch(() => {
-        if (stale()) return;
-        setContacts([]); contactsRef.current = [];
-        setHasMore(false); setLoading(false);
       });
       return;
     }
-    // Modo conversa-first (1ª página). Aqui as rows vêm direto dos atendimentos, então
-    // a view (caixa × arquivadas) já é decidida no servidor pelo filtro `archived`.
-    listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 })
+    // Modo conversa-first (1ª página). Aqui as rows vêm direto dos atendimentos.
+    // plano 69 F2: com um filtro server-expressável, a lista vem de
+    // `/api/atendimentos/filter` (MESMA query + escopo da contagem) — a `view`
+    // (caixa × arquivadas) já está codificada nos params; sem filtro, o caminho
+    // simples `/api/atendimentos?archived=…` de sempre. O shape do envelope
+    // (`conversations` + `has_more`) é idêntico nos dois.
+    const sf = serverFilterRef.current;
+    loadedServerFilterRef.current = sf ? sf.params : null;
+    const firstPage = sf
+      ? filterConversations({ ...sf.params, limit: SIDEBAR_PAGE, offset: 0 },
+                            { signal: ctrl.signal })
+      : listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 },
+                          { signal: ctrl.signal });
+    firstPage
       .then((vRes) => {
-        if (stale()) return;
+        if (token !== fetchSeqRef.current) return;  // resposta obsoleta — descarta
+        loadedQueryRef.current = '';
         if (vRes && vRes.ok) {
           const convs = (vRes.data && vRes.data.conversations) || [];
           const rows = sortContacts(convs.map(convRowToSidebarRow));
@@ -162,18 +233,93 @@ export function useConversationList({ onUnreadChange }) {
           setContacts([]); contactsRef.current = []; setHasMore(false);
         }
         setLoading(false);
+      })
+      .catch((e) => {
+        if (token !== fetchSeqRef.current || (e && e.name === 'AbortError')) return;
+        setLoading(false);
       });
   }, []);
 
-  // Carrega a PRÓXIMA página (scroll infinito) e ANEXA (dedup por conversation_id).
-  // Só no modo conversa-first (sem busca). Guardado contra chamadas concorrentes.
+  // plano 62 F6 + eafb629 — próxima página do modo BUSCA: avança o cursor de CONTATOS,
+  // pede os atendimentos EXATOS dos contatos da página nova (`contact_ids`, mesmo padrão
+  // da 1ª página — nenhum some por ter o atendimento fora das 200 mais recentes) e anexa.
+  // Páginas de contatos são disjuntas, então o append não duplica; a dedup por `rowKeyFor`
+  // é cinto de segurança contra o re-ordenamento que o offset pagination sofre quando
+  // chega mensagem nova durante a rolagem. `step` se auto-chama enquanto a página não
+  // render NENHUMA linha (ver SEARCH_EMPTY_PAGE_CHAIN) — do contrário o scroll travaria.
+  const loadSearchPage = useCallback((q, archivedView, token, done) => {
+    const step = (chainLeft) => {
+      const offset = offsetRef.current;
+      const ctrl = new AbortController();
+      loadMoreAbortRef.current = ctrl;
+      getContacts(q, false, { limit: SIDEBAR_PAGE, offset, signal: ctrl.signal })
+        .then((cRes) => {
+          // Token ANTES de avançar o cursor: um reset (query nova/troca de aba) já zerou
+          // o `offsetRef`, e avançá-lo aqui corromperia a paginação da query nova.
+          if (token !== fetchSeqRef.current) { done(); return; }
+          if (!cRes || !cRes.ok) { done(); return; }
+          const env = cRes.data || {};
+          const items = env.items || [];
+          offsetRef.current = offset + items.length;
+          // `items.length === 0` fecha a paginação mesmo com um `has_more` otimista —
+          // sem isso o cursor ficaria parado pedindo a mesma página vazia pra sempre.
+          const serverHasMore = !!env.has_more && items.length > 0;
+          const finish = (fresh) => {
+            if (token !== fetchSeqRef.current) { done(); return; }  // reset durante o 2º request
+            if (fresh.length) {
+              setContacts((prev) => {
+                const seen = new Set(prev.map(rowKeyFor));
+                const add = fresh.filter((r) => !seen.has(rowKeyFor(r)));
+                const next = sortContacts([...prev, ...add]);
+                contactsRef.current = next;
+                return next;
+              });
+            }
+            if (serverHasMore && fresh.length === 0 && chainLeft > 1) { step(chainLeft - 1); return; }
+            setHasMore(serverHasMore && fresh.length > 0);
+            done();
+          };
+          if (!items.length) { finish([]); return; }
+          const ids = items.map((c) => c.id).filter((id) => id != null);
+          listConversations({ archived: archivedView, contact_ids: ids.join(','), limit: 500 },
+                            { signal: ctrl.signal })
+            .then((vRes) => {
+              const convs = (vRes && vRes.ok && vRes.data && vRes.data.conversations) || [];
+              finish(buildRows(items, convs, { archivedView }));
+            })
+            .catch(() => { done(); });  // AbortError/erro de rede — sem estado a corrigir
+        })
+        .catch(() => { done(); });
+    };
+    step(SEARCH_EMPTY_PAGE_CHAIN);
+  }, []);
+
+  // Carrega a PRÓXIMA página (scroll infinito) e ANEXA. Vale nos DOIS modos (plano 62
+  // F6: a busca também pagina). Guardado contra chamadas concorrentes.
   const loadMore = useCallback(() => {
-    if (searchRef.current || loadingMoreRef.current || !hasMore) return;
+    if (loadingMoreRef.current || !hasMore) return;
     loadingMoreRef.current = true;
     setLoadingMore(true);
-    listConversations({ archived: showArchivedRef.current,
-                        limit: SIDEBAR_PAGE, offset: offsetRef.current })
+    // plano 62 F3: captura o token atual — se um reset (busca/arquivo) chegar com esta
+    // página em voo, o append obsoleto é descartado (e o fetchContacts novo a aborta).
+    const token = fetchSeqRef.current;
+    const done = () => { loadingMoreRef.current = false; setLoadingMore(false); };
+    const q = loadedQueryRef.current;   // modo da lista CARREGADA (não o texto em digitação)
+    const archivedView = showArchivedRef.current;
+    if (q) { loadSearchPage(q, archivedView, token, done); return; }
+    const ctrl = new AbortController();
+    loadMoreAbortRef.current = ctrl;
+    // plano 69 F2: pagina a MESMA query da 1ª página (server-filtrada ou simples).
+    const lsf = loadedServerFilterRef.current;
+    const nextPage = lsf
+      ? filterConversations({ ...lsf, limit: SIDEBAR_PAGE, offset: offsetRef.current },
+                            { signal: ctrl.signal })
+      : listConversations({ archived: archivedView,
+                            limit: SIDEBAR_PAGE, offset: offsetRef.current },
+                          { signal: ctrl.signal });
+    nextPage
       .then((vRes) => {
+        if (token !== fetchSeqRef.current) return;  // reset no meio — descarta
         if (vRes && vRes.ok) {
           const convs = (vRes.data && vRes.data.conversations) || [];
           const fresh = convs.map(convRowToSidebarRow);
@@ -188,8 +334,9 @@ export function useConversationList({ onUnreadChange }) {
           offsetRef.current += convs.length;
         }
       })
-      .finally(() => { loadingMoreRef.current = false; setLoadingMore(false); });
-  }, [hasMore]);
+      .catch(() => {})  // plano 62 F3: AbortError/erro de rede — sem estado a corrigir
+      .finally(done);
+  }, [hasMore, loadSearchPage]);
 
   // Stable handle so the []-dep WS callback can refetch with the current search.
   useEffect(() => { fetchContactsRef.current = fetchContacts; }, [fetchContacts]);
@@ -201,8 +348,12 @@ export function useConversationList({ onUnreadChange }) {
   // Initial load
   useEffect(() => { fetchContacts(); }, []);
 
-  // Debounced search
+  // Debounced search. plano 62 F3: pula a execução do MOUNT (search ainda '') — o
+  // initial load acima já cobre; sem o skip, o refetch duplicado de 300ms abortava
+  // o fetch inicial e atrasava o 1º paint da sidebar em cargas lentas.
+  const searchDebounceMountedRef = useRef(false);
   useEffect(() => {
+    if (!searchDebounceMountedRef.current) { searchDebounceMountedRef.current = true; return; }
     const timer = setTimeout(() => fetchContacts(search), 300);
     return () => clearTimeout(timer);
   }, [search]);
@@ -218,6 +369,7 @@ export function useConversationList({ onUnreadChange }) {
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
     contactsRef, displayedRef, searchRef, fetchContactsRef, showArchivedRef,
+    serverFilterRef,
     showChannel, channelOptions,
   };
 }

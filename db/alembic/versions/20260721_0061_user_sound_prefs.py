@@ -8,8 +8,13 @@ Postgres NULLs são distintos num índice único). Molde: ``saved_conversation_f
 
 Guardada + idempotente + reversível.
 
-Revision ID: 0059_user_sound_prefs
-Revises: 0058_merge_p50_p57
+Re-encadeada após ``0060_trgm_unaccent_search`` (plano 62 F4) na integração das duas
+linhas de trabalho: nasceu como ``0059`` em paralelo ao ``0059_idx_msg_ts_visible``, e
+duas revisões com o mesmo pai são exatamente o incidente que ``tests/test_alembic_hygiene``
+proíbe — a cadeia fica LINEAR em vez de convergir por merge revision.
+
+Revision ID: 0061_user_sound_prefs
+Revises: 0060_trgm_unaccent_search
 Create Date: 2026-07-20
 """
 from typing import Sequence, Union
@@ -19,8 +24,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 
-revision: str = "0059_user_sound_prefs"
-down_revision: Union[str, Sequence[str], None] = "0058_merge_p50_p57"
+revision: str = "0061_user_sound_prefs"
+down_revision: Union[str, Sequence[str], None] = "0060_trgm_unaccent_search"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

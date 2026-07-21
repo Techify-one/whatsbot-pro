@@ -80,6 +80,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
     contactsRef, displayedRef, searchRef, fetchContactsRef, showArchivedRef,
+    serverFilterRef,
     showChannel, channelOptions,
   } = list;
 
@@ -152,6 +153,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     searching: !!search,
     showArchived,
     skipStoredPreset: hasUrlFilters,
+    // plano 69 F2: a sidebar conversa-first é servida por /api/atendimentos/filter
+    // (mesma query da contagem) quando o spec é server-expressável. O hook de filtros
+    // escreve os params em `serverFilterRef` e refaz a lista ao mudar um filtro.
+    serverFilterRef,
+    fetchContacts,
   });
   const {
     statusFilter, setStatusFilter,

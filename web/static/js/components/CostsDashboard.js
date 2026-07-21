@@ -74,6 +74,12 @@ export function CostsDashboard() {
   const [sortField, setSortField] = useState('cost_usd');
   const [sortAsc, setSortAsc] = useState(false);
   const [search, setSearch] = useState('');
+  // plano 69 F7: busca com debounce (300ms) — vai ao SERVIDOR, não filtra no cliente.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
   useEffect(() => {
     getConfig().then(res => {
@@ -102,21 +108,23 @@ export function CostsDashboard() {
     // eslint-disable-next-line
   }, [periodKey]);
 
-  // plano 50 — SCROLL INFINITO com LOTE FIXO. O servidor entrega os TOP gastadores
-  // (custo desc) em lotes de PAGE_SIZE; rolar até o fim carrega o próximo lote. Nunca
-  // baixa tudo. Busca e ordenação por outro campo são aplicadas no CLIENTE sobre os
-  // itens já carregados (ver `filtered`/`pageItems`).
+  // plano 50 — SCROLL INFINITO com LOTE FIXO. plano 69 F7: busca (q) e ordenação
+  // (sort/order) agora vão ao SERVIDOR, que rankeia/filtra o conjunto INTEIRO do
+  // período e devolve a página certa. Assim buscar um gastador fora da 1ª página o
+  // encontra, e ordenar reordena o ranking todo (não só o carregado).
+  const listKey = `${periodKey}|${debouncedSearch}|${sortField}|${sortAsc ? 'a' : 'd'}`;
   const fetchPage = useCallback((offset) =>
-    getUsageByContact({ ...periodParams, limit: PAGE_SIZE, offset })
+    getUsageByContact({ ...periodParams, limit: PAGE_SIZE, offset,
+      q: debouncedSearch || undefined, sort: sortField, order: sortAsc ? 'asc' : 'desc' })
       .then((res) => ({
         items: (res && res.ok && res.data && res.data.items) || [],
         hasMore: !!(res && res.ok && res.data && res.data.has_more),
       })).catch(() => ({ items: [], hasMore: false })),
-    [periodKey]);   // eslint-disable-line
+    [listKey]);   // eslint-disable-line
 
   const {
     items: contacts, loading, loadingMore, hasMore, loadMore,
-  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: periodKey, keyOf: (c) => c.phone });
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: listKey, keyOf: (c) => c.phone });
 
   const sentinelRef = useRef(null);
   useScrollSentinel(sentinelRef, loadMore, hasMore);
@@ -159,24 +167,9 @@ export function CostsDashboard() {
     deps: [period, customStartDate, customStartTime, customEndDate, customEndTime, sortField, sortAsc, search],
   });
 
-  // Busca + ordenação são aplicadas no CLIENTE sobre os itens JÁ carregados (o servidor
-  // entrega top-gastadores em lotes; rolar carrega mais). Busca por nome/telefone;
-  // ordenação por custo/tokens/nome. `pageItems` = tudo o que já foi carregado, filtrado.
-  const filtered = search
-    ? contacts.filter((c) => {
-        const q = search.toLowerCase();
-        return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
-      })
-    : contacts;
-
-  const pageItems = useMemo(() => [...filtered].sort((a, b) => {
-    const va = a[sortField] || 0;
-    const vb = b[sortField] || 0;
-    if (sortField === 'name') {
-      return sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-    }
-    return sortAsc ? va - vb : vb - va;
-  }), [filtered, sortField, sortAsc]);
+  // plano 69 F7: busca + ordenação agora são server-side (ver `fetchPage`) — a lista
+  // já vem filtrada e ordenada + paginada. Nada de re-filtrar/re-ordenar no cliente.
+  const pageItems = contacts;
 
   const typeLabel = { text: 'Texto', audio: 'Audio', image: 'Imagem' };
 

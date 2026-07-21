@@ -28,6 +28,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -92,6 +93,12 @@ Index("idx_contacts_archived", contacts.c.is_archived)
 # GIN sobre o JSONB de custom attributes (migration 0014) — declarado aqui para o
 # metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
 Index("idx_contacts_cattr_gin", contacts.c.custom_attributes, postgresql_using="gin")
+# GIN trigram sobre f_unaccent(lower(name)) (plano 62 F4, migration 0060) —
+# espelhado aqui para o autogenerate/drift-check não propor DROP do índice.
+Index("idx_contacts_name_trgm",
+      func.f_unaccent(func.lower(contacts.c.name)).label("name_unaccent"),
+      postgresql_using="gin",
+      postgresql_ops={"name_unaccent": "gin_trgm_ops"})
 
 
 observations = Table(
@@ -150,6 +157,24 @@ Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
 Index("idx_msg_execution", messages.c.execution_id)
+# Índice PARCIAL (plano 62 F2, materializado na migration 0059): o scan de
+# conteúdo da busca (``contact_ids_matching_message`` em db/search/contact_search.py)
+# faz ``ORDER BY ts DESC LIMIT MESSAGE_SCAN_CAP`` filtrando os MESMOS 4 roles do
+# predicado abaixo — vira index scan reverso com early-termination. Subconjunto
+# deliberado de LIST_PANEL_ONLY_ROLES: transcription/private_note/error seguem
+# pesquisáveis, então ficam no índice.
+Index("idx_msg_ts_visible", messages.c.ts.desc(),
+      postgresql_where=text(
+          "role NOT IN ('tool_call', 'system_notice', 'conversation_event', 'system')"))
+# GIN trigram PARCIAL sobre f_unaccent(lower(content)) (plano 62 F4, migration
+# 0060) — mesmo predicado de roles do idx_msg_ts_visible. Espelhado aqui para o
+# autogenerate/drift-check não propor DROP do índice.
+Index("idx_msg_content_trgm",
+      func.f_unaccent(func.lower(messages.c.content)).label("content_unaccent"),
+      postgresql_using="gin",
+      postgresql_ops={"content_unaccent": "gin_trgm_ops"},
+      postgresql_where=text(
+          "role NOT IN ('tool_call','system_notice','conversation_event','system')"))
 
 
 usage = Table(

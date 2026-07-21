@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState, getContacts } from '../../services/api.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
+import { highlightComposerMarkup, toWhatsAppMarkup } from '../../utils/formatWhatsApp.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
 import { avatarUrl } from './utils.js';
@@ -86,6 +87,14 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   const { quickReplies, getCandidates } = useQuickReplies();
   const [quickReplyMenu, setQuickReplyMenu] = useState(null);  // {query, start, index} | null
   const inputRef = useRef(null);
+  // Overlay de highlight (WYSIWYG no campo): espelho atrás do textarea que mostra
+  // o texto com negrito/itálico/tachado/mono reais. Sincroniza o scroll.
+  const mirrorRef = useRef(null);
+  useEffect(() => {
+    if (mirrorRef.current && inputRef.current) {
+      mirrorRef.current.scrollTop = inputRef.current.scrollTop;
+    }
+  }, [message]);
   // Autocomplete do campo "Para": busca contatos por NOME ou número (server-side,
   // cobre todos os contatos independente do filtro da sidebar). Escolher um item
   // preenche o número e dispara a verificação de WhatsApp já existente.
@@ -171,9 +180,12 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     const seq = ++sugSeq.current;
     const t = setTimeout(async () => {
       try {
-        const res = await getContacts(q);
+        // plano 62 F3: teto no caller — com `limit` o backend pagina e devolve o
+        // envelope { items, total, has_more } em vez da lista completa.
+        const res = await getContacts(q, false, { limit: 20 });
         if (seq !== sugSeq.current) return;  // resposta obsoleta
-        const list = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+        const list = (res && res.ok && res.data && Array.isArray(res.data.items))
+          ? res.data.items : [];
         // Só pessoas (grupos não são um "novo atendimento" por número) e com número,
         // e do mesmo tipo de contato que o canal escolhido.
         const people = list
@@ -269,7 +281,8 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     const convId = (sessionState && sessionState.conversation_id) || null;
     try {
       // conversation_id null + channel_id → o backend cria o atendimento nesse canal.
-      const res = await sendMessage(phone, message.trim(), null, convId, channelId);
+      // Converte o **negrito** do campo para *negrito* (formato nativo do WhatsApp).
+      const res = await sendMessage(phone, toWhatsAppMarkup(message.trim()), null, convId, channelId);
       if (!res.ok) { setSendError(res.error || 'Falha ao enviar mensagem.'); setSending(false); return; }
       onSent && onSent(phone, channelId);
     } catch (e) {
@@ -476,15 +489,23 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
           <div class="flex flex-col gap-1.5">
             <label class="text-[13px] font-medium text-wa-secondary">Mensagem</label>
             <div class="relative">
+              <div
+                ref=${mirrorRef}
+                aria-hidden="true"
+                class="wa-field pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-lg px-3 py-2 text-[14px] whitespace-pre-wrap break-words border border-transparent ${(!freeTextAllowed && !sessionLoading) ? 'opacity-60' : ''}"
+                dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(message) }}
+              ></div>
               <textarea
                 ref=${inputRef}
                 value=${message}
                 onInput=${onMessageInput}
                 onKeyDown=${onTextKeyDown}
+                onScroll=${(e) => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.target.scrollTop; }}
                 disabled=${!freeTextAllowed && !sessionLoading}
                 placeholder=${freeTextAllowed ? 'Escreva sua mensagem aqui...  (use / para respostas rápidas)' : 'Texto livre indisponível fora da janela de 24h — envie um template.'}
                 rows="4"
-                class="wa-field w-full rounded-lg px-3 py-2 text-[14px] outline-none border border-wa-border focus:border-wa-teal resize-none ${(!freeTextAllowed && !sessionLoading) ? 'opacity-60 cursor-not-allowed' : ''}"
+                style="color: transparent; background: transparent; caret-color: #000;"
+                class="wa-field relative z-[1] box-border w-full rounded-lg px-3 py-2 text-[14px] outline-none border border-wa-border focus:border-wa-teal resize-none ${(!freeTextAllowed && !sessionLoading) ? 'opacity-60 cursor-not-allowed' : ''}"
               ></textarea>
               ${quickReplyMenu ? (() => {
                 const cands = getCandidates(quickReplyMenu.query);
