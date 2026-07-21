@@ -1,6 +1,7 @@
 # Plano 69 — Lista bate com a contagem: filtros server-side onde hoje só a contagem é server-side
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-21 · **Escopo:** médio-grande
+> **Status:** IMPLEMENTADO (F0–F7 + F9; F8 adiada p/ pós-plano-68) · **Data:** 2026-07-21 · **Escopo:** médio-grande
+> **Execução:** worktree isolado `plano-69` (branch `plano-69`, base `21627f3`) + banco de teste próprio `whatsbot_test_69` — para rodar em PARALELO ao plano 68 (que é 100% escopo-plugin `agendamento_retorno`) sem colisão. Commits F0/F5b/F1/F2+F3/F4/F6/F7 na branch. **Falta**: merge da branch na `developer`; F8 (Agendamentos, único ponto de conflito com o 68) após o 68 pousar. Verificação: `test_endpoints` 1427/2 (2 falhas pré-existentes, == baseline), `test_plano69` 9 passed, `conversationFilterSpec.test.js` 16 passed.
 > **Origem:** bug de produção reportado pelo usuário — na tela **Conversas**, filtrando por "Agente: Atendente X", a **contagem** da aba mostra 21 mas a **lista** mostra só 7 conversas. Continuação direta dos planos **60** (contagem total de conversas sem carregar) e **61** (contagem total de protocolos no Kanban), que shiparam a metade "contagem server-side" e **deixaram a lista filtrando no cliente** (decisão 60/D2: paginação da lista = "plano 50 F8, ortogonal"). **Método:** leitura direta do fluxo (hook → API → rota → engine `db/filters` → repo) + varredura multi-agente de todas as telas com lista+contagem, tudo com `arquivo:linha` verificado; nada de memória.
 > **Causa-raiz (verificada):** uma **classe** de bug espalhada pelo app — uma lista **paginada/capada** cujo filtro (ou busca/ordenação) é aplicado **no cliente sobre só as linhas já carregadas**, enquanto a **contagem** vem do **servidor** (→ número diverge da lista) OU a paginação avança sobre o universo **não-filtrado** (→ lista incompleta, às vezes com falso-vazio que trava o scroll). O padrão **correto** já existe no repo: o **Kanban de Protocolos** (plano 61) serve contagem por coluna E cards paginados da **mesma** fonte server-side filtrada — então lista e contagem **não podem divergir**. Este plano converge as outras telas para esse padrão.
 > **Como usar este plano:** ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro.
@@ -312,11 +313,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** com >500 agendamentos, cada aba de status mostra a lista completa daquele status; `.zip` reempacotado.
 
 #### Status de execução — Fase 8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ⏸️ ADIADA (conflito com o plano 68)
+- **O que foi feito:** nada — deliberadamente adiada.
+- **Como foi feito / decisões:** o plano 68 (rodando em paralelo por outra IA) reescreve `agendamento_retorno/logic.py`/`lifecycle.py`/`settings.py` e **bump do `plugin.yaml`** (→1.1.0), reempacotando o `.zip`. A F8 toca o MESMO plugin (`ScheduleTabs.js` + bump/zip) — a única colisão real entre os dois planos. Como F8 é 🟢 baixa/latente (só quebra >500 linhas; hoje ~45), foi segurada para aplicar SOBRE a versão do 68 (um bump/reempacote só), evitando editar o mesmo `plugin.yaml`/`.zip` em concorrência.
+- **Problemas / pendências:** executar F8 **depois** que o plano 68 pousar: `ScheduleTabs.js` manda `?status=`/`assignee_user_id`, para de cortar no cliente; bump 1.x→ e reempacota o `.zip` (repo `whatsbot-pro-plugins`). Backend (`routes.py`/`logic.py`) já suporta.
+- **Verificação:** pendente (pós-68).
 
 ---
 
@@ -328,11 +329,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** o modo Lista mostra o total real (ou fica documentado que já mostra); nenhuma regressão no Kanban.
 
 #### Status de execução — Fase 9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (verificação — já-correto)
+- **O que foi feito:** lido o render do modo Lista em `protocolos_tab.js`.
+- **Como foi feito / decisões:** o modo **Lista já é correto** — `fetchPage` lê o envelope `{items,total,has_more}` de `GET /protocolos?…` e guarda `env.total` em `totalCount` ([:640,650-654]); `shownTotal` ([:1007-1012]) mostra `totalCount` (servidor) na Lista e a soma dos `col.total` no Kanban. NÃO conta `rows.length` no cliente. Sem teto. Nenhuma mudança necessária (nenhum toque no plugin ⇒ nenhum conflito com o 68).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** leitura do código (`totalCount`/`shownTotal` server-side); Kanban intacto (padrão de referência D1).
 
 ---
 
@@ -401,15 +402,15 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 
 ## 9. Checklist de verificação
 
-- [ ] **Conversas:** filtrar "Agente: X" ⇒ a **lista** mostra o mesmo número da **contagem** da aba; rolar carrega SÓ matches (não conversas de outros agentes).
-- [ ] Trocar aba (Minhas/Não atribuídas/Menções) ⇒ fila server-side completa (paginada), número da aba batendo.
-- [ ] Caso default (sem filtro, aba Todas, Abertas) fica **byte-idêntico** ao de hoje (caracterização).
-- [ ] Modo BUSCA inalterado (fallback cliente); dim não-expressável ⇒ lista E contagem no cliente juntas (sem número mentindo).
-- [ ] **Contatos:** filtrar por etiqueta/tipo/atributo mostra TODOS os matches (paginado); **nunca** "Nenhum contato encontrado" com `hasMore=true` sem carregar mais.
-- [ ] **Custos:** buscar gastador fora da 1ª página o encontra; ordenar reordena o ranking inteiro.
-- [ ] **Agendamentos:** com >500 linhas, cada aba de status lista o conjunto completo; `.zip` reempacotado.
-- [ ] **Protocolos:** Kanban sem regressão; modo Lista mostra total real (ou confirmado já-correto).
-- [ ] `venv/bin/python -m pytest tests/test_endpoints.py -q` **verde** no Postgres (`WHATSBOT_TEST_DB_URL`).
-- [ ] `node --test` verde em `conversationFilterSpec.test.js` (e módulos puros tocados).
-- [ ] Refactor não regride `/api/atendimentos/filter` (Attendances.js ok).
-- [ ] "X de Y" (F4) e badges novos legíveis no **modo escuro**; nenhum segredo na URL; reload/voltar-avançar não quebra a lista nem a contagem.
+- [x] **Conversas:** filtrar "Agente: X" ⇒ a **lista** mostra o mesmo número da **contagem** da aba (provado no backend: `test_agent_filter_list_matches_count` — `len(/filter)==/count.all`); rolar carrega SÓ matches (server-paginado por `/filter`). _Validação visual manual pendente._
+- [x] Trocar aba (Minhas/Não atribuídas/Menções) ⇒ fila server-side completa; `has_mention` == aba Menções provado (`test_has_mention_filter_matches_mentions_tab`). _Validação visual manual pendente._
+- [~] Caso default (sem filtro, aba Todas, Abertas) — P1 = **migrar tudo** (`/filter?status=open`); NÃO é byte-idêntico de propósito (enche a página de abertas em vez de trazer fechados e escondê-los). Ordem idêntica (`is_pinned,last_activity_at`). _Validação visual manual pendente._
+- [x] Modo BUSCA inalterado (fallback cliente); dim não-expressável/colisão ⇒ `serverMode=false` ⇒ lista E contagem no cliente juntas (D4, `isListServerExpressible`).
+- [x] **Contatos:** filtro expressável vai ao servidor (paginado, `total` reflete o filtro — `test_contacts_filter_*`); sentinela SEMPRE renderizada com `hasMore` (fim do dead-end). _Validação visual manual pendente._
+- [x] **Custos:** busca + ordenação server-side sobre o conjunto do período (`test_usage_by_contact_search_and_sort_server_side`).
+- [ ] **Agendamentos:** F8 ADIADA (pós-plano-68). Pendente.
+- [x] **Protocolos:** modo Lista já mostra o total do servidor (F9 — verificado); Kanban intocado.
+- [x] `test_endpoints.py` no Postgres (`whatsbot_test_69`): **1427 passed, 2 failed** — as 2 são pré-existentes (`agent_transfer_alert`), IDÊNTICAS ao baseline sem plano 69.
+- [x] `node --test conversationFilterSpec.test.js` → **16 passed**.
+- [x] `/api/atendimentos/filter` não regrediu (shape intacto + `avatar_v` aditivo; suíte verde; Attendances.js intocado).
+- [ ] "X de Y" (F4) + linha de Contatos legíveis no **modo escuro**; reload/voltar-avançar — _validação visual manual pendente_ (código usa `text-wa-secondary`; sem segredo em querystring de filtro).
