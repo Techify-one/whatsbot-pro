@@ -14,7 +14,7 @@
 // orchestrated by the container (it owns those setters), so this hook exposes
 // `setShowArchived` and reloads on the change without reaching into other hooks.
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
-import { getContacts, listConversations, listChannelsForFilter } from '../../../services/api.js';
+import { getContacts, listConversations, filterConversations, listChannelsForFilter } from '../../../services/api.js';
 import { buildRows, convRowToSidebarRow, sortContacts, distinctChannelCount } from '../../../services/conversationRows.js';
 import { rowKeyFor } from '../ContactList.js';
 
@@ -60,6 +60,14 @@ export function useConversationList({ onUnreadChange }) {
   // linhas ainda são do modo anterior, e paginar por `searchRef` ali anexaria linhas de
   // busca sobre a lista conversa-first com o cursor errado.
   const loadedQueryRef = useRef('');
+  // plano 69 F2 — modo conversa-first server-filtrado: `serverFilterRef.current` guarda
+  // os params de `/api/atendimentos/filter` (buildListParams) quando o spec é
+  // server-expressável; `null` = caminho simples `/api/atendimentos`. É ESCRITO pelo hook
+  // de filtros a cada mudança de spec. `loadedServerFilterRef` congela os params da lista
+  // JÁ carregada, para o `loadMore` paginar a MESMA query (o serverFilterRef pode mudar
+  // durante a rolagem). Assim lista e contagem partem do mesmo WHERE (padrão do Kanban).
+  const serverFilterRef = useRef(null);
+  const loadedServerFilterRef = useRef(null);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -197,10 +205,20 @@ export function useConversationList({ onUnreadChange }) {
       });
       return;
     }
-    // Modo conversa-first (1ª página). Aqui as rows vêm direto dos atendimentos, então
-    // a view (caixa × arquivadas) já é decidida no servidor pelo filtro `archived`.
-    listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 },
-                      { signal: ctrl.signal })
+    // Modo conversa-first (1ª página). Aqui as rows vêm direto dos atendimentos.
+    // plano 69 F2: com um filtro server-expressável, a lista vem de
+    // `/api/atendimentos/filter` (MESMA query + escopo da contagem) — a `view`
+    // (caixa × arquivadas) já está codificada nos params; sem filtro, o caminho
+    // simples `/api/atendimentos?archived=…` de sempre. O shape do envelope
+    // (`conversations` + `has_more`) é idêntico nos dois.
+    const sf = serverFilterRef.current;
+    loadedServerFilterRef.current = sf ? sf.params : null;
+    const firstPage = sf
+      ? filterConversations({ ...sf.params, limit: SIDEBAR_PAGE, offset: 0 },
+                            { signal: ctrl.signal })
+      : listConversations({ archived: archivedView, limit: SIDEBAR_PAGE, offset: 0 },
+                          { signal: ctrl.signal });
+    firstPage
       .then((vRes) => {
         if (token !== fetchSeqRef.current) return;  // resposta obsoleta — descarta
         loadedQueryRef.current = '';
@@ -291,9 +309,15 @@ export function useConversationList({ onUnreadChange }) {
     if (q) { loadSearchPage(q, archivedView, token, done); return; }
     const ctrl = new AbortController();
     loadMoreAbortRef.current = ctrl;
-    listConversations({ archived: archivedView,
-                        limit: SIDEBAR_PAGE, offset: offsetRef.current },
-                      { signal: ctrl.signal })
+    // plano 69 F2: pagina a MESMA query da 1ª página (server-filtrada ou simples).
+    const lsf = loadedServerFilterRef.current;
+    const nextPage = lsf
+      ? filterConversations({ ...lsf, limit: SIDEBAR_PAGE, offset: offsetRef.current },
+                            { signal: ctrl.signal })
+      : listConversations({ archived: archivedView,
+                            limit: SIDEBAR_PAGE, offset: offsetRef.current },
+                          { signal: ctrl.signal });
+    nextPage
       .then((vRes) => {
         if (token !== fetchSeqRef.current) return;  // reset no meio — descarta
         if (vRes && vRes.ok) {
@@ -345,6 +369,7 @@ export function useConversationList({ onUnreadChange }) {
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
     contactsRef, displayedRef, searchRef, fetchContactsRef, showArchivedRef,
+    serverFilterRef,
     showChannel, channelOptions,
   };
 }

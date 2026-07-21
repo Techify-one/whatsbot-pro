@@ -207,11 +207,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** com "Agente: Atendente X" a sidebar mostra as 21 (rolando carrega **só** matches, não conversas de outros agentes); default sem filtro fica idêntico ao de hoje; modo busca inalterado.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `useConversationList.js` — refs `serverFilterRef`/`loadedServerFilterRef`; o fetch conversa-first (1ª página) e o `loadMore` roteiam por `filterConversations(...)` quando `serverFilterRef.current` tem params, senão `listConversations(...)` de sempre; `serverFilterRef` exposto no retorno. `useConversationFilters.js` — sincroniza `serverFilterRef` em RENDER (params de `buildListParams`) + efeito que refaz a 1ª página quando um FILTRO muda (status/aba/tags/avançado). `Contacts.js` passa `serverFilterRef` + `fetchContacts` ao hook de filtros. `api.js` — `filterConversations` ganhou `reqOpts` (signal). `conversations.py` — `_run_filter` decora `avatar_v` por row (paridade com `/api/atendimentos`).
+- **Como foi feito / decisões:** P1 = **migrar tudo** (converge ao Kanban): mesmo o default (`status=open`) vai por `/filter?status=open` — a lista enche de abertas (antes o caminho simples trazia 50 recentes de qualquer status e o cliente escondia os fechados). Sincronizar o ref em render (não em efeito) é **load-bearing**: o efeito `[showArchived]` do list-hook roda ANTES dos efeitos do filters-hook, então só a escrita síncrona garante params frescos naquele refetch. `loadedServerFilterRef` congela os params da lista carregada p/ o `loadMore` paginar a MESMA query. Fallback (não-expressável/colisão/busca) = caminho simples intacto (D3).
+- **Problemas / pendências:** WS-leak (F2 item 4, `[paralelo]`/opcional): uma conversa reatribuída p/ FORA do filtro atual só sai da lista no próximo refetch (troca de filtro/aba) — decisão consciente para NÃO reintroduzir o re-filtro cliente que a F3 removeu (senão a lista voltaria a encolher < contagem). Documentado na §6 e como limitação conhecida.
+- **Verificação:** `node --check` OK nos 5 módulos. Suíte de endpoints: **1427 passed, 2 failed** — os 2 são pré-existentes (`agent_transfer_alert`, dependentes de estado/plugins), IDÊNTICOS ao baseline (main tree, sem plano 69) rodado no mesmo banco. Backend do `/filter` (list==count) provado no `test_plano69` (`agent=user:<id>` list==count).
 
 ---
 
@@ -224,11 +224,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** clicar "Minhas"/"Não atribuídas" mostra a fila server-side completa (paginada), com o número da aba batendo; alternar filtros não deixa a lista "encolher" abaixo do total do servidor.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída (junto da F2)
+- **O que foi feito:** `useConversationFilters.js` — `serverMode` (`useMemo` = `!searching && isListServerExpressible(spec)`). Em `serverMode`: `statusTagFiltered` = `activeContacts` (sem re-aplicar status/tags/avançado) e `displayedContacts` = só `sortContactsBy` (sem re-aplicar a aba). O efeito da contagem passou a gatear em `serverMode` (não mais `isServerExpressible` do spec-base): lista E contagem server-side juntas, ou ambas caem no cliente (D4).
+- **Como foi feito / decisões:** F3 é o par lógico da F2 — sem ele, o servidor cortava e o cliente re-cortava sobre a página (a lista encolhia < contagem, o bug original de volta). `serverMode` também alinha a decisão server/client da CONTAGEM com a da LISTA (o badge da aba nunca fica server enquanto a lista está client). `activeContacts` (gate `isVisibleInSidebar`) é mantido nos dois modos (paridade com o conversa-first atual).
+- **Problemas / pendências:** nenhuma além do WS-leak citado na F2.
+- **Verificação:** `node --check` OK; endpoints 1427/2 (== baseline). Node tests do tradutor (12) verdes. Validação manual do fluxo (Agente:X ⇒ lista == contagem; troca de aba refaz a fila server-side) fica p/ o checklist final.
 
 ---
 

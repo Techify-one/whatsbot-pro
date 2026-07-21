@@ -494,7 +494,7 @@ export async function deleteSavedFilter(id) {
 // from `params`, dropping empty values and URL-encoding keys (cattr:<key>) and
 // values correctly. AND between distinct params; a comma-separated value (e.g.
 // labels=vip,lead) is OR within that dimension.
-export async function filterConversations(params = {}) {
+export async function filterConversations(params = {}, reqOpts = {}) {
   const parts = [];
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
@@ -506,7 +506,9 @@ export async function filterConversations(params = {}) {
     }
   }
   const qs = parts.join('&');
-  return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`);
+  // `reqOpts` (plano 69 F2): { signal } opcional — a sidebar conversa-first agora
+  // pode ser servida por este endpoint e precisa cancelar o fetch anterior.
+  return request('GET', `/api/atendimentos/filter${qs ? '?' + qs : ''}`, undefined, reqOpts);
 }
 
 export async function countConversations(params = {}) {
