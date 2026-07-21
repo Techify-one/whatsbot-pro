@@ -357,11 +357,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** enviar um `.html`/`.svg` e abrir a URL → o navegador **baixa** (não renderiza/executa); um `.png` legítimo continua inline no chat.
 
 #### Status de execução — Fase F10
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Rota dedicada `GET /statics/outbox/{name}` em `server/app.py`, registrada ANTES do mount `/statics` (mesmo truque do placeholder de avatar, que já é o precedente do repo), forçando `Content-Disposition: attachment` para todo MIME fora de uma allow-list inline.
+- **Como foi feito / decisões:** A allow-list é exatamente o que o painel precisa renderizar embutido — `image/jpeg,png,webp,gif`, `video/mp4,webm`, `audio/ogg,mpeg,mp4,wav,webm`, `application/pdf`. Tudo fora dela é servido como `application/octet-stream` **e** com `attachment`, os dois juntos (só o header já bastaria, mas trocar o `Content-Type` fecha a brecha de um navegador que ignore o header). O arquivo não some: continua acessível, só é baixado em vez de renderizado. Path traversal (`/`, `\\`, `..`) e arquivo inexistente devolvem 404. Somado ao F1 (um `.html` nem chega a nascer com essa extensão), são duas barreiras independentes.
+- **Problemas / pendências:** A rota cobre `statics/outbox/` (o que o operador envia). `statics/media/` (mídia que o GOWA baixa do cliente) continua no mount puro — é a mesma classe de risco, mas o conteúdo vem do WhatsApp, não de um upload direto, e mexer nela estava fora do escopo do plano.
+- **Verificação:** 9 checks novos (seção "Statics outbox — Content-Disposition"): `.png` legítimo segue inline e sem header; `.html`/`.svg`/`.xlsx` viram `attachment` + `octet-stream`; inexistente → 404; traversal não serve. Suíte 1515/0.
 
 ---
 

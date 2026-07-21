@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import mimetypes
 import logging
 import os
 import re
@@ -461,6 +462,46 @@ def create_app(
             content=_AVATAR_PLACEHOLDER_SVG,
             media_type="image/svg+xml",
             headers={"Cache-Control": "no-cache"},
+        )
+
+    # Operator-uploaded media (plano 64 · F10) — XSS armazenado.
+    #
+    # `statics/outbox/` recebe arquivo ARBITRÁRIO enviado pelo operador e é
+    # servido same-origin, com uma CSP que permite `'unsafe-inline'`. Um `.html`
+    # ou `.svg` ali dentro executaria script no domínio do painel (o `nosniff`
+    # não ajuda: o tipo é corretamente adivinhado). Arrastar arquivos amplia
+    # muito a superfície, então:
+    #
+    #   1. o nome em disco já nasce com a extensão do MIME validado e nunca com
+    #      uma extensão executável (F1, server/upload_names.py); e
+    #   2. esta rota — que shadow-a o mount, por ser registrada ANTES, igual ao
+    #      precedente do avatar — força `Content-Disposition: attachment` para
+    #      todo tipo fora de uma allow-list inline pequena e explícita.
+    #
+    # A allow-list é exatamente o que o painel precisa renderizar embutido
+    # (<img>/<video>/<audio> e o PDF que o navegador abre). Qualquer coisa fora
+    # dela é baixada, nunca renderizada.
+    _INLINE_SAFE_MIMES = {
+        "image/jpeg", "image/png", "image/webp", "image/gif",
+        "video/mp4", "video/webm",
+        "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm",
+        "application/pdf",
+    }
+
+    @app.get("/statics/outbox/{name}")
+    async def serve_outbox_media(name: str):
+        if "/" in name or "\\" in name or ".." in name:
+            return Response(status_code=404)
+        media_file = statics_outbox_dir / name
+        if not media_file.is_file():
+            return Response(status_code=404)
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if mime in _INLINE_SAFE_MIMES:
+            return FileResponse(str(media_file), media_type=mime)
+        return FileResponse(
+            str(media_file),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
 
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)

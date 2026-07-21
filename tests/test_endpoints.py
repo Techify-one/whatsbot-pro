@@ -1164,6 +1164,47 @@ r = client.post(
 check("upload abaixo do teto -> segue o fluxo normal", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
+#  10d. Serving de statics/outbox (plano 64 · F10 — XSS armazenado)
+# ═══════════════════════════════════════════════════════════════════
+section("Statics outbox — Content-Disposition (plano 64)")
+
+# A pasta real usada pelo app (o Settings() do teste resolve data_dir para a
+# raiz do repo), a mesma onde as rotas de envio já gravaram acima.
+_outbox = app.state.deps.statics_outbox_dir
+_outbox.mkdir(parents=True, exist_ok=True)
+(_outbox / "legit.png").write_bytes(fake_png)
+(_outbox / "evil.html").write_text("<script>alert(1)</script>")
+(_outbox / "evil.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')
+(_outbox / "planilha.xlsx").write_bytes(b"PK\x03\x04")
+
+r = client.get("/statics/outbox/legit.png")
+check("png legítimo -> 200 inline", r.status_code == 200)
+check("png legítimo -> sem Content-Disposition", "content-disposition" not in r.headers)
+check("png legítimo -> media type de imagem", r.headers.get("content-type") == "image/png")
+
+r = client.get("/statics/outbox/evil.html")
+check("html -> 200 (não some, só não executa)", r.status_code == 200)
+check("html -> Content-Disposition: attachment",
+      r.headers.get("content-disposition", "").startswith("attachment"))
+check("html -> servido como octet-stream, não text/html",
+      r.headers.get("content-type", "").startswith("application/octet-stream"))
+
+r = client.get("/statics/outbox/evil.svg")
+check("svg -> forçado a download", r.headers.get("content-disposition", "").startswith("attachment"))
+
+r = client.get("/statics/outbox/planilha.xlsx")
+check("xlsx -> forçado a download", r.headers.get("content-disposition", "").startswith("attachment"))
+
+r = client.get("/statics/outbox/nao_existe.png")
+check("arquivo inexistente -> 404", r.status_code == 404)
+
+r = client.get("/statics/outbox/..%2F..%2Fetc%2Fpasswd")
+check("path traversal -> não serve", r.status_code in (404, 400))
+
+for _f in ("legit.png", "evil.html", "evil.svg", "planilha.xlsx"):
+    (_outbox / _f).unlink(missing_ok=True)
+
+# ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence
 # ═══════════════════════════════════════════════════════════════════
 section("Contacts — Presence")
