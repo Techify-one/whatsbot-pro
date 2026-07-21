@@ -133,6 +133,10 @@ KNOWN_FILTERS: set[str] = {
     # ``filter.conversation.before_status`` was RELOCATED from the route into
     # ``conversation_service``; ``filter.conversation.before_assign`` is new.
     "filter.conversation.before_status", "filter.conversation.before_assign",
+    # Plano 67 — ``filter.conversation.clear_assignee_on_close``: bool seam applied
+    # in ``conversation_service.set_status`` on a close (default True = clear the
+    # human assignee; a plugin returns False to KEEP the attendant assigned).
+    "filter.conversation.clear_assignee_on_close",
     # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
     # the attendance plugin firms up):
     # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn
