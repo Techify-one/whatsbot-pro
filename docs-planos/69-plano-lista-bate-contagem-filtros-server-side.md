@@ -240,11 +240,11 @@ WAVE 3  F9(verificar Protocolos modo Lista)                           ← 🟢 v
 **Pronto quando:** aparece só quando há mais no banco do que carregado; some quando iguais; legível no **modo escuro**.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(...)_
-- **Como foi feito / decisões:** _(...)_
-- **Problemas / pendências:** _(...)_
-- **Verificação:** _(...)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** linha "Mostrando X de Y" em `ContactList.js`, logo acima da sentinela do scroll, quando `tabCounts[assignmentTab]` (total server-side da aba) > `contacts.length` (carregado).
+- **Como foi feito / decisões:** usa o total da ABA atual (`tabCounts[assignmentTab]`, com fallback em `all`), não o `all` cru — condiz com a lista exibida. Em fallback/busca `tabCounts` = client counts (total==carregado) ⇒ a linha some sozinha. `text-wa-secondary` (legível nos dois temas).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `node --check` OK. Aparece só quando há mais no servidor que carregado; some quando iguais (checklist manual final).
 
 ---
 
