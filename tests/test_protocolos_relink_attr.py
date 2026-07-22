@@ -94,6 +94,15 @@ def _get_attr(scope, entity_id, key):
     return (custom_attribute_repo.get_values(tbl, entity_id) or {}).get(key)
 
 
+def _cycles_of(protocolo_id: int) -> list[dict]:
+    """Atendimentos-ciclo de um protocolo, do mais antigo ao mais novo."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(
+            "SELECT * FROM plugin_protocolos_atendimentos WHERE protocolo_id = :p "
+            "ORDER BY started_at, id"), {"p": protocolo_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def _count_open(contact_id: int) -> int:
     with get_engine().connect() as conn:
         return int(conn.execute(text(
@@ -245,68 +254,168 @@ def test_closing_blocked_when_conversation_open_without_cycle(plugin_logic):
 
 # ── Decisão no momento de RESOLVER ────────────────────────────────────────────
 
-def test_resolve_previous_links_and_keeps_protocol_open(plugin_logic):
-    """'Faz parte do anterior': absorve o protocolo atual no anterior, que fica ABERTO."""
+def test_resolve_previous_merges_and_keeps_protocol_closed(plugin_logic):
+    """'Faz parte do anterior': funde o re-engajamento no protocolo anterior — nenhum
+    atendimento novo, só a data final do último é estendida e o protocolo segue FINALIZADO."""
     plogic = plugin_logic
     phone = "5511970003100"
     contact, conv = _contact_and_conversation(phone)
     _configure(plogic)
     prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 120)
+    old_cycle = _seed_ciclo(prev, conv["id"], contact["id"])
+    with get_engine().begin() as c:
+        c.execute(text("UPDATE plugin_protocolos_atendimentos SET ended_at = :ts "
+                       "WHERE id = :id"), {"ts": time.time() - 120, "id": old_cycle})
     _inbound(plogic, phone)                                       # abre o protocolo novo
 
     data, err = plogic.apply_resolve_decision(conv["id"], "previous")
     assert err is None and data["applied"] == "previous"
-    assert plogic.get_protocolo(prev)["status"] == "aberto"
-    assert _count_open(contact["id"]) == 1
-    with get_engine().connect() as conn:
-        pid = conn.execute(text(
-            "SELECT protocolo_id FROM plugin_protocolos_atendimentos "
-            "WHERE conversation_id = :c"), {"c": conv["id"]}).scalar()
-    assert int(pid) == prev
+    at = plogic.get_protocolo(prev)
+    assert at["status"] == "fechado"                    # não reabre
+    assert _count_open(contact["id"]) == 0              # o transitório foi descartado
+    assert at["closed_at"] > time.time() - 30           # fechamento re-carimbado
+    rows = _cycles_of(prev)
+    assert len(rows) == 1 and int(rows[0]["id"]) == old_cycle    # nada de atendimento novo
+    assert rows[0]["ended_at"] > time.time() - 30                # data final estendida
     # Escolha do atendente (source=user) → grava o valor p/ decidir o próximo ciclo.
     assert _get_attr("contact", contact["id"], "continuidade") == "continuacao"
 
 
-def test_resolve_previous_after_cycle_closed_creates_no_ghost_cycle(plugin_logic):
-    """A decisão é aplicada DEPOIS de resolver o atendimento (para cancelar o formulário
-    não deixar vínculo pela metade): o ciclo já fechado é movido para o anterior e nenhum
-    ciclo ABERTO fantasma nasce no lugar."""
+def test_resolve_previous_discards_transient_protocol_and_its_cycles(plugin_logic):
+    """O protocolo transitório (aberto pela mensagem do cliente) some junto com os ciclos
+    dele — nenhuma linha órfã sobra apontando para o protocolo descartado."""
     plogic = plugin_logic
     phone = "5511970003200"
     contact, conv = _contact_and_conversation(phone)
     _configure(plogic)
     prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 120)
+    _seed_ciclo(prev, conv["id"], contact["id"])
     _inbound(plogic, phone)
-    # Fecha o ciclo direto (o que o formulário de resolver faria — aqui só interessa o
-    # estado "atendimento já resolvido", não a validação dos rótulos obrigatórios).
-    with get_engine().begin() as conn:
-        conn.execute(text("UPDATE plugin_protocolos_atendimentos SET ended_at = :ts "
-                          "WHERE conversation_id = :c"),
-                     {"ts": time.time(), "c": conv["id"]})
+    transient = plogic._select_open_protocolo(contact["id"])["id"]
+    assert transient != prev
 
     data, err = plogic.apply_resolve_decision(conv["id"], "previous")
     assert err is None and data["applied"] == "previous"
+    assert plogic.get_protocolo(transient) is None
+    assert not _cycles_of(transient)
+    # O único atendimento da conversa é o do protocolo anterior (o novo foi apagado).
     with get_engine().connect() as conn:
         rows = conn.execute(text(
-            "SELECT protocolo_id, ended_at FROM plugin_protocolos_atendimentos "
-            "WHERE conversation_id = :c"), {"c": conv["id"]}).mappings().all()
-    assert len(rows) == 1                                   # nada de ciclo novo
-    assert int(rows[0]["protocolo_id"]) == prev
-    assert rows[0]["ended_at"] is not None                  # continua resolvido
+            "SELECT protocolo_id FROM plugin_protocolos_atendimentos "
+            "WHERE conversation_id = :c"), {"c": conv["id"]}).all()
+    assert [int(r[0]) for r in rows] == [prev]
 
 
-def test_resolve_new_records_value_and_leaves_protocol(plugin_logic):
+def test_resolve_previous_preserves_fields(plugin_logic):
+    """Os valores dos rótulos (do atendimento e do protocolo) continuam EXATAMENTE como
+    estavam no fechamento anterior — o merge só mexe em datas."""
+    plogic = plugin_logic
+    phone = "5511970003300"
+    contact, conv = _contact_and_conversation(phone)
+    _configure(plogic)
+    prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 120)
+    cyc = _seed_ciclo(prev, conv["id"], contact["id"])
+    with get_engine().begin() as c:
+        c.execute(text("UPDATE plugin_protocolos_atendimentos SET ended_at = :ts, "
+                       "assignee_user_id = 7, assignee_name = 'Ana' WHERE id = :id"),
+                  {"ts": time.time() - 120, "id": cyc})
+        c.execute(text(
+            "INSERT INTO plugin_protocolos_campos_extras "
+            "(atendimento_id, def_id, payload, created_at, updated_at) "
+            "VALUES (:cy, 'd1', :pl, :ts, :ts)"),
+            {"cy": cyc, "ts": time.time(),
+             "pl": '{"type":"text","name":"obs","label":"Obs","value":"1o contato"}'})
+        c.execute(text(
+            "INSERT INTO plugin_protocolos_protocolo_extras "
+            "(protocolo_id, def_id, payload, created_at, updated_at) "
+            "VALUES (:p, 'p1', :pl, :ts, :ts)"),
+            {"p": prev, "ts": time.time(),
+             "pl": '{"type":"text","name":"motivo","label":"Motivo","value":"duvida"}'})
+    _inbound(plogic, phone)
+
+    assert plogic.apply_resolve_decision(conv["id"], "previous")[1] is None
+    row = _cycles_of(prev)[0]
+    assert int(row["assignee_user_id"]) == 7 and row["assignee_name"] == "Ana"
+    with get_engine().connect() as conn:
+        assert "1o contato" in conn.execute(text(
+            "SELECT payload FROM plugin_protocolos_campos_extras "
+            "WHERE atendimento_id = :cy"), {"cy": cyc}).scalar()
+        assert "duvida" in conn.execute(text(
+            "SELECT payload FROM plugin_protocolos_protocolo_extras "
+            "WHERE protocolo_id = :p"), {"p": prev}).scalar()
+
+
+def test_resolve_previous_without_cycles_creates_one_closed(plugin_logic):
+    """Dado legado: protocolo fechado sem NENHUM atendimento → cria exatamente 1, já
+    encerrado (mantém o invariante sem inflar a lista no caso normal)."""
+    plogic = plugin_logic
+    phone = "5511970003400"
+    contact, conv = _contact_and_conversation(phone)
+    _configure(plogic)
+    prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 120)
+    _inbound(plogic, phone)
+
+    assert plogic.apply_resolve_decision(conv["id"], "previous")[1] is None
+    rows = _cycles_of(prev)
+    assert len(rows) == 1 and rows[0]["ended_at"] is not None
+
+
+def test_before_status_allows_close_after_merge(plugin_logic):
+    """Depois do merge não há atendimento novo a preencher: fechar a conversa é liberado
+    mesmo com rótulo OBRIGATÓRIO configurado (senão o core 403aria e a conversa ficaria
+    aberta). No fluxo normal (protocolo ABERTO) o gate continua barrando."""
+    plogic = plugin_logic
+    phone = "5511970003500"
+    contact, conv = _contact_and_conversation(phone)
+    _configure(plogic)
+    prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 120)
+    _seed_ciclo(prev, conv["id"], contact["id"])
+    before = plogic.get_extra_defs("atendimento")
+    plogic.set_field_defs("atendimento", [
+        {"key": "motivo", "label": "Motivo", "type": "text", "required": True}])
+    try:
+        _inbound(plogic, phone)                   # protocolo ABERTO → gate ativo
+        payload = {"conversation_id": conv["id"], "new_status": "closed"}
+        assert plogic._check_before_status(dict(payload)) is None
+
+        assert plogic.apply_resolve_decision(conv["id"], "previous")[1] is None
+        assert plogic._check_before_status(dict(payload)) is not None
+    finally:
+        plogic.set_field_defs("atendimento", before)
+
+
+def test_resolve_new_opens_protocol_with_open_cycle(plugin_logic):
+    """'É um novo protocolo': o protocolo novo fica ABERTO com um atendimento (ciclo) ABERTO
+    — nada é resolvido — e o anterior é marcado como revisado (a pergunta não volta)."""
     plogic = plugin_logic
     phone = "5511970004000"
     contact, conv = _contact_and_conversation(phone)
     _configure(plogic)
-    _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 60)
+    prev = _seed_protocolo(contact["id"], status="fechado", closed_at=time.time() - 60)
     _inbound(plogic, phone)
 
     data, err = plogic.apply_resolve_decision(conv["id"], "new")
     assert err is None and data["applied"] == "new"
     assert _count_open(contact["id"]) == 1
+    cur = plogic._select_open_protocolo(contact["id"])
+    assert data["protocolo_id"] == cur["id"] and cur["id"] != prev
+    assert plogic.get_open_cycle(conv["id"], cur["id"]) is not None   # atendimento em curso
     assert _get_attr("contact", contact["id"], "continuidade") == "novo"
+    # Não pergunta de novo no próximo clique em "Resolver".
+    assert plogic.relink_suggestion_for_contact(contact["id"], conv["id"])["suggest"] is False
+
+
+def test_resolve_new_without_open_protocol_creates_one(plugin_logic):
+    """Sem protocolo aberto (auto_link desligado/adiado), 'novo' CRIA o protocolo + ciclo."""
+    plogic = plugin_logic
+    phone = "5511970004050"
+    contact, conv = _contact_and_conversation(phone)
+    _configure(plogic)
+    assert _count_open(contact["id"]) == 0
+
+    data, err = plogic.apply_resolve_decision(conv["id"], "new")
+    assert err is None and _count_open(contact["id"]) == 1
+    assert plogic.get_open_cycle(conv["id"], data["protocolo_id"]) is not None
 
 
 def test_resolve_from_attr_consumes_the_value(plugin_logic):
@@ -321,7 +430,7 @@ def test_resolve_from_attr_consumes_the_value(plugin_logic):
 
     data, err = plogic.apply_resolve_decision(conv["id"], "previous", source="attr")
     assert err is None and data["applied"] == "previous"
-    assert plogic.get_protocolo(prev)["status"] == "aberto"
+    assert plogic.get_protocolo(prev)["status"] == "fechado"    # funde, não reabre
     assert _get_attr("contact", contact["id"], "continuidade") is None
 
 
@@ -412,7 +521,8 @@ def test_relink_decision_endpoint(plugin_logic, build_app):
                json={"kind": "previous", "previous_id": prev})
     assert r.status_code == 200, r.text
     assert r.json()["data"]["applied"] == "previous"
-    assert plogic.get_protocolo(prev)["status"] == "aberto"
+    assert plogic.get_protocolo(prev)["status"] == "fechado"   # fundido, segue finalizado
+    assert _count_open(contact["id"]) == 0
     assert _get_attr("contact", contact["id"], "continuidade") == "continuacao"
 
     # Conversa inexistente → 404; decisão inválida → 409.
