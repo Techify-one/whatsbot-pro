@@ -120,9 +120,30 @@ try:
 except ImportError:  # pragma: no cover - core antigo
     _MEDIA_LIMITS = None
 
+# ── Formatter PT-BR dos tipos inbound (plano 75 F1/F2) ──────────────────────
+# Toda a tradução tipo→texto mora em ``inbound_text`` (puro, stdlib-only). Aqui
+# só ligamos o resultado em ``InboundEvent.text`` — antes o parse deixava
+# ``text=""`` para contacts/order/system/unsupported/button_reply e a bolha do
+# painel nascia MUDA (caso real: card de contato com o telefone que o atendente
+# tinha acabado de pedir).
+# Import defensivo pelo mesmo motivo do ``MediaLimits`` acima: um zip antigo
+# (ou uma instalação onde o arquivo novo não chegou) tem que continuar
+# CARREGANDO — sem o formatter o parse cai no fallback genérico.
+try:
+    from .inbound_text import describe_message
+except Exception:  # noqa: BLE001 — pragma: no cover (plugin sem o módulo novo)
+    def describe_message(msg: dict) -> str:  # type: ignore[misc]
+        return ""
+
 GRAPH_BASE = "https://graph.facebook.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 HTTP_TIMEOUT = 20.0
+
+
+def _unsupported_text(msg_type: str) -> str:
+    """Fallback genérico: um tipo que ninguém sabe descrever NUNCA vira bolha
+    vazia — o operador ao menos vê que algo chegou e de que tipo era."""
+    return f'⚠️ Mensagem do tipo "{msg_type or "desconhecido"}" não suportada'
 
 
 class WhatsAppCloudChannel(Channel):
@@ -883,13 +904,43 @@ class WhatsAppCloudChannel(Channel):
             )
         elif msg_type in ("button", "interactive"):
             inter = msg.get(msg_type) or {}
-            media_type = "interactive"
+            media_type = "interactive"          # dado histórico — NÃO renomear
             media_extras = {"payload": inter}
-            text = inter.get("text") or ""
+            # O caminho legado lia ``inter["text"]``, chave que só existe no
+            # quick-reply de template (``type: "button"``); button_reply /
+            # list_reply / nfm_reply chegavam em branco. O formatter cobre os
+            # quatro e mantém a saída do ``button`` byte-idêntica. O ``or`` é a
+            # rede para o caso do import defensivo ter caído no stub.
+            text = describe_message(msg) or (inter.get("text") or "")
+        elif msg_type in ("contacts", "order", "system"):
+            # Tipos estruturados que a Cloud API entrega SEM texto próprio. O
+            # despacho de formatação está em ``inbound_text`` — não duplicar aqui.
+            media_type = msg_type
+            media_extras = {"payload": msg.get(msg_type)}
+            text = describe_message(msg) or _unsupported_text(msg_type)
         else:
-            # Unknown/unsupported type — keep metadata, leave text empty.
+            # Unknown/unsupported type — mantém a metadata (plugins leem via o
+            # evento ``message.saved``) e agora também preenche o texto, para a
+            # bolha nunca nascer muda (plano 75 F2).
             media_type = msg_type or None
             media_extras = {"unsupported_type": msg_type, "payload": msg.get(msg_type)}
+            text = describe_message(msg) or _unsupported_text(msg_type)
+
+        # Citação/resposta feita pelo cliente (plano 75 F9 — bug C1). ``context``
+        # é campo de MENSAGEM, não de tipo, então resolve-se UMA vez, aqui, e
+        # vale para todos os ramos acima.
+        # ⚠️ PROIBIDO normalizar/limpar o id: quatro formatos convivem no banco
+        # (``wamid.…`` nativo, ``WAID:wamid.…`` importado do Chatwoot, ``3EB0…``
+        # do GOWA, inteiro em string do Telegram) e cada um só precisa casar
+        # consigo mesmo, por igualdade exata.
+        # ⚠️ ``context.referred_product`` (produto do catálogo) e
+        # ``context.forwarded`` NÃO são citação — só ``context.id`` vira reply.
+        reply_to: Optional[str] = None
+        context = msg.get("context")
+        if isinstance(context, dict):
+            context_id = context.get("id")
+            if isinstance(context_id, str) and context_id:
+                reply_to = context_id
 
         return InboundEvent(
             channel_id=channel_id,
@@ -905,6 +956,7 @@ class WhatsAppCloudChannel(Channel):
             media_type=media_type,
             media_path=None,           # filled by the core inbound media resolver
             media_extras=media_extras,
+            reply_to_msg_id=reply_to,
             ts=ts,
             raw=msg,
         )

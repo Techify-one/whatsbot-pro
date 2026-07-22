@@ -81,6 +81,45 @@ def format_media_content(media_kind: str, transcription: str, text: str = "") ->
     return f"{text}\n{prefix}"
 
 
+# Media kinds the panel knows how to render on its own (see
+# web/static/js/components/contacts/MediaContent.js): each of these draws a
+# visible body (player, <img>, link, map link) even with an empty text, so an
+# empty caption is legitimate and must NOT be replaced by a placeholder.
+RENDERABLE_MEDIA_TYPES = frozenset({
+    "image",
+    "audio",
+    "video",
+    "sticker",
+    "document",
+    "location",
+    "live_location",
+})
+
+
+def placeholder_for_unrenderable(
+    text: str | None,
+    media_type: str | None,
+    media_path: str | None,
+) -> str:
+    """Return the text to persist/show, never letting a message render mute.
+
+    Safety net (plano 75 F3), provider-agnostic: when a channel hands us a
+    message whose text is empty, that carries no file (`media_path`) and whose
+    ``media_type`` is not one the panel can draw, the bubble would come out
+    completely blank. In that case we substitute a readable PT-BR placeholder.
+
+    Anything else is returned untouched — in particular a real media message
+    without a caption (image/audio/video/sticker/document/location) keeps its
+    empty text, because the bubble already shows the media itself.
+    """
+    body = text or ""
+    if body or media_path:
+        return body
+    if not media_type or media_type in RENDERABLE_MEDIA_TYPES:
+        return body
+    return f'[Mensagem do tipo "{media_type}" não suportada]'
+
+
 async def maybe_transcribe(
     media_kind: str,            # "audio" | "image" | "document"
     path: str,

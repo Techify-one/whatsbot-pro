@@ -438,6 +438,18 @@ class TelegramChannel(Channel):
         # Prune Nones so the extras stay clean (mirrors the GOWA extractor).
         extras = {k: v for k, v in extras.items() if v is not None} or {}
 
+        # Citação do cliente (plano 75 F9 — bug C1): o Bot API entrega a
+        # mensagem citada inteira em ``reply_to_message``. O ``external_msg_id``
+        # deste provider é ``str(message_id)``, então o id abaixo casa com o do
+        # banco por igualdade exata — nada de normalizar. Acesso defensivo: a
+        # chave só existe quando a mensagem é de fato uma resposta.
+        reply_to: Optional[str] = None
+        replied = msg.get("reply_to_message")
+        if isinstance(replied, dict):
+            replied_id = replied.get("message_id")
+            if replied_id is not None and replied_id != "":
+                reply_to = str(replied_id)
+
         return InboundEvent(
             channel_id=self.channel_id,
             provider=self.provider,
@@ -452,6 +464,7 @@ class TelegramChannel(Channel):
             media_type=media_type,
             media_path=media_path,
             media_extras=extras,
+            reply_to_msg_id=reply_to,
             ts=_to_float(msg.get("date")),
             raw=msg,
         )

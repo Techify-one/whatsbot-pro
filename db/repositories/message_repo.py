@@ -412,6 +412,81 @@ def update_status_by_msg_id(msg_id: str, new_status: str) -> list[str]:
     return updated_msg_ids
 
 
+#: Outgoing statuses a delivery failure is allowed to overwrite.
+#: ``read`` is deliberately absent (a message the recipient already read cannot
+#: have failed) and so is ``failed`` itself (idempotency — see below).
+_FAILABLE_STATUSES = ("sent", "delivered", "operator")
+
+
+def mark_failed_by_msg_id(msg_id: str) -> dict | None:
+    """Mark an OUTGOING message as ``failed`` by its provider msg_id (plano 75 F4).
+
+    Overwrites ``sent`` / ``delivered`` / ``operator``. NEVER overwrites ``read``
+    (already read by the recipient ⇒ it cannot have failed) nor ``failed``
+    (idempotent — a second webhook for the same failure is a no-op).
+
+    Unlike :func:`update_status_by_msg_id`, there is **no cascade**: delivery
+    acks are monotonic across the thread, but a failure belongs to one specific
+    message. It also cannot reuse that function, whose filter is
+    ``status IN ('sent','delivered')`` — panel/template sends are stored as
+    ``operator``, so reusing it would be a silent no-op.
+
+    Returns the updated row (``id``, ``contact_id``, ``conversation_id``,
+    ``content``, ``msg_id``) when the transition actually happened, and ``None``
+    when it did NOT — i.e. the msg_id is unknown, the message was already
+    ``failed``, or it is already ``read``. Callers therefore get the return value
+    as their own dedup guard: a truthy row means "this failure is new, act on it"
+    (e.g. write the error card once), ``None`` means "nothing changed, stay
+    quiet". Distinguishing *unknown* from *not-transitioned* is intentionally
+    left out of the return value; log the msg_id at the call site instead.
+    """
+    if not msg_id:
+        return None
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            sa_update(messages)
+            .where(
+                (messages.c.msg_id == msg_id)
+                & (messages.c.status.is_not(None))
+                & (messages.c.status.in_(_FAILABLE_STATUSES))
+            )
+            .values(status="failed")
+            .returning(
+                messages.c.id,
+                messages.c.contact_id,
+                messages.c.conversation_id,
+                messages.c.content,
+                messages.c.msg_id,
+            )
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def exists_by_msg_id(msg_id: str) -> bool:
+    """Is there ANY stored message with this provider ``msg_id``? (plano 75 F5)
+
+    The companion :func:`mark_failed_by_msg_id` deliberately collapses "unknown
+    msg_id" and "known but not transitioned" into a single ``None`` (see its
+    docstring), which is exactly the distinction the failure webhook needs:
+
+    * row exists ⇒ the ``None`` was a legitimate dedup (already ``failed`` or
+      already ``read``) — stay quiet;
+    * no row at all ⇒ the outgoing message has not been persisted **yet** (the
+      reply loop writes every part only after sending all of them, so a part can
+      stay sent-but-unsaved for a couple of seconds) — the caller may retry.
+
+    Read-only and cheap (indexed lookup capped at one row); never raises for an
+    empty ``msg_id``.
+    """
+    if not msg_id:
+        return False
+    with get_engine().connect() as conn:
+        found = conn.execute(
+            select(messages.c.id).where(messages.c.msg_id == msg_id).limit(1)
+        ).first()
+    return found is not None
+
+
 def get_contact_id_by_msg_id(msg_id: str) -> int | None:
     """Look up the contact_id for a given GOWA msg_id."""
     with get_engine().connect() as conn:
@@ -576,3 +651,69 @@ def _row_to_dict(row) -> dict:
     # na visão contato-cêntrica/mesclada. nullable em linhas pré-plano-11.
     d["conversation_id"] = row["conversation_id"]
     return d
+
+
+# Max chars kept from the quoted message body (plano 75 F10 / risco R11): the reply
+# bubble only shows one truncated line, so the page payload must not carry the whole
+# original message. The panel truncates again at render time (140) — this is the wire cap.
+QUOTED_SNIPPET_MAX = 120
+
+
+def get_by_msg_ids(msg_ids, *, conversation_id: int | None = None,
+                   contact_id: int | None = None) -> dict[str, dict]:
+    """Batch lookup of messages by their provider ``msg_id`` (plano 75 F10).
+
+    Used to hydrate the ``quoted`` block of a reply whose target fell OUTSIDE the
+    keyset page the panel loaded (bug C2): one indexed query per page instead of the
+    client-side scan over the in-memory window (``idx_msg_id`` already exists in
+    production — no DDL).
+
+    Matching is by EXACT equality, never normalized: production holds four id shapes
+    side by side (``wamid.…`` Cloud, ``WAID:wamid.…`` imported from Chatwoot,
+    ``3EB0…`` GOWA, plain int Telegram) and each only needs to match itself
+    (plano 75 F.P.#7 / R12 — stripping the ``WAID:`` prefix would break the replies
+    that work today).
+
+    A scope is MANDATORY (``conversation_id`` and/or ``contact_id``): without it an
+    unrelated conversation's content would leak into the panel. Returns a map
+    ``{msg_id: light_row}`` with only what the reply bubble renders — the body is
+    truncated at :data:`QUOTED_SNIPPET_MAX` and no media path / raw payload is
+    exposed. Ids with no match are simply absent from the map.
+    """
+    if conversation_id is None and contact_id is None:
+        raise ValueError("get_by_msg_ids requires a conversation_id and/or contact_id scope")
+    wanted = [m for m in dict.fromkeys(msg_ids or []) if m]
+    if not wanted:
+        return {}
+    cond = messages.c.msg_id.in_(wanted)
+    if conversation_id is not None:
+        cond = cond & (messages.c.conversation_id == conversation_id)
+    if contact_id is not None:
+        cond = cond & (messages.c.contact_id == contact_id)
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(
+                messages.c.id, messages.c.msg_id, messages.c.role, messages.c.content,
+                messages.c.media_type, messages.c.status, messages.c.sent_by_name,
+            ).where(cond).order_by(messages.c.id)
+        ).mappings().all()
+    out: dict[str, dict] = {}
+    for r in rows:
+        mid = r["msg_id"]
+        if mid in out:
+            # Same provider id twice (re-delivery/import): keep the oldest row — the
+            # quote points at the message that already existed.
+            continue
+        body = r["content"] or ""
+        out[mid] = {
+            "_id": r["id"],
+            "msg_id": mid,
+            "role": r["role"],
+            "content": body[:QUOTED_SNIPPET_MAX],
+            "media_type": r["media_type"],
+            # Cheap scalars the panel needs for the sender label of the quoted line
+            # ("Manual"/operator name vs "IA"); no media path, no raw payload (R11).
+            "status": r["status"],
+            "sent_by_name": r["sent_by_name"],
+        }
+    return out

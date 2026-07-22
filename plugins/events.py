@@ -45,7 +45,16 @@ KNOWN_EVENTS: set[str] = {
     # ``{conversation_id, contact_id, role, msg_id, ts}``.
     "message.persisted",
     "message.reaction", "message.edited", "message.revoked", "message.deleted",
+    # ``message.failed`` (plano 75 F5): o provedor avisou que NÃO entregou uma
+    # mensagem de saída (Cloud API: ``statuses[].status == "failed"``). Payload:
+    # ``{phone, channel_id, msg_id, error_code, error_title, error_details,
+    # conversation_id, is_new, ts, raw}``. É o gancho de automação para "o
+    # template não chegou" — antes da F5 nada era emitido nesse caso.
+    "message.failed",
     # Presence / receipts
+    # ``receipt.changed`` passou a valer para TODOS os status (plano 75 F5) —
+    # ``sent``/``failed``/``played`` além de ``delivered``/``read``, que eram os
+    # únicos antes. O payload carrega ``status`` e ``errors``.
     "presence.changed", "receipt.changed",
     # Group / call / newsletter
     "group.participants_changed", "group.joined",

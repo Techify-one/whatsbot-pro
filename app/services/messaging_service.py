@@ -44,7 +44,11 @@ from server.execution import (
     astamp_execution_channel, aset_execution_texts, set_current_contact_id,
 )
 from server.helpers import parse_split_reply
-from server.transcription import maybe_transcribe, format_media_content
+from server.transcription import (
+    maybe_transcribe,
+    format_media_content,
+    placeholder_for_unrenderable,
+)
 from plugins.events import apply_filter, emit_with_filter
 from app.services.realtime_broadcast import build_inbound_saved_message
 
@@ -980,6 +984,11 @@ class MessagingService:
                 _saved_text = text or ("[Áudio recebido]" if audio_path else "")
                 _saved_media_type = item.get("media_type") or ("image" if image_path else "audio")
                 _saved_media_path = item.get("media_path") or image_path or audio_path
+                # plano 75 F3 — safety net: a media_type the panel cannot draw and
+                # with no file would persist an empty body (mute bubble). Real media
+                # without a caption keeps its empty text (it has media_path).
+                _saved_text = placeholder_for_unrenderable(
+                    _saved_text, _saved_media_type, _saved_media_path)
                 saved = contact.add_message(
                     "user", _saved_text,
                     media_type=_saved_media_type,

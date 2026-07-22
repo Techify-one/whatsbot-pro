@@ -31,12 +31,60 @@ from agent import group_mentions
 from plugins.events import emit_with_filter, apply_filter
 from server.authz import permission_denied
 from server.helpers import _ok, _err
+from server.message_errors import describe_failure
 
 logger = logging.getLogger(__name__)
 
 # Last raw payloads per provider (in-memory, debug) — mirrors webhook-payloads.
 _RECENT: list[dict] = []
 _RECENT_CAP = 50
+
+# Retentativa do casamento de um ``status=failed`` cuja linha ainda não existe
+# (plano 75 F5, corrida com o writer do split de resposta — ver
+# ``_schedule_failed_retry``). Módulo-level de propósito: os testes reduzem o
+# intervalo por monkeypatch para não esperar segundos de relógio.
+_FAILED_RETRY_ATTEMPTS = 3
+_FAILED_RETRY_INTERVAL = 2.0
+# Referências fortes das tasks em voo — sem isso o GC pode coletar uma task só
+# referenciada pelo loop e a retentativa some no meio do caminho.
+_RETRY_TASKS: set = set()
+
+
+def _first_error(errors) -> dict:
+    """Extract ``code``/``title``/``details`` from a provider ``errors`` array.
+
+    Shape of the Meta payload (plano 75 §12.8)::
+
+        "errors": [{"code": 131049, "title": "...", "message": "...",
+                    "error_data": {"details": "..."}, "href": "..."}]
+
+    Everything is optional and defensive: ``errors`` may be absent, empty, not a
+    list, or carry different keys across providers/API versions — this never
+    raises and always returns the three keys (``code`` may be ``None``, the two
+    strings may be empty). Only the FIRST item is described; the full array
+    stays available to subscribers through the event's ``raw``.
+    """
+    item = None
+    if isinstance(errors, list) and errors:
+        item = errors[0]
+    elif isinstance(errors, dict):
+        item = errors
+    if not isinstance(item, dict):
+        return {"code": None, "title": "", "details": ""}
+    code = item.get("code")
+    if isinstance(code, str):
+        try:
+            code = int(code.strip())
+        except ValueError:
+            pass  # keep the raw string — a caller may still log/display it
+    data = item.get("error_data")
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "code": code,
+        "title": item.get("title") or item.get("message") or "",
+        "details": data.get("details") or item.get("details") or "",
+    }
 
 
 def register_routes(app, deps):
@@ -94,6 +142,137 @@ def register_routes(app, deps):
                 logger.debug("unread clear failed for %s", phone_key, exc_info=True)
         return cleared
 
+    async def _emit_failure_card(ev, failed_row: dict, errors) -> None:
+        """Grava o card ``role="error"`` no fio da conversa (plano 75 F6).
+
+        Por que ``error``: o role já é painel-only em todas as camadas — fora do
+        contexto do LLM (``message_repo.get_context``), fora do preview da
+        sidebar (``LIST_PANEL_ONLY_ROLES``) e já tem card renderizado
+        (``SystemMessageCard.js``). Zero mudança de frontend.
+
+        Dedup (R7): quem chama só entra aqui com ``failed_row`` truthy, e essa
+        row só existe quando ``mark_failed_by_msg_id`` fez a transição de fato —
+        a reentrega rotineira do webhook da Meta devolve ``None`` e não gera um
+        2º card.
+
+        Defensivo (mesmo princípio de ``emit_conversation_notice``): um card que
+        falha ao ser gravado é logado e engolido — nunca derruba o processamento
+        do webhook nem os eventos de bus que vêm depois.
+        """
+        try:
+            contact_id = failed_row.get("contact_id")
+            if not contact_id:
+                return
+            err = _first_error(errors)
+            content = describe_failure(
+                code=err["code"], title=err["title"], details=err["details"])
+            conversation_id = failed_row.get("conversation_id")
+            msg = await asyncio.to_thread(
+                message_repo.add, int(contact_id), "error", content,
+                conversation_id=conversation_id)
+            if ws_manager is not None:
+                await ws_manager.broadcast("new_message", {
+                    "phone": ev.chat_id,
+                    "channel_id": ev.channel_id,
+                    "message": {"role": "error", "content": content,
+                                "ts": msg["ts"],
+                                "conversation_id": conversation_id}})
+        except Exception:
+            logger.exception(
+                "[Webhook %s] falha ao gravar o card de erro para msg_id=%s",
+                getattr(ev, "channel_id", "?"), failed_row.get("msg_id"))
+
+    async def _apply_failure(ev, failed_row: dict, errors) -> None:
+        """Efeitos colaterais de UMA transição para ``failed`` (plano 75 F5/F6).
+
+        Fatorado porque roda em DOIS caminhos: o normal (a linha já estava no
+        banco quando o webhook chegou) e o da retentativa
+        (``_retry_failed_match``, quando a linha só apareceu depois). Duplicar
+        isso nos dois lugares era como o card e a bolha vermelha saíam de sincronia.
+
+        Só é chamado com ``failed_row`` truthy — ou seja, quando
+        ``mark_failed_by_msg_id`` GANHOU a transição. Esse UPDATE com
+        ``WHERE status IN ('sent','delivered','operator')`` é o guard de
+        unicidade: duas chamadas concorrentes (reentrega da Meta + retentativa,
+        ou duas retentativas) serializam na row e só a primeira recebe o
+        ``RETURNING`` — a segunda vê ``failed`` e volta ``None``. Logo, no
+        máximo UM card por mensagem.
+        """
+        if ws_manager is not None:
+            # O painel já pinta a bolha vermelha a partir deste evento
+            # (useConversationWsEvents → MessageBubble).
+            await ws_manager.broadcast("message_status", {
+                "phone": ev.chat_id, "msg_ids": [failed_row.get("msg_id")],
+                "status": "failed"})
+        # O PORQUÊ, no fio da conversa, em PT-BR (plano 75 F6) — a bolha
+        # vermelha sozinha não diz o que fazer a seguir.
+        await _emit_failure_card(ev, failed_row, errors)
+
+    async def _retry_failed_match(ev, msg_id: str, errors) -> None:
+        """Tenta de novo casar um ``status=failed`` com a linha da mensagem.
+
+        Corrida real (plano 75 F5): a resposta da IA é enviada parte a parte com
+        um ``sleep(split_message_delay)`` no meio e só é GRAVADA depois do loop
+        inteiro — a parte 1 fica ~2 s enviada-mas-não-persistida. Um webhook
+        ``failed`` que caia nessa janela não acha linha nenhuma e a falha se
+        perderia em silêncio (sem bolha vermelha, sem card).
+
+        Limitada de propósito (``_FAILED_RETRY_ATTEMPTS`` × ``_FAILED_RETRY_INTERVAL``
+        ≈ 6 s, folga sobre o split padrão de 2 s) e SEMPRE em background: a
+        resposta HTTP já foi devolvida, porque um 200 lento faz a Meta reentregar
+        em loop. Nunca levanta: um erro aqui é logado e a task morre.
+        """
+        for attempt in range(1, _FAILED_RETRY_ATTEMPTS + 1):
+            await asyncio.sleep(_FAILED_RETRY_INTERVAL)
+            try:
+                row = await asyncio.to_thread(message_repo.mark_failed_by_msg_id, msg_id)
+                if row is not None:
+                    logger.info(
+                        "[Webhook %s] status=failed casado na retentativa %d/%d "
+                        "para msg_id=%s", ev.channel_id, attempt,
+                        _FAILED_RETRY_ATTEMPTS, msg_id)
+                    await _apply_failure(ev, row, errors)
+                    return
+                if await asyncio.to_thread(message_repo.exists_by_msg_id, msg_id):
+                    # A linha apareceu, mas outra passada (reentrega da Meta ou
+                    # uma retentativa irmã) já ganhou a transição — ou o
+                    # destinatário já tinha lido. Nada a fazer: o card é único.
+                    logger.info(
+                        "[Webhook %s] status=failed já tratado por outra passada "
+                        "para msg_id=%s", ev.channel_id, msg_id)
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "[Webhook %s] retentativa %d de status=failed falhou para msg_id=%s",
+                    ev.channel_id, attempt, msg_id, exc_info=True)
+        err = _first_error(errors)
+        logger.warning(
+            "[Webhook %s] status=failed DESCARTADO: msg_id=%s não apareceu no banco "
+            "após %d tentativas (código=%s, motivo=%r). Provável mensagem de outra "
+            "instalação, apagada ou id desconhecido.",
+            ev.channel_id, msg_id, _FAILED_RETRY_ATTEMPTS, err["code"], err["title"])
+
+    def _schedule_failed_retry(ev, msg_id: str, errors) -> None:
+        """Dispara ``_retry_failed_match`` em background (fire-and-forget).
+
+        Nunca dentro do request: a Meta precisa do 200 rápido. Guarda a
+        referência forte em ``_RETRY_TASKS`` (o loop só mantém referência fraca)
+        e a solta no término.
+        """
+        try:
+            task = asyncio.create_task(_retry_failed_match(ev, msg_id, errors))
+        except RuntimeError:
+            # Sem loop rodando (chamada fora do servidor) — melhor perder a
+            # retentativa do que derrubar o webhook.
+            logger.warning("[Webhook %s] não foi possível agendar a retentativa "
+                           "de status=failed para msg_id=%s",
+                           getattr(ev, "channel_id", "?"), msg_id, exc_info=True)
+            return
+        _RETRY_TASKS.add(task)
+        task.add_done_callback(_RETRY_TASKS.discard)
+
     async def _dispatch_events(events: list) -> int:
         """Route parsed InboundEvents (plano 11 Fase 2 / plano 13 Fase 0).
 
@@ -134,15 +313,18 @@ def register_routes(app, deps):
                 elif kind == "receipt":
                     status = extras.get("status")
                     mid = ev.external_msg_id
+                    errors = extras.get("errors")
+                    # Row of the message a delivery FAILURE landed on — also the
+                    # dedup guard (see below) and the hook point for the error
+                    # card in the thread (plano 75 F6): it carries id,
+                    # contact_id, conversation_id and content.
+                    failed_row = None
                     if status in ("delivered", "read") and mid:
                         updated = await asyncio.to_thread(
                             message_repo.update_status_by_msg_id, mid, status)
                         if updated and ws_manager is not None:
                             await ws_manager.broadcast("message_status", {
                                 "phone": ev.chat_id, "msg_ids": updated, "status": status})
-                        await emit_with_filter("receipt.changed", {
-                            "phone": ev.chat_id, "msg_ids": [mid], "status": status,
-                            "channel_id": ev.channel_id, "ts": ev.ts or time.time()})
                         # Unread tracking parity with the legacy GOWA handler: a
                         # "read" ack on an INCOMING message we hadn't read yet
                         # clears its unread state (marks the contact read +
@@ -155,6 +337,78 @@ def register_routes(app, deps):
                                 for phone_key in cleared:
                                     await ws_manager.broadcast(
                                         "messages_read", {"phone": phone_key})
+                    elif status == "failed" and mid:
+                        # The provider accepted the send and only later told us it
+                        # was not delivered (plano 75 F5) — until now this whole
+                        # branch fell into the void and the operator saw nothing.
+                        # ``mark_failed_by_msg_id`` returns the row ONLY on a real
+                        # transition, so it doubles as the redelivery guard: Meta
+                        # re-posts the same status routinely and the 2nd pass finds
+                        # the row already 'failed' → None → no duplicate side effect.
+                        failed_row = await asyncio.to_thread(
+                            message_repo.mark_failed_by_msg_id, mid)
+                        if failed_row is None:
+                            # ``None`` funde dois casos bem diferentes (docstring
+                            # do repo). ``exists_by_msg_id`` os separa:
+                            if await asyncio.to_thread(
+                                    message_repo.exists_by_msg_id, mid):
+                                # Dedup legítimo: a linha existe e já está
+                                # 'failed' (reentrega da Meta) ou 'read'.
+                                logger.info(
+                                    "[Webhook %s] status=failed sem transição para "
+                                    "msg_id=%s (já 'failed' ou já lida)",
+                                    ev.channel_id, mid)
+                            else:
+                                # Não existe linha NENHUMA: ou a mensagem ainda
+                                # não foi persistida (corrida com o writer do
+                                # split de resposta — janela de ~2 s), ou o
+                                # msg_id é mesmo desconhecido. Só o tempo diz;
+                                # a retentativa em background decide.
+                                logger.info(
+                                    "[Webhook %s] status=failed sem linha para "
+                                    "msg_id=%s — agendando retentativa",
+                                    ev.channel_id, mid)
+                                _schedule_failed_retry(ev, mid, errors)
+                        else:
+                            await _apply_failure(ev, failed_row, errors)
+                    # ``sent``/``played``: nothing is persisted on purpose — an
+                    # outgoing message is already born 'sent'/'operator' and
+                    # writing here would break the monotonic ack semantics of
+                    # ``update_status_by_msg_id``. The bus event below still fires.
+
+                    # Bus emit for EVERY status (sent/delivered/read/failed/played).
+                    # It used to live INSIDE the delivered/read branch, so no plugin
+                    # could ever react to a delivery failure. Emitted AFTER the DB
+                    # write so a subscriber that queries the DB sees the new state.
+                    await emit_with_filter("receipt.changed", {
+                        "phone": ev.chat_id, "msg_ids": [mid] if mid else [],
+                        "status": status, "errors": errors,
+                        "channel_id": ev.channel_id, "ts": ev.ts or time.time()})
+                    if status == "failed":
+                        # The automation hook. Always emitted ON THIS FIRST PASS —
+                        # a failure we cannot match to a stored message is still a
+                        # failure worth surfacing, and automation must not depend
+                        # on the row being persisted yet (plano 75 F5).
+                        # ``is_new`` keeps its exact meaning: "the transition
+                        # happened in THIS pass" — the dedup guard for the routine
+                        # webhook redelivery. A retry that later matches the row
+                        # does NOT emit a second ``message.failed`` (a subscriber
+                        # would count the same failure twice); it only paints the
+                        # bubble + writes the single error card. Same reason
+                        # ``conversation_id`` stays ``None`` when there is no row:
+                        # guessing "the contact's latest conversation" could
+                        # attach the failure to the WRONG one — subscribers that
+                        # need it can look it up by ``msg_id`` afterwards.
+                        err = _first_error(errors)
+                        await emit_with_filter("message.failed", {
+                            "phone": ev.chat_id, "channel_id": ev.channel_id,
+                            "msg_id": mid,
+                            "error_code": err["code"],
+                            "error_title": err["title"],
+                            "error_details": err["details"],
+                            "conversation_id": (failed_row or {}).get("conversation_id"),
+                            "is_new": failed_row is not None,
+                            "ts": ev.ts or time.time(), "raw": ev.raw})
                     handled += 1
                 elif kind == "edited":
                     # A counterpart edited a message on their side: mirror it into

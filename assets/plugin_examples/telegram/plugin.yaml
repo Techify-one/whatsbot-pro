@@ -1,6 +1,6 @@
 id: telegram
 name: Telegram
-version: 1.0.0
+version: 1.2.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada Telegram via Bot API. Crie um bot no @BotFather, cole o token

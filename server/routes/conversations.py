@@ -41,6 +41,36 @@ def _filter_context(request: Request) -> FilterContext:
         contact_cattr_keys=contact_cattr_keys)
 
 
+def _hydrate_quoted(msgs: list[dict], conv_id: int) -> None:
+    """Anexa ``quoted`` às respostas cujo alvo ficou FORA da página (plano 75 F10).
+
+    O painel resolve a citação client-side, varrendo só a janela já carregada
+    (``ContactDetail.findQuoted``). Com paginação keyset (plano 50) uma citação que
+    aponta para uma mensagem de dias antes nunca resolvia e virava "Mensagem original
+    indisponível" — mesmo com o dado correto no banco (bug C2).
+
+    Aqui, em UMA query em lote por página, os alvos ausentes da própria página são
+    buscados e o trecho vai como ``msg["quoted"]``. Aditivo: quem já resolve dentro da
+    página não recebe nada (payload não cresce à toa — risco R11) e um front antigo que
+    ignore o campo continua funcionando. Escopado por ``conversation_id`` para não
+    vazar conteúdo de outra conversa. Best-effort: falhar aqui nunca derruba a página.
+    """
+    present = {m.get("msg_id") for m in msgs if m.get("msg_id")}
+    wanted = [m["reply_to_msg_id"] for m in msgs
+              if m.get("reply_to_msg_id") and m["reply_to_msg_id"] not in present]
+    if not wanted:
+        return
+    try:
+        found = message_repo.get_by_msg_ids(wanted, conversation_id=conv_id)
+    except Exception:
+        logger.exception("Falha ao hidratar citações da conversa %s", conv_id)
+        return
+    for m in msgs:
+        q = found.get(m.get("reply_to_msg_id") or "")
+        if q:
+            m["quoted"] = q
+
+
 # Teto de ids no CSV de `contact_ids`. A busca da barra lateral manda os contatos que
 # casaram o termo; um termo curto pode casar muita gente e o `IN` não deve crescer sem
 # limite. Cortar aqui é seguro: quem sobra continua vindo pelo cruzamento client-side.
@@ -355,6 +385,9 @@ def register_routes(app, deps):
             has_more = len(msgs) > page_limit
             if has_more:
                 msgs = msgs[1:]
+            # Citação cujo alvo caiu fora desta página (plano 75 F10): resolve em lote
+            # aqui, depois do corte do over-fetch (a msg extra não conta como "presente").
+            _hydrate_quoted(msgs, conv_id)
             # Atribuição de agente: resolve agent_key → display_name (dedupe por chave)
             # para o painel exibir "IA - <NOME>" / "Ferramenta IA - <NOME>".
             _an_cache: dict = {}

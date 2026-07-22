@@ -543,8 +543,9 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `message.edited` | Mensagem editada (inbound: cliente editou a própria) — o core JÁ atualiza `messages.content` + `edited_ts` e faz broadcast `message_edited` (GOWA/Telegram; Cloud não emite) | `id, phone, original_message_id, body` |
 | `message.revoked` | Mensagem apagada pra todos | `id, phone, revoked_message_id, revoked_from_me, revoked_chat` |
 | `message.deleted` | Mensagem deletada do histórico | `deleted_message_id, original_content, original_sender, was_from_me` |
+| `message.failed` | **NOVO (plano 75)** — o provedor avisou que NÃO entregou a mensagem (`statuses[].status = "failed"` da Meta). O core já marcou a msg como `failed` e fez broadcast `message_status`. `is_new=False` ⇒ é reentrega do mesmo webhook (a Meta reentrega de rotina) — use como guard de dedupe | `phone, channel_id, msg_id, error_code, error_title, error_details, conversation_id, is_new, ts, raw` |
 | `presence.changed` | Digitando / gravando | `phone, state` (`composing`/`paused`), `media` (`text`/`audio`) |
-| `receipt.changed` | Ack delivered/read | `phone, msg_ids, status` |
+| `receipt.changed` | Ack de entrega — **desde o plano 75 cobre TODOS os status** (`sent`, `delivered`, `read`, `failed`, `played`), não só `delivered`/`read`; o emit saiu de dentro do `if`. Sempre emitido DEPOIS da escrita no banco | `phone, msg_ids, status, errors, channel_id, ts` (`errors` = array cru do provedor, só em `failed`) |
 | `group.participants_changed` | Join/leave/promote/demote | `chat_id, phone, type, jids` |
 | `group.joined` | Bot adicionado ao grupo | `chat_id, phone` |
 | `call.received` | Chamada recebida (offer) | `call_id, phone, auto_rejected` |

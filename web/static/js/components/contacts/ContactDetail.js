@@ -288,10 +288,19 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     return formatWhatsApp(text, names);
   }
 
-  // Locate a quoted message in the current thread by its GOWA msg_id.
-  function findQuoted(msgId) {
-    if (!msgId || !messages) return null;
-    return messages.find(m => m.msg_id === msgId) || null;
+  // Locate a quoted message by its provider msg_id (plano 75 F10).
+  // Prefers the `quoted` block hydrated by the server (which also covers targets
+  // OUTSIDE the loaded keyset page) and falls back to the in-memory window for
+  // pages served by an older backend. Matching is exact — msg_id shapes are never
+  // normalized (`WAID:` prefixed ids from the Chatwoot import must keep matching).
+  // `_hydrated` marks a quote whose target is NOT in the DOM: the bubble shows its
+  // content but cannot scroll to it.
+  function findQuoted(msgId, msg) {
+    if (!msgId) return null;
+    const local = messages ? (messages.find(m => m.msg_id === msgId) || null) : null;
+    const hydrated = (msg && msg.quoted && msg.quoted.msg_id === msgId) ? msg.quoted : null;
+    if (!hydrated) return local;
+    return { ...hydrated, _id: local ? local._id : hydrated._id, _hydrated: !local };
   }
 
   // Build {senderLabel, senderColor, snippet} for a quoted message, mirroring

@@ -80,10 +80,14 @@ export function MessageBubble({
         </button>`}
         <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${sColor};">${senderLabel}</span>
         ${(!m.revoked && m.reply_to_msg_id) ? (() => {
-          const qmsg = findQuoted(m.reply_to_msg_id);
+          const qmsg = findQuoted(m.reply_to_msg_id, m);
           const q = quotedInfo(qmsg);
           const accent = q ? q.senderColor : '#8696a0';
-          const canJump = !!(qmsg && qmsg._id != null);
+          // Plano 75 F10: a citação hidratada pelo servidor mostra o CONTEÚDO mesmo
+          // com o alvo fora da página — mas não dá para rolar até uma linha ausente
+          // do DOM, então o clique fica desligado (_hydrated). Sem citação nenhuma
+          // (alvo apagado / nunca recebido) segue o texto de indisponível.
+          const canJump = !!(qmsg && qmsg._id != null && !qmsg._hydrated);
           return html`
             <div
               onClick=${canJump ? ((e) => { e.stopPropagation(); focusMessage(qmsg._id, { smooth: true }); }) : null}

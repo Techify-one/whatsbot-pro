@@ -32,6 +32,7 @@ from channels import jid as jid_classifier
 from db.repositories import channel_repo, contact_repo, conversation_repo
 from plugins.events import apply_filter, emit_with_filter
 from app.services.realtime_broadcast import build_inbound_saved_message
+from server.transcription import placeholder_for_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -480,7 +481,13 @@ class MessageIngestService:
         conversation_id = await asyncio.to_thread(
             contact.ensure_conversation_live, "user", _reopen)
 
-        broadcast_msg: dict = {"role": "user", "content": display_text,
+        # plano 75 F3 — safety net shared with the batch save (messaging_service):
+        # an unrenderable media_type with no body would paint a blank bubble, so
+        # the optimistic t=0 text must already carry the same placeholder that
+        # will be persisted. Legitimate media (with media_path) is untouched.
+        ui_text = placeholder_for_unrenderable(display_text, media_type, media_path)
+
+        broadcast_msg: dict = {"role": "user", "content": ui_text,
                                "ts": time.time(), "msg_id": msg_id}
         if not _notify:
             broadcast_msg["silent"] = True  # frontend pula som/alerta de nova mensagem
@@ -504,7 +511,7 @@ class MessageIngestService:
         # message.saved, but do NOT run the agent (plano 13 Fase 0 — trigger_ai).
         if not getattr(event, "trigger_ai", True):
             saved = await asyncio.to_thread(
-                contact.add_message, "user", display_text,
+                contact.add_message, "user", ui_text,
                 media_type=media_type, media_path=media_path,
                 msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen)
             # plano 57: new_message autoritativo pós-save (grupo sem @menção — 1 linha).
@@ -516,7 +523,7 @@ class MessageIngestService:
             except Exception:
                 logger.exception("[Ingest] falha ao re-emitir new_message (grupo) pós-save para %s", phone)
             await emit_with_filter("message.saved", {
-                "phone": phone, "channel_id": channel_id, "text": display_text,
+                "phone": phone, "channel_id": channel_id, "text": ui_text,
                 "msg_id": msg_id, "media_type": media_type, "media_path": media_path,
                 "media_extras": media_extras, "is_group": event.is_group,
                 "group_jid": event.chat_id if event.is_group else None,
