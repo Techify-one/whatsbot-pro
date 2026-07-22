@@ -192,7 +192,18 @@ export function useMediaUpload({
         if (item.previewUrl) { try { URL.revokeObjectURL(item.previewUrl); } catch {} }
         continue;
       }
-      keep.push(kind === item.kind ? item : { ...item, kind });
+      if (kind === item.kind) {
+        keep.push(item);
+        continue;
+      }
+      // Rerroteado (documento → áudio/vídeo): o item nasceu como documento e
+      // por isso veio SEM `previewUrl` (só imagem/vídeo ganham miniatura no
+      // `buildQueueItems`). A prévia de áudio/vídeo precisa da URL local, senão
+      // o player abre vazio (0:00) e o operador não consegue ouvir antes de
+      // enviar.
+      const previewUrl = item.previewUrl
+        || (() => { try { return URL.createObjectURL(item.file); } catch { return null; } })();
+      keep.push({ ...item, kind, previewUrl });
     }
     if (firstBad) setRejection(firstBad);
     if (!keep.length) return 0;
@@ -350,7 +361,10 @@ export function useMediaUpload({
       });
     } else {
       optimistic = { ...base, content: '[Áudio]', media_type: 'audio', media_path: localUrl };
-      sendPromise = api.sendAudio(phone, item.blob, item.filename, conversationId, channelId);
+      // `blob` = clipe do gravador; `file` = arquivo anexado que o canal aceita
+      // como áudio mas não como documento (rerroteado em `reroutedKind`). Sem o
+      // fallback, o anexo chegava aqui com `blob` undefined e o envio falhava.
+      sendPromise = api.sendAudio(phone, source, item.filename, conversationId, channelId);
     }
     optimistic = { ...optimistic, ts: Date.now() / 1000, _localId: localId,
                    _status: 'sending', _isLocalBlob: true };
