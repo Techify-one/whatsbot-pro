@@ -74,7 +74,6 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const [attrDefs, setAttrDefs] = useState([]);       // atributos (contato+conversa) p/ o skip da avaliação
   const [protoFieldDefs, setProtoFieldDefs] = useState([]);  // rótulos da aba "Protocolo" p/ o mesmo skip
 
-
   const load = useCallback(async (sc) => {
     setLoading(true); setMsg('');
     try {
@@ -89,7 +88,8 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   useEffect(() => { if (FIELD_TABS.includes(tab)) load(tab); }, [tab, load]);
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
-  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, relink_prompt_enabled: true, relink_window_minutes: 30 };
+  const RELINK_ATTR_EMPTY = { enabled: false, scope: 'contact', key: '', values: { previous: '', new: '', block: '' }, consume: true };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, relink_prompt_enabled: true, relink_window_minutes: 30, relink_attr: RELINK_ATTR_EMPTY };
   const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
@@ -150,7 +150,6 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
 
   // Opções do seletor da regra de skip: atributos do core + rótulos do protocolo.
   const skipDefs = [...attrDefs, ...protoFieldDefs];
-
 
   function update(i, patch) {
     setDefs((list) => list.map((d, j) => (j === i ? { ...d, ...patch } : d)));
@@ -219,6 +218,22 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   }
   function removeSkipAttr(i) {
     setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).filter((_, j) => j !== i) }));
+  }
+
+  // Regra "decidir a continuidade pelo atributo personalizado" — vive em
+  // general.relink_attr (salva junto no PUT /general-config pelo botão da aba geral).
+  function updateRelinkAttr(patch) {
+    setGeneral((g) => {
+      const base = g || GENERAL_EMPTY;
+      return { ...base, relink_attr: { ...RELINK_ATTR_EMPTY, ...(base.relink_attr || {}), ...patch } };
+    });
+  }
+  function updateRelinkAttrValue(kind, value) {
+    setGeneral((g) => {
+      const base = g || GENERAL_EMPTY;
+      const ra = { ...RELINK_ATTR_EMPTY, ...(base.relink_attr || {}) };
+      return { ...base, relink_attr: { ...ra, values: { ...(ra.values || {}), [kind]: value } } };
+    });
   }
 
   function askRemove(i, d) {
@@ -457,6 +472,71 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
           </div>
         </div>
       `}
+
+      ${general === null ? null : (() => {
+        const ra = { ...RELINK_ATTR_EMPTY, ...(general.relink_attr || {}) };
+        const def = attrDefs.find((a) => a.key === ra.key && a.scope === ra.scope);
+        const opts = (def && def.options) || [];
+        const valueField = (kind, label, hint) => html`
+          <div>
+            <label class="block text-[12px] text-wa-secondary mb-1">${label}</label>
+            <${AttributeValueInput} type=${def && def.type} options=${opts}
+              value=${(ra.values || {})[kind] || ''} disabled=${!canEdit}
+              placeholder="— não usar —"
+              onChange=${(v) => updateRelinkAttrValue(kind, v)} />
+            <span class="block text-[11px] text-wa-secondary mt-0.5">${hint}</span>
+          </div>`;
+        return html`
+        <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
+          <label class="flex items-start gap-2 text-[13px] text-wa-text">
+            <input class="mt-0.5" type="checkbox" checked=${!!ra.enabled} disabled=${!canEdit}
+              onChange=${(e) => updateRelinkAttr({ enabled: e.target.checked })} />
+            <span>
+              <span class="font-medium">Decidir a continuidade por um atributo personalizado</span>
+              <span class="block text-[12px] text-wa-secondary mt-0.5">
+                A escolha do atendente no pop-up <b>grava</b> o valor abaixo no atributo, e um valor
+                já preenchido <b>decide sozinho</b> o próximo re-engajamento (o pop-up não aparece).
+                Precedência: <b>não abrir</b> › <b>faz parte do anterior</b> › <b>novo protocolo</b>.
+                Atributo vazio ⇒ volta a perguntar.
+              </span>
+            </span>
+          </label>
+          <div class="pl-6 space-y-2">
+            <div>
+              <label class="block text-[12px] text-wa-secondary mb-1">Atributo</label>
+              ${canEdit ? html`
+                <${OptionListSelect} options=${attrOptions(attrDefs)} grouped=${true} float=${true}
+                  value=${ra.key ? `${ra.scope}::${ra.key}` : ''}
+                  placeholder="— selecione —" searchPlaceholder="Pesquisar atributo…"
+                  onChange=${(v) => { const ix = String(v || '').indexOf('::');
+                    updateRelinkAttr(ix < 0
+                      ? { scope: 'contact', key: '', values: { previous: '', new: '', block: '' } }
+                      : { scope: v.slice(0, ix) || 'contact', key: v.slice(ix + 2),
+                        values: { previous: '', new: '', block: '' } }); }} />`
+              : html`<div class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] opacity-60">
+                  ${def ? `${def.label} (${SCOPE_LABEL[def.scope] || def.scope})` : '— selecione —'}
+                </div>`}
+            </div>
+            ${valueField('previous', 'Valor = faz parte do protocolo anterior',
+              'Vincula o atendimento ao protocolo anterior (reabre o anterior).')}
+            ${valueField('new', 'Valor = é um novo protocolo',
+              'Abre um protocolo novo imediatamente, sem esperar a decisão.')}
+            ${valueField('block', 'Valor = não abrir protocolo',
+              'Não abre nem vincula, e a conversa não é reaberta. Permanece até o atributo mudar.')}
+            <label class="flex items-start gap-2 text-[13px] text-wa-text">
+              <input class="mt-0.5" type="checkbox" checked=${ra.consume !== false} disabled=${!canEdit}
+                onChange=${(e) => updateRelinkAttr({ consume: e.target.checked })} />
+              <span>
+                <span class="font-medium">Limpar o valor após aplicar</span>
+                <span class="block text-[12px] text-wa-secondary mt-0.5">
+                  A decisão vale para um re-engajamento e o valor é apagado — o ciclo seguinte volta
+                  a perguntar. Não se aplica ao valor de <b>não abrir protocolo</b>, que permanece.
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>`;
+      })()}
 
       <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
         <div class="text-[13px] font-semibold text-wa-text">Ignorar abertura por regex</div>

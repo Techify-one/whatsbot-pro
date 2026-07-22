@@ -1976,7 +1976,8 @@ function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser
 
         <label class="block text-[12px] text-wa-secondary mb-1">Agrupar por</label>
         <div class="mb-2">
-          <${OptionListSelect} grouped=${true} value=${groupSel} onChange=${setGroupSel}
+          <${OptionListSelect} grouped=${true} value=${groupSel}
+            onChange=${(v) => setGroupSel(v || 'status')}
             searchPlaceholder="Pesquisar campo…"
             options=${[
               { value: 'status', label: 'Status', group: 'Nativos' },

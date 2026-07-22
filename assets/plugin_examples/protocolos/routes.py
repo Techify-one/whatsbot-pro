@@ -242,9 +242,12 @@ async def get_contact_protocolo(contact_id: int):
 
 
 @router.get("/contacts/{contact_id}/relink-suggestion", dependencies=[plugin_permission("view")])
-async def relink_suggestion(contact_id: int):
-    """Plano 49: há protocolo fechado dentro da janela p/ sugerir o vínculo? (contrato §4)."""
-    return {"ok": True, "data": logic.relink_suggestion_for_contact(contact_id)}
+async def relink_suggestion(contact_id: int, conversation_id: int | None = None):
+    """Plano 49: há protocolo fechado dentro da janela p/ sugerir o vínculo? (contrato §4).
+
+    ``conversation_id`` (opcional) permite ler a decisão por atributo no escopo CONVERSA."""
+    return {"ok": True,
+            "data": logic.relink_suggestion_for_contact(contact_id, conversation_id)}
 
 
 @router.post("/contacts/{contact_id}/protocolo/ensure", dependencies=[plugin_permission("edit")])
@@ -337,6 +340,9 @@ async def relink_protocolo(previous_id: int, request: Request):
                                        actor=(name or None), conversation_id=conv)
     if err:
         return _err(err, status=404 if "encontrado" in err else 409)
+    # A escolha do atendente vira valor do atributo personalizado (decide o PRÓXIMO
+    # re-engajamento sem perguntar). No-op se a regra estiver desligada.
+    logic.record_relink_attr_decision("previous", (at or {}).get("contact_id"), conv)
     return {"ok": True, "data": {"protocolo": at}}
 
 
@@ -348,16 +354,44 @@ async def open_new_protocolo(conversation_id: int):
     at, err = logic.open_new_protocolo(conversation_id)
     if err:
         return _err(err, status=404 if "encontrada" in err else 409)
+    logic.record_relink_attr_decision("new", (at or {}).get("contact_id"), conversation_id)
     return {"ok": True, "data": {"protocolo": at}}
 
 
 @router.post("/protocolos/{previous_id}/relink-reviewed",
              dependencies=[plugin_permission("edit")])
-async def relink_reviewed(previous_id: int):
+async def relink_reviewed(previous_id: int, conversation_id: int | None = None):
     """Ação "Fechar tudo" do popup de continuidade: marca o protocolo anterior como revisado
     para não reperguntar (a conversa é fechada pelo frontend via setConversationStatus)."""
     logic.mark_relink_reviewed(previous_id)
+    at = logic.get_protocolo(previous_id) or {}
+    logic.record_relink_attr_decision("block", at.get("contact_id"), conversation_id)
     return {"ok": True, "data": {"protocolo_id": previous_id}}
+
+
+@router.post("/conversas/{conversation_id}/relink-decision",
+             dependencies=[plugin_permission("resolve")])
+async def relink_decision(conversation_id: int, request: Request):
+    """Decisão de continuidade tomada ao RESOLVER o atendimento (dentro da janela).
+
+    Corpo: ``{kind: 'previous'|'new', previous_id?, source?}``. ``source='attr'`` marca que
+    a decisão veio do atributo personalizado (consome o valor em vez de gravá-lo)."""
+    _, name = _atendente(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — corpo vazio/não-JSON é tolerado
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    prev = body.get("previous_id")
+    data, err = logic.apply_resolve_decision(
+        conversation_id, str(body.get("kind") or ""),
+        previous_id=int(prev) if prev not in (None, "") else None,
+        source="attr" if body.get("source") == "attr" else "user",
+        actor=(name or None))
+    if err:
+        return _err(err, status=404 if "encontrad" in err else 409)
+    return {"ok": True, "data": data}
 
 
 @router.post("/protocolos/{atid}/assign", dependencies=[plugin_permission("assign")])

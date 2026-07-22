@@ -838,6 +838,23 @@ def _open_cycles_of_protocolo(atid: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _has_open_conversation(atid: int) -> bool:
+    """Alguma conversa deste protocolo está ABERTA no core?
+
+    Complementa ``_open_cycles_of_protocolo``: uma conversa pode estar aberta sem ciclo
+    aberto (reabertura pelo botão, dados anteriores ao fix do ``on_outbound``) — e nesse
+    estado o atendimento está em curso, então o protocolo não pode ser finalizado.
+    Best-effort: erro de leitura NÃO trava o Finalizar."""
+    try:
+        for cid in _conversation_ids_of_protocolo(atid):
+            conv = conversation_repo.get(cid)
+            if conv and (conv.get("status") or "") != "closed":
+                return True
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: _has_open_conversation falhou: %s", e)
+    return False
+
+
 def _cycle_is_resolvable(cycle: dict) -> bool:
     """Um ciclo aberto só é 'resolvível' pela UI se aponta para uma conversa (atendimento)
     que AINDA existe no core — é a conversa que o operador abre no popup 'Resolver
@@ -896,6 +913,13 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
     orphan = [c for c in open_cycles if not _cycle_is_resolvable(c)]
     live = [c for c in open_cycles if _cycle_is_resolvable(c)]
     if live:
+        return None, ("Existe um atendimento aberto neste protocolo — "
+                      "resolva-o antes de finalizar.")
+    # Rede de segurança: conversa ABERTA sem ciclo aberto (ex.: reaberta pelo botão, ou
+    # linhas antigas de antes de ``on_outbound`` garantir o ciclo). Sem isto dava para
+    # finalizar o protocolo com o atendimento em curso. Resolver o atendimento cria+fecha
+    # o ciclo que falta (``resolve_atendimento``), então o caminho de saída existe.
+    if _has_open_conversation(atid):
         return None, ("Existe um atendimento aberto neste protocolo — "
                       "resolva-o antes de finalizar.")
     # Exige os rótulos OBRIGATÓRIOS (OBS + extras) antes de fechar — lidos do que já
@@ -1039,14 +1063,99 @@ def relink_to_previous(previous_id: int, current_open_id: int | None = None,
     return at, None
 
 
-def relink_suggestion_for_contact(contact_id: int) -> dict:
+def merge_into_previous(conversation_id: int, previous_id: int | None = None,
+                        actor: str | None = None) -> tuple[dict | None, str | None]:
+    """"Faz parte do protocolo anterior" no momento de RESOLVER: FUNDE este re-engajamento
+    no protocolo anterior, que segue FINALIZADO.
+
+    Diferente de ``relink_to_previous`` (que reabria o anterior e movia o ciclo novo para
+    dentro dele, criando mais um atendimento na lista): aqui nada de novo aconteceu, então
+    o protocolo transitório aberto pela mensagem do cliente é DESCARTADO com os ciclos dele
+    e apenas a DATA FINAL do último atendimento já existente do anterior é estendida. Os
+    valores dos rótulos (do ciclo e do protocolo) ficam EXATAMENTE como estavam no
+    fechamento anterior — nada é regravado.
+
+    O protocolo anterior permanece ``fechado`` (só re-carimba ``closed_at``): não reabre,
+    então os efeitos de fechar (mensagem de avaliação, religar IA) NÃO disparam de novo.
+
+    Convenção de erro (o route mapeia): "não encontrad*" → 404; demais → 409."""
+    atend = conversation_repo.get(conversation_id)
+    if not atend:
+        return None, "Conversa não encontrada."
+    contact_id = atend["contact_id"]
+    prev = get_protocolo(previous_id) if previous_id else \
+        get_last_closed_protocolo_for_contact(contact_id)
+    if not prev or prev.get("contact_id") != contact_id:
+        return None, "Protocolo anterior não encontrado para este contato."
+    if prev["status"] != "fechado":
+        return None, "O protocolo anterior não está fechado."
+    ts = now()
+    # 1) Descarta o protocolo transitório (aberto pelo auto_link neste re-engajamento) e
+    #    TODOS os ciclos dele — é o que garante "nenhum atendimento novo na lista".
+    cur = _select_open_protocolo(contact_id)
+    if cur and cur["id"] != prev["id"]:
+        with make_plugin_db() as conn:
+            conn.execute(
+                text("DELETE FROM plugin_protocolos_campos_extras WHERE atendimento_id IN "
+                     "(SELECT id FROM plugin_protocolos_atendimentos WHERE protocolo_id = :cur)"),
+                {"cur": cur["id"]},
+            )
+            conn.execute(
+                text("DELETE FROM plugin_protocolos_atendimentos WHERE protocolo_id = :cur"),
+                {"cur": cur["id"]},
+            )
+        _discard_protocolo(cur["id"])
+    # 2) Estende a data final do ÚLTIMO atendimento do anterior (só ended_at/updated_at —
+    #    atendente e rótulos permanecem os do fechamento anterior).
+    with make_plugin_db() as conn:
+        last_id = conn.execute(
+            text("SELECT id FROM plugin_protocolos_atendimentos WHERE protocolo_id = :aid "
+                 "ORDER BY started_at DESC, id DESC LIMIT 1"),
+            {"aid": prev["id"]},
+        ).scalar()
+        if last_id is not None:
+            conn.execute(
+                text("UPDATE plugin_protocolos_atendimentos "
+                     "SET ended_at = :ts, updated_at = :ts WHERE id = :id"),
+                {"ts": ts, "id": int(last_id)},
+            )
+    if last_id is None:
+        # Dado legado: protocolo fechado sem nenhum ciclo. Cria um já encerrado para manter
+        # o invariante "protocolo fechado tem ao menos 1 atendimento".
+        cycle = _insert_cycle(conversation_id, contact_id, prev["id"])
+        with make_plugin_db() as conn:
+            conn.execute(
+                text("UPDATE plugin_protocolos_atendimentos "
+                     "SET ended_at = :ts, updated_at = :ts WHERE id = :id"),
+                {"ts": ts, "id": cycle["id"]},
+            )
+    # 3) Re-carimba o fechamento do protocolo (continua 'fechado').
+    with make_plugin_db() as conn:
+        conn.execute(
+            text("UPDATE plugin_protocolos_protocolos SET closed_at = :ts, updated_at = :ts "
+                 "WHERE id = :id"),
+            {"ts": ts, "id": prev["id"]},
+        )
+    _emit_proto_notice("protocolo_relinked", conversation_id=conversation_id,
+                       contact_id=contact_id,
+                       phone=prev.get("contact_phone") or None, actor=actor)
+    _broadcast_changed(contact_id, prev["id"])
+    return get_protocolo(prev["id"]), None
+
+
+def relink_suggestion_for_contact(contact_id: int,
+                                  conversation_id: int | None = None) -> dict:
     """Contrato §4 do plano 49: há protocolo FECHADO dentro da janela p/ este contato?
 
     Devolve ``suggest`` (mostrar o popup?), a janela, o tempo desde o fechamento e um
     resumo do protocolo anterior + do protocolo novo já aberto (se houver). ``suggest``
-    só é ``True`` com o toggle ligado E dentro da janela."""
+    só é ``True`` com o toggle ligado E dentro da janela.
+
+    ``attr_decision`` carrega a decisão pendente gravada no atributo personalizado — quando
+    presente ela manda e ``suggest`` vira False (não se pergunta o que já está decidido)."""
     enabled = relink_prompt_enabled()
     window_min = relink_window_minutes()
+    _attr = read_relink_attr_decision(contact_id, conversation_id)
     out: dict = {
         "suggest": False,
         "enabled": enabled,
@@ -1054,6 +1163,8 @@ def relink_suggestion_for_contact(contact_id: int) -> dict:
         "seconds_since_close": None,
         "previous": None,
         "current_open": None,
+        # No resolver só existem 2 decisões; ``block`` é regra de ABERTURA (ver on_inbound).
+        "attr_decision": _attr if _attr in ("previous", "new") else None,
     }
     current = _select_open_protocolo(contact_id)
     if current:
@@ -1072,29 +1183,17 @@ def relink_suggestion_for_contact(contact_id: int) -> dict:
         "assignee_name": prev.get("assignee_name") or "",
         "atendimentos_count": _count_atendimentos_of_protocolo(prev["id"]),
     }
-    # Só sugere quando NÃO há protocolo aberto (o auto_link agora ADIA a abertura durante
-    # a janela — o protocolo novo só nasce se o atendente escolher "É um novo protocolo")
-    # e o anterior ainda não foi revisado (decisão de "Fechar tudo" marca revisado).
-    out["suggest"] = bool(current is None
-                          and not prev.get("relink_reviewed")
+    # A pergunta acontece no RESOLVER (não mais ao abrir a conversa): o protocolo atual já
+    # está aberto — a mensagem do cliente sempre abre um. Sugere quando o protocolo anterior
+    # fechou dentro da janela, ainda não foi revisado e não é o próprio protocolo atual.
+    out["suggest"] = bool(not prev.get("relink_reviewed")
+                          and (current is None or current["id"] != prev["id"])
                           and 0 <= secs <= window_min * 60)
+    # Decisão gravada num atributo personalizado manda: não pergunta — o frontend aplica
+    # ``attr_decision`` direto (``/relink-decision`` com ``source=attr``).
+    if out["attr_decision"]:
+        out["suggest"] = False
     return out
-
-
-def _defer_open_for_relink(contact_id: int) -> bool:
-    """True quando NÃO se deve auto-abrir um protocolo agora: o contato fechou um protocolo
-    há pouco (dentro da janela, ainda não revisado) e o popup de continuidade vai perguntar
-    ao atendente — o protocolo novo só nasce se ele escolher "É um novo protocolo". Espelha
-    a condição de ``relink_suggestion_for_contact`` (suggest)."""
-    if not relink_prompt_enabled():
-        return False
-    if _select_open_protocolo(contact_id):
-        return False  # já há um aberto → fluxo normal (não é re-engajamento a decidir)
-    prev = get_last_closed_protocolo_for_contact(contact_id)
-    if not prev or prev.get("closed_at") is None or prev.get("relink_reviewed"):
-        return False
-    secs = now() - float(prev["closed_at"])
-    return 0 <= secs <= relink_window_minutes() * 60
 
 
 def mark_relink_reviewed(protocolo_id: int) -> None:
@@ -1123,6 +1222,129 @@ def open_new_protocolo(conversation_id: int) -> tuple[dict | None, str | None]:
     ensure_open_cycle(conversation_id, contact_id, at["id"])
     _broadcast_changed(contact_id, at["id"])
     return at, None
+
+
+# ── Decisão de continuidade gravada num atributo personalizado ───────────────
+# Ver o bloco de config ``_sanitize_relink_attr`` para o contrato. Aqui ficam a LEITURA
+# (que decisão está pendente), a ESCRITA (o que o atendente escolheu no popup) e a
+# APLICAÇÃO (executar a decisão sem perguntar). Tudo best-effort: qualquer erro de
+# leitura/escrita degrada para o fluxo manual de sempre, nunca quebra o pipeline.
+
+# Prioridade de avaliação: o bloqueio vence, depois "faz parte do anterior", depois "novo".
+_RELINK_ATTR_PRIORITY = ("block", "previous", "new")
+
+
+def _relink_attr_target(cfg: dict, contact_id, conversation_id):
+    """(tabela do core, id) onde o valor do atributo vive, conforme o escopo configurado."""
+    if cfg["scope"] == "conversation":
+        return (_conversations_tbl, int(conversation_id)) if conversation_id else None
+    from db.tables import contacts as _contacts_tbl
+    return (_contacts_tbl, int(contact_id)) if contact_id else None
+
+
+def read_relink_attr_decision(contact_id, conversation_id=None) -> str | None:
+    """Decisão PENDENTE gravada no atributo: ``'block'``/``'previous'``/``'new'`` ou None.
+
+    None = nada configurado, nada gravado ou valor sem mapeamento → o popup decide."""
+    try:
+        cfg = get_relink_attr_config()
+        if not cfg["enabled"]:
+            return None
+        target = _relink_attr_target(cfg, contact_id, conversation_id)
+        if not target:
+            return None
+        stored = (custom_attribute_repo.get_values(*target) or {}).get(cfg["key"])
+        for kind in _RELINK_ATTR_PRIORITY:
+            if _attr_value_matches(stored, cfg["values"].get(kind)):
+                return kind
+        return None
+    except Exception as e:  # noqa: BLE001 — na dúvida, cai no fluxo manual (popup)
+        logger.debug("protocolos: read_relink_attr_decision falhou: %s", e)
+        return None
+
+
+def record_relink_attr_decision(kind: str, contact_id, conversation_id=None) -> None:
+    """Grava no atributo o valor mapeado para a decisão que o atendente tomou no popup.
+    No-op quando a feature está desligada ou a decisão não tem valor mapeado."""
+    try:
+        cfg = get_relink_attr_config()
+        value = cfg["values"].get(kind) if cfg["enabled"] else ""
+        if not value:
+            return
+        target = _relink_attr_target(cfg, contact_id, conversation_id)
+        if not target:
+            return
+        custom_attribute_repo.set_values(*target, {cfg["key"]: value})
+    except Exception as e:  # noqa: BLE001 — gravar o atributo nunca derruba a decisão
+        logger.debug("protocolos: record_relink_attr_decision falhou: %s", e)
+
+
+def clear_relink_attr_value(contact_id, conversation_id=None) -> None:
+    """Consome a decisão: remove a chave do ``custom_attributes`` (``set_values`` apaga a
+    chave quando o valor é None). No-op quando ``consume`` está desligado."""
+    try:
+        cfg = get_relink_attr_config()
+        if not cfg["enabled"] or not cfg["consume"]:
+            return
+        target = _relink_attr_target(cfg, contact_id, conversation_id)
+        if not target:
+            return
+        custom_attribute_repo.set_values(*target, {cfg["key"]: None})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: clear_relink_attr_value falhou: %s", e)
+
+
+def apply_resolve_decision(conversation_id: int, kind: str, *, previous_id=None,
+                           source: str = "user",
+                           actor: str | None = None) -> tuple[dict, str | None]:
+    """Aplica a decisão de continuidade tomada no momento de RESOLVER o atendimento.
+
+    ``kind='previous'`` → FUNDE este re-engajamento no protocolo anterior
+    (``merge_into_previous``): descarta o protocolo transitório + seus ciclos, estende a data
+    final do último atendimento do anterior e o mantém FINALIZADO (sem atendimento novo, sem
+    reabrir, sem reenviar avaliação). ``kind='new'`` → ABRE de fato o protocolo novo deste
+    re-engajamento (reusa o que o ``auto_link`` já abriu — o índice só permite 1 aberto por
+    contato) e garante um ATENDIMENTO (ciclo) aberto nele; o atendimento NÃO é resolvido,
+    quem está no painel segue tocando o caso.
+
+    ``source='user'`` (clique no popup) GRAVA a escolha no atributo personalizado, para que
+    ela decida sozinha o próximo ciclo. ``source='attr'`` (a decisão veio do atributo)
+    CONSOME o valor. Devolve ``({'applied': kind, ...}, erro)``."""
+    if kind not in ("previous", "new"):
+        return {}, "Decisão inválida."
+    atend = conversation_repo.get(conversation_id)
+    if not atend:
+        return {}, "Conversa não encontrada."
+    contact_id = atend["contact_id"]
+    out = {"applied": kind, "protocolo_id": None}
+    if kind == "previous":
+        prev = get_protocolo(previous_id) if previous_id else \
+            get_last_closed_protocolo_for_contact(contact_id)
+        if not prev or prev.get("contact_id") != contact_id:
+            return {}, "Protocolo anterior não encontrado para este contato."
+        at, err = merge_into_previous(conversation_id, previous_id=prev["id"], actor=actor)
+        if err:
+            return {}, err
+        out["protocolo_id"] = (at or {}).get("id")
+    else:
+        # Protocolo novo DE FATO: reusa o aberto (auto_link) ou cria, e garante o ciclo
+        # aberto — é o atendimento novo que o atendente segue tocando.
+        at, err = open_new_protocolo(conversation_id)
+        if err:
+            return {}, err
+        out["protocolo_id"] = (at or {}).get("id")
+        # Para de sugerir ESTE re-engajamento: sem isto a pergunta voltaria no próximo
+        # clique em "Resolver" (o anterior segue fechado dentro da janela) e o atendimento
+        # nunca conseguiria ser resolvido. ``reopen_protocolo`` zera a marca.
+        prev = get_protocolo(previous_id) if previous_id else \
+            get_last_closed_protocolo_for_contact(contact_id)
+        if prev and prev.get("contact_id") == contact_id and prev["status"] == "fechado":
+            mark_relink_reviewed(prev["id"])
+    if source == "attr":
+        clear_relink_attr_value(contact_id, conversation_id)
+    else:
+        record_relink_attr_decision(kind, contact_id, conversation_id)
+    return out, None
 
 
 def _conversation_ids_of_protocolo(atid: int) -> list[int]:
@@ -2311,8 +2533,10 @@ def on_inbound(ctx, payload: dict) -> None:
         contact, atend = _resolve_target(payload)
         if not atend:
             return
-        if _defer_open_for_relink(contact["id"]):
-            return  # ADIA a abertura — o popup de continuidade decide (abre só se "novo")
+        # A mensagem do cliente SEMPRE reabre/abre o protocolo — a continuidade é decidida
+        # depois, ao resolver. A única exceção é o valor de BLOQUEIO do atributo.
+        if read_relink_attr_decision(contact["id"], atend["id"]) == "block":
+            return
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True)
@@ -2330,12 +2554,21 @@ def on_outbound(ctx, payload: dict) -> None:
         contact, atend = _resolve_target(payload)
         if not atend:
             return
-        if _defer_open_for_relink(contact["id"]):
-            return  # ADIA a abertura — o popup de continuidade decide (abre só se "novo")
+        if read_relink_attr_decision(contact["id"], atend["id"]) == "block":
+            return
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True)
-        ensure_cycle_exists(atend["id"], contact["id"], at["id"])
+        # Conversa ABERTA → garante um ciclo ABERTO: o envio do atendente numa conversa
+        # fechada a REABRE antes deste evento (o core salva e só então emite message.sent),
+        # e isso é um atendimento NOVO dentro do protocolo. Sem isto o protocolo ficava sem
+        # ciclo aberto e dava para finalizá-lo com o atendimento em curso.
+        # Conversa FECHADA (ex.: a mensagem de avaliação do fechar, enviada com
+        # reopen=False) → só bootstrap: nunca abre ciclo logo após uma resolução.
+        if (atend.get("status") or "") != "closed":
+            ensure_open_cycle(atend["id"], contact["id"], at["id"])
+        else:
+            ensure_cycle_exists(atend["id"], contact["id"], at["id"])
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos.on_outbound falhou: %s", e)
 
@@ -2623,12 +2856,67 @@ def relink_window_minutes() -> int:
     return v if v > 0 else 30
 
 
+# ── Decisão de continuidade por ATRIBUTO PERSONALIZADO ───────────────────────
+# O admin escolhe UM atributo personalizado do core (escopo contato OU conversa) e
+# mapeia um valor para cada decisão do popup de continuidade:
+#   previous → "faz parte do protocolo anterior"   new → "é um novo protocolo"
+#   block    → "não abrir protocolo" (nem vincula, nem abre — e não reabre a conversa)
+# O vínculo é BIDIRECIONAL: a escolha do atendente no popup GRAVA o valor mapeado, e um
+# valor já presente DECIDE sozinho o próximo re-engajamento (o popup não aparece). Por
+# padrão o valor é CONSUMIDO (removido) ao ser aplicado — decide uma vez, depois volta a
+# perguntar. Mapeamento vazio ⇒ aquela decisão não é automatizada nem gravada.
+
+_RELINK_ATTR_KINDS = ("previous", "new", "block")
+
+
+def _sanitize_relink_attr(cfg) -> dict:
+    """Normaliza o sub-objeto ``relink_attr``. Escopo inválido ou chave vazia ⇒ desligado
+    (a feature nunca fica "ligada" apontando para lugar nenhum)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    scope = cfg.get("scope")
+    scope = scope if scope in ("contact", "conversation") else "contact"
+    key = str(cfg.get("key") or "").strip()
+    raw_values = cfg.get("values") if isinstance(cfg.get("values"), dict) else {}
+    values = {k: str(raw_values.get(k) or "").strip() for k in _RELINK_ATTR_KINDS}
+    return {
+        # Sem chave de atributo não há como ler/gravar nada — a feature fica desligada.
+        "enabled": bool(cfg.get("enabled")) and bool(key),
+        "scope": scope,
+        "key": key,
+        "values": values,
+        "consume": bool(cfg.get("consume", True)),
+    }
+
+
+def get_relink_attr_config() -> dict:
+    return _sanitize_relink_attr({
+        "enabled": config_repo.get(_general_key("relink_attr_enabled"), False),
+        "scope": config_repo.get(_general_key("relink_attr_scope"), "contact"),
+        "key": config_repo.get(_general_key("relink_attr_key"), ""),
+        "values": {k: config_repo.get(_general_key(f"relink_attr_{k}"), "")
+                   for k in _RELINK_ATTR_KINDS},
+        "consume": config_repo.get(_general_key("relink_attr_consume"), True),
+    })
+
+
+def set_relink_attr_config(cfg: dict) -> dict:
+    clean = _sanitize_relink_attr(cfg)
+    config_repo.set(_general_key("relink_attr_enabled"), clean["enabled"])
+    config_repo.set(_general_key("relink_attr_scope"), clean["scope"])
+    config_repo.set(_general_key("relink_attr_key"), clean["key"])
+    config_repo.set(_general_key("relink_attr_consume"), clean["consume"])
+    for k in _RELINK_ATTR_KINDS:
+        config_repo.set(_general_key(f"relink_attr_{k}"), clean["values"][k])
+    return get_relink_attr_config()
+
+
 def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
         "resolve_keep_assignee": resolve_keep_assignee_enabled(),
         "relink_prompt_enabled": relink_prompt_enabled(),
         "relink_window_minutes": relink_window_minutes(),
+        "relink_attr": get_relink_attr_config(),
     }
 
 
@@ -2650,6 +2938,8 @@ def set_general_config(cfg: dict) -> dict:
         except (TypeError, ValueError):
             m = 30
         config_repo.set(_general_key("relink_window_minutes"), max(1, min(m, 1440)))
+    if "relink_attr" in cfg:
+        set_relink_attr_config(cfg.get("relink_attr"))
     return get_general_config()
 
 
@@ -3207,11 +3497,22 @@ def _check_before_status(payload: dict):
         return payload
     cid = payload.get("conversation_id")
     cycle = get_latest_cycle(cid)
+    # Continuidade FUNDIDA no protocolo anterior (``merge_into_previous``): o ciclo deste
+    # re-engajamento foi descartado e o protocolo já está finalizado — não há atendimento
+    # novo a preencher, então não há o que exigir (e exigir aqui seria inacionável: não
+    # existe ciclo aberto onde gravar o rótulo). No fluxo normal de resolver o protocolo do
+    # contato ainda está ABERTO neste ponto, então o gate abaixo segue valendo.
+    conv = conversation_repo.get(cid) or {}
+    if conv.get("contact_id") is not None and _select_open_protocolo(conv["contact_id"]) is None:
+        proto = get_protocolo(cycle["protocolo_id"]) \
+            if cycle and cycle.get("protocolo_id") else None
+        if cycle is None or (proto and proto["status"] == "fechado"):
+            return payload
     eff = _effective_values("atendimento", cycle or {})
     # Rótulo Atendente (escopo atendimento) reflete o assignee NATIVO da conversa (não o do ciclo).
     at_def = next((d for d in get_field_defs("atendimento") if d.get("type") == "atendente"), None)
     if at_def:
-        eff[at_def["key"]] = (conversation_repo.get(cid) or {}).get("assignee_user_id")
+        eff[at_def["key"]] = conv.get("assignee_user_id")
     err = _missing_required("atendimento", eff)
     if err:
         logger.info("protocolos: recusando fechar atendimento %s — %s", cid, err)
@@ -3248,7 +3549,34 @@ def before_reopen(ctx, value):
     direction = "received" if ex.get("role") == "user" else "sent"
     if _skip_open_matches(ex.get("text") or "", direction):
         return False  # não reabrir
+    if _relink_attr_blocks_phone(ex.get("phone")):
+        return False  # atributo marcou "não abrir protocolo" → conversa segue fechada
     return value
+
+
+def _relink_attr_blocks_phone(phone) -> bool:
+    """True quando o atributo personalizado deste contato está no valor de BLOQUEIO.
+
+    Dá ao valor de bloqueio a mesma semântica do botão "Fechar conversa e protocolo
+    juntos": nem protocolo novo, nem reabertura automática da conversa. Leitura PURA (não
+    consome o valor) e barata: só toca o banco quando a regra está ligada com valor de
+    bloqueio mapeado. Best-effort — erro nunca impede a reabertura."""
+    try:
+        cfg = get_relink_attr_config()
+        if not cfg["enabled"] or not cfg["values"].get("block") or not phone:
+            return False
+        contact = contact_repo.get_by_phone(phone)
+        if not contact:
+            return False
+        conv_id = None
+        if cfg["scope"] == "conversation":
+            atend = (conversation_repo.get_open_for_contact(contact["id"])
+                     or conversation_repo.get_latest_for_contact(contact["id"]))
+            conv_id = (atend or {}).get("id")
+        return read_relink_attr_decision(contact["id"], conv_id) == "block"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: _relink_attr_blocks_phone falhou: %s", e)
+        return False
 
 
 def suppress_ai_on_ignored(ctx, value):

@@ -13,11 +13,14 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { ResolveForm } from '/plugins/protocolos/static/resolve_form.js';
-import { RelinkGate } from '/plugins/protocolos/static/relink_gate.js';
+import { RelinkModal } from '/plugins/protocolos/static/relink_modal.js';
 import { ProtocolosTab } from '/plugins/protocolos/static/protocolos_tab.js';
 // Helper do core p/ resolver o assignee atual da conversa (seed do rótulo "atendente").
 // Carrega auth como qualquer chamada core.
 import { getConversation } from '/static/js/services/api.js';
+// Toast do core (barramento global — ver services/notify.js): avisa que o resolver não
+// aconteceu porque a escolha foi "é um novo protocolo".
+import { notify } from '/static/js/services/notify.js';
 
 const html = htm.bind(h);
 
@@ -64,6 +67,92 @@ async function resolveAndCloseAll(api, apiBase, conversationId, protocoloId) {
   return { ok: true };
 }
 
+// contact_id da conversa: alguns call sites de "Resolver" passam só { id }.
+async function contactIdOf(atend) {
+  if (atend && atend.contact_id != null) return atend.contact_id;
+  try {
+    const c = await getConversation(atend.id);
+    const cv = (c && c.ok && c.data) ? c.data.conversation : null;
+    return cv ? cv.contact_id : null;
+  } catch (_) { return null; }
+}
+
+// Decisão de CONTINUIDADE no momento de resolver o atendimento. Devolve
+// `{ outcome, pending }`:
+//   outcome 'resolved' → fundido no protocolo anterior (nenhum atendimento novo; o
+//                        protocolo segue finalizado) — o core só precisa fechar a conversa
+//   outcome 'form'     → segue para o formulário padrão de resolver
+//   outcome 'abort'    → nada é resolvido: o atendente cancelou OU escolheu "é um novo
+//                        protocolo" (que abre o protocolo/atendimento novo e mantém a
+//                        conversa ABERTA para o caso novo ser tocado)
+//   pending            → decisão a APLICAR depois que o atendimento for resolvido
+//                        (`applyContinuity`), ou null
+//
+// As duas escolhas do popup encerram a pergunta na hora — nenhuma delas passa pelo
+// formulário de resolver. Cancelar não deixa efeito e a pergunta volta na próxima
+// tentativa. Fora da janela, sem protocolo anterior ou com qualquer falha → 'form' (nunca
+// trava o atendente: na dúvida, o fluxo padrão de sempre).
+async function resolveContinuity(api, apiBase, atend) {
+  const skip = { outcome: 'form', pending: null };
+  let sug = null;
+  try {
+    const contactId = await contactIdOf(atend);
+    if (contactId == null) return skip;
+    const r = await api.http.get(
+      `${apiBase}/contacts/${contactId}/relink-suggestion?conversation_id=${atend.id}`);
+    sug = (r && r.ok && r.data) || null;
+  } catch (_) { return skip; }
+  if (!sug) return skip;
+
+  // A decisão vem do atributo personalizado (não pergunta) ou do clique do atendente.
+  let kind = null;
+  let source = 'user';
+  if (sug.attr_decision) { kind = sug.attr_decision; source = 'attr'; }
+  else if (sug.suggest && sug.previous) {
+    const picked = await api.ui.openModal((close) => html`
+      <${RelinkModal} previous=${sug.previous} secondsSinceClose=${sug.seconds_since_close}
+        onPick=${(v) => close(v)} />`);
+    if (picked !== 'previous' && picked !== 'new') return { outcome: 'abort', pending: null };
+    kind = picked;
+  }
+  if (kind !== 'previous' && kind !== 'new') return skip;
+
+  const pending = { kind, previous_id: (sug.previous && sug.previous.id) || null, source };
+
+  // "É um novo protocolo": abre de fato o protocolo novo + o atendimento (ciclo) dele e
+  // ABORTA o resolver — o caso é novo, então a conversa continua ABERTA para ser tocada.
+  // Sem formulário e sem fechar nada. Falha → cai no fluxo padrão de resolver.
+  if (kind === 'new') {
+    const opened = await applyContinuity(api, apiBase, atend.id, pending);
+    // Falhou → fluxo padrão de resolver, SEM reaplicar depois: abrir o ciclo já com o
+    // atendimento resolvido deixaria um atendimento aberto fantasma.
+    if (opened && opened.ok === false) return { outcome: 'form', pending: null };
+    notify('Novo protocolo aberto — o atendimento segue em aberto.', { kind: 'success' });
+    return { outcome: 'abort', pending: null };
+  }
+
+  // "Faz parte do anterior": nada de novo aconteceu. NENHUM pop-up adicional e NENHUM
+  // /resolve — o backend funde este re-engajamento no protocolo anterior (descarta o
+  // protocolo transitório + seus ciclos, estende a data final do último atendimento já
+  // existente e mantém o protocolo finalizado, com os rótulos como estavam). Ao core resta
+  // só fechar a conversa. Falha → cai no formulário padrão (nunca trava o atendente).
+  const done = await applyContinuity(api, apiBase, atend.id, pending);
+  if (done && done.ok === false) return { outcome: 'form', pending };
+  return { outcome: 'resolved', pending: null };
+}
+
+// Aplica a decisão de continuidade: kind='previous' funde este re-engajamento no protocolo
+// anterior (sem atendimento novo, protocolo segue finalizado); kind='new' abre o protocolo
+// novo + o atendimento dele. Nos dois casos também grava/consome o atributo personalizado.
+// Devolve a resposta HTTP (ou `{ok:false}` quando a chamada falhou) — quem chama usa isso
+// para cair no formulário padrão de resolver.
+async function applyContinuity(api, apiBase, conversationId, pending) {
+  if (!pending) return null;
+  try {
+    return await api.http.post(`${apiBase}/conversas/${conversationId}/relink-decision`, pending);
+  } catch (_) { return { ok: false }; }
+}
+
 export default function register(api) {
   const apiBase = api.apiBase;                 // /api/plugins/protocolos
   // Permissão do plugin (default-allow p/ legado/sem RBAC). `edit` gate o popup de
@@ -82,6 +171,17 @@ export default function register(api) {
     // Sem permissão de EDITAR protocolos → não injeta o popup nem chama /resolve
     // (que 403aria). O core segue e resolve a conversa normalmente.
     if (!can('edit')) return atend;
+
+    // 0) CONTINUIDADE (antes de tudo): o contato fechou um protocolo há pouco? A decisão
+    //    "faz parte do anterior × é um novo protocolo" acontece AQUI, ao resolver — não
+    //    mais ao abrir a conversa. "Faz parte do anterior" funde tudo no protocolo anterior
+    //    e fecha; "É um novo protocolo" abre o protocolo/atendimento novo e deixa a conversa
+    //    aberta. Nenhuma das duas passa pelo formulário (nem com rótulos obrigatórios), e
+    //    cancelar não deixa efeito — a pergunta volta. Fora da janela nada disso aparece.
+    const cont = await resolveContinuity(api, apiBase, atend);
+    if (cont.outcome === 'abort') return null;      // cancelou → não resolve nada
+    if (cont.outcome === 'resolved') return atend;  // vinculado ao anterior → core fecha
+
     // Rótulos editáveis do protocolo: OBS (fixo editável) + extras. Os fixos de
     // sistema (Início/Fim/Atendente/ID) são preenchidos pelo fluxo, não digitados.
     let defs = [];
@@ -123,10 +223,22 @@ export default function register(api) {
     //    required. LÊ a resposta p/ capturar o protocolo_id (liga atendimento→protocolo;
     //    vem de get_latest_cycle/_atendimento_dict, que inclui a coluna protocolo_id).
     let protocoloId = null;
+    let resolveOk = false;
     try {
       const j = await api.http.post(`/atendimentos/${atend.id}/resolve`, { fields: result.fields || {} });
+      resolveOk = !!(j && j.ok);
       if (j && j.ok && j.data && j.data.protocolo_id != null) protocoloId = j.data.protocolo_id;
     } catch (_) { /* ignore — o before_status do backend é a rede de segurança */ }
+
+    // 1b) Só AGORA a decisão de continuidade tem efeito (vínculo ao anterior + gravação do
+    //     atributo): o atendimento foi de fato resolvido. Cancelar o formulário acima já
+    //     abortou tudo, e a pergunta volta na próxima tentativa.
+    if (resolveOk && cont.pending) {
+      await applyContinuity(api, apiBase, atend.id, cont.pending);
+      if (cont.pending.kind === 'previous' && cont.pending.previous_id != null) {
+        protocoloId = cont.pending.previous_id;    // "ir ao protocolo" = o anterior
+      }
+    }
 
     // 2) "Resolver e ir ao protocolo" (result.goTo): navega à aba Protocolos abrindo
     //    o detalhe daquele protocolo. Contido no plugin — o core resolve a aba pelo
@@ -154,16 +266,7 @@ export default function register(api) {
       Protocolos
     </a>` : null));
 
-  // 4) Continuidade de protocolo (bloqueante, dentro do chat): quando o contato fechou um
-  //    protocolo há pouco (janela configurável), o auto_link ADIA a abertura de um novo
-  //    protocolo no backend e este overlay OBRIGA o atendente a decidir antes de usar o
-  //    chat — faz parte do anterior / é um novo protocolo / fechar tudo. Renderizado no slot
-  //    `chat.header.banner` (dentro do painel `relative` do chat) com `absolute inset-0`:
-  //    cobre só o chat desta conversa, então a lista continua clicável (dá pra trocar de
-  //    conversa; a decisão fica pendente e reaparece ao voltar). O componente é remontado a
-  //    cada conversa, então cada uma resolve a própria sugestão.
-  api.addSlot('chat.header.banner', (ctx) => (
-    (can('edit') && ctx && ctx.conversationId)
-      ? html`<${RelinkGate} conversationId=${ctx.conversationId} api=${api} />`
-      : null));
+  // (A continuidade de protocolo NÃO tem mais overlay no chat: abrir uma conversa fechada
+  //  não pergunta nem reabre nada. A pergunta acontece ao RESOLVER o atendimento — ver
+  //  `resolveContinuity` no filtro beforeResolve acima.)
 }

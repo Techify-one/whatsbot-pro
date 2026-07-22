@@ -22,7 +22,7 @@ export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
 // Cache module-level dos atendentes atribuíveis (lista pequena, reusada em vários campos).
 let _assignableUsers = null;
 
-// Seletor de ATENDENTE nativo: os mesmos usuários de "Atribuir atendente" + "Não atribuído".
+// Seletor de ATENDENTE com busca: os mesmos usuários de "Atribuir atendente" + "Não atribuído".
 // value = uid (número) ou vazio quando não atribuído; onChange devolve number|null.
 export function AttendantSelect({ value, onChange, fallbackUser = null }) {
   const [users, setUsers] = useState(_assignableUsers || []);

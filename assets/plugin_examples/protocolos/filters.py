@@ -9,6 +9,8 @@ Desligável via setting ``enforce_backend``. Reabrir nunca é bloqueado.
 ``filter.conversation.before_reopen``: impede a REABERTURA automática de uma conversa
 fechada quando uma mensagem ENVIADA (operador) casa a regra "ignorar abertura" (direção
 sent/both). O core aplica no envio do operador com ``value=True``; ``False`` mantém fechada.
+Também mantém fechada quando o atributo personalizado de continuidade está no valor de
+BLOQUEIO (mesma semântica do botão "Fechar conversa e protocolo juntos" do popup).
 
 ``filter.llm.messages``: quando a última mensagem RECEBIDA do contato casa a regra
 "ignorar abertura" (direção received/both), aborta a resposta da IA (retorna None). A
