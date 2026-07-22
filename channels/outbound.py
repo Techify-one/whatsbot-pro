@@ -151,6 +151,28 @@ class OutboundRouter:
             logger.warning("create_template failed on %s: %s", channel_id, e)
             return {"ok": False, "error": str(e)}
 
+    def upload_template_example(self, channel_id: str, file_bytes: bytes,
+                                mime: str, filename: str) -> dict:
+        """Upload a media sample and return its provider handle (plano 73).
+
+        Capability-gated exactly like ``create_template``: the returned handle is
+        what ``create_template(header_handle=...)`` expects. Returns
+        ``{ok, handle?, error?}`` — never raises, so the route maps a failure to a
+        clean API error instead of a 500.
+        """
+        if not self.supports(channel_id, "templates"):
+            return {"ok": False, "error": "templates_not_supported"}
+        inst = self.get(channel_id)
+        if inst is None:
+            return {"ok": False, "error": "channel_not_registered"}
+        try:
+            return inst.upload_example(file_bytes, mime, filename)
+        except NotImplementedError:
+            return {"ok": False, "error": "templates_not_supported"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("upload_template_example failed on %s: %s", channel_id, e)
+            return {"ok": False, "error": str(e)}
+
     def delete_template(self, channel_id: str, name: str) -> dict:
         """Delete a template (all languages) on a channel (capability-gated)."""
         if not self.supports(channel_id, "templates"):

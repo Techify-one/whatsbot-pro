@@ -18,7 +18,7 @@ body validation + 404, then delegate the WRITE + side effects to
 import asyncio
 import uuid
 
-from fastapi import Request
+from fastapi import File, Request, UploadFile
 from fastapi.responses import Response
 
 from app.services import channel_service as svc
@@ -94,7 +94,8 @@ def register_routes(app, deps):
         """Templates for a channel, used by the picker when starting a BRAND-NEW
         conversation (no conversation row yet, plano 21). Channel-scoped twin of
         ``GET /api/conversations/{id}/templates`` — same ``{supported, templates,
-        can_create, can_delete}`` shape."""
+        can_create, can_delete, channel}`` shape (``channel`` = ``{id, name,
+        phone}``, o remetente que o modal exibe no cabeçalho)."""
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
@@ -103,12 +104,15 @@ def register_routes(app, deps):
             return _err("Canal não encontrado.", 404)
         can_create = has_permission(request, "template.create")
         can_delete = has_permission(request, "template.delete")
+        channel = await tpl_svc.channel_badge(deps, channel_id)
         if not tpl_svc.supports_templates(deps, channel_id):
             return _ok({"supported": False, "templates": [],
-                        "can_create": can_create, "can_delete": can_delete})
+                        "can_create": can_create, "can_delete": can_delete,
+                        "channel": channel})
         templates = await tpl_svc.list_templates(deps, channel_id)
         return _ok({"supported": True, "templates": templates,
-                    "can_create": can_create, "can_delete": can_delete})
+                    "can_create": can_create, "can_delete": can_delete,
+                    "channel": channel})
 
     @app.post("/api/channels/{channel_id}/send-template")
     async def channel_send_template(channel_id: str, body: dict, request: Request):
@@ -174,6 +178,13 @@ def register_routes(app, deps):
             return _err("body_examples deve ser uma lista.", status=400)
         if header_examples is not None and not isinstance(header_examples, list):
             return _err("header_examples deve ser uma lista.", status=400)
+        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
+            body.get("header_format"), body.get("header_handle"))
+        if media_err:
+            return _err(media_err, status=400)
+        buttons, btn_err = tpl_svc.normalize_buttons(body.get("buttons"))
+        if btn_err:
+            return _err(btn_err, status=400)
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
@@ -184,9 +195,41 @@ def register_routes(app, deps):
             body_text=body_text,
             header_text=(body.get("header_text") or "").strip() or None,
             footer_text=(body.get("footer_text") or "").strip() or None,
-            body_examples=body_examples, header_examples=header_examples)
+            body_examples=body_examples, header_examples=header_examples,
+            header_format=header_format, header_handle=header_handle,
+            buttons=buttons)
         if kind == "failed":
             return _err(f"Falha ao criar template: {data}", status=502)
+        return _ok(data)
+
+    @app.post("/api/channels/{channel_id}/templates/upload-example")
+    async def channel_upload_template_example(
+            channel_id: str, request: Request, file: UploadFile = File(...)):
+        """Upload a media sample and return its Meta handle (plano 73).
+
+        The handle goes back as ``header_handle`` in the create-template body — it
+        is how Meta wants the example of an IMAGE/VIDEO/DOCUMENT header. MIME and
+        size are validated BEFORE the provider call so a bad file never leaves the
+        server."""
+        denied = permission_denied(request, "template.create")
+        if denied:
+            return denied
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            return _err("Canal não encontrado.", 404)
+        if not tpl_svc.supports_templates(deps, channel_id):
+            return _err("Este canal não suporta templates.", status=400)
+        data_bytes = await file.read()
+        err = tpl_svc.validate_example_upload(file.content_type or "",
+                                              len(data_bytes or b""))
+        if err:
+            return _err(err, status=400)
+        kind, data = await tpl_svc.upload_template_example(
+            deps, channel_id, file_bytes=data_bytes,
+            mime=(file.content_type or "").split(";")[0].strip().lower(),
+            filename=file.filename or "example")
+        if kind == "failed":
+            return _err(f"Falha ao enviar o arquivo: {data}", status=502)
         return _ok(data)
 
     @app.delete("/api/channels/{channel_id}/templates/{name}")

@@ -6047,6 +6047,7 @@ class _FakeTplChannel(_Ch):
         self.sent = []
         self.created = None
         self.deleted = None
+        self.uploaded = None
         self._tpls = [{
             "name": "boas_vindas", "language": "pt_BR", "category": "MARKETING",
             "status": "APPROVED", "components": [
@@ -6076,11 +6077,18 @@ class _FakeTplChannel(_Ch):
 
     def create_template(self, name, *, category, language, body_text,
                         header_text=None, footer_text=None,
-                        body_examples=None, header_examples=None):
+                        body_examples=None, header_examples=None,
+                        header_format=None, header_handle=None, buttons=None):
         self.created = {"name": name, "category": category, "language": language,
                         "body_text": body_text, "header_text": header_text,
-                        "footer_text": footer_text, "body_examples": body_examples}
+                        "footer_text": footer_text, "body_examples": body_examples,
+                        "header_format": header_format,
+                        "header_handle": header_handle, "buttons": buttons}
         return {"ok": True, "id": "TPLNEW", "status": "PENDING", "category": category}
+
+    def upload_example(self, file_bytes, mime, filename):
+        self.uploaded = {"size": len(file_bytes), "mime": mime, "filename": filename}
+        return {"ok": True, "handle": "4:fakehandle=="}
 
     def delete_template(self, name):
         self.deleted = name
@@ -6162,6 +6170,83 @@ check("create template canal sem suporte -> 400",
       client.post(f"/api/conversations/{_conv2['id']}/templates",
                   json={"name": "ok", "body_text": "x"}).status_code == 400)
 
+check("create template só-texto -> não manda mídia/botões (regressão)",
+      _fake_ch.created.get("header_format") is None
+      and _fake_ch.created.get("header_handle") is None
+      and _fake_ch.created.get("buttons") is None)
+
+# ── Cabeçalho de mídia + botões (plano 73) ──────────────────────────────
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/templates", json={
+    "name": "promo_midia", "category": "UTILITY", "body_text": "Olá!",
+    "header_format": "IMAGE", "header_handle": "4:abc==",
+    "buttons": [
+        {"type": "QUICK_REPLY", "text": "Falar com atendente"},
+        {"type": "URL", "text": "Rastrear", "url": "https://x/{{1}}", "example": "https://x/12"},
+        {"type": "PHONE_NUMBER", "text": "Ligar", "phone_number": "+5511999999999"},
+        {"type": "COPY_CODE", "example": "PROMO2026"},
+    ]})
+check("POST create template com mídia+botões -> 200", r.status_code == 200)
+check("create template -> canal recebeu header de mídia",
+      _fake_ch.created["header_format"] == "IMAGE"
+      and _fake_ch.created["header_handle"] == "4:abc==")
+check("create template -> botões normalizados (4 tipos, chaves por tipo)",
+      [b["type"] for b in _fake_ch.created["buttons"]]
+      == ["QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"]
+      and _fake_ch.created["buttons"][1]["example"] == ["https://x/12"]
+      and "text" not in _fake_ch.created["buttons"][3])
+check("create template header_format sem handle -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y",
+                        "header_format": "IMAGE"}).status_code == 400)
+check("create template header_format inválido -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "header_format": "AUDIO",
+                        "header_handle": "4:z"}).status_code == 400)
+check("create template botão de tipo desconhecido -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y",
+                        "buttons": [{"type": "FLOW", "text": "a"}]}).status_code == 400)
+check("create template 3 botões URL -> 400 (limite de mistura)",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "URL", "text": "a", "url": "https://a"},
+                      {"type": "URL", "text": "b", "url": "https://b"},
+                      {"type": "URL", "text": "c", "url": "https://c"}]}).status_code == 400)
+check("create template botão URL com {{1}} sem exemplo -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "URL", "text": "a", "url": "https://a/{{1}}"}]}).status_code == 400)
+check("create template texto de botão > 25 chars -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "QUICK_REPLY", "text": "x" * 26}]}).status_code == 400)
+check("create template buttons não-lista -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": "nope"}).status_code == 400)
+
+# Upload do exemplo de mídia (handle da Meta)
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                files={"file": ("foto.png", b"\x89PNG fake bytes", "image/png")})
+check("POST upload-example (conv) -> 200 + handle", r.status_code == 200
+      and r.json()["data"]["handle"] == "4:fakehandle==")
+check("upload-example -> canal recebeu bytes/mime",
+      _fake_ch.uploaded and _fake_ch.uploaded["mime"] == "image/png"
+      and _fake_ch.uploaded["size"] > 0)
+check("upload-example MIME fora da whitelist -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                  files={"file": ("a.exe", b"MZ", "application/x-msdownload")}
+                  ).status_code == 400)
+check("upload-example arquivo > 16 MiB -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                  files={"file": ("big.png", b"x" * (16 * 1024 * 1024 + 1), "image/png")}
+                  ).status_code == 400)
+check("upload-example canal sem templates -> 400",
+      client.post(f"/api/conversations/{_conv2['id']}/templates/upload-example",
+                  files={"file": ("foto.png", b"abc", "image/png")}).status_code == 400)
+check("upload-example conversa inexistente -> 404",
+      client.post("/api/conversations/999999/templates/upload-example",
+                  files={"file": ("foto.png", b"abc", "image/png")}).status_code == 404)
+
 r = client.delete(f"/api/conversations/{_tpl_conv['id']}/templates/pedido_ok")
 check("DELETE template -> 200", r.status_code == 200)
 check("delete template -> canal recebeu name", _fake_ch.deleted == "pedido_ok")
@@ -6227,6 +6312,33 @@ check("channel send-template sem template_name -> 400",
 check("channel send-template canal sem suporte (gowa) -> 400",
       client.post("/api/channels/default/send-template",
                   json={"phone": "5511", "template_name": "x"}).status_code == 400)
+
+# Criação estendida + upload de exemplo pelo canal (plano 73).
+r = client.post("/api/channels/cloud_test/templates", json={
+    "name": "canal_midia", "category": "UTILITY", "body_text": "Oi",
+    "header_format": "DOCUMENT", "header_handle": "4:doc==",
+    "buttons": [{"type": "QUICK_REPLY", "text": "Ok"}]})
+check("channel create template com mídia+botões -> 200", r.status_code == 200)
+check("channel create template -> canal recebeu mídia/botões",
+      _fake_ch.created["header_format"] == "DOCUMENT"
+      and _fake_ch.created["buttons"] == [{"type": "QUICK_REPLY", "text": "Ok"}])
+check("channel create template header_format inválido -> 400",
+      client.post("/api/channels/cloud_test/templates",
+                  json={"name": "x", "body_text": "y", "header_format": "AUDIO",
+                        "header_handle": "4:z"}).status_code == 400)
+r = client.post("/api/channels/cloud_test/templates/upload-example",
+                files={"file": ("foto.jpg", b"\xff\xd8 fake", "image/jpeg")})
+check("channel upload-example -> 200 + handle", r.status_code == 200
+      and r.json()["data"]["handle"] == "4:fakehandle==")
+check("channel upload-example MIME inválido -> 400",
+      client.post("/api/channels/cloud_test/templates/upload-example",
+                  files={"file": ("a.txt", b"x", "text/plain")}).status_code == 400)
+check("channel upload-example canal sem templates -> 400",
+      client.post("/api/channels/default/templates/upload-example",
+                  files={"file": ("foto.png", b"x", "image/png")}).status_code == 400)
+check("channel upload-example canal inexistente -> 404",
+      client.post("/api/channels/nao_existe/templates/upload-example",
+                  files={"file": ("foto.png", b"x", "image/png")}).status_code == 404)
 
 # ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
 section("WhatsApp Cloud — list_templates parsing (Frente C)")

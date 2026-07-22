@@ -206,6 +206,7 @@ async def info():
                 "waba_id",
                 "access_token",
                 "verify_token",
+                "app_id",
                 "app_secret",
             ],
             "webhook_path_template": "/api/webhook/whatsapp_cloud/{channel_id}",
