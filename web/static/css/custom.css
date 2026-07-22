@@ -12,12 +12,14 @@
   --wa-bg: 255 255 255;
   --wa-panel: 240 242 245;
   --wa-chatBg: 239 234 226;
-  --wa-chatOverlay: 209 215 219;
   --wa-outgoing: 217 253 211;
   --wa-incoming: 255 255 255;
   --wa-text: 17 27 33;
-  --wa-secondary: 102 119 129;
-  --wa-border: 233 237 239;
+  /* Um passo mais escuro que o cinza original (102 119 129): aquele media 4,13:1
+     sobre --wa-panel, abaixo do mínimo AA de 4,5 para texto pequeno. */
+  --wa-secondary: 95 111 121;
+  /* Idem: 233 237 239 dava 1,05:1 contra o painel — separador invisível na prática. */
+  --wa-border: 223 228 232;
   --wa-inputBg: 255 255 255;
   --wa-replyPreviewBg: 255 255 255;
   --wa-hover: 245 246 246;
@@ -30,29 +32,43 @@
   --wa-ai-label: 4 120 87;
 }
 
+/* Tema escuro de ALTO CONTRASTE. Decisão explícita do usuário: destacar os
+   elementos importa mais que reproduzir o tom do WhatsApp. Duas alavancas:
+   (1) os extremos foram afastados — o fundo desceu para quase preto enquanto os
+   painéis subiram, então "estar elevado" virou um sinal visível (fundo↔painel
+   passou de 1,4:1 para 1,9:1); (2) cada degrau de superfície é distinto de
+   verdade — border/hover/selected já foram TRÊS VALORES IGUAIS, o que apagava os
+   separadores e tornava a conversa aberta indistinguível da conversa sob o
+   cursor. Os pisos que impedem isso de regredir vivem em services/themeContrast.js. */
 html.dark {
   color-scheme: dark;
-  --wa-teal: 0 168 132;
-  --wa-tealDark: 0 168 132;
-  --wa-bg: 17 27 33;
-  --wa-panel: 32 44 51;
-  --wa-chatBg: 11 20 26;
-  --wa-chatOverlay: 32 44 51;
-  --wa-outgoing: 0 92 75;
-  --wa-incoming: 32 44 51;
-  --wa-text: 233 237 239;
-  --wa-secondary: 142 158 168;
-  --wa-border: 42 57 66;
-  --wa-inputBg: 42 57 66;
-  --wa-replyPreviewBg: 31 44 51;
-  --wa-hover: 42 57 66;
-  --wa-selected: 42 57 66;
+  /* Verde mais vivo que o #00A884 do WhatsApp: com o fundo mais escuro ele podia
+     ficar apagado, e o acento é o que guia o olho (abas, ícones ativos, botões). */
+  --wa-teal: 0 217 165;
+  --wa-tealDark: 45 235 186;   /* hover CLAREIA no escuro (no tema claro, escurece) */
+  --wa-bg: 10 16 20;
+  --wa-panel: 22 35 43;
+  --wa-chatBg: 6 11 14;
+  --wa-outgoing: 1 107 86;
+  /* Deixou de ser igual ao painel: um pouco mais claro, para o bubble recebido
+     descolar do fundo do chat (1,27:1 → 1,33:1). */
+  --wa-incoming: 27 41 50;
+  --wa-text: 242 246 248;
+  /* Timestamps, prévias e ícones secundários — ~9,9:1 sobre o fundo (AAA), sem
+     virar texto primário. */
+  --wa-secondary: 173 189 199;
+  /* ── Degraus de superfície: border < hover < selected ────────────── */
+  --wa-border: 61 84 96;       /* 2,0:1 contra o painel — separador realmente visível */
+  --wa-inputBg: 30 45 55;      /* distinto do painel: o campo tem corpo próprio */
+  --wa-replyPreviewBg: 26 40 49;
+  --wa-hover: 36 53 63;
+  --wa-selected: 47 80 96;     /* 1,47:1 contra o hover — conversa aberta inconfundível */
   --wa-badge: 37 211 102;
-  --wa-icon: 142 158 168;
-  --wa-iconActive: 0 168 132;
-  /* Rótulo da IA mais CLARO no modo escuro (emerald-400) — o verde escuro do tema
+  --wa-icon: 173 189 199;
+  --wa-iconActive: 0 217 165;
+  /* Rótulo da IA mais CLARO no modo escuro (emerald-300) — o verde escuro do tema
      claro somia no bubble escuro. Legível sobre bg-wa-outgoing/incoming escuros. */
-  --wa-ai-label: 52 211 153;
+  --wa-ai-label: 110 231 183;
 }
 
 /* Smooth transitions for status indicators */
@@ -197,6 +213,8 @@ html.dark .text-gray-300,
 html.dark .text-gray-400,
 html.dark .text-gray-500,
 html.dark .text-gray-600 { color: rgb(var(--wa-secondary)); }
+html.dark .text-gray-100,
+html.dark .text-gray-200,
 html.dark .text-gray-700,
 html.dark .text-gray-800,
 html.dark .text-gray-900,
@@ -206,50 +224,163 @@ html.dark .border-gray-100,
 html.dark .border-gray-200,
 html.dark .border-gray-300 { border-color: rgb(var(--wa-border)); }
 
+html.dark .placeholder-gray-300::placeholder,
 html.dark .placeholder-gray-400::placeholder,
-html.dark .placeholder-gray-500::placeholder { color: rgb(var(--wa-secondary)); }
+html.dark .placeholder-gray-500::placeholder,
+html.dark .placeholder-gray-600::placeholder { color: rgb(var(--wa-secondary)); }
 
 /* Soft accent tints (bg-green-50, border-red-200, text-amber-700, …) used for
    selected / success / warning / error states stay LIGHT by default, so in dark
    mode they'd show themed light text over a near-white pill = unreadable. Re-tint
    them to a dark, translucent version of the same hue (so the card reads as a
-   subtle colored-dark surface) and lift the paired accent text to a light shade. */
+   subtle colored-dark surface) and lift the paired accent text to a light shade.
+
+   Per hue, three rules with the same shape:
+     bg-<h>-50/100/200     → translucent dark tint of the hue
+     border-<h>-100…500    → the hue at 40% (visible seam on a dark surface)
+     text-<h>-500…900      → the hue's 300 shade (light enough to read on dark)
+   The `500` text shade matters: it is the most used accent in the codebase
+   (text-red-500 alone appears 74×) and measures only 3,88:1 on bg-wa-panel —
+   below the 4,5:1 AA floor. Shade `400` is deliberately NOT overridden: it is
+   already light enough on a dark surface. */
 html.dark .bg-green-50, html.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.14); }
-html.dark .border-green-100, html.dark .border-green-200 { border-color: rgba(34, 197, 94, 0.40); }
-html.dark .text-green-600, html.dark .text-green-700, html.dark .text-green-800 { color: #86efac; }
+html.dark .bg-green-200 { background-color: rgba(34, 197, 94, 0.20); }
+html.dark .border-green-100, html.dark .border-green-200, html.dark .border-green-300,
+html.dark .border-green-400, html.dark .border-green-500 { border-color: rgba(34, 197, 94, 0.40); }
+html.dark .text-green-500, html.dark .text-green-600, html.dark .text-green-700,
+html.dark .text-green-800, html.dark .text-green-900 { color: #86efac; }
 
 html.dark .bg-red-50, html.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.14); }
-html.dark .border-red-100, html.dark .border-red-200 { border-color: rgba(239, 68, 68, 0.40); }
-html.dark .text-red-600, html.dark .text-red-700, html.dark .text-red-800 { color: #fca5a5; }
+html.dark .bg-red-200 { background-color: rgba(239, 68, 68, 0.20); }
+html.dark .border-red-100, html.dark .border-red-200, html.dark .border-red-300,
+html.dark .border-red-400, html.dark .border-red-500 { border-color: rgba(239, 68, 68, 0.40); }
+html.dark .text-red-500, html.dark .text-red-600, html.dark .text-red-700,
+html.dark .text-red-800, html.dark .text-red-900 { color: #fca5a5; }
 
 html.dark .bg-amber-50, html.dark .bg-amber-100 { background-color: rgba(245, 158, 11, 0.14); }
-html.dark .border-amber-100, html.dark .border-amber-200 { border-color: rgba(245, 158, 11, 0.40); }
-html.dark .text-amber-600, html.dark .text-amber-700, html.dark .text-amber-800 { color: #fcd34d; }
+html.dark .bg-amber-200 { background-color: rgba(245, 158, 11, 0.20); }
+html.dark .border-amber-100, html.dark .border-amber-200, html.dark .border-amber-300,
+html.dark .border-amber-400, html.dark .border-amber-500 { border-color: rgba(245, 158, 11, 0.40); }
+html.dark .text-amber-500, html.dark .text-amber-600, html.dark .text-amber-700,
+html.dark .text-amber-800, html.dark .text-amber-900 { color: #fcd34d; }
 
 html.dark .bg-yellow-50, html.dark .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.14); }
-html.dark .border-yellow-100, html.dark .border-yellow-200 { border-color: rgba(234, 179, 8, 0.40); }
-html.dark .text-yellow-600, html.dark .text-yellow-700, html.dark .text-yellow-800 { color: #fde047; }
+html.dark .bg-yellow-200 { background-color: rgba(234, 179, 8, 0.20); }
+html.dark .border-yellow-100, html.dark .border-yellow-200, html.dark .border-yellow-300,
+html.dark .border-yellow-400, html.dark .border-yellow-500 { border-color: rgba(234, 179, 8, 0.40); }
+html.dark .text-yellow-500, html.dark .text-yellow-600, html.dark .text-yellow-700,
+html.dark .text-yellow-800, html.dark .text-yellow-900 { color: #fde047; }
 
 html.dark .bg-blue-50, html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.14); }
-html.dark .border-blue-100, html.dark .border-blue-200 { border-color: rgba(59, 130, 246, 0.40); }
-html.dark .text-blue-600, html.dark .text-blue-700, html.dark .text-blue-800 { color: #93c5fd; }
+html.dark .bg-blue-200 { background-color: rgba(59, 130, 246, 0.20); }
+html.dark .border-blue-100, html.dark .border-blue-200, html.dark .border-blue-300,
+html.dark .border-blue-400, html.dark .border-blue-500 { border-color: rgba(59, 130, 246, 0.40); }
+html.dark .text-blue-500, html.dark .text-blue-600, html.dark .text-blue-700,
+html.dark .text-blue-800, html.dark .text-blue-900 { color: #93c5fd; }
 
 html.dark .bg-orange-50, html.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.14); }
-html.dark .border-orange-100, html.dark .border-orange-200 { border-color: rgba(249, 115, 22, 0.40); }
-html.dark .text-orange-600, html.dark .text-orange-700, html.dark .text-orange-800 { color: #fdba74; }
+html.dark .bg-orange-200 { background-color: rgba(249, 115, 22, 0.20); }
+html.dark .border-orange-100, html.dark .border-orange-200, html.dark .border-orange-300,
+html.dark .border-orange-400, html.dark .border-orange-500 { border-color: rgba(249, 115, 22, 0.40); }
+html.dark .text-orange-500, html.dark .text-orange-600, html.dark .text-orange-700,
+html.dark .text-orange-800, html.dark .text-orange-900 { color: #fdba74; }
 
 html.dark .bg-purple-50, html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.14); }
-html.dark .border-purple-100, html.dark .border-purple-200 { border-color: rgba(168, 85, 247, 0.40); }
-html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800 { color: #d8b4fe; }
+html.dark .bg-purple-200 { background-color: rgba(168, 85, 247, 0.20); }
+html.dark .border-purple-100, html.dark .border-purple-200, html.dark .border-purple-300,
+html.dark .border-purple-400, html.dark .border-purple-500 { border-color: rgba(168, 85, 247, 0.40); }
+html.dark .text-purple-500, html.dark .text-purple-600, html.dark .text-purple-700,
+html.dark .text-purple-800, html.dark .text-purple-900 { color: #d8b4fe; }
 
 html.dark .bg-pink-50, html.dark .bg-pink-100 { background-color: rgba(236, 72, 153, 0.14); }
-html.dark .border-pink-100, html.dark .border-pink-200 { border-color: rgba(236, 72, 153, 0.40); }
-html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { color: #f9a8d4; }
+html.dark .bg-pink-200 { background-color: rgba(236, 72, 153, 0.20); }
+html.dark .border-pink-100, html.dark .border-pink-200, html.dark .border-pink-300,
+html.dark .border-pink-400, html.dark .border-pink-500 { border-color: rgba(236, 72, 153, 0.40); }
+html.dark .text-pink-500, html.dark .text-pink-600, html.dark .text-pink-700,
+html.dark .text-pink-800, html.dark .text-pink-900 { color: #f9a8d4; }
 
-/* Form fields: fixed gray surface + black text, readable in both themes.
-   A dedicated class so the dark utility overrides above never touch it. */
+/* Hues below were missing entirely — a bg-teal-100 pill or a text-indigo-800
+   label (both present in the codebase) rendered as dark-on-near-white in dark
+   mode. Added with the same shape so any screen, including future plugins, is
+   covered whichever hue it reaches for. */
+html.dark .bg-teal-50, html.dark .bg-teal-100 { background-color: rgba(20, 184, 166, 0.14); }
+html.dark .bg-teal-200 { background-color: rgba(20, 184, 166, 0.20); }
+html.dark .border-teal-100, html.dark .border-teal-200, html.dark .border-teal-300,
+html.dark .border-teal-400, html.dark .border-teal-500 { border-color: rgba(20, 184, 166, 0.40); }
+html.dark .text-teal-500, html.dark .text-teal-600, html.dark .text-teal-700,
+html.dark .text-teal-800, html.dark .text-teal-900 { color: #5eead4; }
+
+html.dark .bg-indigo-50, html.dark .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.14); }
+html.dark .bg-indigo-200 { background-color: rgba(99, 102, 241, 0.20); }
+html.dark .border-indigo-100, html.dark .border-indigo-200, html.dark .border-indigo-300,
+html.dark .border-indigo-400, html.dark .border-indigo-500 { border-color: rgba(99, 102, 241, 0.40); }
+html.dark .text-indigo-500, html.dark .text-indigo-600, html.dark .text-indigo-700,
+html.dark .text-indigo-800, html.dark .text-indigo-900 { color: #a5b4fc; }
+
+html.dark .bg-emerald-50, html.dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.14); }
+html.dark .bg-emerald-200 { background-color: rgba(16, 185, 129, 0.20); }
+html.dark .border-emerald-100, html.dark .border-emerald-200, html.dark .border-emerald-300,
+html.dark .border-emerald-400, html.dark .border-emerald-500 { border-color: rgba(16, 185, 129, 0.40); }
+html.dark .text-emerald-500, html.dark .text-emerald-600, html.dark .text-emerald-700,
+html.dark .text-emerald-800, html.dark .text-emerald-900 { color: #6ee7b7; }
+
+html.dark .bg-violet-50, html.dark .bg-violet-100 { background-color: rgba(139, 92, 246, 0.14); }
+html.dark .bg-violet-200 { background-color: rgba(139, 92, 246, 0.20); }
+html.dark .border-violet-100, html.dark .border-violet-200, html.dark .border-violet-300,
+html.dark .border-violet-400, html.dark .border-violet-500 { border-color: rgba(139, 92, 246, 0.40); }
+html.dark .text-violet-500, html.dark .text-violet-600, html.dark .text-violet-700,
+html.dark .text-violet-800, html.dark .text-violet-900 { color: #c4b5fd; }
+
+html.dark .bg-cyan-50, html.dark .bg-cyan-100 { background-color: rgba(6, 182, 212, 0.14); }
+html.dark .bg-cyan-200 { background-color: rgba(6, 182, 212, 0.20); }
+html.dark .border-cyan-100, html.dark .border-cyan-200, html.dark .border-cyan-300,
+html.dark .border-cyan-400, html.dark .border-cyan-500 { border-color: rgba(6, 182, 212, 0.40); }
+html.dark .text-cyan-500, html.dark .text-cyan-600, html.dark .text-cyan-700,
+html.dark .text-cyan-800, html.dark .text-cyan-900 { color: #67e8f9; }
+
+html.dark .bg-sky-50, html.dark .bg-sky-100 { background-color: rgba(14, 165, 233, 0.14); }
+html.dark .bg-sky-200 { background-color: rgba(14, 165, 233, 0.20); }
+html.dark .border-sky-100, html.dark .border-sky-200, html.dark .border-sky-300,
+html.dark .border-sky-400, html.dark .border-sky-500 { border-color: rgba(14, 165, 233, 0.40); }
+html.dark .text-sky-500, html.dark .text-sky-600, html.dark .text-sky-700,
+html.dark .text-sky-800, html.dark .text-sky-900 { color: #7dd3fc; }
+
+html.dark .bg-lime-50, html.dark .bg-lime-100 { background-color: rgba(132, 204, 22, 0.14); }
+html.dark .bg-lime-200 { background-color: rgba(132, 204, 22, 0.20); }
+html.dark .border-lime-100, html.dark .border-lime-200, html.dark .border-lime-300,
+html.dark .border-lime-400, html.dark .border-lime-500 { border-color: rgba(132, 204, 22, 0.40); }
+html.dark .text-lime-500, html.dark .text-lime-600, html.dark .text-lime-700,
+html.dark .text-lime-800, html.dark .text-lime-900 { color: #bef264; }
+
+html.dark .bg-rose-50, html.dark .bg-rose-100 { background-color: rgba(244, 63, 94, 0.14); }
+html.dark .bg-rose-200 { background-color: rgba(244, 63, 94, 0.20); }
+html.dark .border-rose-100, html.dark .border-rose-200, html.dark .border-rose-300,
+html.dark .border-rose-400, html.dark .border-rose-500 { border-color: rgba(244, 63, 94, 0.40); }
+html.dark .text-rose-500, html.dark .text-rose-600, html.dark .text-rose-700,
+html.dark .text-rose-800, html.dark .text-rose-900 { color: #fda4af; }
+
+/* Form fields. A dedicated class (never touched by the raw-utility overrides
+   above) so every input/select/textarea in the app — core AND plugin screens —
+   is themed from one place.
+   Light: fixed gray surface + black text.
+   Dark: follows the tokens. The inset ring is NOT decorative — most call sites
+   write just `wa-field w-full px-3 py-2 rounded-md`, with no border utility, and
+   a dark field with no outline would dissolve into the panel. box-shadow (not
+   border) keeps the box model identical and never fights `border-wa-border`
+   where a call site does set one. */
 .wa-field { background-color: #e5e7eb; color: #000; }
 .wa-field::placeholder { color: #6b7280; }
+
+html.dark .wa-field {
+  background-color: rgb(var(--wa-inputBg));
+  color: rgb(var(--wa-text));
+  box-shadow: inset 0 0 0 1px rgb(var(--wa-border));
+}
+html.dark .wa-field::placeholder { color: rgb(var(--wa-secondary)); }
+/* 21 call sites pair .wa-field with `focus:outline-none`, so without this the
+   focused field would be indistinguishable from the others in dark mode. Reuses
+   the same inset ring, just tinted with the accent. */
+html.dark .wa-field:focus { box-shadow: inset 0 0 0 1px rgb(var(--wa-teal)); }
 
 /* Toast UI WYSIWYG editor (MarkdownEditor.js): round the corners and use the
    app border color so it blends with the surrounding form. The base/dark themes

@@ -79,7 +79,7 @@ export function AudioPlayer({ src, isLocalBlob }) {
 
       <!-- Play/Pause -->
       <button type="button" onClick=${togglePlay}
-        class="w-[32px] h-[32px] flex items-center justify-center rounded-full shrink-0 text-wa-teal hover:text-[#06a884] transition-colors">
+        class="w-[32px] h-[32px] flex items-center justify-center rounded-full shrink-0 text-wa-teal hover:text-wa-tealDark transition-colors">
         ${playing ? html`
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <rect x="3" y="2" width="4" height="12" rx="1" />
@@ -94,7 +94,7 @@ export function AudioPlayer({ src, isLocalBlob }) {
 
       <!-- Progress bar -->
       <div class="flex-1 flex flex-col gap-[2px] min-w-0">
-        <div class="relative h-[4px] bg-[#d9d9d9] rounded-full cursor-pointer group" onClick=${seek}>
+        <div class="relative h-[4px] bg-wa-border rounded-full cursor-pointer group" onClick=${seek}>
           <div class="absolute left-0 top-0 h-full bg-wa-teal rounded-full transition-[width] duration-100"
             style="width: ${progress}%"></div>
           <div class="absolute top-1/2 -translate-y-1/2 w-[12px] h-[12px] bg-wa-teal rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
@@ -108,7 +108,7 @@ export function AudioPlayer({ src, isLocalBlob }) {
       <!-- Speed button -->
       <button type="button" onClick=${cycleSpeed}
         class="text-[11px] font-medium px-[6px] py-[2px] rounded-full shrink-0 transition-colors
-          ${speed === 1 ? 'text-wa-secondary bg-[#e9edef]' : 'text-white bg-wa-teal'}">
+          ${speed === 1 ? 'text-wa-secondary bg-wa-hover' : 'text-white bg-wa-teal'}">
         ${speed}x
       </button>
     </div>
