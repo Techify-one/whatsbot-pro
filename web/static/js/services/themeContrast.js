@@ -86,9 +86,13 @@ export function deltaLstar(a, b) {
 //
 // `min` é por tema porque os dois têm ambições diferentes: o tema CLARO mantém
 // separadores deliberadamente suaves (herança do visual WhatsApp) e endurecê-los
-// seria redesenhá-lo; o tema ESCURO foi refeito para alto contraste a pedido do
-// usuário, então os pisos dele são altos de propósito — são exatamente o que
-// impede alguém de achatar a paleta de volta sem perceber.
+// seria redesenhá-lo; o tema ESCURO foi refeito a pedido do usuário no molde do
+// VS Code Dark (acentos dessaturados, superfícies em cinza neutro com degraus
+// curtos), então os pisos de SUPERFÍCIE e de ACENTO caíram junto — eles agora
+// marcam o mínimo abaixo do qual os degraus deixariam de ser percebidos, não a
+// ambição de alto contraste de antes. Os pisos de TEXTO não mudaram: as letras ficaram intactas na suavização,
+// então continuam valendo AA/AAA e é isso que impede a "suavização" de virar
+// ilegibilidade na próxima rodada.
 export const CONTRAST_RULES = [
   // ── Legibilidade (razão WCAG) ──────────────────────────────────────
   // Texto primário sobre cada superfície onde ele de fato aparece.
@@ -100,21 +104,28 @@ export const CONTRAST_RULES = [
   // Texto secundário (horário, prévia da conversa, rótulos auxiliares).
   { fg: 'secondary', bg: 'bg', kind: 'texto', metric: 'contrast', min: { light: 4.5, dark: 7 } },
   { fg: 'secondary', bg: 'panel', kind: 'texto', metric: 'contrast', min: { light: 4.5, dark: 7 } },
-  // Acento: ícones ativos, links, botão primário.
-  { fg: 'teal', bg: 'bg', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 4.5 } },
-  { fg: 'teal', bg: 'panel', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 4.5 } },
+  // Acento: ícones ativos, links, botão primário. Piso 3:1 = componente
+  // não-textual (WCAG 1.4.11). O rótulo BRANCO do botão primário é o texto que
+  // corre sobre o acento e mede 5,0:1 sobre o verde escuro atual — quem escurecer
+  // mais o acento precisa reconferir aquele par à mão (não é token wa-*).
+  { fg: 'teal', bg: 'bg', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 3 } },
+  { fg: 'teal', bg: 'panel', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 3 } },
 
   // ── Separação de superfície (ΔL*) ──────────────────────────────────
   // Elevação: o painel tem que ler como "acima" do fundo — é o que faz a barra
   // lateral, os cards e os modais se destacarem em vez de derreterem na tela.
-  { fg: 'panel', bg: 'bg', kind: 'elevação', metric: 'lightness', min: { dark: 6 } },
+  // Pisos calibrados no limiar de percepção (ΔL* ≈ 2-3 em áreas grandes). O tema
+  // escuro encosta neles de propósito: no VS Code Dark, que é a referência, o
+  // editor (#1F1F1F) e o painel (#252526) diferem só ΔL* ≈ 2,4 — elevação no
+  // escuro é um sussurro, não um degrau.
+  { fg: 'panel', bg: 'bg', kind: 'elevação', metric: 'lightness', min: { dark: 3 } },
   // Separador visível sobre o painel.
-  { fg: 'border', bg: 'panel', kind: 'superfície', metric: 'lightness', min: { light: 3, dark: 10 } },
+  { fg: 'border', bg: 'panel', kind: 'superfície', metric: 'lightness', min: { light: 3, dark: 6 } },
   // Os dois estados de linha da sidebar não podem se confundir.
-  { fg: 'selected', bg: 'hover', kind: 'superfície', metric: 'lightness', min: { dark: 6 } },
-  { fg: 'hover', bg: 'bg', kind: 'superfície', metric: 'lightness', min: { dark: 8 } },
+  { fg: 'selected', bg: 'hover', kind: 'superfície', metric: 'lightness', min: { dark: 3 } },
+  { fg: 'hover', bg: 'bg', kind: 'superfície', metric: 'lightness', min: { dark: 5 } },
   // Bubble recebido contra o fundo do chat.
-  { fg: 'incoming', bg: 'chatBg', kind: 'elevação', metric: 'lightness', min: { dark: 6 } },
+  { fg: 'incoming', bg: 'chatBg', kind: 'elevação', metric: 'lightness', min: { dark: 4 } },
 ];
 
 // Avalia as regras de um tema. Devolve uma linha por regra aplicável, com o

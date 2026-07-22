@@ -6,6 +6,11 @@
 // valor para `--wa-hover` e `--wa-selected` (o que já aconteceu no tema escuro e
 // tornava a conversa aberta indistinguível da conversa sob o cursor), o teste
 // aponta o par exato e a razão medida.
+//
+// O tema escuro foi refeito no molde do VS Code Dark (acentos dessaturados,
+// superfícies em cinza neutro com degraus curtos) sem tocar nas letras — os pisos
+// de superfície/acento acompanharam a mudança; os de texto, não. Ver
+// CONTRAST_RULES em themeContrast.js.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -47,9 +52,9 @@ test('lstar: âncoras conhecidas (preto=0, branco=100)', () => {
 // Este par (fundo vs painel do tema escuro) mede só 1,19:1 mas ΔL* ≈ 8, um
 // degrau perfeitamente visível — foi exatamente o que motivou métricas separadas.
 test('deltaLstar: separa superfícies escuras que a razão WCAG achata', () => {
-  const bg = [10, 16, 20], panel = [22, 35, 43];
+  const bg = [30, 30, 30], panel = [37, 37, 38];   // fundo × painel do tema escuro
   assert.ok(contrastRatio(bg, panel) < 1.3, 'razão WCAG achata este par (esperado)');
-  assert.ok(deltaLstar(bg, panel) > 6, 'ΔL* enxerga o degrau');
+  assert.ok(deltaLstar(bg, panel) > 3, 'ΔL* enxerga o degrau');
   assert.equal(deltaLstar([32, 44, 51], [32, 44, 51]), 0);
 });
 
