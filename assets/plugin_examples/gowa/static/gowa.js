@@ -8,6 +8,8 @@
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
+// Seletor com busca do core: a lista de fusos tem centenas de itens.
+import { SearchableSelect } from '/static/js/components/SearchableSelect.js';
 
 const html = htm.bind(h);
 
@@ -163,12 +165,10 @@ function DisconnectAlerts({ apiBase }) {
 
         <div>
           <label class=${LABEL}>Fuso horário (hora exibida nos alertas)</label>
-          <select class=${FIELD} value=${cfg.timezone || 'America/Sao_Paulo'}
-            onChange=${(e) => upd({ timezone: e.target.value })}>
-            ${(cfg.timezones || []).map(
-              (t) => html`<option value=${t.value}>${t.label}</option>`
-            )}
-          </select>
+          <${SearchableSelect} value=${cfg.timezone || 'America/Sao_Paulo'}
+            onChange=${(v) => upd({ timezone: v })}
+            options=${(cfg.timezones || []).map((t) => ({ value: t.value, label: t.label }))}
+            inputClass=${FIELD + ' w-full'} searchPlaceholder="Pesquisar fuso…" />
           <div class=${HINT}>Fuso usado na hora exibida nos alertas. A lista traz todos os fusos do mundo.</div>
         </div>
 

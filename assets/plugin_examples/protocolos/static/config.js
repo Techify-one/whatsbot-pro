@@ -11,6 +11,8 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
 import { notifyPermissionDenied } from '/static/js/services/notify.js';
+import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
+import { AttributeValueInput } from '/static/js/components/AttributeValueInput.js';
 
 const html = htm.bind(h);
 
@@ -35,6 +37,12 @@ const FIELD_TABS = ['protocolo', 'atendimento'];
 // Rótulo de origem de cada opção do seletor "não enviar avaliação" (aba Avaliação):
 // atributos personalizados do core (contato/conversa) + rótulos da aba "Protocolo".
 const SCOPE_LABEL = { contact: 'contato', conversation: 'conversa', protocolo: 'protocolo' };
+// Cabeçalho de cada grupo no seletor com busca (OptionListSelect grouped).
+const SCOPE_GROUP = { contact: 'Contato', conversation: 'Conversa', protocolo: 'Protocolo' };
+// Opções do seletor de atributo: `scope::key` (o par é a identidade) + grupo por escopo.
+const attrOptions = (defs) => (defs || []).map((a) => ({
+  value: `${a.scope}::${a.key}`, label: a.label, group: SCOPE_GROUP[a.scope] || a.scope,
+}));
 // Direções da regra "ignorar abertura" (qual lado da conversa é analisado).
 const SKIP_DIRECTIONS = [
   ['sent', 'Mensagens enviadas (pelo atendente/IA)'],
@@ -357,25 +365,23 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
             <div key=${i} class="flex flex-wrap gap-2 items-end">
               <div class="flex-1 min-w-[160px]">
                 <label class="block text-[12px] text-wa-secondary mb-1">Atributo</label>
-                <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
-                  value=${`${r.scope}::${r.key}`}
-                  onChange=${(e) => { const v = e.target.value; const ix = v.indexOf('::');
-                    updateSkipAttr(i, { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }}>
-                  <option value="::">— selecione —</option>
-                  ${skipDefs.map((a) => html`<option key=${`${a.scope}::${a.key}`} value=${`${a.scope}::${a.key}`}>${a.label} (${SCOPE_LABEL[a.scope] || a.scope})</option>`)}
-                </select>
+                ${canEdit ? html`
+                  <${OptionListSelect} options=${attrOptions(skipDefs)} grouped=${true} float=${true}
+                    value=${r.key ? `${r.scope}::${r.key}` : ''}
+                    placeholder="— selecione —" searchPlaceholder="Pesquisar atributo…"
+                    onChange=${(v) => { const ix = String(v || '').indexOf('::');
+                      updateSkipAttr(i, ix < 0
+                        ? { scope: 'contact', key: '', value: '' }
+                        : { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }} />`
+                : html`<div class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] opacity-60">
+                    ${def ? `${def.label} (${SCOPE_LABEL[def.scope] || def.scope})` : '— selecione —'}
+                  </div>`}
               </div>
               <div class="flex-1 min-w-[140px]">
                 <label class="block text-[12px] text-wa-secondary mb-1">Valor</label>
-                ${opts.length ? html`
-                  <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
-                    value=${r.value} onChange=${(e) => updateSkipAttr(i, { value: e.target.value })}>
-                    <option value="">— selecione —</option>
-                    ${opts.map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
-                  </select>` : html`
-                  <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" type="text"
-                    value=${r.value} disabled=${!canEdit}
-                    onInput=${(e) => updateSkipAttr(i, { value: e.target.value })} />`}
+                <${AttributeValueInput} type=${def && def.type} options=${opts}
+                  value=${r.value} disabled=${!canEdit}
+                  onChange=${(v) => updateSkipAttr(i, { value: v })} />
               </div>
               ${canEdit ? html`<button onClick=${() => removeSkipAttr(i)}
                 class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}
