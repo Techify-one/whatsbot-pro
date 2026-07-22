@@ -373,7 +373,6 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           resolveAssignee=${resolveAssignee}
           hasIdentity=${currentUserId != null}
           selected=${selectedKey}
-          showChannel=${showChannel}
           onSelect=${selectContact}
           onDropFiles=${handleRowDropFiles}
           onContextMenu=${setCtxMenu}

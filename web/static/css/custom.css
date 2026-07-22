@@ -108,7 +108,8 @@ html.dark {
 
 /* Thin scrollbar like WhatsApp */
 .wa-scrollbar::-webkit-scrollbar {
-  width: 6px;
+  width: 6px;   /* barra vertical */
+  height: 6px;  /* barra horizontal (faixa de abas do inbox) */
 }
 .wa-scrollbar::-webkit-scrollbar-track {
   background: transparent;

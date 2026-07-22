@@ -471,7 +471,10 @@ export function ConversationFilterBar({
       ` : null}
 
       <!-- Assignment tabs -->
-      <div class="flex items-center gap-1 px-[12px] mt-1 border-b border-wa-border overflow-x-auto wa-scrollbar">
+      <!-- overflow-y-hidden é obrigatório: com overflow-x:auto o navegador promove o
+           outro eixo a auto também, e o -mb-px das abas produzia uma barrinha
+           vertical parasita de poucos pixels. O scroll horizontal continua valendo. -->
+      <div class="flex items-center gap-1 px-[12px] mt-1 border-b border-wa-border overflow-x-auto overflow-y-hidden wa-scrollbar">
         ${hasIdentity ? tabBtn('mine', 'Minhas', counts.mine) : null}
         ${(hasIdentity && (counts.mentions > 0 || assignmentTab === 'mentions')) ? tabBtn('mentions', 'Menções', counts.mentions) : null}
         ${tabBtn('unassigned', 'Não atribuídas', counts.unassigned)}

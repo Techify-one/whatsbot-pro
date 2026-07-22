@@ -109,9 +109,74 @@ function highlightParts(text, query) {
   return parts;
 }
 
+// Chevron da faixa de etiquetas (mesmo path do ChevronDown da barra de filtros).
+const TagChevron = () => html`
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+`;
+
+// Faixa de etiquetas da linha da conversa. Regras (pedido do operador):
+//   - o nome da etiqueta aparece SEMPRE inteiro (nada de truncar com "…");
+//   - colapsada, mostra só o que coube na PRIMEIRA linha;
+//   - havendo excesso, uma seta expande a linha inteira (todas as etiquetas) e
+//     recolhe no clique seguinte.
+// O corte é feito por `max-height` = altura de uma etiqueta + `overflow-hidden`: o
+// flex-wrap já posiciona os chips, então o navegador esconde as linhas seguintes sem
+// nunca cortar um chip no meio. A altura da etiqueta é MEDIDA (não hardcoded) para
+// acompanhar zoom/fonte do usuário, e re-medida quando a sidebar muda de largura.
+function RowTags({ tags, globalTags, expanded, onToggle }) {
+  const wrapRef = useRef(null);
+  const [lineH, setLineH] = useState(0);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => {
+      const first = el.firstElementChild;
+      if (!first) { setLineH(0); setOverflowing(false); return; }
+      const h = first.offsetHeight;
+      setLineH(h);
+      setOverflowing(el.scrollHeight > h + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tags.join('|'), expanded]);
+
+  return html`
+    <div class="flex items-start gap-[3px] mt-[2px]">
+      <div
+        ref=${wrapRef}
+        class="flex-1 min-w-0 flex flex-wrap gap-[3px] overflow-hidden"
+        style=${(!expanded && lineH) ? `max-height:${lineH}px` : null}
+      >
+        ${tags.map(tagName => {
+          const tagInfo = globalTags && globalTags[tagName];
+          const color = tagInfo ? tagInfo.color : '#6b7280';
+          return html`<span
+            key=${tagName}
+            class="text-[9px] font-semibold rounded px-[4px] py-[0.5px] leading-[14px] whitespace-nowrap"
+            style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
+            title=${tagName}
+          >${tagName}</span>`;
+        })}
+      </div>
+      ${(overflowing || expanded) ? html`
+        <button
+          onClick=${(e) => { e.stopPropagation(); e.preventDefault(); onToggle(); }}
+          title=${expanded ? 'Mostrar menos etiquetas' : 'Mostrar todas as etiquetas'}
+          class="shrink-0 w-[16px] h-[16px] flex items-center justify-center rounded text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors"
+        ><span class="flex transition-transform ${expanded ? 'rotate-180' : ''}"><${TagChevron} /></span></button>
+      ` : null}
+    </div>
+  `;
+}
+
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
@@ -143,6 +208,17 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   // operador confirma. `dragOverKey` realça a linha sob o cursor.
   const [dragOverKey, setDragOverKey] = useState(null);
   const dropEnabled = !selectionMode && typeof onDropFiles === 'function';
+
+  // Linhas com a faixa de etiquetas expandida (todas as etiquetas, várias linhas).
+  // Chaveado por rowKeyFor — o mesmo identificador de seleção/drag. O estado mora AQUI
+  // (e não dentro do RowTags) para sobreviver aos re-renders frequentes da lista
+  // (WebSocket de nova mensagem, refresh de contagens, etc.).
+  const [expandedTagRows, setExpandedTagRows] = useState(() => new Set());
+  const toggleTagRow = (key) => setExpandedTagRows(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   const allSelectedHaveTag = (name) =>
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
@@ -567,6 +643,15 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
 
                   <!-- Text content with bottom border -->
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
+                    <!-- Linha 1: canal (esq.) + atendente (dir.), na MESMA altura, para não
+                         sobrar vão vazio de um dos lados. O canal fica ACIMA do nome (estilo
+                         Chatwoot) e é sempre visível — não passa pelo gate showChannel, que
+                         segue valendo só no cabeçalho do chat. Cada chip devolve null quando
+                         não há dado (linha sem canal / sem atendente). -->
+                    <div class="flex items-center justify-between gap-[6px] min-w-0 mb-[1px]">
+                      <${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} margin=${false} />
+                      ${resolveAssignee ? html`<span class="ml-auto shrink-0"><${AssigneeChip} assignee=${resolveAssignee(c)} /></span>` : null}
+                    </div>
                     <div class="flex justify-between items-baseline">
                       <span class="text-wa-text text-[17px] truncate leading-[21px]">
                         ${c.is_group
@@ -587,30 +672,20 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
                             : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
-                        ${showChannel ? html`<${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} />` : null}
                       </span>
-                      <span class="flex flex-col items-end gap-[3px] ml-[6px] shrink-0">
-                        <span class="flex items-center gap-[4px]">
-                          ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
-                          <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
-                        </span>
-                        ${resolveAssignee ? html`<${AssigneeChip} assignee=${resolveAssignee(c)} />` : null}
+                      <!-- Linha 2 (dir.): só fixado + hora. O atendente subiu para a linha do
+                           canal, então esta coluna deixou de ser uma pilha. -->
+                      <span class="flex items-center gap-[4px] ml-[6px] shrink-0">
+                        ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
+                        <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
                       </span>
                     </div>
-                    ${(c.tags && c.tags.length > 0) ? html`
-                      <div class="flex items-center gap-[3px] mt-[2px] flex-wrap">
-                        ${c.tags.slice(0, 3).map(tagName => {
-                          const tagInfo = globalTags && globalTags[tagName];
-                          const color = tagInfo ? tagInfo.color : '#6b7280';
-                          return html`<span
-                            class="text-[9px] font-semibold rounded px-[4px] py-[0.5px] max-w-[70px] truncate leading-[14px]"
-                            style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
-                            title=${tagName}
-                          >${tagName}</span>`;
-                        })}
-                        ${c.tags.length > 3 ? html`<span class="text-[9px] text-wa-secondary">+${c.tags.length - 3}</span>` : null}
-                      </div>
-                    ` : null}
+                    ${(c.tags && c.tags.length > 0) ? html`<${RowTags}
+                      tags=${c.tags}
+                      globalTags=${globalTags}
+                      expanded=${expandedTagRows.has(rowKeyFor(c))}
+                      onToggle=${() => toggleTagRow(rowKeyFor(c))}
+                    />` : null}
                     <div class="flex justify-between items-center mt-[3px]">
                       ${aiRespondingState && aiRespondingState[typingKey({ channelId: c.channel_id, phone: c.phone })]
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5">
