@@ -19,6 +19,7 @@ import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
+import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
@@ -352,6 +353,12 @@ export function App({ onLogout, hasPassword, currentUser }) {
     // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
     // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
     if (m.silent) return;
+    // Escopo por ATRIBUIÇÃO: só notifica se a conversa é minha ou não tem dono nenhum
+    // (nem humano nem IA) — a mensagem da conversa de outro atendente não é minha para
+    // atender. Vale para o som E para o pop-up do navegador logo abaixo. O backend manda
+    // `assignee_user_id`/`active_agent_key` no payload do ingest; sem eles, notifica
+    // como antes (fail-open — ver shouldNotifyNewMessage).
+    if (!shouldNotifyNewMessage(m, (currentUser && currentUser.id != null) ? currentUser.id : null)) return;
     // plano 63 F2 — o motor resolve as 3 camadas (usuário/global/dispositivo). O
     // interruptor per-device (`whatsbot_notif_sound`) é checado DENTRO do motor,
     // então o gate legado `getNotifPref('sound')` sai daqui (evita gate duplo).

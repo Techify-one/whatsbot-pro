@@ -290,6 +290,7 @@ export default function SoundSettings({ config, onSaveConfig, currentUser }) {
                       ? html`<span class="text-[10px] px-2 py-0.5 rounded-full bg-wa-teal/15 text-wa-teal font-medium">personalizado</span>`
                       : html`<span class="text-[10px] px-2 py-0.5 rounded-full bg-wa-hover text-wa-secondary">padrão da equipe</span>`}
                   </div>
+                  ${ev.hint ? html`<div class="text-[11px] text-wa-secondary -mt-1">${ev.hint}</div>` : null}
                   <div class="flex items-center gap-3 flex-wrap">
                     <select value=${soundId} onChange=${(e) => p.writeVal(mode, key, 'sound', e.target.value)}
                       class="wa-field px-2 py-1.5 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none">

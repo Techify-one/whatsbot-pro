@@ -21,7 +21,8 @@ import re
 # ``config.sound_settings``; o servidor ainda decide SE o alerta de transferência
 # é emitido (gate), lendo esse mesmo padrão via :func:`event_gate`.
 EVENTS: list[dict] = [
-    {"key": "new_message",    "label": "Mensagem nova",                 "group": "Mensagens",      "cls": "notification", "duration_applies": False},
+    {"key": "new_message",    "label": "Mensagem nova",                 "group": "Mensagens",      "cls": "notification", "duration_applies": False,
+     "hint": "Toca só nas conversas atribuídas a você ou sem atendente e sem IA — mensagem de conversa de outro atendente não toca."},
     {"key": "mention",        "label": "Menção interna",                "group": "Mensagens",      "cls": "notification", "duration_applies": False},
     {"key": "ia_to_human",    "label": "Transferência da IA → atendente", "group": "Transferências", "cls": "alert", "duration_applies": True},
     {"key": "assigned_to_me", "label": "Conversa atribuída a você",     "group": "Transferências", "cls": "alert", "duration_applies": True},

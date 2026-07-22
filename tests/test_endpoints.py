@@ -5285,6 +5285,62 @@ check("HTTP gowa: reaction -> 200 + handled", r.status_code == 200
 check("HTTP gowa: canal inexistente -> 200 ignored",
       client.post("/api/webhook/gowa/nao_existe", json={"event": "message", "payload": {}}).status_code == 200)
 
+# ── Escopo do som de mensagem nova: o payload diz de QUEM é a conversa ─────────
+# O painel só toca (e só mostra o pop-up) quando a conversa é do atendente logado
+# ou não tem dono nenhum. A decisão é client-side (shouldNotifyNewMessage), mas
+# depende destes dois campos virem no broadcast do ingest — é o que se testa aqui.
+_deps_snd = app.state.deps
+_orig_snd_bcast = _deps_snd.ws_manager.broadcast
+_snd_msgs = []
+
+
+async def _capture_new_message(event, data):
+    if event == "new_message" and (data.get("message") or {}).get("role") == "user":
+        _snd_msgs.append(data["message"])
+    return await _orig_snd_bcast(event, data)
+
+
+def _inbound_capture(phone: str, msg_id: str):
+    """POST inbound pela rota real capturando os `new_message` de role user."""
+    _snd_msgs.clear()
+    _deps_snd.ws_manager.broadcast = _capture_new_message
+    try:
+        client.post("/api/webhook/gowa/default", json={
+            "event": "message", "payload": {
+                "from": f"{phone}@s.whatsapp.net", "id": msg_id, "body": "escopo do som",
+                "from_name": "Cliente Som"}})
+    finally:
+        _deps_snd.ws_manager.broadcast = _orig_snd_bcast
+    # O t=0 (não-autoritativo) é o que dispara som/pop-up no painel.
+    return next((m for m in _snd_msgs if not m.get("authoritative")), None)
+
+
+# `assignee_user_id` é NULLABLE e SEM FK (db/tables.py) — aqui basta um id qualquer:
+# o que se verifica é o campo chegar no payload, não a existência do usuário.
+_snd_uid = 4242
+_snd_phone = "5511707070055"
+_contact11.get_or_create(_snd_phone)
+_contact11.update(_contact11.get_by_phone(_snd_phone)["id"], ai_enabled=0)
+
+_m0 = _inbound_capture(_snd_phone, "gw_som_1")
+check("new_message (t=0) carrega assignee_user_id", _m0 is not None and "assignee_user_id" in _m0)
+check("new_message (t=0) carrega active_agent_key", _m0 is not None and "active_agent_key" in _m0)
+
+# Atribuída a alguém → o payload carrega o dono, e só ele toca no painel.
+_snd_conv = _conv11.get(_m0["conversation_id"]) if _m0 else None
+if _snd_conv:
+    _conv11.set_assignee(_snd_conv["id"], _snd_uid)
+_m1 = _inbound_capture(_snd_phone, "gw_som_2")
+check("new_message -> assignee_user_id reflete o atendente da conversa",
+      _m1 is not None and _m1.get("assignee_user_id") == _snd_uid)
+
+# Sem atendente → assignee nulo (o painel toca para todos, se também não houver IA).
+if _snd_conv:
+    _conv11.set_assignee(_snd_conv["id"], None)
+_m2 = _inbound_capture(_snd_phone, "gw_som_3")
+check("new_message -> sem atendente devolve assignee_user_id nulo",
+      _m2 is not None and _m2.get("assignee_user_id") is None)
+
 # ── Conversa-cêntrico (plano 11 D1): leitura + unread + saída POR CONVERSA ──
 section("Conversa-cêntrico (plano 11 D1)")
 

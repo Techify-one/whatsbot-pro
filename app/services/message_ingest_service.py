@@ -488,6 +488,17 @@ class MessageIngestService:
         # over phone/channel), so a NEW conversation's row updates in place at t=0.
         if conversation_id is not None:
             broadcast_msg["conversation_id"] = conversation_id
+            # Quem "possui" a conversa — o painel usa isto para decidir se toca o som
+            # de mensagem nova (só as minhas ou as sem atendente e sem IA). Defensivo:
+            # falha aqui ⇒ campos AUSENTES ⇒ o cliente toca (fail-open), nunca fica
+            # mudo por causa de uma query.
+            try:
+                _asg = await asyncio.to_thread(conversation_repo.assignment_of, conversation_id)
+                if _asg:
+                    broadcast_msg["assignee_user_id"] = _asg.get("assignee_user_id")
+                    broadcast_msg["active_agent_key"] = _asg.get("active_agent_key")
+            except Exception:
+                logger.debug("assignment_of falhou para a conversa %s", conversation_id)
         if reply_to:
             broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:
