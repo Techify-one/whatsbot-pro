@@ -107,6 +107,7 @@ export function useConversationList({ onUnreadChange }) {
       const rows = res.data || [];
       setChannelOptions(rows.map((c) => ({
         id: c.id,
+        provider: c.provider || null,   // usado pelo selo de canal do cabeçalho do chat
         label: c.display_name
           || c.provider
           || (c.id === 'default' ? 'Padrão' : c.id),

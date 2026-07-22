@@ -3,7 +3,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks'
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
-import { ContactList, typingKey } from './ContactList.js';
+import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
@@ -307,6 +307,22 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
   const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  // Linha da conversa aberta: é ela que carrega `channel_provider`/`channel_name`
+  // (só a query da LISTA traz o canal — o detalhe do contato não). O cabeçalho do
+  // chat mostra o mesmo selo da sidebar a partir daqui, sem requisição nova.
+  const selectedRow = selectedKey
+    ? (displayedContacts || []).find(c => rowKeyFor(c) === selectedKey) || null
+    : null;
+  // Rede de segurança: um filtro/busca ativo pode esconder a linha da conversa ABERTA
+  // da lista. Aí o canal vem do catálogo de canais (casado por `channelId`), para o
+  // selo do cabeçalho não piscar quando o operador mexe nos filtros.
+  const selectedChannelOpt = selectedChannelId
+    ? (channelOptions || []).find(o => o.id === selectedChannelId) || null
+    : null;
+  const headerChannelProvider = (selectedRow && selectedRow.channel_provider)
+    || (selectedChannelOpt && selectedChannelOpt.provider) || null;
+  const headerChannelName = (selectedRow && selectedRow.channel_name)
+    || (selectedChannelOpt && selectedChannelOpt.label) || null;
   const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
@@ -416,6 +432,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 setContactData=${setContactData}
                 info=${info}
                 contact=${contactData}
+                channelProvider=${headerChannelProvider}
+                channelName=${headerChannelName}
+                showChannel=${showChannel}
                 onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
                 currentUser=${currentUser}

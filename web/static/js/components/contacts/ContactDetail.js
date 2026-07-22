@@ -9,6 +9,8 @@ import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon 
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { Slot } from '../../plugins/Slot.js';
+// Selo do canal — MESMO componente da linha da barra lateral.
+import { ChannelChip } from './ChannelChip.js';
 import { emit as emitClientEvent, applyFilter, getFilters } from '../../plugins/registry.js';
 import { MessageBubble } from './MessageBubble.js';
 import { MessageEditDialog } from './MessageEditDialog.js';
@@ -47,7 +49,8 @@ const SelectManyIcon = () => html`
 // reply-quote lookup and the dialogs (delete / improve / template / context menu)
 // stay here; everything composer-related lives in the hooks/components.
 
-export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
+export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact,
+  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -450,7 +453,12 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         </div>
         <div class="flex-1 min-w-0 ${canReadContact ? 'cursor-pointer' : ''}" onClick=${canReadContact ? onAvatarClick : null} title=${'Conversa com ' + displayName}>
           <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
-            <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
+            <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${
+            // Canal do atendimento, logo após o nome — o MESMO selo da linha da barra
+            // lateral, gateado pelo mesmo `showChannel` (só com 2+ canais instalados),
+            // para as duas telas nunca discordarem sobre mostrar ou não.
+            showChannel ? html`<${ChannelChip} provider=${channelProvider} name=${channelName} margin=${false} />` : null
+            }${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
               const tagInfo = globalTags && globalTags[tagName];
               const color = tagInfo ? tagInfo.color : '#6b7280';
               return html`<span

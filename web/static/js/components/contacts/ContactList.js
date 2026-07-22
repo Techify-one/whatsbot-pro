@@ -10,6 +10,8 @@ import { AssigneeList } from './AssigneeList.js';
 import { clampFlyoutOffset } from './menuLayout.js';
 import { dragHasFiles } from './hooks/useDropZone.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
+// Selo do canal — compartilhado com o cabeçalho do chat (mesma aparência nos dois).
+import { ChannelChip } from './ChannelChip.js';
 import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
@@ -67,23 +69,6 @@ export function rowKeyFor(c) {
 export function typingKey({ conversationId = null, channelId = null, phone = null } = {}) {
   if (conversationId != null) return `conv:${conversationId}`;
   return `${channelId || 'default'}::${phone}`;
-}
-
-// Per-provider channel chip (only shown when ≥2 channels exist). Colour tints stay
-// in the dark-mode-safe set (wa-*/blue) per CLAUDE.md theming rule.
-const CHANNEL_META = {
-  gowa:           { label: 'WhatsApp',  cls: 'bg-wa-teal/15 text-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', cls: 'bg-blue-100 text-blue-700' },
-  telegram:       { label: 'Telegram',  cls: 'bg-blue-100 text-blue-700' },
-  test:           { label: 'Teste',     cls: 'bg-wa-hover text-wa-secondary' },
-};
-function ChannelChip({ provider, name }) {
-  if (!provider) return null;
-  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
-  return html`<span
-    class="ml-[6px] inline-flex items-center gap-[3px] text-[10px] font-semibold rounded px-[5px] py-[1px] align-middle ${meta.cls}"
-    title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}
-  ><span class="w-[5px] h-[5px] rounded-full bg-current opacity-70"></span>${name || meta.label}</span>`;
 }
 
 function normalizePhone(input) {

@@ -4,6 +4,8 @@
 import { h } from 'preact';
 import htm from 'htm';
 
+import { channelMetaFor } from '../contacts/ChannelChip.js';
+
 const html = htm.bind(h);
 
 // Epoch (segundos, float) → rótulo relativo "há ...".
@@ -41,16 +43,11 @@ export function StatusBadge({ status }) {
   return html`<span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${cls}">${open ? 'Aberta' : 'Fechada'}</span>`;
 }
 
-const CHANNEL_META = {
-  gowa: { label: 'WhatsApp', cls: 'bg-wa-teal/15 text-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', cls: 'bg-blue-100 text-blue-700' },
-  telegram: { label: 'Telegram', cls: 'bg-blue-100 text-blue-700' },
-  test: { label: 'Teste', cls: 'bg-wa-hover text-wa-secondary' },
-};
-
+// Mesmo catálogo do selo da sidebar/cabeçalho (rótulo + cor por provider); aqui a
+// pílula é maior por causa da densidade desta tela, mas as cores nunca divergem.
 export function ChannelBadge({ provider, name }) {
   if (!provider) return null;
-  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
+  const meta = channelMetaFor(provider);
   return html`
     <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${meta.cls} inline-flex items-center gap-1"
       title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}>
