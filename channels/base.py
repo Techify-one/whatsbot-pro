@@ -431,14 +431,34 @@ class Channel(ABC):
                         body_text: str, header_text: Optional[str] = None,
                         footer_text: Optional[str] = None,
                         body_examples: Optional[list] = None,
-                        header_examples: Optional[list] = None) -> dict:
+                        header_examples: Optional[list] = None,
+                        header_format: Optional[str] = None,
+                        header_handle: Optional[str] = None,
+                        buttons: Optional[list] = None) -> dict:
         """Create a message template (HSM) at the provider, returning the raw result.
 
         Optional, default raises NotImplementedError. Only channels with
         ``capabilities.templates`` implement it. Returns
         ``{ok, id?, status?, category?, error?}``.
+
+        Media header (plano 73): ``header_format`` in ``{IMAGE, VIDEO, DOCUMENT}``
+        plus a ``header_handle`` produced by :meth:`upload_example` replaces the
+        text header. ``buttons`` is a already-typed list of
+        ``{type, text?, url?, phone_number?, example?}`` (types QUICK_REPLY / URL /
+        PHONE_NUMBER / COPY_CODE) — the provider converts it to its own wire shape.
+        Both are optional: omitting them keeps the text-only behaviour unchanged.
         """
         raise NotImplementedError(f"{self.provider} does not support creating templates")
+
+    def upload_example(self, file_bytes: bytes, mime: str,
+                       filename: str) -> dict:
+        """Upload a sample media file used as a template's header example.
+
+        Optional (plano 73), default refuses so a provider without the concept
+        degrades cleanly. Returns ``{ok, handle?, error?}`` — the ``handle`` is then
+        passed back as ``header_handle`` to :meth:`create_template`.
+        """
+        return {"ok": False, "error": "not_supported"}
 
     def delete_template(self, name: str) -> dict:
         """Delete a message template (all language versions) by name.

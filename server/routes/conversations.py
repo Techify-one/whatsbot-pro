@@ -13,8 +13,9 @@ import asyncio
 import logging
 import time
 
-from fastapi import Request
+from fastapi import File, Request, UploadFile
 
+from app.services import template_service as tpl_svc
 from db.repositories import (conversation_repo, custom_attribute_repo, contact_repo,
                              message_repo, user_repo, agent_repo, mention_repo)
 from db.repositories.custom_attribute_validate import validate_value
@@ -706,9 +707,11 @@ def register_routes(app, deps):
     async def conversation_templates(conv_id: int, request: Request):
         """Templates for the picker (Frente C). Channel-aware: resolves the
         conversation's channel and returns ``{supported, templates, can_create,
-        can_delete}``. Lists templates of every status (the UI badges the status and
-        only lets approved ones be sent). ``can_create``/``can_delete`` are the
-        caller's RBAC capability flags so the UI shows/hides the manage actions.
+        can_delete, channel}``. Lists templates of every status (the UI badges the
+        status and only lets approved ones be sent). ``can_create``/``can_delete``
+        are the caller's RBAC capability flags so the UI shows/hides the manage
+        actions; ``channel`` é ``{id, name, phone}`` — o remetente exibido no
+        cabeçalho do modal, para o atendente saber de qual número o template sai.
         Non-template channels (GOWA) return ``supported=False`` with no provider call."""
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -719,12 +722,17 @@ def register_routes(app, deps):
         channel_id = conv.get("channel_id") or "default"
         can_create = has_permission(request, "template.create")
         can_delete = has_permission(request, "template.delete")
+        channel = await tpl_svc.channel_badge(deps, channel_id)
+        if conv.get("channel_name"):
+            channel["name"] = conv["channel_name"]
         if not outbound.supports(channel_id, "templates"):
             return _ok({"supported": False, "templates": [],
-                        "can_create": can_create, "can_delete": can_delete})
+                        "can_create": can_create, "can_delete": can_delete,
+                        "channel": channel})
         templates = await asyncio.to_thread(outbound.list_templates, channel_id)
         return _ok({"supported": True, "templates": templates,
-                    "can_create": can_create, "can_delete": can_delete})
+                    "can_create": can_create, "can_delete": can_delete,
+                    "channel": channel})
 
     @app.post("/api/atendimentos/{conv_id}/send-template")
     async def send_conversation_template(conv_id: int, body: dict, request: Request):
@@ -796,9 +804,10 @@ def register_routes(app, deps):
         """Create a template on the conversation's channel (gated ``template.create``).
 
         body: ``{name, category?, language?, body_text, header_text?, footer_text?,
-        body_examples?, header_examples?}``. The provider assembles the Graph
-        components (including the ``example`` arrays Meta requires for ``{{n}}``).
-        The template is created ``PENDING`` until Meta reviews it."""
+        body_examples?, header_examples?, header_format?, header_handle?,
+        buttons?}``. The provider assembles the Graph components (including the
+        ``example`` arrays Meta requires for ``{{n}}``, the media header and the
+        buttons). The template is created ``PENDING`` until Meta reviews it."""
         denied = permission_denied(request, "template.create")
         if denied:
             return denied
@@ -818,6 +827,13 @@ def register_routes(app, deps):
             return _err("body_examples deve ser uma lista.", status=400)
         if header_examples is not None and not isinstance(header_examples, list):
             return _err("header_examples deve ser uma lista.", status=400)
+        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
+            body.get("header_format"), body.get("header_handle"))
+        if media_err:
+            return _err(media_err, status=400)
+        buttons, btn_err = tpl_svc.normalize_buttons(body.get("buttons"))
+        if btn_err:
+            return _err(btn_err, status=400)
 
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
@@ -832,7 +848,9 @@ def register_routes(app, deps):
             header_text=(body.get("header_text") or "").strip() or None,
             footer_text=(body.get("footer_text") or "").strip() or None,
             body_examples=body_examples or None,
-            header_examples=header_examples or None)
+            header_examples=header_examples or None,
+            header_format=header_format, header_handle=header_handle,
+            buttons=buttons)
         if not result.get("ok"):
             return _err(f"Falha ao criar template: {result.get('error')}", status=502)
         return _ok({
@@ -840,6 +858,35 @@ def register_routes(app, deps):
             "id": result.get("id"), "status": result.get("status"),
             "category": result.get("category"), "name": name,
         })
+
+    @app.post("/api/atendimentos/{conv_id}/templates/upload-example")
+    async def upload_conversation_template_example(
+            conv_id: int, request: Request, file: UploadFile = File(...)):
+        """Upload a media sample for a template header (plano 73).
+
+        Conversation-scoped twin of the channel endpoint: returns the Meta
+        ``handle`` to send back as ``header_handle`` when creating the template."""
+        denied = permission_denied(request, "template.create")
+        if denied:
+            return denied
+        conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        channel_id = conv.get("channel_id") or "default"
+        if not outbound.supports(channel_id, "templates"):
+            return _err("Este canal não suporta templates.", status=400)
+        data_bytes = await file.read()
+        err = tpl_svc.validate_example_upload(file.content_type or "",
+                                              len(data_bytes or b""))
+        if err:
+            return _err(err, status=400)
+        kind, data = await tpl_svc.upload_template_example(
+            deps, channel_id, file_bytes=data_bytes,
+            mime=(file.content_type or "").split(";")[0].strip().lower(),
+            filename=file.filename or "example")
+        if kind == "failed":
+            return _err(f"Falha ao enviar o arquivo: {data}", status=502)
+        return _ok(data)
 
     @app.delete("/api/atendimentos/{conv_id}/templates/{name}")
     async def delete_conversation_template(conv_id: int, name: str, request: Request):
