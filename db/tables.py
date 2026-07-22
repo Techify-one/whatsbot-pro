@@ -904,6 +904,24 @@ user_sound_prefs = Table(
 Index("ux_user_sound_prefs_user", user_sound_prefs.c.user_id, unique=True)
 
 
+# Biblioteca de sons IMPORTADOS pela equipe (aba "Sons"). O áudio em si fica em
+# ``statics/sounds/<filename>`` (servido pelo mount estático); aqui ficam o nome
+# escolhido pelo operador e a proveniência. O id vira ``custom:<id>`` nas
+# preferências de som (``sound_settings`` / ``user_sound_prefs``).
+custom_sounds = Table(
+    "custom_sounds",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(80), nullable=False),
+    Column("filename", String(120), nullable=False),   # gerado; nunca o nome do upload
+    Column("mime", String(80), nullable=False, server_default=""),
+    Column("size_bytes", Integer, nullable=False, server_default="0"),
+    Column("created_by", Integer, nullable=True),      # logical FK -> users.id
+    Column("created_at", Float, nullable=False, server_default="0"),
+)
+Index("ix_custom_sounds_name", custom_sounds.c.name)
+
+
 # Set of core table names — used by the SQLite → Postgres migration helper to
 # distinguish what belongs to the app vs. plugin-owned tables.
 CORE_TABLES = frozenset(t.name for t in metadata.sorted_tables)

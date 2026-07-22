@@ -36,6 +36,10 @@ export function pref(u, g, s) {
  * @param {string} eventKey
  * @param {object} ctx  { global, user, device:{masterOn,volumeMult}, seeds,
  *                        enabledOverride, durationOverride }
+ *   - `enabledOverride`: gate do SERVIDOR (transferências). `false` cala sem
+ *     apelação; `true`/ausente deixa a preferência decidir (AND, não override).
+ *   - `durationOverride`: FALLBACK de duração (keys legadas), abaixo de
+ *     usuário/global e acima do code-seed.
  * @returns {{play:boolean, soundId?:string, volume?:number, duration?:number}}
  */
 export function resolveEvent(eventKey, ctx = {}) {
@@ -53,12 +57,11 @@ export function resolveEvent(eventKey, ctx = {}) {
   const deviceMasterOn = device.masterOn !== false;
   if (!deviceMasterOn || masterSynced === false) return { play: false };
 
-  // Enabled do evento: o SERVIDOR tem precedência nas transferências (override);
-  // senão user??global??seed.
-  let enabled;
-  if (ctx.enabledOverride !== undefined) enabled = ctx.enabledOverride;
-  else enabled = pref(uEv.enabled, gEv.enabled, seed.enabled);
-  if (enabled === false) return { play: false };
+  // Enabled do evento: AND entre o gate do SERVIDOR (transferências — o admin
+  // pode silenciar para todos) e a preferência user??global??seed (o atendente
+  // pode silenciar só para si). Qualquer um dos dois em `false` cala.
+  if (ctx.enabledOverride === false) return { play: false };
+  if (pref(uEv.enabled, gEv.enabled, seed.enabled) === false) return { play: false };
 
   const soundId = pref(uEv.sound, gEv.sound, seed.sound) || 'none';
   if (soundId === 'none') return { play: false };
@@ -69,8 +72,11 @@ export function resolveEvent(eventKey, ctx = {}) {
   volume = clamp01(volume) * clamp01(mult);
   if (volume <= 0) return { play: false };
 
-  let duration = ctx.durationOverride;
-  if (duration === undefined) duration = pref(uEv.duration, gEv.duration, seed.duration);
+  // Duração: preferência do atendente primeiro (ele a edita na aba "Notificações
+  // e sons"), depois o padrão da equipe; o valor mandado pelo servidor é só um
+  // FALLBACK (keys legadas ``*_alert_duration``) antes do code-seed.
+  const durationFallback = ctx.durationOverride !== undefined ? ctx.durationOverride : seed.duration;
+  const duration = pref(uEv.duration, gEv.duration, durationFallback);
 
   return { play: true, soundId, volume, duration };
 }

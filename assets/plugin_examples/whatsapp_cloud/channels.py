@@ -214,6 +214,13 @@ class WhatsAppCloudChannel(Channel):
                  "help": "Necessário para listar e criar templates (HSM). Em "
                          "WhatsApp Manager → Configurações da conta. Diferente do "
                          "Phone Number ID."},
+                {"key": "app_id", "label": "App ID (Meta)", "type": "text",
+                 "required": False,
+                 "placeholder": "ID do App na Meta",
+                 "help": "Necessário só para criar templates com cabeçalho de "
+                         "mídia (imagem/vídeo/documento). Em "
+                         "developers.facebook.com → seu App → Configurações → "
+                         "ID do aplicativo."},
                 {"key": "verify_token", "label": "Verify Token",
                  "type": "token_suggest", "required": True,
                  "placeholder": "token de verificação do webhook"},
@@ -299,13 +306,18 @@ class WhatsAppCloudChannel(Channel):
                 resp = client.get(url, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
+                display = data.get("display_phone_number") or ""
                 return {
                     "connected": True,
                     "logged_in": True,
                     "needs_qr": False,
                     "error": None,
                     "verified_name": data.get("verified_name"),
-                    "display_phone_number": data.get("display_phone_number"),
+                    "display_phone_number": display,
+                    # Número da conta em dígitos: o sweep de identidade persiste em
+                    # channels.own_phone, e o painel usa para mostrar de qual número
+                    # a mensagem/template sai.
+                    "own_phone": "".join(c for c in display if c.isdigit()) or None,
                     "quality_rating": data.get("quality_rating"),
                 }
             return {
@@ -614,11 +626,113 @@ class WhatsAppCloudChannel(Channel):
     def _invalidate_templates_cache(self) -> None:
         self._templates_cache = None
 
+    # ── Upload de exemplo de mídia (resumable upload — plano 73) ─────
+    def upload_example(self, file_bytes: bytes, mime: str,
+                       filename: str) -> dict:
+        """Upload a media sample via the Meta **resumable upload** API.
+
+        Two steps, both authenticated with ``Authorization: OAuth {token}`` (the
+        upload API rejects ``Bearer``) and the token in the HEADER, never in the
+        query string (a URL is logged; a header isn't):
+
+        1. ``POST /{app_id}/uploads?file_name=&file_length=&file_type=`` → session id
+        2. ``POST /{upload_session_id}`` with ``file_offset: 0`` and the raw bytes
+           as body → ``{"h": "4:…"}`` — that ``h`` is the ``header_handle``.
+
+        Returns ``{ok, handle?, error?}``. This is a DIFFERENT flow from the
+        ``/{phone_number_id}/media`` upload used to send media at runtime: only the
+        resumable handle is accepted as a template header example.
+        """
+        app_id = self._cred("app_id")
+        token = self._access_token
+        if not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not app_id:
+            return {"ok": False,
+                    "error": "App ID não configurado no canal — necessário para "
+                             "cabeçalho de mídia."}
+        if not file_bytes:
+            return {"ok": False, "error": "arquivo vazio"}
+
+        mime = self._normalize_upload_mime(mime)
+        headers = {"Authorization": f"OAuth {token}"}
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                start = client.post(
+                    f"{self._base_url()}/{app_id}/uploads",
+                    headers=headers,
+                    params={"file_name": filename or "example",
+                            "file_length": str(len(file_bytes)),
+                            "file_type": mime})
+                if start.status_code not in (200, 201):
+                    return {"ok": False, "error": _graph_error(start)}
+                session_id = (start.json() or {}).get("id") or ""
+                if not session_id:
+                    return {"ok": False, "error": "sessão de upload não retornada"}
+
+                finish = client.post(
+                    f"{self._base_url()}/{session_id}",
+                    headers={**headers, "file_offset": "0", "Content-Type": mime},
+                    content=file_bytes)
+                if finish.status_code not in (200, 201):
+                    return {"ok": False, "error": _graph_error(finish)}
+                handle = (finish.json() or {}).get("h") or ""
+                if not handle:
+                    return {"ok": False, "error": "handle não retornado pela Meta"}
+                return {"ok": True, "handle": handle}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud upload_example failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _normalize_upload_mime(mime: str) -> str:
+        """Collapse the video MIMEs browsers report onto what Meta accepts."""
+        m = (mime or "").split(";")[0].strip().lower()
+        if m in ("video/quicktime", "video/mpeg", "video/x-msvideo"):
+            return "video/mp4"
+        return m or "application/octet-stream"
+
+    @staticmethod
+    def _graph_buttons(buttons: list) -> list[dict]:
+        """Convert the core's typed buttons into the Graph BUTTONS shape.
+
+        The core validated types/limits already; here we only map field names —
+        the Graph specifics (COPY_CODE carrying no ``text``, the URL example being
+        a list) stay inside the provider.
+        """
+        out: list[dict] = []
+        for b in buttons or []:
+            btype = (b.get("type") or "").strip().upper()
+            text = (b.get("text") or "").strip()
+            if btype == "QUICK_REPLY":
+                out.append({"type": "QUICK_REPLY", "text": text})
+            elif btype == "URL":
+                comp: dict = {"type": "URL", "text": text,
+                              "url": (b.get("url") or "").strip()}
+                example = b.get("example")
+                if isinstance(example, str):
+                    example = [example]
+                if example:
+                    comp["example"] = list(example)
+                out.append(comp)
+            elif btype == "PHONE_NUMBER":
+                out.append({"type": "PHONE_NUMBER", "text": text,
+                            "phone_number": (b.get("phone_number") or "").strip()})
+            elif btype == "COPY_CODE":
+                example = b.get("example")
+                if isinstance(example, list):
+                    example = example[0] if example else ""
+                out.append({"type": "COPY_CODE", "example": example or ""})
+        return out
+
     def create_template(self, name: str, *, category: str, language: str,
                         body_text: str, header_text: Optional[str] = None,
                         footer_text: Optional[str] = None,
                         body_examples: Optional[list] = None,
-                        header_examples: Optional[list] = None) -> dict:
+                        header_examples: Optional[list] = None,
+                        header_format: Optional[str] = None,
+                        header_handle: Optional[str] = None,
+                        buttons: Optional[list] = None) -> dict:
         """Create a template via ``POST /{waba_id}/message_templates`` (Graph API).
 
         Assembles the Graph ``components`` from a simple normalized definition so the
@@ -635,7 +749,14 @@ class WhatsAppCloudChannel(Channel):
             return {"ok": False, "error": "name e body_text são obrigatórios"}
 
         components: list[dict] = []
-        if header_text and header_text.strip():
+        media_format = (header_format or "").strip().upper()
+        if media_format in ("IMAGE", "VIDEO", "DOCUMENT") and header_handle:
+            # Media header: Meta wants the sample as an upload handle, never a URL.
+            components.append({
+                "type": "HEADER", "format": media_format,
+                "example": {"header_handle": [header_handle]},
+            })
+        elif header_text and header_text.strip():
             header_comp: dict = {"type": "HEADER", "format": "TEXT",
                                  "text": header_text.strip()}
             if header_examples:
@@ -648,13 +769,21 @@ class WhatsAppCloudChannel(Channel):
         components.append(body_comp)
         if footer_text and footer_text.strip():
             components.append({"type": "FOOTER", "text": footer_text.strip()})
+        graph_buttons = self._graph_buttons(buttons or [])
+        if graph_buttons:
+            components.append({"type": "BUTTONS", "buttons": graph_buttons})
 
+        cat = (category or "UTILITY").strip().upper()
         payload = {
             "name": name.strip(),
             "language": (language or "pt_BR").strip(),
-            "category": (category or "UTILITY").strip().upper(),
+            "category": cat,
             "components": components,
         }
+        if cat == "UTILITY":
+            # 12h TTL — only meaningful (and only accepted without hurting review)
+            # for utility templates.
+            payload["message_send_ttl_seconds"] = 43200
         url = f"{self._base_url()}/{waba_id}/message_templates"
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT) as client:

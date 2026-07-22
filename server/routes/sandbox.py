@@ -20,6 +20,7 @@ from server.execution import (
     astamp_execution_channel,
 )
 from server.helpers import _ok, _err, parse_split_reply
+from server.upload_names import unique_media_name
 
 # Config-key prefix flagging a contact as a sandbox/test number. Operator sends
 # from the official chat check this and stay local instead of hitting GOWA.
@@ -130,8 +131,9 @@ def register_routes(app, deps):
 
     def _save_upload(upload: UploadFile, content: bytes, default_name: str) -> str:
         """Persist an uploaded file under statics/outbox and return its rel path."""
-        suffix = Path(upload.filename or default_name).suffix or Path(default_name).suffix
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            upload.content_type, upload.filename or default_name,
+            default_ext=(Path(default_name).suffix or ".bin"))
         dest.write_bytes(content)
         return f"statics/outbox/{dest.name}"
 

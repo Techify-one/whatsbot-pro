@@ -14,10 +14,11 @@ from pydantic import BaseModel, Field
 class Settings(BaseModel):
     inbound_mode: str = Field(
         default="poll",
-        description="Como receber mensagens: 'poll' (long-poll getUpdates — "
-        "funciona sem host público, recomendado para desktop/EXE) ou 'webhook' "
-        "(registre a URL mostrada na tela de configuração; exige host público). "
-        "Trocar exige reiniciar.",
+        description="Fallback global para canais sem modo próprio. O recebimento "
+        "agora é definido POR CANAL (automático ao criar a inbox: webhook se houver "
+        "domínio HTTPS público, senão long-poll) e é trocável na tela de configuração "
+        "sem reiniciar. 'poll' = long-poll getUpdates (sem host público); 'webhook' = "
+        "exige host público HTTPS.",
     )
     poll_interval: float = Field(
         default=2.0,

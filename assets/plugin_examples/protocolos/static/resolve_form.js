@@ -39,12 +39,13 @@ export function AttendantSelect({ value, onChange, fallbackUser = null }) {
   const extra = (!hasCur && fallbackUser && fallbackUser.id != null)
     ? [{ id: fallbackUser.id, name: fallbackUser.name || fallbackUser.email || ('#' + fallbackUser.id), email: fallbackUser.email }]
     : [];
-  return html`<select class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${cur}
-    onChange=${(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
-    <option value="">Não atribuído</option>
-    ${extra.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
-    ${users.map((u) => html`<option key=${u.id} value=${u.id}>${u.name || u.email || ('#' + u.id)}</option>`)}
-  </select>`;
+  // Mesmo seletor com busca dos demais campos — a lista de atendentes cresce com a equipe.
+  const opts = [...extra, ...users].map((u) => ({
+    value: String(u.id), label: u.name || u.email || ('#' + u.id),
+  }));
+  return html`<${OptionListSelect} options=${opts} value=${cur}
+    placeholder="Não atribuído" searchPlaceholder="Pesquisar atendente…"
+    onChange=${(v) => onChange(v ? Number(v) : null)} />`;
 }
 
 // Um campo, renderizado conforme `def.type`. value/onChange controlados pelo pai.

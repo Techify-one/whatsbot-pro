@@ -74,8 +74,6 @@ export function aiDefaultsFrom(cfg) {
     message_batch_delay: cfg.message_batch_delay ?? 3,
     split_messages: cfg.split_messages ?? true,
     split_message_delay: cfg.split_message_delay ?? 2,
-    transfer_alert_enabled: cfg.transfer_alert_enabled ?? true,
-    transfer_alert_duration: cfg.transfer_alert_duration ?? 5,
     ai_sequential_delay: cfg.ai_sequential_delay ?? 2,
   };
 }

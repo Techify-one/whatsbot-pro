@@ -10,7 +10,10 @@ import {
   sendChannelTemplate,
   createChannelTemplate,
   deleteChannelTemplate,
+  uploadConversationTemplateExample,
+  uploadChannelTemplateExample,
 } from '../../services/api.js';
+import { formatPhoneDisplay } from '../../utils/phone.js';
 
 const html = htm.bind(h);
 
@@ -30,6 +33,85 @@ const html = htm.bind(h);
 
 const MEDIA_FORMATS = ['image', 'video', 'document'];
 const LANG_SUGGESTIONS = ['pt_BR', 'en_US', 'en', 'es_ES', 'es'];
+
+// ── Criação: cabeçalho de mídia + botões (plano 73) ──────────────────────────
+// Espelha as regras do servidor (app/services/template_service.py) só para dar
+// feedback imediato — a Meta continua sendo a validação final.
+const MEDIA_HEADER_KINDS = ['IMAGE', 'VIDEO', 'DOCUMENT'];
+const HEADER_KIND_OPTIONS = [
+  { value: 'none', label: 'Nenhum' },
+  { value: 'TEXT', label: 'Texto' },
+  { value: 'IMAGE', label: 'Imagem' },
+  { value: 'VIDEO', label: 'Vídeo' },
+  { value: 'DOCUMENT', label: 'Documento' },
+];
+const MEDIA_ACCEPT = {
+  IMAGE: 'image/jpeg,image/png',
+  VIDEO: 'video/mp4,video/3gpp',
+  DOCUMENT: '.pdf,.doc,.docx,.xls,.xlsx',
+};
+const BUTTON_TYPE_OPTIONS = [
+  { value: 'QUICK_REPLY', label: 'Resposta rápida' },
+  { value: 'URL', label: 'Link (URL)' },
+  { value: 'PHONE_NUMBER', label: 'Telefone' },
+  { value: 'COPY_CODE', label: 'Copiar código' },
+];
+const BUTTON_TEXT_MAX = 25;
+const BUTTONS_MAX = 10;
+const BUTTON_TYPE_MAX = { URL: 2, PHONE_NUMBER: 1, COPY_CODE: 1 };
+
+// `null` quando a lista é válida; senão a mensagem PT-BR do primeiro problema.
+function validateButtons(buttons) {
+  if (!buttons || !buttons.length) return null;
+  if (buttons.length > BUTTONS_MAX) return `No máximo ${BUTTONS_MAX} botões.`;
+  const counts = {};
+  for (let i = 0; i < buttons.length; i++) {
+    const b = buttons[i];
+    const n = i + 1;
+    counts[b.type] = (counts[b.type] || 0) + 1;
+    const limit = BUTTON_TYPE_MAX[b.type];
+    if (limit && counts[b.type] > limit) {
+      const label = (BUTTON_TYPE_OPTIONS.find(o => o.value === b.type) || {}).label || b.type;
+      return `No máximo ${limit} botão(ões) do tipo "${label}".`;
+    }
+    const text = (b.text || '').trim();
+    if (b.type !== 'COPY_CODE') {
+      if (!text) return `Botão ${n}: informe o texto.`;
+      if (text.length > BUTTON_TEXT_MAX) return `Botão ${n}: texto até ${BUTTON_TEXT_MAX} caracteres.`;
+    }
+    if (b.type === 'URL') {
+      const url = (b.url || '').trim();
+      if (!url) return `Botão ${n}: informe a URL.`;
+      if (url.includes('{{') && !(b.example || '').trim()) {
+        return `Botão ${n}: URL com variável exige um exemplo.`;
+      }
+    }
+    if (b.type === 'PHONE_NUMBER' && !(b.phone_number || '').trim()) {
+      return `Botão ${n}: informe o telefone.`;
+    }
+    if (b.type === 'COPY_CODE' && !(b.example || '').trim()) {
+      return `Botão ${n}: informe o código de exemplo.`;
+    }
+  }
+  return null;
+}
+
+// Só as chaves que o tipo usa (nada extra chega ao servidor).
+function buildButtonPayload(b) {
+  const text = (b.text || '').trim();
+  if (b.type === 'URL') {
+    const out = { type: 'URL', text, url: (b.url || '').trim() };
+    if ((b.example || '').trim()) out.example = (b.example || '').trim();
+    return out;
+  }
+  if (b.type === 'PHONE_NUMBER') {
+    return { type: 'PHONE_NUMBER', text, phone_number: (b.phone_number || '').trim() };
+  }
+  if (b.type === 'COPY_CODE') {
+    return { type: 'COPY_CODE', example: (b.example || '').trim() };
+  }
+  return { type: 'QUICK_REPLY', text };
+}
 
 // Unique, ascending {{n}} indices found in a string.
 function placeholders(text) {
@@ -82,6 +164,10 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null);
   const [creating, setCreating] = useState(false);
+  // Remetente do template: `{id, name, phone}` do canal desta conversa. Exibido
+  // no cabeçalho do modal (lista / envio / criação) para o atendente saber de
+  // qual número oficial o template sai.
+  const [channelInfo, setChannelInfo] = useState(null);
 
   // Per-selection (send) form state.
   const [bodyVars, setBodyVars] = useState({});       // {n: value}
@@ -106,6 +192,7 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
         setTemplates(res.data.templates || []);
         setCanCreate(!!res.data.can_create);
         setCanDelete(!!res.data.can_delete);
+        setChannelInfo(res.data.channel || null);
         setError('');
       } else {
         setError((res && res.error) || 'Falha ao carregar templates.');
@@ -127,6 +214,7 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
         setTemplates(res.data.templates || []);
         setCanCreate(!!res.data.can_create);
         setCanDelete(!!res.data.can_delete);
+        setChannelInfo(res.data.channel || null);
       } else {
         setError((res && res.error) || 'Falha ao carregar templates.');
       }
@@ -260,7 +348,10 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
             ${(selected || creating) ? html`
               <button onClick=${() => { setSelected(null); setCreating(false); }} class="text-wa-secondary hover:text-wa-text text-[18px] leading-none shrink-0" title="Voltar">‹</button>
             ` : null}
-            <span class="text-wa-text text-[15px] font-medium truncate">${title}</span>
+            <div class="flex flex-col min-w-0">
+              <span class="text-wa-text text-[15px] font-medium truncate">${title}</span>
+              <${ChannelBadge} channel=${channelInfo} />
+            </div>
           </div>
           <div class="flex items-center gap-2 shrink-0">
             ${(!loading && supported && !selected && !creating && canCreate) ? html`
@@ -428,33 +519,86 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
   `;
 }
 
+// ── Remetente (sub-component) ────────────────────────────────────────────────
+// "De quem sai este template": nome do canal + número oficial, vindos do payload
+// da listagem (`channel`). O core não sabe o provider — quem informa o número é
+// o próprio plugin do canal (via `status()`), então um provider sem número
+// simplesmente rende só o nome, e um canal ainda não resolvido não rende nada.
+function ChannelBadge({ channel }) {
+  if (!channel) return null;
+  const name = (channel.name || '').trim();
+  const phone = channel.phone ? formatPhoneDisplay(channel.phone) : '';
+  if (!name && !phone) return null;
+  const label = [name, phone].filter(Boolean).join(' · ');
+  return html`
+    <span class="text-wa-secondary text-[11px] truncate" title=${`Canal: ${label}`}>
+      Enviando por ${label}
+    </span>
+  `;
+}
+
 // ── Create form (sub-component) ──────────────────────────────────────────────
-// Builds a SIMPLE definition (name/category/language + header/body/footer text +
-// example values per {{n}}) and POSTs it; the provider assembles the Graph
-// components. Media headers / buttons are intentionally out of scope here.
+// Builds a SIMPLE definition (name/category/language + header/body/footer +
+// example values per {{n}} + media header handle + buttons) and POSTs it; the
+// provider assembles the Graph components. Plano 73 added the media header
+// (uploaded as an example → Meta handle) and the four button types.
 function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, onCreated }) {
   const [name, setName] = useState('');
   const [category, setCategory] = useState('UTILITY');
   const [language, setLanguage] = useState('pt_BR');
+  const [headerKind, setHeaderKind] = useState('none');  // none|TEXT|IMAGE|VIDEO|DOCUMENT
   const [headerText, setHeaderText] = useState('');
   const [bodyText, setBodyText] = useState('');
   const [footerText, setFooterText] = useState('');
   const [headerEx, setHeaderEx] = useState({});  // {n: value}
   const [bodyEx, setBodyEx] = useState({});       // {n: value}
+  const [mediaName, setMediaName] = useState('');
+  const [mediaHandle, setMediaHandle] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [buttons, setButtons] = useState([]);   // [{type, text, url, example, phone_number}]
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [okMsg, setOkMsg] = useState('');
 
   const nameValid = /^[a-z0-9_]+$/.test(name);
-  const headerIdxs = useMemo(() => placeholders(headerText), [headerText]);
+  const isMediaHeader = MEDIA_HEADER_KINDS.includes(headerKind);
+  const headerIdxs = useMemo(
+    () => (headerKind === 'TEXT' ? placeholders(headerText) : []),
+    [headerKind, headerText]);
   const bodyIdxs = useMemo(() => placeholders(bodyText), [bodyText]);
+  const buttonsError = useMemo(() => validateButtons(buttons), [buttons]);
+
+  async function pickMedia(file) {
+    if (!file) return;
+    setUploadError('');
+    setMediaHandle('');
+    setMediaName(file.name || '');
+    setUploading(true);
+    const res = channelMode
+      ? await uploadChannelTemplateExample(channelId, file)
+      : await uploadConversationTemplateExample(conversationId, file);
+    setUploading(false);
+    if (res && res.ok && res.data && res.data.handle) {
+      setMediaHandle(res.data.handle);
+    } else {
+      setUploadError((res && res.error) || 'Falha ao enviar o arquivo.');
+    }
+  }
+
+  function updateButton(i, patch) {
+    setButtons(prev => prev.map((b, idx) => (idx === i ? { ...b, ...patch } : b)));
+  }
 
   const canCreate = useMemo(() => {
-    if (saving || !nameValid || !bodyText.trim()) return false;
+    if (saving || uploading || !nameValid || !bodyText.trim()) return false;
+    if (isMediaHeader && !mediaHandle) return false;
+    if (buttonsError) return false;
     for (const n of headerIdxs) if (!(headerEx[n] || '').trim()) return false;
     for (const n of bodyIdxs) if (!(bodyEx[n] || '').trim()) return false;
     return true;
-  }, [saving, nameValid, bodyText, headerIdxs, headerEx, bodyIdxs, bodyEx]);
+  }, [saving, uploading, nameValid, bodyText, isMediaHeader, mediaHandle,
+      buttonsError, headerIdxs, headerEx, bodyIdxs, bodyEx]);
 
   async function submit() {
     if (!canCreate) return;
@@ -467,10 +611,15 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
       language: language.trim() || 'pt_BR',
       body_text: bodyText.trim(),
     };
-    if (headerText.trim()) payload.header_text = headerText.trim();
+    if (headerKind === 'TEXT' && headerText.trim()) payload.header_text = headerText.trim();
+    if (isMediaHeader && mediaHandle) {
+      payload.header_format = headerKind;
+      payload.header_handle = mediaHandle;
+    }
     if (footerText.trim()) payload.footer_text = footerText.trim();
     if (bodyIdxs.length) payload.body_examples = bodyIdxs.map(n => (bodyEx[n] || '').trim());
     if (headerIdxs.length) payload.header_examples = headerIdxs.map(n => (headerEx[n] || '').trim());
+    if (buttons.length) payload.buttons = buttons.map(buildButtonPayload);
 
     const res = channelMode
       ? await createChannelTemplate(channelId, payload)
@@ -519,10 +668,37 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
       </div>
 
       <div>
-        <label class="text-wa-secondary text-[12px] font-medium block mb-1">Cabeçalho (texto, opcional)</label>
-        <input type="text" value=${headerText}
-          onInput=${(e) => setHeaderText(e.target.value)}
-          placeholder="ex: Olá, {{1}}!" class=${fieldCls} />
+        <label class="text-wa-secondary text-[12px] font-medium block mb-1">Cabeçalho (opcional)</label>
+        <div class="flex flex-wrap gap-3 mb-2">
+          ${HEADER_KIND_OPTIONS.map(opt => html`
+            <label key=${opt.value} class="flex items-center gap-1.5 text-[13px] text-wa-text cursor-pointer">
+              <input type="radio" name="tpl-header-kind" value=${opt.value}
+                checked=${headerKind === opt.value}
+                onChange=${() => { setHeaderKind(opt.value); setUploadError(''); }} />
+              ${opt.label}
+            </label>
+          `)}
+        </div>
+        ${headerKind === 'TEXT' ? html`
+          <input type="text" value=${headerText}
+            onInput=${(e) => setHeaderText(e.target.value)}
+            placeholder="ex: Olá, {{1}}!" class=${fieldCls} />
+        ` : null}
+        ${isMediaHeader ? html`
+          <div class="rounded-[8px] border border-dashed border-wa-border p-3 bg-wa-bg space-y-2">
+            <input type="file" accept=${MEDIA_ACCEPT[headerKind]}
+              onChange=${(e) => pickMedia(e.target.files && e.target.files[0])}
+              class="wa-field w-full text-[13px] rounded-[8px] px-2 py-1.5 border border-wa-border" />
+            <div class="text-[11px] text-wa-secondary">
+              Envie um arquivo de EXEMPLO (até 16 MB) — a Meta usa só para aprovar o modelo.
+            </div>
+            ${uploading ? html`<div class="text-[12px] text-wa-secondary">Enviando…</div>` : null}
+            ${mediaHandle ? html`
+              <div class="text-[12px] text-green-700">Pronto ✓ ${mediaName}</div>
+            ` : null}
+            ${uploadError ? html`<div class="text-[12px] text-red-500">${uploadError}</div>` : null}
+          </div>
+        ` : null}
       </div>
       ${headerIdxs.length ? html`
         <div class="space-y-2 pl-2 border-l-2 border-wa-border">
@@ -566,6 +742,59 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
         <input type="text" value=${footerText}
           onInput=${(e) => setFooterText(e.target.value)}
           placeholder="ex: Equipe Techify" class=${fieldCls} />
+      </div>
+
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-wa-secondary text-[12px] font-medium">Botões (opcional)</label>
+          <button type="button" disabled=${buttons.length >= BUTTONS_MAX}
+            onClick=${() => setButtons(prev => [...prev, { type: 'QUICK_REPLY', text: '' }])}
+            class="text-[12px] px-2 py-1 rounded-[6px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">
+            + Adicionar botão
+          </button>
+        </div>
+        ${buttons.map((b, i) => html`
+          <div key=${'btn' + i} class="rounded-[8px] border border-wa-border p-2 space-y-2 bg-wa-bg">
+            <div class="flex gap-2 items-center">
+              <select value=${b.type}
+                onChange=${(e) => updateButton(i, { type: e.target.value })}
+                class="${fieldCls} flex-1">
+                ${BUTTON_TYPE_OPTIONS.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+              </select>
+              <button type="button" title="Remover botão"
+                onClick=${() => setButtons(prev => prev.filter((_, idx) => idx !== i))}
+                class="px-2 py-1.5 rounded-[6px] text-wa-secondary hover:bg-wa-hover transition-colors">
+                <${TrashIcon} />
+              </button>
+            </div>
+            ${b.type !== 'COPY_CODE' ? html`
+              <input type="text" value=${b.text || ''} maxlength=${BUTTON_TEXT_MAX}
+                onInput=${(e) => updateButton(i, { text: e.target.value })}
+                placeholder="Texto do botão (até 25 caracteres)" class=${fieldCls} />
+            ` : null}
+            ${b.type === 'URL' ? html`
+              <input type="text" value=${b.url || ''}
+                onInput=${(e) => updateButton(i, { url: e.target.value })}
+                placeholder="https://exemplo.com/rastreio/{{1}}" class=${fieldCls} />
+              ${(b.url || '').includes('{{') ? html`
+                <input type="text" value=${b.example || ''}
+                  onInput=${(e) => updateButton(i, { example: e.target.value })}
+                  placeholder="Exemplo da URL completa" class=${fieldCls} />
+              ` : null}
+            ` : null}
+            ${b.type === 'PHONE_NUMBER' ? html`
+              <input type="text" value=${b.phone_number || ''}
+                onInput=${(e) => updateButton(i, { phone_number: e.target.value })}
+                placeholder="+5511999999999" class=${fieldCls} />
+            ` : null}
+            ${b.type === 'COPY_CODE' ? html`
+              <input type="text" value=${b.example || ''}
+                onInput=${(e) => updateButton(i, { example: e.target.value })}
+                placeholder="Código de exemplo (ex: PROMO2026)" class=${fieldCls} />
+            ` : null}
+          </div>
+        `)}
+        ${buttonsError ? html`<div class="text-[12px] text-red-500">${buttonsError}</div>` : null}
       </div>
 
       ${error ? html`<div class="text-red-500 text-[13px]">${error}</div>` : null}

@@ -11,6 +11,8 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
 import { notifyPermissionDenied } from '/static/js/services/notify.js';
+import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
+import { AttributeValueInput } from '/static/js/components/AttributeValueInput.js';
 
 const html = htm.bind(h);
 
@@ -32,6 +34,15 @@ const TYPES = [
 // Abas: as 2 primeiras são escopos de rótulos; as demais são configs do plugin.
 const TABS = [['protocolo', 'Protocolo'], ['atendimento', 'Resolver atendimento'], ['avaliacao', 'Avaliação'], ['geral', 'Configurações gerais']];
 const FIELD_TABS = ['protocolo', 'atendimento'];
+// Rótulo de origem de cada opção do seletor "não enviar avaliação" (aba Avaliação):
+// atributos personalizados do core (contato/conversa) + rótulos da aba "Protocolo".
+const SCOPE_LABEL = { contact: 'contato', conversation: 'conversa', protocolo: 'protocolo' };
+// Cabeçalho de cada grupo no seletor com busca (OptionListSelect grouped).
+const SCOPE_GROUP = { contact: 'Contato', conversation: 'Conversa', protocolo: 'Protocolo' };
+// Opções do seletor de atributo: `scope::key` (o par é a identidade) + grupo por escopo.
+const attrOptions = (defs) => (defs || []).map((a) => ({
+  value: `${a.scope}::${a.key}`, label: a.label, group: SCOPE_GROUP[a.scope] || a.scope,
+}));
 // Direções da regra "ignorar abertura" (qual lado da conversa é analisado).
 const SKIP_DIRECTIONS = [
   ['sent', 'Mensagens enviadas (pelo atendente/IA)'],
@@ -61,6 +72,8 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   const [generalMsg, setGeneralMsg] = useState('');
   const [skip, setSkip] = useState(null);             // regra "ignorar abertura por regex"
   const [attrDefs, setAttrDefs] = useState([]);       // atributos (contato+conversa) p/ o skip da avaliação
+  const [protoFieldDefs, setProtoFieldDefs] = useState([]);  // rótulos da aba "Protocolo" p/ o mesmo skip
+
 
   const load = useCallback(async (sc) => {
     setLoading(true); setMsg('');
@@ -118,6 +131,26 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     } catch (_) { setAttrDefs([]); }
   }, []);
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
+
+  // Rótulos da aba "Protocolo" (sistema de campos PRÓPRIO do plugin) — também
+  // selecionáveis na regra "não enviar avaliação". Carregados à parte dos
+  // `defs` (que seguem a aba aberta) para a aba Avaliação não depender dela.
+  // "atendente" fica de fora: é campo fixo de pessoa, não comparável por valor.
+  const loadProtoFieldDefs = useCallback(async () => {
+    try {
+      const d = await reqJson(`${apiBase}/field-defs?scope=protocolo`, { headers: authHeaders() });
+      const all = (d && d.ok && d.data && d.data.defs) || [];
+      setProtoFieldDefs(all.filter((x) => x.type !== 'atendente').map((x) => ({
+        key: x.key, label: x.label || x.key, scope: 'protocolo', type: x.type,
+        options: Array.isArray(x.options) ? x.options : [],
+      })));
+    } catch (_) { setProtoFieldDefs([]); }
+  }, [apiBase]);
+  useEffect(() => { loadProtoFieldDefs(); }, [loadProtoFieldDefs]);
+
+  // Opções do seletor da regra de skip: atributos do core + rótulos do protocolo.
+  const skipDefs = [...attrDefs, ...protoFieldDefs];
+
 
   function update(i, patch) {
     setDefs((list) => list.map((d, j) => (j === i ? { ...d, ...patch } : d)));
@@ -319,37 +352,36 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
             </div>
           </div>`)}
         <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
-          <div class="text-[12px] font-semibold text-wa-text">Não enviar avaliação quando o contato/conversa tiver o atributo:</div>
+          <div class="text-[12px] font-semibold text-wa-text">Não enviar avaliação quando o contato/conversa/protocolo tiver o atributo:</div>
           <p class="text-[12px] text-wa-secondary">
-            Se o contato (ou a conversa) tiver um dos atributos personalizados abaixo com o valor
-            indicado, ao finalizar o protocolo <b>nem</b> a mensagem normal <b>nem</b> a privada são enviadas.
+            Se o contato (ou a conversa) tiver um dos atributos personalizados abaixo — ou se um
+            <b>rótulo da aba Protocolo</b> estiver preenchido — com o valor indicado, ao finalizar o
+            protocolo <b>nem</b> a mensagem normal <b>nem</b> a privada são enviadas.
           </p>
           ${((proto.skip_attrs) || []).map((r, i) => {
-            const def = attrDefs.find((a) => a.key === r.key && a.scope === r.scope);
+            const def = skipDefs.find((a) => a.key === r.key && a.scope === r.scope);
             const opts = (def && def.options) || [];
             return html`
             <div key=${i} class="flex flex-wrap gap-2 items-end">
               <div class="flex-1 min-w-[160px]">
                 <label class="block text-[12px] text-wa-secondary mb-1">Atributo</label>
-                <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
-                  value=${`${r.scope}::${r.key}`}
-                  onChange=${(e) => { const v = e.target.value; const ix = v.indexOf('::');
-                    updateSkipAttr(i, { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }}>
-                  <option value="::">— selecione —</option>
-                  ${attrDefs.map((a) => html`<option key=${`${a.scope}::${a.key}`} value=${`${a.scope}::${a.key}`}>${a.label} (${a.scope === 'contact' ? 'contato' : 'conversa'})</option>`)}
-                </select>
+                ${canEdit ? html`
+                  <${OptionListSelect} options=${attrOptions(skipDefs)} grouped=${true} float=${true}
+                    value=${r.key ? `${r.scope}::${r.key}` : ''}
+                    placeholder="— selecione —" searchPlaceholder="Pesquisar atributo…"
+                    onChange=${(v) => { const ix = String(v || '').indexOf('::');
+                      updateSkipAttr(i, ix < 0
+                        ? { scope: 'contact', key: '', value: '' }
+                        : { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }} />`
+                : html`<div class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] opacity-60">
+                    ${def ? `${def.label} (${SCOPE_LABEL[def.scope] || def.scope})` : '— selecione —'}
+                  </div>`}
               </div>
               <div class="flex-1 min-w-[140px]">
                 <label class="block text-[12px] text-wa-secondary mb-1">Valor</label>
-                ${opts.length ? html`
-                  <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
-                    value=${r.value} onChange=${(e) => updateSkipAttr(i, { value: e.target.value })}>
-                    <option value="">— selecione —</option>
-                    ${opts.map((o) => html`<option key=${o} value=${o}>${o}</option>`)}
-                  </select>` : html`
-                  <input class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" type="text"
-                    value=${r.value} disabled=${!canEdit}
-                    onInput=${(e) => updateSkipAttr(i, { value: e.target.value })} />`}
+                <${AttributeValueInput} type=${def && def.type} options=${opts}
+                  value=${r.value} disabled=${!canEdit}
+                  onChange=${(v) => updateSkipAttr(i, { value: v })} />
               </div>
               ${canEdit ? html`<button onClick=${() => removeSkipAttr(i)}
                 class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}

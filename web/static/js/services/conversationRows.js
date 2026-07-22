@@ -23,6 +23,30 @@
 export const isUnassigned = (c) => c.assignee_user_id == null && !c.active_agent_key;
 
 /**
+ * Se uma mensagem nova deve NOTIFICAR este atendente (som + pop-up do navegador).
+ *
+ * Regra: a conversa é minha, OU não tem dono nenhum — nem humano nem IA (a mesma
+ * definição de "Não atribuídas" da barra lateral, via `isUnassigned`). Mensagem de
+ * conversa de OUTRO atendente, ou que a IA já está atendendo, não notifica.
+ *
+ * FAIL-OPEN em dois casos, de propósito: payload sem a informação de atribuição
+ * (sandbox, plugin, backend antigo) e instalação sem login (`uid` nulo) notificam
+ * como antes — uma mudança de escopo nunca pode calar um caminho que ela não conhece.
+ *
+ * @param {{ assignee_user_id?: number|null, active_agent_key?: string|null }} msg
+ *   o objeto `message` do broadcast `new_message`.
+ * @param {number|null} currentUserId
+ * @returns {boolean}
+ */
+export function shouldNotifyNewMessage(msg, currentUserId) {
+  const m = msg || {};
+  if (!('assignee_user_id' in m)) return true;   // backend não informou → como antes
+  if (currentUserId == null) return true;        // sem identidade → como antes
+  if (m.assignee_user_id === currentUserId) return true;
+  return isUnassigned(m);
+}
+
+/**
  * Whether a row matches the status chip ('open' | 'closed' | 'all').
  * @param {{ conv_status?: string }} c
  * @param {string} statusFilter

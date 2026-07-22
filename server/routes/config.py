@@ -11,9 +11,9 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Request
 
-from config.settings import (LLM_API_BASE_URL, exposed_config_keys,
-                             writable_config_keys)
-from server.authz import permission_denied
+from config.settings import (LLM_API_BASE_URL, config_key_permission,
+                             exposed_config_keys, writable_config_keys)
+from server.authz import check, permission_denied
 from server.helpers import _ok, _err, _mask_key
 from server import balance_monitor
 from agent import group_mentions
@@ -116,11 +116,22 @@ def register_routes(app, deps):
 
     @app.put("/api/config")
     async def save_config(body: dict, request: Request):
-        denied = permission_denied(request, "settings.manage")
-        if denied:
-            return denied
+        # Autorização POR CHAVE: ``settings.manage`` libera tudo; uma chave que
+        # pertence a uma aba de Configurações Gerais também aceita a permissão
+        # granular daquela aba (``config.settings.config_key_permission``). Basta
+        # UMA chave do corpo ser autorizada para o PUT seguir — as não autorizadas
+        # são ignoradas (nunca gravadas); corpo inteiro negado ⇒ 403.
+        can_all = check(request, "settings.manage")
+        if not can_all:
+            authorized = {k for k in body
+                          if config_key_permission(k)
+                          and check(request, config_key_permission(k))}
+            if not authorized:
+                return permission_denied(request, "settings.manage")
         # R17: the PUT allowlist is derived from the single config-key metadata table.
         allowed_keys = writable_config_keys()
+        if not can_all:
+            allowed_keys = allowed_keys & authorized
         keys_changed = []
         audit_before = {}   # {key: old_value} for the audit trail
         audit_after = {}    # {key: new_value} for the audit trail

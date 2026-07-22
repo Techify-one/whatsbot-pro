@@ -26,6 +26,8 @@ ROLE_DEFAULTS = {
         "conversation.read", "conversation.reply", "conversation.assign",
         "conversation.resolve", "contact.read", "contact.write", "contact.import",
         "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
+        # Abas de Configurações Gerais (a aba "Sons" é pessoal, sem permissão).
+        "settings.general", "settings.advanced", "settings.notifications",
         # IA granular (substitui o antigo agent.manage — gestor recebe todas).
         # Prompt dividido em edit/version/delete (substitui agent.prompts.manage).
         "agent.config.manage", "agent.create", "agent.duplicate",

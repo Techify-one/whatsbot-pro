@@ -221,6 +221,15 @@ class TelegramChannel(Channel):
         local = _local_file(path_or_url)
         if local is not None:
             name = filename or local.name
+            if method == "sendDocument":
+                # O Telegram faz DETECÇÃO DE TIPO no servidor para uploads
+                # multipart: um .mp4 mandado como documento ganha atributos de
+                # vídeo e o cliente o exibe com player, ignorando a intenção de
+                # "enviar como arquivo" (plano 64 — a zona "Arquivo" do drop
+                # ficava indistinguível da zona "Foto ou vídeo"). Este flag
+                # desliga a detecção e o anexo chega como anexo. String "true"
+                # de propósito: aqui o payload vai como form-data, não JSON.
+                payload["disable_content_type_detection"] = "true"
             with local.open("rb") as fh:
                 res = self._request(method, payload, files={field: (name, fh)})
         else:

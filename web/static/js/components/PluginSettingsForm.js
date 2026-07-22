@@ -7,8 +7,12 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders, handleUnauthorized } from '../services/api.js';
+import { SearchableSelect } from './SearchableSelect.js';
 
 const html = htm.bind(h);
+
+// Acima disso o enum ganha campo de busca; abaixo, o <select> nativo é mais leve.
+const ENUM_SEARCH_THRESHOLD = 8;
 
 
 function fieldType(prop) {
@@ -29,6 +33,15 @@ function FieldInput({ name, prop, value, onChange }) {
   const baseCls = "w-full wa-field border border-wa-border rounded px-3 py-2 text-[14px] focus:outline-none focus:border-wa-teal";
 
   if (t === 'enum') {
+    // O tamanho do enum é decidido pelo plugin (ilimitado): acima de um punhado de
+    // opções o popup nativo vira rolagem, então cai no seletor com busca.
+    if (prop.enum.length > ENUM_SEARCH_THRESHOLD) {
+      return html`
+        <${SearchableSelect} value=${value ?? ''} onChange=${onChange}
+          options=${prop.enum.map(opt => ({ value: opt, label: String(opt) }))}
+          inputClass=${baseCls} searchPlaceholder="Pesquisar opção…" />
+      `;
+    }
     return html`
       <select class=${baseCls} value=${value ?? ''} onChange=${e => onChange(e.target.value)}>
         ${prop.enum.map(opt => html`<option value=${opt}>${opt}</option>`)}

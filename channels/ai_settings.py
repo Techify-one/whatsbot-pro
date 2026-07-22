@@ -4,8 +4,9 @@ Each channel may override a subset of the global AI settings under
 ``channels.config["ai"]``. This module reads that override map (cached briefly,
 like the allowed-JID-types cache) and resolves an effective value, falling back
 to a caller-supplied global default. Keeps the per-channel knobs (ligar IA,
-resposta em grupos, transcrição, contexto, agrupamento, mensagens picadas,
-alerta de transferência) DRY and in one place.
+resposta em grupos, transcrição, contexto, agrupamento, mensagens picadas) DRY
+and in one place. O alerta sonoro de transferência NÃO é per-canal (é sobre quem
+RECEBE, não sobre o canal): mora no padrão da equipe em ``config.sound_settings``.
 
 The global ``auto_reply`` master switch (checked FIRST) and the LLM key / low
 balance settings stay global — they are NOT in :data:`PER_CHANNEL_AI_KEYS`.
@@ -37,8 +38,6 @@ PER_CHANNEL_AI_KEYS = (
     "message_batch_delay",
     "split_messages",
     "split_message_delay",
-    "transfer_alert_enabled",
-    "transfer_alert_duration",
     "ai_sequential_enabled",
     "ai_sequential_delay",
     # plano 71: "atendente padrão para novas conversas" — um user_id humano que

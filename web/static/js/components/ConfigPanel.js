@@ -2,7 +2,6 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { hasPermission } from '../utils/permissions.js';
-import { getNotifPref, setNotifPref } from '../utils/notifications.js';
 
 const html = htm.bind(h);
 
@@ -19,23 +18,27 @@ function Section({ title, id, children }) {
   `;
 }
 
-export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
+// `sections`: quais seções renderizar (e, portanto, quais chaves o Salvar manda).
+// Cada aba de Configurações Gerais monta o painel com a sua fatia — "avisos" na
+// aba Geral, "avancado" na aba Avançado. Sem a prop, renderiza todas.
+export function ConfigPanel({ config, saving, onSave, onNotify, currentUser, sections }) {
+  const show = (id) => !sections || sections.includes(id);
   // Avisos de sistema, execuções salvas, retenção de auditoria e a senha do
   // painel vivem no PUT /api/config (gated settings.manage). Sem essa permissão
   // esses campos NÃO aparecem — só a seção "Marcar conversas" (endpoints próprios).
-  const canSettings = hasPermission(currentUser, 'settings.manage');
+  // Gate POR SEÇÃO: cada aba de Configurações Gerais tem a sua permissão;
+  // `settings.manage` é o super-conjunto que libera todas (e é o que gateia a
+  // escrita no PUT /api/config junto com a granular da chave).
+  const canAllSettings = hasPermission(currentUser, 'settings.manage');
+  const canSection = (id) => canAllSettings || hasPermission(
+    currentUser, id === 'avancado' ? 'settings.advanced' : 'settings.general');
+  const canSettings = canSection('avisos') || canSection('avancado');
   // Avisos de sistema no chat (plano 12) — toggles globais por grupo de evento.
   const [systemNoticeAssignment, setSystemNoticeAssignment] = useState(true);
   const [systemNoticeTags, setSystemNoticeTags] = useState(true);
   const [systemNoticeConvLabels, setSystemNoticeConvLabels] = useState(true);
   const [systemNoticeStatus, setSystemNoticeStatus] = useState(true);
   const [systemNoticeAi, setSystemNoticeAi] = useState(true);
-  // Notificação de mensagens privadas (nota interna do operador) — desligado por padrão.
-  const [notifyPrivateMessages, setNotifyPrivateMessages] = useState(false);
-  // Alerta sonoro na transferência de um atendente para OUTRO atendente (só toca
-  // para quem recebeu a conversa). Config global independente do alerta IA→humano.
-  const [agentTransferAlertEnabled, setAgentTransferAlertEnabled] = useState(true);
-  const [agentTransferAlertDuration, setAgentTransferAlertDuration] = useState(5);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
   // URL pública base do painel (domínio real) — usada por links externos (ex.: link
@@ -43,19 +46,8 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   const [publicBaseUrl, setPublicBaseUrl] = useState('');
 
   const [saveSuccess, setSaveSuccess] = useState(false);
-  // Som de notificação (mensagem nova / menção) — preferência PER-DEVICE em
-  // localStorage (não vai no PUT /api/config). Reexpõe o interruptor que sumiu
-  // quando a tela de notificações migrou para um plugin removível (plano 63 F0).
-  // A tela dedicada "Notificações e sons" (por evento) chega na F3.
-  const [notifSoundEnabled, setNotifSoundEnabled] = useState(false);
-  useEffect(() => { setNotifSoundEnabled(getNotifPref('sound')); }, []);
-  function toggleNotifSound(on) {
-    setNotifSoundEnabled(on);
-    setNotifPref('sound', on);   // per-device; aplica na hora (evento whatsbot:notif-prefs)
-  }
-
   // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
-  // (avisos | notificacoes | avancado). Roda uma vez, quando o
+  // (avisos | avancado). Roda uma vez, quando o
   // conteúdo já montou (config carregada).
   const sectionScrolledRef = useRef(false);
   useEffect(() => {
@@ -78,9 +70,6 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
       setSystemNoticeConvLabels(config.system_notice_conv_labels ?? true);
       setSystemNoticeStatus(config.system_notice_status ?? true);
       setSystemNoticeAi(config.system_notice_ai ?? true);
-      setNotifyPrivateMessages(config.notify_private_messages ?? false);
-      setAgentTransferAlertEnabled(config.agent_transfer_alert_enabled ?? true);
-      setAgentTransferAlertDuration(config.agent_transfer_alert_duration ?? 5);
       setMaxExecutions(config.max_executions ?? 200);
       setAuditRetentionDays(config.audit_retention_days ?? 365);
       setPublicBaseUrl(config.public_base_url ?? '');
@@ -89,17 +78,18 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
 
   async function handleSave() {
     const data = {
-      system_notice_assignment: systemNoticeAssignment,
-      system_notice_tags: systemNoticeTags,
-      system_notice_conv_labels: systemNoticeConvLabels,
-      system_notice_status: systemNoticeStatus,
-      system_notice_ai: systemNoticeAi,
-      notify_private_messages: notifyPrivateMessages,
-      agent_transfer_alert_enabled: agentTransferAlertEnabled,
-      agent_transfer_alert_duration: parseInt(agentTransferAlertDuration, 10) || 5,
-      max_executions: parseInt(maxExecutions, 10) || 200,
-      audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
-      public_base_url: (publicBaseUrl || '').trim().replace(/\/+$/, ''),
+      ...(show('avisos') ? {
+        system_notice_assignment: systemNoticeAssignment,
+        system_notice_tags: systemNoticeTags,
+        system_notice_conv_labels: systemNoticeConvLabels,
+        system_notice_status: systemNoticeStatus,
+        system_notice_ai: systemNoticeAi,
+      } : {}),
+      ...(show('avancado') ? {
+        max_executions: parseInt(maxExecutions, 10) || 200,
+        audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
+        public_base_url: (publicBaseUrl || '').trim().replace(/\/+$/, ''),
+      } : {}),
     };
     setSaveSuccess(false);
     const result = await onSave(data);
@@ -116,7 +106,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
   return html`
     <div class="flex flex-col gap-4 flex-1">
 
-      ${canSettings ? html`
+      ${canSection('avisos') && show('avisos') ? html`
       <!-- Section: Avisos de sistema no chat (plano 12) -->
       <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
@@ -184,56 +174,9 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
         </div>
       <//>
 
-      <!-- Section: Notificações -->
-      <${Section} id="notificacoes" title="Notificações">
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
-            <input
-              type="checkbox"
-              checked=${notifSoundEnabled}
-              onChange=${(e) => toggleNotifSound(e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-            />
-            Som de notificação
-          </label>
-          <span class="text-xs text-wa-secondary">Toca um som neste dispositivo ao chegar uma mensagem nova ou uma menção. Preferência local (deste navegador). Ajustes por evento (som, volume e duração) ficam em <span class="font-semibold">Notificações e sons</span>, no menu ⚙️.</span>
-        </div>
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
-            <input
-              type="checkbox"
-              checked=${notifyPrivateMessages}
-              onChange=${(e) => setNotifyPrivateMessages(e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-            />
-            Notificar mensagens privadas
-          </label>
-          <span class="text-xs text-wa-secondary">Ao adicionar uma nota privada (mensagem interna, não enviada ao contato), acende o ícone verde na conversa e a contagem na aba do navegador. Não toca som.</span>
-        </div>
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
-            <input
-              type="checkbox"
-              checked=${agentTransferAlertEnabled}
-              onChange=${(e) => setAgentTransferAlertEnabled(e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal"
-            />
-            Alerta sonoro ao transferir atendimento entre atendentes
-          </label>
-          <span class="text-xs text-wa-secondary">Toca um alerta sonoro quando um atendimento é transferido de um atendente para outro — apenas para o atendente que recebeu a conversa. Não toca ao assumir uma conversa para si.</span>
-          <label class="block text-sm font-semibold text-wa-text mt-1">Duração do alerta (segundos)</label>
-          <input
-            type="number"
-            min="1"
-            max="30"
-            step="1"
-            value=${agentTransferAlertDuration}
-            onInput=${(e) => setAgentTransferAlertDuration(e.target.value)}
-            class="w-full bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-          />
-        </div>
-      <//>
+      ` : null}
 
+      ${canSection('avancado') && show('avancado') ? html`
       <!-- Section: Avancado -->
       <${Section} id="avancado" title="Avançado">
         <!-- Domínio público (URL base) -->
@@ -280,7 +223,10 @@ export function ConfigPanel({ config, saving, onSave, onNotify, currentUser }) {
         </div>
       <//>
 
-      <!-- Save Button (sticky) -->
+      ` : null}
+
+      <!-- Save Button (sticky) — vale para a fatia renderizada nesta aba -->
+      ${canSettings ? html`
       <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">
         <button
           onClick=${handleSave}

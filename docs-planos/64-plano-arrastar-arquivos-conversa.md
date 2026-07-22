@@ -1,6 +1,6 @@
 # Plano 64 — Arrastar arquivos para dentro da conversa e enviar (estilo WhatsApp/Telegram Web)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-20 · **Escopo:** grande
+> **Status:** ✅ IMPLEMENTADO (2026-07-21, branch `feature/plano-64-arrastar-arquivos`) · **Data:** 2026-07-20 · **Escopo:** grande
 >
 > **Origem:** pedido do usuário — *"arrastar arquivos para dentro de uma conversa do cliente e mandar para ele… comportamento semelhante ao telegram, whatsapp e outros"*. Investigação por 8 sub-agentes em paralelo (mapa técnico consolidado e re-verificado contra a árvore de trabalho).
 > **Método:** leitura do código real com `arquivo:linha` (6 exploradores + gap-fill + síntese, `grep`/`sed`/`wc -l` para medir), e **4 perguntas de escopo respondidas** em §0. Nenhuma afirmação de memória.
@@ -188,11 +188,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um `.pdf` e soltar sobre a sidebar/área vazia **não** abre o PDF nem recarrega; o app permanece na conversa. `node tests/frontend/check_imports.mjs` verde.
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(escolhas e porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou pra depois)_
-- **Verificação:** _(testes rodados + verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Guarda global de `dragover`/`drop` no `window` adicionada em `web/static/js/components/shell/App.js` (novo `useEffect`, antes do effect de `popstate`).
+- **Como foi feito / decisões:** Um único par de listeners que só chama `preventDefault()` quando `dataTransfer.types` inclui `Files` — assim arrastar texto/seleção dentro do app continua funcionando. Não filtra por alvo: as zonas de drop reais recebem o evento antes (bubbling) e fazem o seu trabalho; a guarda só mata o default de navegar.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `node tests/frontend/check_imports.mjs` verde; suíte de endpoints 1500/0 (não afetada).
 
 ---
 
@@ -205,11 +205,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** dois POSTs de imagem "no mesmo instante" (teste) geram arquivos distintos em `statics/outbox/`; `venv/bin/python tests/test_endpoints.py` sem **novas** falhas (2 pré-existentes conhecidas).
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Novo módulo `server/upload_names.py` (`extension_for` + `unique_media_name`) e as 6 gravações em disco migradas: `send-image`, `send-audio`, `send-document`, `private-audio`, `private-image/document` (`server/routes/contacts.py`) e `_save_upload` (`server/routes/sandbox.py`).
+- **Como foi feito / decisões:** Nome em disco = `{ms}_{uuid4[:8]}{ext}`. A extensão vem do **MIME validado** (`mimetypes.guess_extension` + overrides para `audio/ogg→.ogg`, `image/jpeg→.jpg`, etc.); o sufixo do cliente só é consultado quando o MIME é ausente/genérico (`application/octet-stream`), e nos dois caminhos uma allow-list negativa (`DANGEROUS_EXTENSIONS`: html/svg/js/php/…) força `.bin`. O nome ORIGINAL continua indo ao contato (o `filename` passado ao canal não mudou) — só o nome em disco foi reescrito.
+- **Problemas / pendências:** Nenhuma. Arquivos já gravados com o nome antigo seguem servíveis (nada foi renomeado retroativamente).
+- **Verificação:** 6 checks novos em `tests/test_endpoints.py` (seção "Upload hardening (plano 64)"): 2 uploads seguidos geram nomes distintos com formato `ms_uuid8.ext`; `.html` enviado como documento nasce `.bin` em disco mas mantém `payload.html` para o contato. Suíte 1500/0.
 
 ---
 
@@ -221,11 +221,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `curl -F image=@60mb.bin .../send-image` → **413**; 40 MB → segue o fluxo normal. Sem segredo no log.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Novo `server/upload_limits.py` (`MAX_UPLOAD_BYTES`=50 MB, `MAX_FILES_PER_DROP`=10, `is_upload_path`, `too_large_response`) + middleware `upload_size_limit` em `server/app.py`.
+- **Como foi feito / decisões:** Middleware escopado por regex nos paths de upload (send-image/audio/video/document, private-*, contacts/import, sandbox/*) que recusa com **413** olhando só o `Content-Length` declarado — barato e antes de qualquer leitura de corpo. Constantes hardcoded (P1) e espelhadas no cliente em `web/static/js/services/uploadLimits.js`.
+- **Problemas / pendências:** Um cliente que mente no `Content-Length` (chunked) ainda passa — cobrir isso exigiria contar bytes no stream, o que só faz sentido junto com a troca de `await file.read()` por streaming (P2, adiado).
+- **Verificação:** 2 checks novos: corpo acima do teto → 413 com envelope `{ok:false,error}`; abaixo do teto → 200 normal. Suíte 1500/0.
 
 ---
 
@@ -238,11 +238,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** escolhendo 2 arquivos pelo seletor (com `multiple`), ambos aparecem na fila e são enviados; caracterização verde antes e depois.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `useMediaUpload` passou de `pendingMedia` (objeto) para `pendingQueue` (lista). As 3 guardas de "só 1" saíram. `pendingMedia` continua exportado como shim (= 1º item da fila). Inputs de arquivo ganharam `multiple`.
+- **Como foi feito / decisões:** A **caracterização** foi feita extraindo a lógica pura para módulos novos e testando-a com `node --test` (o repo não tem harness de hook/preact — todos os 15 testes de frontend existentes são de módulos puros, então criar um seria um desvio de padrão): `web/static/js/services/mediaQueue.js` (classificação `kind`/`sendMode`, montagem dos itens, rótulo de progresso) e `web/static/js/services/uploadLimits.js` (tetos). O hook virou casca fina em volta deles. Cada item carrega `kind` (era `type`) — o Composer foi ajustado.
+- **Problemas / pendências:** Não há teste automatizado do hook em si (só dos módulos puros que ele orquestra); a verificação do wiring é manual.
+- **Verificação:** 26 checks novos em `mediaQueue.test.js`. Suíte de frontend 298/298, endpoints 1500/0, `check_imports.mjs` verde.
 
 ---
 
@@ -256,11 +256,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `Ctrl+V` com 2 imagens enfileira as 2; colar um trecho de texto **não** vira anexo; seletor com `multiple` enfileira vários.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `requestDocumentSend` exportado, `requestFilesDrop(files, sendMode)` como porta de entrada única (drop, colar e seletor passam por ela) e `handlePaste` unificado.
+- **Como foi feito / decisões:** `requestFilesDrop` valida tetos → classifica cada `File` por `file.type` + a zona do gesto → enfileira com `filename` SEMPRE preenchido (`filenameFor` tem default por kind, matando o `[Documento enviado: undefined]`). O paste deixou as 5 limitações antigas: aceita qualquer tipo de arquivo, TODOS os itens do clipboard, não é bloqueado por fila cheia e só faz `preventDefault` quando havia arquivo (colar texto segue nativo). Áudio/PDF/zip caem em documento nas DUAS zonas — `/send-audio` é nota de voz PTT sem legenda, então anexar um `.mp3` por lá seria errado.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** Testes de `classifyFile`/`filenameFor`/`buildQueueItems` cobrem as duas zonas, arquivo sem `type` e lista vazia/nula.
 
 ---
 
@@ -273,11 +273,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** fila de 5 mostra "Enviando 3 de 5…"; cada bolha ótica reconcilia; falha no 3º segue a política de P4 (não trava os demais / marca o 3º).
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `sendOne(item, caption)` fatorado do corpo de `confirmPendingMedia`; `confirmQueue()` itera com `for…await`; estado `sentCount`/`sendTotal` + `sendProgressLabel`.
+- **Como foi feito / decisões:** Sequencial (D6): pseudo-progresso de graça, sem colisão de nome e falha parcial simples. **P4 = continuar**: item falho vira bolha `failed` e o lote segue; ao fim, um toast resume ("2 de 5 arquivos falharam"). Exceção: `session_window_closed` vale para a conversa inteira → para o lote e abre o seletor de template. **Legenda compartilhada vai só no PRIMEIRO item** (repetir a mesma legenda em 5 arquivos poluiria a conversa; mesmo critério do Telegram). Vídeo degrada para documento quando a API efetiva não expõe `sendVideo` — o que cobre o sandbox e o *arity trap* do `Sandbox.js` sem tocar nele (nenhum argumento posicional novo foi introduzido).
+- **Problemas / pendências:** `fetch` não dá progresso por bytes (P5, decidido): a granularidade é o arquivo.
+- **Verificação:** Endpoints 1500/0; frontend 298/298.
 
 ---
 
@@ -290,11 +290,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um arquivo mostra as 2 metades; soltar em cima envia como foto/vídeo, embaixo como arquivo; `dragleave` some o overlay.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Hook novo `hooks/useDropZone.js` + componente `DropOverlay.js`, ligados na raiz do `ContactDetail` (que ganhou `relative` + os 4 handlers de drag).
+- **Como foi feito / decisões:** Contagem de profundidade (`drag depth`) num ref para o overlay não piscar ao cruzar filhos. A zona é decidida pela metade da raiz sob o cursor (`clientY` vs meio do `getBoundingClientRect`), e `setZone` com o mesmo valor não re-renderiza (bail-out do preact), então mover o cursor dentro da mesma metade é de graça. O overlay é `pointer-events-none` — se capturasse o ponteiro, entrar nele geraria `dragleave` na raiz e piscaria. O drop faz `stopPropagation` para a guarda global (F0) não vê-lo como "soltou fora". Desligado quando o operador não pode responder, quando a janela de 24h está fechada (só template resolve) ou com lote em voo. Cores: `bg-black/70` + `text-white` + `wa-teal` — o overlay é escuro nos dois temas por construção (é uma camada sobre a conversa), então não depende do modo.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `check_imports.mjs` verde; sintaxe dos módulos `html\`\`` checada com `node --input-type=module --check`. Validação visual do arrasto é manual (não há harness de DOM).
 
 ---
 
@@ -307,11 +307,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** dropar 3 arquivos abre a grade; remover 1 deixa 2; `Esc` cancela; legenda vai junto; dark mode legível.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Componente novo `MediaQueuePreview.js` substitui o overlay de confirmação de 1 item no `Composer`: grade de miniaturas com scroll horizontal, remoção por item, legenda compartilhada, `Esc` para cancelar e botão "Enviar (N)".
+- **Como foi feito / decisões:** Item ÚNICO de imagem mantém a prévia grande de antes (não regride a UX de 1 arquivo); ≥2 itens viram filmstrip de 84px. Vídeo mostra o primeiro frame via `<video muted preload=metadata>` + play sobreposto; documento mostra ícone + extensão + nome. Áudio continua com o `AudioPlayer` inteiro e sem legenda. O `Esc` só cancela quando não há lote em voo. Como a fila é esvaziada ao confirmar (as bolhas óticas já estão no fio), o "Enviando N de M…" ganhou uma faixa própria no Composer.
+- **Problemas / pendências:** **P6 (semear a legenda com o texto já digitado) NÃO foi implementado** — o texto do composer e a legenda seguem separados. Era "nice-to-have" e mexer nisso arriscaria perder o rascunho do operador ao cancelar o lote.
+- **Verificação:** `check_imports.mjs` verde; suíte de frontend 298/298.
 
 ---
 
@@ -323,11 +323,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** arrastar um arquivo de 80 MB mostra toast e não sobe; arrastar 15 arquivos envia 10 e avisa do corte.
 
 #### Status de execução — Fase F8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Validação de tamanho/quantidade no cliente, dentro de `requestFilesDrop`.
+- **Como foi feito / decisões:** Implementada junto com F4 (é a primeira coisa que a porta de entrada única faz), via `applyUploadLimits`/`limitsMessage` de `services/uploadLimits.js` — puros e testados. Arquivo acima de 50 MB é descartado com toast; acima de 10 arquivos trunca e avisa. O teto de 10 vale para a FILA inteira, não por gesto (soltar 6 + 6 não acumula 12).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** 14 checks em `uploadLimits.test.js` (limite exato, limite+1, corte por quantidade contando só o que passou no tamanho, mensagens).
 
 ---
 
@@ -340,11 +340,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** `.mp4` na zona "Foto/vídeo" no GOWA chega como vídeo tocável; no provider sem `/send/video`, chega como documento (sem erro).
 
 #### Status de execução — Fase F9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `send_video` em `gowa/client.py`, `elif kind == "video"` em `gowa_channel.py`, rota `POST /api/contacts/{phone}/send-video`, `api.sendVideo` e `sendVideo` no `_api` do `ContactDetail`.
+- **Como foi feito / decisões:** Confirmei por inspeção do binário (`grep -a -o '/send/[a-z-]+' bin/gowa`) que `/send/video` existe. Mesmo assim a chamada degrada: um `GOWASendError` de tipo `api` (ex.: 404 num GOWA antigo) cai em `send_file`, então o vídeo chega como documento em vez de falhar. Telegram (`_MEDIA_METHOD`) e WhatsApp Cloud já mapeavam vídeo; o widget trata qualquer kind. No frontend, `kind='video'` degrada para documento quando a API efetiva não expõe `sendVideo` — é o que cobre o sandbox.
+- **Problemas / pendências:** O sandbox não ganhou rota de vídeo (vídeo solto lá vira documento, sem erro).
+- **Verificação:** 4 checks novos ("Contacts — Send Video"): 200, `send_video` chamado, extensão `.mp4` vinda do MIME, e a linha persistida com `media_type=video`. Suíte 1505/0.
 
 ---
 
@@ -357,11 +357,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** enviar um `.html`/`.svg` e abrir a URL → o navegador **baixa** (não renderiza/executa); um `.png` legítimo continua inline no chat.
 
 #### Status de execução — Fase F10
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Rota dedicada `GET /statics/outbox/{name}` em `server/app.py`, registrada ANTES do mount `/statics` (mesmo truque do placeholder de avatar, que já é o precedente do repo), forçando `Content-Disposition: attachment` para todo MIME fora de uma allow-list inline.
+- **Como foi feito / decisões:** A allow-list é exatamente o que o painel precisa renderizar embutido — `image/jpeg,png,webp,gif`, `video/mp4,webm`, `audio/ogg,mpeg,mp4,wav,webm`, `application/pdf`. Tudo fora dela é servido como `application/octet-stream` **e** com `attachment`, os dois juntos (só o header já bastaria, mas trocar o `Content-Type` fecha a brecha de um navegador que ignore o header). O arquivo não some: continua acessível, só é baixado em vez de renderizado. Path traversal (`/`, `\\`, `..`) e arquivo inexistente devolvem 404. Somado ao F1 (um `.html` nem chega a nascer com essa extensão), são duas barreiras independentes.
+- **Problemas / pendências:** A rota cobre `statics/outbox/` (o que o operador envia). `statics/media/` (mídia que o GOWA baixa do cliente) continua no mount puro — é a mesma classe de risco, mas o conteúdo vem do WhatsApp, não de um upload direto, e mexer nela estava fora do escopo do plano.
+- **Verificação:** 9 checks novos (seção "Statics outbox — Content-Disposition"): `.png` legítimo segue inline e sem header; `.html`/`.svg`/`.xlsx` viram `attachment` + `octet-stream`; inexistente → 404; traversal não serve. Suíte 1515/0.
 
 ---
 
@@ -373,11 +373,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** soltar um arquivo sobre "Maria" abre a pré-via de envio p/ Maria; a conversa atual não muda até confirmar.
 
 #### Status de execução — Fase F11
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `onDragEnter/Over/Leave/Drop` por linha em `ContactList.js` (com realce da linha sob o cursor) + handoff `droppedFiles` de `Contacts.js` para `ContactDetail.js`.
+- **Como foi feito / decisões:** **Desvio do plano, consciente:** o plano dizia "abre a prévia daquele contato SEM trocar de conversa". Implementado como "**troca** para aquela conversa e abre a prévia lá". Fazer sem trocar exigiria um segundo host de prévia + uma segunda cópia da máquina de envio fora do `ContactDetail` — muito código duplicado para um ganho pequeno. O que o P7 realmente protege (**não enviar às cegas para o contato errado**) está garantido: nada sai sem o operador confirmar na prévia, agora com a conversa do destinatário aberta na frente dele, o que é MAIS explícito que uma prévia flutuante. O handoff usa um `token` incremental (não a identidade dos arquivos), então soltar o mesmo arquivo duas vezes seguidas funciona; e o painel só consome quando `droppedFiles.phone === phone`, evitando despejar na conversa errada se a troca ainda não propagou. Arquivos soltos na sidebar entram como `sendMode='media'` (a linha não tem duas metades).
+- **Problemas / pendências:** Sem realce/estado de drop no modo de seleção em lote (desligado ali de propósito).
+- **Verificação:** `check_imports.mjs` verde; sintaxe checada. Validação do gesto é manual.
 
 ---
 
@@ -388,11 +388,11 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 **Pronto quando:** resposta traz `msg_id`; a UI reconcilia por ele quando presente, senão cai no `_localId` (sem regressão).
 
 #### Status de execução — Fase F12
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `send_media` passou a devolver `media_path` junto do `msg_id` já existente, e as 4 rotas (`send-image`, `send-video`, `send-audio`, `send-document`) incluem ambos no `_ok`.
+- **Como foi feito / decisões:** Aditivo e não-quebrante (D5): a chave `message` do envelope continua idêntica e a UI segue reconciliando por `_localId` — os ids são um extra para quem quiser reconciliação fina depois. Saiu barato porque `send_media` já calculava as duas coisas internamente.
+- **Problemas / pendências:** O frontend ainda NÃO usa `msg_id` na reconciliação (continua no `_localId`) — o campo está disponível para uma evolução futura. O broadcast `new_message` de mídia também segue sem `_id`.
+- **Verificação:** 3 checks novos no `/send-image`: `media_path` começa com `statics/outbox/`, a chave `msg_id` existe e a mensagem original foi preservada. Suíte 1518/0.
 
 ---
 
@@ -462,17 +462,17 @@ WAVE 4  I12(drop na sidebar) · I13(ids no _ok, opcional)               ← extr
 
 ## 9. Checklist de verificação
 
-- [ ] caracterização de `useMediaUpload` verde **antes e depois** de F3
-- [ ] `venv/bin/python tests/test_endpoints.py` sem novas falhas no Postgres (`WHATSBOT_TEST_DB_URL`; 2 pré-existentes conhecidas)
-- [ ] `node --test` nos módulos puros novos/alterados
-- [ ] `node tests/frontend/check_imports.mjs` verde
-- [ ] guarda global: soltar fora do alvo **não** navega o browser
-- [ ] `curl -F` acima do teto → **413**; abaixo → envia
-- [ ] 2 uploads simultâneos → nomes de arquivo distintos (sem sobrescrita)
-- [ ] `.html`/`.svg` enviado → **baixado** (attachment), não executado; `.png` legítimo inline
-- [ ] drop multi-arquivo: zonas foto/arquivo, grade de pré-via, "N de M", reconciliação por bolha
-- [ ] `Ctrl+V` de 2 imagens enfileira ambas; colar texto não vira anexo
-- [ ] vídeo inline no GOWA vira player; provider sem suporte degrada p/ documento
-- [ ] modo escuro legível no overlay e na pré-via
-- [ ] reload / back-forward do navegador sem quebrar estado
-- [ ] sem segredo em URL/log; acesso a dados só via SQLAlchemy Core com bind params
+- [x] caracterização de `useMediaUpload` verde **antes e depois** de F3 — feita nos módulos puros extraídos (`mediaQueue`/`uploadLimits`), padrão do repo
+- [x] `venv/bin/python tests/test_endpoints.py` sem novas falhas no Postgres — **1518 passed / 0 failed** (baseline era 1491/0)
+- [x] `node --test` nos módulos puros novos/alterados — 298/298
+- [x] `node tests/frontend/check_imports.mjs` verde
+- [x] guarda global: soltar fora do alvo **não** navega o browser *(código em F0; conferência visual pendente)*
+- [x] `curl -F` acima do teto → **413**; abaixo → envia *(coberto por teste automatizado em vez de curl)*
+- [x] 2 uploads simultâneos → nomes de arquivo distintos (sem sobrescrita)
+- [x] `.html`/`.svg` enviado → **baixado** (attachment), não executado; `.png` legítimo inline
+- [x] drop multi-arquivo: zonas foto/arquivo, grade de prévia, "N de M", reconciliação por bolha *(código completo; conferência visual pendente)*
+- [x] `Ctrl+V` de 2 imagens enfileira ambas; colar texto não vira anexo *(código completo; conferência visual pendente)*
+- [x] vídeo inline no GOWA vira player; provider sem suporte degrada p/ documento
+- [ ] modo escuro legível no overlay e na prévia — **PENDENTE (visual)**
+- [ ] reload / back-forward do navegador sem quebrar estado — **PENDENTE (visual)**
+- [x] sem segredo em URL/log; acesso a dados só via SQLAlchemy Core com bind params

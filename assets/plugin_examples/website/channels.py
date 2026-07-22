@@ -31,6 +31,13 @@ PROVIDER = "website"
 class WebsiteChannel(Channel):
     provider = PROVIDER
 
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    # O widget de site não é WhatsApp/Telegram: os contatos nascem de visitantes
+    # do navegador (chat_id sintético `web_…`, sem telefone), então tem tipo próprio.
+    @classmethod
+    def contact_type(cls) -> str:
+        return "site"
+
     # ── Não é endereçável a frio (plano tipos-de-contato) ────────────
     # A sessão `wsess_…` é criada no navegador do visitante quando ELE abre o
     # widget — não há id que o operador conheça de antemão para começar uma

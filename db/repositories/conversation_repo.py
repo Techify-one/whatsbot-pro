@@ -235,6 +235,20 @@ def get(conv_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def assignment_of(conv_id: int) -> dict | None:
+    """Só quem "possui" a conversa: ``{assignee_user_id, active_agent_key}``.
+
+    Vai no payload do ``new_message`` do ingest para o painel decidir se toca o som
+    de mensagem nova (só as minhas ou as sem dono). Duas colunas em vez do ``get()``
+    inteiro porque isto roda no caminho quente de TODA mensagem recebida.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(conversations.c.assignee_user_id, conversations.c.active_agent_key)
+            .where(conversations.c.id == conv_id)).mappings().first()
+    return dict(row) if row else None
+
+
 def get_open_for_contact(contact_id: int) -> dict | None:
     """Most recent open conversation for a contact (the active thread)."""
     with get_engine().connect() as conn:

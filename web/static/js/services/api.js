@@ -662,9 +662,16 @@ export async function sendConversationTemplate(convId, payload) {
 
 // Create a template (WhatsApp Cloud) — gated by template.create.
 // body: {name, category?, language?, body_text, header_text?, footer_text?,
-//        body_examples?, header_examples?}
+//        body_examples?, header_examples?, header_format?, header_handle?,
+//        buttons?}  (plano 73 — cabeçalho de mídia + botões)
 export async function createConversationTemplate(convId, payload) {
   return request('POST', `/api/atendimentos/${convId}/templates`, payload);
+}
+
+// Sobe um arquivo de exemplo do cabeçalho de mídia → {handle} (plano 73).
+// O handle volta como `header_handle` na criação do template.
+export async function uploadConversationTemplateExample(convId, file) {
+  return uploadRequest(`/api/atendimentos/${convId}/templates/upload-example`, { file });
 }
 
 // Delete a template (all languages) by name — gated by template.delete.
@@ -693,9 +700,15 @@ export async function sendChannelTemplate(channelId, payload) {
   return request('POST', `/api/channels/${encodeURIComponent(channelId)}/send-template`, payload);
 }
 
-// Cria um template no canal — gated por template.create.
+// Cria um template no canal — gated por template.create. Mesmo payload da versão
+// conv-scoped (inclui header_format/header_handle/buttons — plano 73).
 export async function createChannelTemplate(channelId, payload) {
   return request('POST', `/api/channels/${encodeURIComponent(channelId)}/templates`, payload);
+}
+
+// Sobe um arquivo de exemplo do cabeçalho de mídia no canal → {handle}.
+export async function uploadChannelTemplateExample(channelId, file) {
+  return uploadRequest(`/api/channels/${encodeURIComponent(channelId)}/templates/upload-example`, { file });
 }
 
 // Apaga um template (todas as línguas) no canal — gated por template.delete.

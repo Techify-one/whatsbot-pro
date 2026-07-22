@@ -1,9 +1,9 @@
 import { h } from 'preact';
-import { useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
-import { ContactList, typingKey } from './ContactList.js';
+import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
@@ -178,6 +178,24 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [setShowArchived, setSelected, setSelectedConvId]);
   useEffect(() => { setSelectionMode(false); setSelectedKeys([]); }, [showArchived]);
 
+  // Esc fecha, em camadas, o que estiver aberto no hub: primeiro o painel lateral
+  // (contato / atendimento), depois a própria conversa — volta ao estado "nenhuma
+  // conversa selecionada" (URL "/", só a sidebar + placeholder). Guardas:
+  // `defaultPrevented` respeita quem já consumiu a tecla (menus de autocomplete do
+  // compositor, prévia de mídia), e um overlay `.fixed.inset-0` no DOM significa
+  // modal aberto — ele tem o próprio Esc e tem precedência.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (document.querySelector('.fixed.inset-0')) return;
+      if (openPanel) { setOpenPanel(null); return; }
+      if (selectedRef.current == null && selectedConvIdRef.current == null) return;
+      selectContact(null);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPanel, setOpenPanel, selectContact, selectedRef, selectedConvIdRef]);
+
   // ── Filters + saved presets + derived sidebar list ──────────────────
   // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
   // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
@@ -241,6 +259,19 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
 
   // ── New-conversation / channel picker ───────────────────────────────
   const picker = useChannelPicker({ selectContact, fetchContacts, setSearch, newConvChannelRef });
+
+  // Arrastar arquivos para uma linha da sidebar (plano 64 · F11). Abre aquela
+  // conversa e entrega os arquivos ao painel, que monta a prévia — nada é
+  // enviado sem confirmação (P7). O handoff é um estado com `token` para o
+  // painel consumir uma vez só (soltar os MESMOS arquivos duas vezes seguidas
+  // ainda dispara, porque o token muda).
+  const [droppedFiles, setDroppedFiles] = useState(null);
+  const dropTokenRef = useRef(0);
+  const handleRowDropFiles = useCallback((row, files) => {
+    selectContact(row);
+    dropTokenRef.current += 1;
+    setDroppedFiles({ token: dropTokenRef.current, phone: row.phone, files });
+  }, [selectContact]);
   const {
     checkingPhone, checkPhoneError, setCheckPhoneError,
     channelPicker, setChannelPicker,
@@ -276,6 +307,22 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
   const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  // Linha da conversa aberta: é ela que carrega `channel_provider`/`channel_name`
+  // (só a query da LISTA traz o canal — o detalhe do contato não). O cabeçalho do
+  // chat mostra o mesmo selo da sidebar a partir daqui, sem requisição nova.
+  const selectedRow = selectedKey
+    ? (displayedContacts || []).find(c => rowKeyFor(c) === selectedKey) || null
+    : null;
+  // Rede de segurança: um filtro/busca ativo pode esconder a linha da conversa ABERTA
+  // da lista. Aí o canal vem do catálogo de canais (casado por `channelId`), para o
+  // selo do cabeçalho não piscar quando o operador mexe nos filtros.
+  const selectedChannelOpt = selectedChannelId
+    ? (channelOptions || []).find(o => o.id === selectedChannelId) || null
+    : null;
+  const headerChannelProvider = (selectedRow && selectedRow.channel_provider)
+    || (selectedChannelOpt && selectedChannelOpt.provider) || null;
+  const headerChannelName = (selectedRow && selectedRow.channel_name)
+    || (selectedChannelOpt && selectedChannelOpt.label) || null;
   const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
@@ -328,6 +375,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           selected=${selectedKey}
           showChannel=${showChannel}
           onSelect=${selectContact}
+          onDropFiles=${handleRowDropFiles}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
           aiRespondingState=${aiRespondingState}
@@ -384,6 +432,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 setContactData=${setContactData}
                 info=${info}
                 contact=${contactData}
+                channelProvider=${headerChannelProvider}
+                channelName=${headerChannelName}
+                showChannel=${showChannel}
                 onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
                 currentUser=${currentUser}
@@ -397,6 +448,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 loadOlder=${loadOlder}
                 loadingOlder=${loadingOlder}
                 hasMore=${contactData && contactData.has_more}
+                droppedFiles=${droppedFiles}
+                onDroppedFilesConsumed=${() => setDroppedFiles(null)}
               />`
           }
           ${openPanel === 'contact' && selected && canReadContact ? html`

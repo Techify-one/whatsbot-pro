@@ -5,6 +5,7 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { parseAudioModes, serializeAudioModes } from './constants.js';
+import { SearchableSelect } from '../SearchableSelect.js';
 
 const html = htm.bind(h);
 
@@ -46,14 +47,13 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
            a conversa nova nasce atribuída a este humano e com a IA desligada. -->
       <div>
         <label class="block text-[12px] text-wa-secondary mb-1">Atendente padrão para novas conversas</label>
-        <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-          value=${assigneeVal}
-          onChange=${(e) => set('default_assignee_user_id', e.target.value ? parseInt(e.target.value, 10) : null)}>
-          <option value="">Nenhum (fila "Não atribuídas")</option>
-          ${users.map((u) => html`
-            <option key=${u.id} value=${u.id}>${u.name || u.email}</option>
-          `)}
-        </select>
+        <${SearchableSelect}
+          value=${assigneeVal ? String(assigneeVal) : ''}
+          onChange=${(v) => set('default_assignee_user_id', v ? parseInt(v, 10) : null)}
+          options=${users.map((u) => ({ value: String(u.id), label: u.name || u.email }))}
+          allowEmpty=${true} emptyLabel='Nenhum (fila "Não atribuídas")'
+          placeholder='Nenhum (fila "Não atribuídas")'
+          searchPlaceholder="Pesquisar atendente…" />
         ${assigneeVal ? html`
           <span class="block text-[11px] text-wa-secondary mt-1">A conversa nasce atribuída a esta pessoa, com a IA desligada.</span>
         ` : null}
@@ -202,24 +202,6 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
           ` : null}
         </div>
 
-        <!-- Alerta sonoro de transferência -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
-            <input type="checkbox" checked=${ai.transfer_alert_enabled !== false}
-              onChange=${(e) => set('transfer_alert_enabled', e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
-            Alerta sonoro ao transferir para humano
-          </label>
-          ${ai.transfer_alert_enabled !== false ? html`
-            <div>
-              <label class="block text-[12px] text-wa-secondary mb-1">Duração do alerta (segundos)</label>
-              <input type="number" min="1" max="30" step="1"
-                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-                value=${ai.transfer_alert_duration ?? 5}
-                onInput=${(e) => num('transfer_alert_duration', e.target.value, 5)} />
-            </div>
-          ` : null}
-        </div>
       ` : null}
     </div>
   `;

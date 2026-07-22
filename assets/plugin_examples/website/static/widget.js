@@ -39,6 +39,9 @@
       + '.wb-msg.user{align-self:flex-end;background:' + color + ';color:#fff;border-bottom-right-radius:4px}'
       + '.wb-msg.assistant{align-self:flex-start;background:#fff;color:#111;border:1px solid #e5e7eb;border-bottom-left-radius:4px}'
       + '.wb-msg img{max-width:100%;border-radius:8px;display:block}'
+      + '.wb-msg audio{width:240px;max-width:100%;display:block}'
+      + '.wb-msg video{max-width:100%;border-radius:8px;display:block}'
+      + '.wb-msg .wb-cap{margin-top:6px}'
       + '.wb-typing{align-self:flex-start;background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:10px 12px;display:none}'
       + '.wb-typing span{display:inline-block;width:6px;height:6px;margin:0 2px;border-radius:50%;background:#9ca3af;animation:wbb 1.2s infinite}'
       + '.wb-typing span:nth-child(2){animation-delay:.2s}.wb-typing span:nth-child(3){animation-delay:.4s}'
@@ -97,9 +100,19 @@
     el.className = 'wb-msg ' + (role === 'user' ? 'user' : 'assistant');
     if (opts.media_url) {
       var mt = opts.media_type || '';
-      if (mt === 'image') { var im = document.createElement('img'); im.src = opts.media_url; el.appendChild(im); }
-      else { var a = document.createElement('a'); a.href = opts.media_url; a.target = '_blank'; a.textContent = content || 'Anexo'; el.appendChild(a); }
-      if (content && mt === 'image') { var cap = document.createElement('div'); cap.textContent = content; el.appendChild(cap); }
+      var caption = content;
+      if (mt === 'image') {
+        var im = document.createElement('img'); im.src = opts.media_url; el.appendChild(im);
+      } else if (mt === 'audio') {
+        var au = document.createElement('audio'); au.controls = true; au.preload = 'metadata'; au.src = opts.media_url; el.appendChild(au);
+        if (caption === '[Áudio]') caption = '';  // placeholder body, not a real caption
+      } else if (mt === 'video') {
+        var vd = document.createElement('video'); vd.controls = true; vd.preload = 'metadata'; vd.src = opts.media_url; el.appendChild(vd);
+      } else {
+        var a = document.createElement('a'); a.href = opts.media_url; a.target = '_blank'; a.textContent = content || 'Anexo'; el.appendChild(a);
+        caption = '';  // link already carries the label
+      }
+      if (caption) { var cap = document.createElement('div'); cap.className = 'wb-cap'; cap.textContent = caption; el.appendChild(cap); }
     } else {
       el.textContent = content;
     }

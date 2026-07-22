@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import mimetypes
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, bootstrap_gowa_upgrade, discover_and_load, PluginRegistry
 from server.persistence_check import ensure_storage_persistence
+from server.upload_limits import MAX_UPLOAD_BYTES, is_upload_path, too_large_response
 from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services, set_channel_runtime as _set_channel_runtime, set_deps as _set_deps
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
@@ -462,6 +464,46 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
+    # Operator-uploaded media (plano 64 · F10) — XSS armazenado.
+    #
+    # `statics/outbox/` recebe arquivo ARBITRÁRIO enviado pelo operador e é
+    # servido same-origin, com uma CSP que permite `'unsafe-inline'`. Um `.html`
+    # ou `.svg` ali dentro executaria script no domínio do painel (o `nosniff`
+    # não ajuda: o tipo é corretamente adivinhado). Arrastar arquivos amplia
+    # muito a superfície, então:
+    #
+    #   1. o nome em disco já nasce com a extensão do MIME validado e nunca com
+    #      uma extensão executável (F1, server/upload_names.py); e
+    #   2. esta rota — que shadow-a o mount, por ser registrada ANTES, igual ao
+    #      precedente do avatar — força `Content-Disposition: attachment` para
+    #      todo tipo fora de uma allow-list inline pequena e explícita.
+    #
+    # A allow-list é exatamente o que o painel precisa renderizar embutido
+    # (<img>/<video>/<audio> e o PDF que o navegador abre). Qualquer coisa fora
+    # dela é baixada, nunca renderizada.
+    _INLINE_SAFE_MIMES = {
+        "image/jpeg", "image/png", "image/webp", "image/gif",
+        "video/mp4", "video/webm",
+        "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm",
+        "application/pdf",
+    }
+
+    @app.get("/statics/outbox/{name}")
+    async def serve_outbox_media(name: str):
+        if "/" in name or "\\" in name or ".." in name:
+            return Response(status_code=404)
+        media_file = statics_outbox_dir / name
+        if not media_file.is_file():
+            return Response(status_code=404)
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if mime in _INLINE_SAFE_MIMES:
+            return FileResponse(str(media_file), media_type=mime)
+        return FileResponse(
+            str(media_file),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")
 
@@ -558,6 +600,21 @@ def create_app(
             return await call_next(request)
         finally:
             reset_current_actor(_actor_token)
+
+    @app.middleware("http")
+    async def upload_size_limit(request: Request, call_next):
+        # Plano 64 · F2 — recusa um upload grande demais ANTES de lê-lo na RAM.
+        # Só olha o Content-Length declarado (barato); um cliente que mente sobre
+        # ele ainda passa, mas o teto do navegador + este gate cobrem o caso real
+        # (arrastar um arquivo enorme por engano).
+        if request.method == "POST" and is_upload_path(request.url.path):
+            raw_len = request.headers.get("content-length")
+            try:
+                if raw_len is not None and int(raw_len) > MAX_UPLOAD_BYTES:
+                    return too_large_response()
+            except ValueError:
+                pass
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

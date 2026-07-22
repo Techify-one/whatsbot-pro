@@ -13,15 +13,19 @@ duração = por quantos segundos o alerta insiste).
 
 from __future__ import annotations
 
+import re
+
 # ── Eventos (o que dispara som) ────────────────────────────────────────────────
-# ``server_gated``: os campos ``enabled``/``duration`` são definidos pelo ADMIN nas
-# keys legadas (``transfer_alert_*`` / ``agent_transfer_alert_*``), não por usuário
-# — o usuário/dispositivo só customiza ``sound``/``volume`` dentro do habilitado.
+# Todos os eventos são editáveis pelo atendente (ativação, som, volume e — nos de
+# classe ``alert`` — duração). O ADMIN define o padrão da equipe em
+# ``config.sound_settings``; o servidor ainda decide SE o alerta de transferência
+# é emitido (gate), lendo esse mesmo padrão via :func:`event_gate`.
 EVENTS: list[dict] = [
-    {"key": "new_message",    "label": "Mensagem nova",                 "group": "Mensagens",      "cls": "notification", "duration_applies": False},
+    {"key": "new_message",    "label": "Mensagem nova",                 "group": "Mensagens",      "cls": "notification", "duration_applies": False,
+     "hint": "Toca só nas conversas atribuídas a você ou sem atendente e sem IA — mensagem de conversa de outro atendente não toca."},
     {"key": "mention",        "label": "Menção interna",                "group": "Mensagens",      "cls": "notification", "duration_applies": False},
-    {"key": "ia_to_human",    "label": "Transferência da IA → atendente", "group": "Transferências", "cls": "alert", "duration_applies": True, "server_gated": True},
-    {"key": "assigned_to_me", "label": "Conversa atribuída a você",     "group": "Transferências", "cls": "alert", "duration_applies": True, "server_gated": True},
+    {"key": "ia_to_human",    "label": "Transferência da IA → atendente", "group": "Transferências", "cls": "alert", "duration_applies": True},
+    {"key": "assigned_to_me", "label": "Conversa atribuída a você",     "group": "Transferências", "cls": "alert", "duration_applies": True},
 ]
 
 # ── Catálogo de sons (MVP 100% sintetizado) ────────────────────────────────────
@@ -37,6 +41,40 @@ SOUNDS: list[dict] = [
 
 VALID_EVENT_KEYS: frozenset[str] = frozenset(e["key"] for e in EVENTS)
 VALID_SOUND_IDS: frozenset[str] = frozenset(s["id"] for s in SOUNDS)
+
+# Sons IMPORTADOS pela equipe (tabela ``custom_sounds``): o id da preferência é
+# ``custom:<row id>``. A validação aqui é só de FORMATO — a existência não é
+# checada (a normalização é pura, sem DB, e um som excluído não pode invalidar a
+# preferência inteira: o motor cai no som padrão do evento).
+_CUSTOM_SOUND_RE = re.compile(r"^custom:[1-9][0-9]{0,17}$")
+
+
+def is_valid_sound_id(sound_id) -> bool:
+    """True para um som do catálogo estático OU um importado (``custom:<n>``)."""
+    if not isinstance(sound_id, str):
+        return False
+    return sound_id in VALID_SOUND_IDS or bool(_CUSTOM_SOUND_RE.match(sound_id))
+
+
+def custom_entry(sound_id: int, name: str, filename: str, extra: dict | None = None) -> dict:
+    """Entrada de catálogo para um som importado (mesma forma de :data:`SOUNDS`).
+
+    ``kind="file"`` diz ao motor para tocar a ``url`` em vez de sintetizar, e
+    ``cls="any"`` deixa o som disponível para QUALQUER evento (one-shot e alerta —
+    num alerta o arquivo é repetido até a duração escolhida)."""
+    entry = {
+        "id": f"custom:{sound_id}",
+        "label": name,
+        "cls": "any",
+        "kind": "file",
+        "url": f"/statics/sounds/{filename}",
+    }
+    if extra:
+        entry["size_bytes"] = extra.get("size_bytes")
+        entry["created_by"] = extra.get("created_by")
+    return entry
+
+
 _DURATION_EVENTS: frozenset[str] = frozenset(
     e["key"] for e in EVENTS if e.get("duration_applies")
 )
@@ -73,7 +111,7 @@ def _normalize_event(key: str, raw: dict) -> dict:
     out: dict = {}
     if "enabled" in raw:
         out["enabled"] = bool(raw["enabled"])
-    if "sound" in raw and raw["sound"] in VALID_SOUND_IDS:
+    if "sound" in raw and is_valid_sound_id(raw["sound"]):
         out["sound"] = raw["sound"]
     if "volume" in raw:
         vol = _clamp_volume(raw["volume"])
@@ -112,3 +150,31 @@ def normalize(value, *, sparse: bool = False) -> dict:
     if events_out or not sparse:
         out["events"] = events_out
     return out
+
+
+def event_gate(raw_settings, key: str, *, legacy_enabled=True,
+               legacy_duration: int = 5) -> tuple[bool, int]:
+    """Resolve ``(enabled, duration)`` de um evento de ALERTA no servidor.
+
+    O padrão da equipe (``config.sound_settings``) é a fonte preferida; quando o
+    evento não traz o campo, cai nas keys legadas (``transfer_alert_*`` /
+    ``agent_transfer_alert_*``), que continuam sendo o piso das instalações que
+    nunca editaram o padrão. Fail-open: qualquer coisa estranha ⇒ legado.
+
+    ``enabled`` é a AUTORIDADE do broadcast (o cliente não pode ligar o que o
+    admin desligou); ``duration`` vai no payload apenas como FALLBACK — o
+    atendente pode sobrescrever a duração na própria preferência.
+    """
+    enabled = bool(legacy_enabled)
+    duration = _clamp_duration(legacy_duration)
+    if duration is None:
+        duration = 5
+    try:
+        ev = (normalize(raw_settings, sparse=False).get("events") or {}).get(key) or {}
+    except Exception:  # noqa: BLE001 — nunca deixa o gate quebrar o broadcast
+        return enabled, duration
+    if "enabled" in ev:
+        enabled = bool(ev["enabled"])
+    if "duration" in ev:
+        duration = ev["duration"]
+    return enabled, duration

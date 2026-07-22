@@ -152,8 +152,45 @@ const SOUNDS = {
   none: { cls: 'any', unit() { return 0.5; } },
 };
 
+// ── Sons IMPORTADOS (biblioteca da equipe) ─────────────────────────────────────
+/** URL do som importado `custom:<id>`, ou null se não está no catálogo carregado. */
+function _customUrl(soundId) {
+  const hit = ((_catalog && _catalog.sounds) || []).find(s => s.id === soundId);
+  return (hit && hit.kind === 'file' && hit.url) ? hit.url : null;
+}
+
+/**
+ * Toca um arquivo de áudio (som importado). One-shot quando `alertSec` é 0; num
+ * alerta, repete até a duração escolhida (`loop` + parada agendada). Elementos
+ * ficam em `_playing` para o preview poder cortar o som anterior.
+ */
+const _playing = new Set();
+function _renderFile(url, volume, alertSec) {
+  try {
+    const el = new Audio(url);
+    el.volume = Math.max(0, Math.min(1, volume));
+    if (alertSec > 0) el.loop = true;
+    el.addEventListener('ended', () => _playing.delete(el));
+    const p = el.play();
+    if (p && typeof p.catch === 'function') p.catch(() => _playing.delete(el));
+    _playing.add(el);
+    if (alertSec > 0) {
+      setTimeout(() => { try { el.pause(); } catch (_) {} _playing.delete(el); }, alertSec * 1000);
+    }
+  } catch (_) { /* fail-open: som importado indisponível não quebra o disparo */ }
+}
+
+/** Interrompe os sons importados em andamento (usado pelo preview da tela). */
+export function stopFileSounds() {
+  for (const el of _playing) { try { el.pause(); } catch (_) {} }
+  _playing.clear();
+}
+
 /** Toca `soundId` uma vez (notification) ou repetindo por `alertSec` s (alert). */
 function _render(soundId, volume, alertSec) {
+  // Som importado: arquivo, não receita sintetizada.
+  const url = _customUrl(soundId);
+  if (url) return _renderFile(url, volume, alertSec);
   const ac = _audioCtx();
   if (!ac) return;
   const def = SOUNDS[soundId];
@@ -194,7 +231,14 @@ export function playEvent(eventKey, opts = {}) {
     if (!r.play) return;
     _lastPlay[eventKey] = now;
     const alertSec = EVENT_CLASS[eventKey] === 'alert' ? (r.duration || 0) : 0;
-    _render(r.soundId, r.volume, alertSec);
+    // Som importado que sumiu da biblioteca (excluído): cai no som de código do
+    // evento em vez de ficar mudo — a preferência não precisa ser reescrita.
+    let soundId = r.soundId;
+    if (soundId.startsWith('custom:') && !_customUrl(soundId)) {
+      soundId = (CODE_SEEDS[eventKey] || {}).sound || 'none';
+      if (soundId === 'none') return;
+    }
+    _render(soundId, r.volume, alertSec);
   } catch (_) { /* nunca deixa o disparo quebrar o pipeline */ }
 }
 
@@ -207,10 +251,16 @@ export function playEvent(eventKey, opts = {}) {
  */
 export function playDescriptor(soundId, opts = {}) {
   try {
-    const def = SOUNDS[soundId];
-    if (!def || soundId === 'none') return;
+    stopFileSounds();   // corta um preview anterior de som importado
     const vol = _clamp01(opts.volume == null ? 0.6 : opts.volume) * getDeviceVolumeMult();
     if (vol <= 0) return;
+    // Som importado: arquivo. Num evento de alerta, repete até o cap do preview.
+    const url = _customUrl(soundId);
+    if (url) {
+      return _renderFile(url, vol, opts.loop ? Math.min(opts.duration || 2, 6) : 0);
+    }
+    const def = SOUNDS[soundId];
+    if (!def || soundId === 'none') return;
     if (opts.loop && def.cls === 'alert') {
       _render(soundId, vol, Math.min(opts.duration || 2, 6));  // cap do preview
     } else {

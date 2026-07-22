@@ -28,6 +28,7 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
+from server.upload_names import unique_media_name
 from server.pagination import (CAP_LIST, CAP_MSGS, PAGE_LIST, PAGE_MSGS,
                                clamp_limit, clamp_offset)
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
@@ -1480,8 +1481,8 @@ def register_routes(app, deps):
         resolved_channel = _channel_for(phone, conversation_id, channel_id)
 
         # Persist the clip locally (never hits GOWA — private notes are panel-only).
-        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            audio.content_type, audio.filename, default_ext=".ogg")
         content = await audio.read()
         dest.write_bytes(content)
         rel_path = f"statics/outbox/{dest.name}"
@@ -1610,9 +1611,9 @@ def register_routes(app, deps):
         resolved_channel = _channel_for(phone, conversation_id, channel_id)
         filename = upload.filename or ("imagem.jpg" if kind == "image" else "arquivo")
         safe_name = Path(filename).name
-        suffix = Path(safe_name).suffix or (".jpg" if kind == "image" else "")
-        stem = Path(safe_name).stem or kind
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            upload.content_type, safe_name,
+            default_ext=(".jpg" if kind == "image" else ".bin"))
         dest.write_bytes(await upload.read())
         rel_path = f"statics/outbox/{dest.name}"
 
@@ -1806,7 +1807,8 @@ def register_routes(app, deps):
                 channel_id, "image", image.filename or f"img{suffix}", len(content))
             if block:
                 return block
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            image.content_type, image.filename, default_ext=".png")
         dest.write_bytes(content)
         # R14: shared operator media-send tail (send → persist → broadcast → emit).
         _u = current_user(request)
@@ -1820,7 +1822,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
         logger.info("[Send] Image sent to %s", phone)
-        return _ok({"message": "Imagem enviada."})
+        return _ok({"message": "Imagem enviada.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-audio")
     async def send_audio_to_contact(
@@ -1861,7 +1865,8 @@ def register_routes(app, deps):
                 channel_id, "audio", audio.filename or f"voice{suffix}", len(content))
             if block:
                 return block
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            audio.content_type, audio.filename, default_ext=".ogg")
         dest.write_bytes(content)
 
         if alimits is not None:
@@ -1906,7 +1911,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
         logger.info("[Send] Audio sent to %s", phone)
-        return _ok({"message": "Áudio enviado."})
+        return _ok({"message": "Áudio enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-document")
     async def send_document_to_contact(
@@ -1943,7 +1950,8 @@ def register_routes(app, deps):
             block = _media_limits_block(channel_id, "document", safe_name, len(content))
             if block:
                 return block
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            document.content_type, safe_name, default_ext=".bin")
         dest.write_bytes(content)
         text_content = f"[Documento enviado: {safe_name}]"
         if caption.strip():
@@ -1962,7 +1970,9 @@ def register_routes(app, deps):
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
         logger.info("[Send] Document sent to %s: %s", phone, safe_name)
-        return _ok({"message": "Documento enviado."})
+        return _ok({"message": "Documento enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-video")
     async def send_video_to_contact(
@@ -1999,7 +2009,8 @@ def register_routes(app, deps):
             if block:
                 return block
         suffix = Path(video.filename or "video.mp4").suffix or ".mp4"
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            video.content_type, video.filename, default_ext=".mp4")
         content = await video.read()
         dest.write_bytes(content)
 
@@ -2017,7 +2028,8 @@ def register_routes(app, deps):
                 if transcoded:
                     # Move the transcoded mp4 into the outbox so its media_path
                     # resolves for the panel render; drop the original upload.
-                    new_dest = statics_outbox_dir / f"{int(time.time() * 1000)}.mp4"
+                    new_dest = statics_outbox_dir / unique_media_name(
+                        "video/mp4", "video.mp4", default_ext=".mp4")
                     try:
                         os.replace(transcoded, new_dest)
                     except OSError:

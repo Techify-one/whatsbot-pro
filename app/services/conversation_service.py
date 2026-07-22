@@ -49,7 +49,7 @@ import time
 
 from db.repositories import (conversation_repo, contact_repo, user_repo,
                              agent_repo, tag_repo, config_repo)
-from server import system_notices
+from server import sound_catalog, system_notices
 from plugins.events import apply_filter, emit_with_filter
 from domain.events import (emit_domain, ConversationReopened,
                            ConversationAttributeSet)
@@ -97,12 +97,22 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
     await broadcast_and_emit(deps, ws_event, bus_event, payload)
 
 
+def _agent_alert_gate() -> tuple[bool, int]:
+    """Lê o gate do alerta entre atendentes (sync — vai num ``to_thread``)."""
+    return sound_catalog.event_gate(
+        config_repo.get("sound_settings", None), "assigned_to_me",
+        legacy_enabled=config_repo.get("agent_transfer_alert_enabled", True),
+        legacy_duration=config_repo.get("agent_transfer_alert_duration", 5))
+
+
 async def _maybe_agent_transfer_alert(deps, conv: dict, assignee_user_id,
                                       actor_id) -> None:
     """Toca o alerta sonoro de transferência ENTRE atendentes, apenas para o
     atendente que recebeu a conversa.
 
-    Espelha o ``human_transfer_alert`` (IA→humano), mas com config GLOBAL própria
+    Espelha o ``human_transfer_alert`` (IA→humano). Ativação/duração vêm do padrão
+    da equipe (``config.sound_settings`` → evento ``assigned_to_me``, editável na
+    aba "Notificações e sons"), com fallback nas keys legadas
     (``agent_transfer_alert_enabled``/``_duration``). Só dispara numa transferência
     real PARA OUTRO humano: ``assignee_user_id`` presente e ``!= actor_id`` — assim
     "assumir para mim" (auto-atribuição) nunca soa. O broadcast vai a todos os
@@ -111,12 +121,9 @@ async def _maybe_agent_transfer_alert(deps, conv: dict, assignee_user_id,
     if not assignee_user_id or assignee_user_id == actor_id:
         return
     try:
-        enabled = await asyncio.to_thread(
-            config_repo.get, "agent_transfer_alert_enabled", True)
+        enabled, duration = await asyncio.to_thread(_agent_alert_gate)
         if not enabled:
             return
-        duration = await asyncio.to_thread(
-            config_repo.get, "agent_transfer_alert_duration", 5)
         await deps.ws_manager.broadcast("agent_transfer_alert", {
             "assignee_user_id": assignee_user_id,
             "enabled": True,

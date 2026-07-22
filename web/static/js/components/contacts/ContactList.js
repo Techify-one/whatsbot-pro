@@ -8,7 +8,10 @@ import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
 import { clampFlyoutOffset } from './menuLayout.js';
+import { dragHasFiles } from './hooks/useDropZone.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
+// Selo do canal — compartilhado com o cabeçalho do chat (mesma aparência nos dois).
+import { ChannelChip } from './ChannelChip.js';
 import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
@@ -68,23 +71,6 @@ export function typingKey({ conversationId = null, channelId = null, phone = nul
   return `${channelId || 'default'}::${phone}`;
 }
 
-// Per-provider channel chip (only shown when ≥2 channels exist). Colour tints stay
-// in the dark-mode-safe set (wa-*/blue) per CLAUDE.md theming rule.
-const CHANNEL_META = {
-  gowa:           { label: 'WhatsApp',  cls: 'bg-wa-teal/15 text-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', cls: 'bg-blue-100 text-blue-700' },
-  telegram:       { label: 'Telegram',  cls: 'bg-blue-100 text-blue-700' },
-  test:           { label: 'Teste',     cls: 'bg-wa-hover text-wa-secondary' },
-};
-function ChannelChip({ provider, name }) {
-  if (!provider) return null;
-  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
-  return html`<span
-    class="ml-[6px] inline-flex items-center gap-[3px] text-[10px] font-semibold rounded px-[5px] py-[1px] align-middle ${meta.cls}"
-    title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}
-  ><span class="w-[5px] h-[5px] rounded-full bg-current opacity-70"></span>${name || meta.label}</span>`;
-}
-
 function normalizePhone(input) {
   const digits = input.replace(/\D/g, '');
   if (digits.length < 10) return null;
@@ -125,7 +111,7 @@ function highlightParts(text, query) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
@@ -151,6 +137,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   const selectedSet = new Set(selectedKeys || []);
   // For the bulk-tag toggle indicator: does every selected conversation have this tag?
   const selectedContacts = (contacts || []).filter(c => selectedSet.has(rowKeyFor(c)));
+
+  // Arrastar arquivos direto para uma conversa da lista (plano 64 · F11). O
+  // drop NÃO envia às cegas (P7): abre a conversa com a prévia já montada, e o
+  // operador confirma. `dragOverKey` realça a linha sob o cursor.
+  const [dragOverKey, setDragOverKey] = useState(null);
+  const dropEnabled = !selectionMode && typeof onDropFiles === 'function';
   const allSelectedHaveTag = (name) =>
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
@@ -533,9 +525,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${rowKeyFor(c)}
                   onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
+                  onDragOver=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                    setDragOverKey(rowKeyFor(c));
+                  } : null}
+                  onDragLeave=${dropEnabled ? () => setDragOverKey(k => (k === rowKeyFor(c) ? null : k)) : null}
+                  onDrop=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverKey(null);
+                    const files = e.dataTransfer && e.dataTransfer.files;
+                    if (files && files.length) onDropFiles(c, files);
+                  } : null}
                   onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
-                    (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
+                    dragOverKey === rowKeyFor(c) ? 'bg-wa-teal/25 outline outline-2 outline-wa-teal -outline-offset-2'
+                      : (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
                       : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
                 >

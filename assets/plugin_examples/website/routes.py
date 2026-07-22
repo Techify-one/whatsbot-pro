@@ -89,9 +89,9 @@ def _load_history(channel_id: str, chat_id: str, limit: int = _HISTORY_LIMIT) ->
     conv = conversation_repo.get_latest_for_contact_inbox(contact["id"], inbox_id)
     if not conv:
         return []
-    # get_context_by_conversation returns newest-first (ts DESC); the widget renders
-    # top→bottom oldest→newest, so hand it chronological order.
-    rows = list(reversed(message_repo.get_context_by_conversation(conv["id"], limit)))
+    # get_context_by_conversation already returns chronological order (oldest→newest);
+    # the widget renders top→bottom oldest→newest, so pass it through as-is.
+    rows = message_repo.get_context_by_conversation(conv["id"], limit)
     out: list[dict] = []
     for r in rows:
         role = r.get("role")
@@ -210,10 +210,17 @@ async def public_messages(body: dict, request: Request):
             logger.warning("[website] channel %s hmac_mandatory but no hmac_token set",
                            sess["channel_id"])
 
+    # Contact name: a verified HMAC identity (setUser) wins; otherwise auto-label
+    # the visitor "{nome do canal} - Contato {N}" (stable per session) so the panel
+    # never shows the raw session token.
+    name = sess.get("identifier") or ""
+    if not name:
+        name = await asyncio.to_thread(
+            sessions.client_display_name, sess["session_token"], sess["channel_id"])
+
     try:
         msg_id = await _ingest_browser_message(
-            sess["channel_id"], sess["chat_id"], text,
-            name=sess.get("identifier") or "")
+            sess["channel_id"], sess["chat_id"], text, name=name)
     except Exception as e:  # noqa: BLE001
         logger.warning("[website] ingest failed: %s", e, exc_info=True)
         return {"ok": False, "error": "falha ao processar"}

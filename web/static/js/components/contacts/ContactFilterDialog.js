@@ -103,12 +103,19 @@ function MultiSelect({ options, selected, onChange, placeholder = '+ Selecione u
 // contato" (recolhido por padrão) para manter a lista limpa quando há muitos atributos.
 function DimensionPicker({ dimensions, value, onChange }) {
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
   const [openContact, setOpenContact] = useState(false);
   const ref = useRef(null);
   useCloseOnOutside(open, setOpen, ref);
+  useEffect(() => { if (!open) setQ(''); }, [open]);
 
-  const core = dimensions.filter(d => !d.group);
-  const contactDims = dimensions.filter(d => d.group === 'contact');
+  // Buscando, o accordion abre sozinho — resultado escondido pareceria "nada achado".
+  const term = q.trim().toLowerCase();
+  const visible = term
+    ? dimensions.filter(d => String(d.label).toLowerCase().includes(term))
+    : dimensions;
+  const core = visible.filter(d => !d.group);
+  const contactDims = visible.filter(d => d.group === 'contact');
   const current = dimensions.find(d => d.key === value);
   const pick = (key) => { onChange(key); setOpen(false); };
 
@@ -123,16 +130,27 @@ function DimensionPicker({ dimensions, value, onChange }) {
       <span class="truncate">${current ? current.label : 'Selecione...'}</span>
       <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="shrink-0 text-wa-secondary"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
     </button>
-    ${open ? html`<div class="absolute z-[80] mt-1 left-0 w-[240px] max-h-[320px] overflow-y-auto bg-wa-panel rounded-md shadow-lg border border-wa-border py-1">
-      ${core.map(row)}
-      ${contactDims.length === 0 ? null : html`<div class="border-t border-wa-border mt-1 pt-1">
-        <button type="button" onClick=${() => setOpenContact(o => !o)}
-          class="w-full flex items-center justify-between gap-1.5 px-2.5 py-1.5 text-[12px] font-semibold uppercase tracking-wide text-wa-secondary hover:bg-wa-hover transition-colors">
-          <span>Atributos do contato (${contactDims.length})</span>
-          <${ChevronIcon} open=${openContact} />
-        </button>
-        ${openContact ? html`<div>${contactDims.map(row)}</div>` : null}
-      </div>`}
+    ${open ? html`<div class="absolute z-[80] mt-1 left-0 w-[240px] bg-wa-panel rounded-md shadow-lg border border-wa-border">
+      <div class="p-2 border-b border-wa-border">
+        <input type="text" class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]"
+          placeholder="Pesquisar dimensão…" value=${q} autofocus
+          onInput=${(e) => setQ(e.target.value)} />
+      </div>
+      <div class="max-h-[280px] overflow-y-auto py-1">
+        ${(core.length + contactDims.length) === 0
+          ? html`<div class="px-2.5 py-2 text-[13px] text-wa-secondary">Nenhuma opção encontrada.</div>`
+          : html`<div>
+              ${core.map(row)}
+              ${contactDims.length === 0 ? null : html`<div class="border-t border-wa-border mt-1 pt-1">
+                <button type="button" onClick=${() => setOpenContact(o => !o)}
+                  class="w-full flex items-center justify-between gap-1.5 px-2.5 py-1.5 text-[12px] font-semibold uppercase tracking-wide text-wa-secondary hover:bg-wa-hover transition-colors">
+                  <span>Atributos do contato (${contactDims.length})</span>
+                  <${ChevronIcon} open=${term ? true : openContact} />
+                </button>
+                ${(term || openContact) ? html`<div>${contactDims.map(row)}</div>` : null}
+              </div>`}
+            </div>`}
+      </div>
     </div>` : null}
   </div>`;
 }

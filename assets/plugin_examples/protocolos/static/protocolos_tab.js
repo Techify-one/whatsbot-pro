@@ -1975,19 +1975,19 @@ function ViewEditorModal({ view, groupFields, users, roles, canTeam, currentUser
         </div>
 
         <label class="block text-[12px] text-wa-secondary mb-1">Agrupar por</label>
-        <select class="${fieldCls} w-full mb-2" value=${groupSel} onChange=${(e) => setGroupSel(e.target.value)}>
-          <optgroup label="Nativos">
-            <option value="status">Status</option>
-            <option value="atendente">Atendente</option>
-            <option value="data">Data</option>
-          </optgroup>
-          ${protoGroupFields.length ? html`<optgroup label="Campos do protocolo">
-            ${protoGroupFields.map((d) => html`<option key=${`protocolo:${d.key}`} value=${`pfield:protocolo:${d.key}`}>${d.label}</option>`)}
-          </optgroup>` : null}
-          ${atendGroupFields.length ? html`<optgroup label="Campos de resolver atendimento">
-            ${atendGroupFields.map((d) => html`<option key=${`atendimento:${d.key}`} value=${`pfield:atendimento:${d.key}`}>${d.label}</option>`)}
-          </optgroup>` : null}
-        </select>
+        <div class="mb-2">
+          <${OptionListSelect} grouped=${true} value=${groupSel} onChange=${setGroupSel}
+            searchPlaceholder="Pesquisar campo…"
+            options=${[
+              { value: 'status', label: 'Status', group: 'Nativos' },
+              { value: 'atendente', label: 'Atendente', group: 'Nativos' },
+              { value: 'data', label: 'Data', group: 'Nativos' },
+              ...protoGroupFields.map((d) => ({
+                value: `pfield:protocolo:${d.key}`, label: d.label, group: 'Campos do protocolo' })),
+              ...atendGroupFields.map((d) => ({
+                value: `pfield:atendimento:${d.key}`, label: d.label, group: 'Campos de resolver atendimento' })),
+            ]} />
+        </div>
         ${groupSel === 'data' ? html`
           <select class="${fieldCls} w-full mb-2" value=${dateMode} onChange=${(e) => setDateMode(e.target.value)}>
             <option value="faixas">Faixas relativas (Hoje, Ontem, …)</option>

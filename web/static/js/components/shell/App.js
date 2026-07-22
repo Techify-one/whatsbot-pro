@@ -19,6 +19,7 @@ import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
+import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
@@ -173,6 +174,26 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // Boot: rewrite any legacy PT URL (/contatos, /painel, …) to its English path
   // before the rest of the app reads window.location.
   useEffect(() => { redirectLegacyPath(); }, []);
+
+  // Plano 64 · F0 — guarda global de arrastar-e-soltar. Sem ela, soltar um
+  // arquivo FORA de uma zona de drop faz o navegador navegar para o arquivo e
+  // destruir o estado do app (perda do que estava digitado/aberto). Os dois
+  // listeners só cancelam o default do navegador; as zonas de drop reais
+  // (overlay da conversa, linha da sidebar) continuam recebendo o evento
+  // normalmente — elas rodam antes, na fase de bubbling.
+  useEffect(() => {
+    function swallow(e) {
+      if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+        e.preventDefault();
+      }
+    }
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallow);
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallow);
+    };
+  }, []);
 
   useEffect(() => {
     function onPopState() {
@@ -332,6 +353,12 @@ export function App({ onLogout, hasPassword, currentUser }) {
     // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
     // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
     if (m.silent) return;
+    // Escopo por ATRIBUIÇÃO: só notifica se a conversa é minha ou não tem dono nenhum
+    // (nem humano nem IA) — a mensagem da conversa de outro atendente não é minha para
+    // atender. Vale para o som E para o pop-up do navegador logo abaixo. O backend manda
+    // `assignee_user_id`/`active_agent_key` no payload do ingest; sem eles, notifica
+    // como antes (fail-open — ver shouldNotifyNewMessage).
+    if (!shouldNotifyNewMessage(m, (currentUser && currentUser.id != null) ? currentUser.id : null)) return;
     // plano 63 F2 — o motor resolve as 3 camadas (usuário/global/dispositivo). O
     // interruptor per-device (`whatsbot_notif_sound`) é checado DENTRO do motor,
     // então o gate legado `getNotifPref('sound')` sai daqui (evita gate duplo).

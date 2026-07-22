@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
-import { AudioPlayer } from './AudioPlayer.js';
+import { MediaQueuePreview } from './MediaQueuePreview.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -43,13 +43,14 @@ export function Composer({
     mentionLabel, applyMention, applyQuickReply,
   } = autocomplete;
   const {
-    attachMenuOpen, attachMenuRef, pendingMedia, mediaCaption, setMediaCaption,
-    fileInputRef, docInputRef, videoInputRef, sending,
+    attachMenuOpen, attachMenuRef, pendingQueue, mediaCaption, setMediaCaption,
+    fileInputRef, docInputRef, videoInputRef, sending, sendProgressLabel, removePendingItem,
     handleAttachClick, pickImage, pickDocument, pickVideo,
     handleFileSelected, handleDocSelected, handleVideoSelected,
     handlePaste, cancelPendingMedia, confirmPendingMedia,
     rejection, dismissRejection,
   } = media;
+  const hasPending = pendingQueue.length > 0;
   const { recording, recordDuration, handleMicClick } = audio;
 
   // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
@@ -71,12 +72,14 @@ export function Composer({
       ref=${fileInputRef}
       type="file"
       accept="image/*"
+      multiple
       class="hidden"
       onChange=${handleFileSelected}
     />
     <input
       ref=${docInputRef}
       type="file"
+      multiple
       class="hidden"
       onChange=${handleDocSelected}
     />
@@ -91,64 +94,31 @@ export function Composer({
     <!-- Anexo recusado pelas regras do canal (tamanho/formato) -->
     <${MediaRejectedModal} rejection=${rejection} onClose=${dismissRejection} />
 
-    <!-- Media confirmation overlay -->
-    ${pendingMedia && canSend ? html`
-      <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
-        ${pendingMedia.type === 'image' ? html`
-          <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
-        ` : pendingMedia.type === 'video' ? html`
-          <video src=${pendingMedia.previewUrl} controls class="max-h-[220px] max-w-full rounded-[8px] bg-black"></video>
-        ` : pendingMedia.type === 'document' ? html`
-          <div class="flex items-center gap-[8px] bg-wa-inputBg border border-wa-border rounded-[8px] px-[14px] py-[10px] max-w-full">
-            <span class="text-[22px]">📄</span>
-            <span class="text-[14px] text-wa-text break-all">${pendingMedia.filename}</span>
-          </div>
-        ` : html`
-          <div class="w-full max-w-[320px]">
-            <${AudioPlayer} src=${pendingMedia.previewUrl} isLocalBlob=${true} />
-          </div>
-        `}
-        ${pendingMedia.type !== 'audio' ? html`
-          <input
-            type="text"
-            class="wa-field w-full max-w-[420px] rounded-[8px] px-[12px] py-[8px] text-[14px] border border-wa-border"
-            placeholder="Adicionar uma legenda (opcional)"
-            value=${mediaCaption}
-            onInput=${(e) => setMediaCaption(e.target.value)}
-            onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmPendingMedia(); } }}
-          />
-        ` : ''}
-        ${(pendingMedia.type === 'audio' && mode === 'private') ? html`
-          <div class="flex items-center gap-[16px] flex-wrap justify-center">
-            <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA processa o áudio como instrução.">
-              <input type="checkbox" class="sr-only peer" checked=${aiReadPrivate}
-                onChange=${e => setAiReadPrivate(e.target.checked)} />
-              <div class="relative w-[28px] h-[16px] bg-gray-500 rounded-full peer-checked:bg-violet-500 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-[12px] after:w-[12px] after:transition-transform peer-checked:after:translate-x-[12px]"></div>
-              <span class="text-[13px] text-wa-secondary">IA lê</span>
-            </label>
-            ${aiReadPrivate ? html`
-              <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA responde no chat do contato. Quando desligado, a resposta fica apenas como nota privada.">
-                <input type="checkbox" class="sr-only peer" checked=${aiReplyInChat}
-                  onChange=${e => setAiReplyInChat(e.target.checked)} />
-                <div class="relative w-[28px] h-[16px] bg-gray-500 rounded-full peer-checked:bg-violet-500 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-[12px] after:w-[12px] after:transition-transform peer-checked:after:translate-x-[12px]"></div>
-                <span class="text-[13px] text-wa-secondary">IA responde no chat</span>
-              </label>
-            ` : ''}
-          </div>
-        ` : ''}
-        <div class="flex gap-[12px]">
-          <button
-            type="button"
-            onClick=${cancelPendingMedia}
-            class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-hover text-wa-text border border-wa-border hover:bg-wa-inputBg transition-colors"
-          >Cancelar</button>
-          <button
-            type="button"
-            onClick=${confirmPendingMedia}
-            disabled=${sending}
-            class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-outgoing text-wa-text border border-wa-border hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-[6px]"
-          ><${SendIcon} /> Enviar</button>
-        </div>
+    <!-- Prévia da fila de mídia (plano 64 · F7) -->
+    ${hasPending && canSend ? html`
+      <${MediaQueuePreview}
+        queue=${pendingQueue}
+        caption=${mediaCaption}
+        setCaption=${setMediaCaption}
+        onRemove=${removePendingItem}
+        onCancel=${cancelPendingMedia}
+        onConfirm=${confirmPendingMedia}
+        sending=${sending}
+        progressLabel=${sendProgressLabel}
+        mode=${mode}
+        aiReadPrivate=${aiReadPrivate}
+        setAiReadPrivate=${setAiReadPrivate}
+        aiReplyInChat=${aiReplyInChat}
+        setAiReplyInChat=${setAiReplyInChat}
+      />
+    ` : ''}
+
+    <!-- Progresso do lote em voo (plano 64 · F5). A fila some ao confirmar (as
+         bolhas óticas já apareceram no fio), então o "N de M" vive aqui. -->
+    ${sending && sendProgressLabel ? html`
+      <div class="flex items-center justify-center gap-[8px] bg-wa-panel border-t border-wa-border px-[16px] py-[7px] shrink-0">
+        <span class="w-[8px] h-[8px] rounded-full bg-wa-teal animate-pulse"></span>
+        <span class="text-[12px] text-wa-secondary">${sendProgressLabel}</span>
       </div>
     ` : ''}
 
@@ -162,7 +132,7 @@ export function Composer({
           Você não pode enviar mensagens neste grupo
         </span>
       </div>
-    ` : pendingMedia ? '' : recording ? html`
+    ` : hasPending ? '' : recording ? html`
       <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
         <div class="flex-1 flex items-center gap-3 mx-[5px]">
           <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>

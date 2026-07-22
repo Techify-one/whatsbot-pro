@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import {
   buildRows, shapeConvData,
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
-  isUnassigned, isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
+  isUnassigned, shouldNotifyNewMessage,
+  isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
   rowMatchesView, specNeedsServer,
@@ -349,6 +350,31 @@ test('matchesStatus / isUnassigned / matchesAssignment', () => {
   assert.equal(matchesAssignment({}, 'mine', null), false);
   assert.equal(matchesAssignment({ assignee_user_id: null, active_agent_key: null }, 'unassigned', 1), true);
   assert.equal(matchesAssignment({}, 'all', null), true);
+});
+
+// Som + pop-up de mensagem nova: só as MINHAS ou as sem dono nenhum.
+test('shouldNotifyNewMessage: escopo por atribuição', () => {
+  const GABRIEL = 7, ANNA = 9;
+  // A conversa é minha → notifica.
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: GABRIEL, active_agent_key: null }, GABRIEL), true);
+  // De outro atendente → não notifica (é o caso que motivou a mudança).
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: ANNA, active_agent_key: null }, GABRIEL), false);
+  // Sem humano e sem IA (fila "Não atribuídas") → notifica todo mundo.
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: null, active_agent_key: null }, GABRIEL), true);
+  // Sem humano mas com a IA atendendo → não notifica ninguém.
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: null, active_agent_key: 'vendas' }, GABRIEL), false);
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: null, active_agent_key: 'vendas' }, null), true);  // sem login: fail-open
+  // FAIL-OPEN: payload sem a informação de atribuição notifica como antes.
+  assert.equal(shouldNotifyNewMessage({ role: 'user' }, GABRIEL), true);
+  assert.equal(shouldNotifyNewMessage(undefined, GABRIEL), true);
+  // FAIL-OPEN: instalação sem login (uid nulo) notifica mesmo com dono.
+  assert.equal(shouldNotifyNewMessage(
+    { assignee_user_id: ANNA, active_agent_key: null }, null), true);
 });
 
 // ── sorting ────────────────────────────────────────────────────────
