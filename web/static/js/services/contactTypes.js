@@ -33,9 +33,16 @@ const TOKEN_HEX = {
 
 // `neutral: true` ⇒ badge renderizado com classes semânticas wa-* (legível nos dois
 // temas), em vez de hex inline. Marcas de brand (whatsapp/telegram) usam hex.
-/** @type {Record<string, { label: string, color: string, neutral?: boolean }>} */
+/**
+ * `phone: true` ⇒ o identificador do contato é um telefone de verdade e pode
+ * passar pelo formatador `+CC (AA) …`. Só o WhatsApp é assim; os demais canais
+ * chaveiam o contato por um identificador NÃO-telefônico (chat_id do Telegram,
+ * PSID do Facebook, token de sessão do widget de site, …) que deve ser exibido
+ * verbatim, nunca transformado num telefone falso.
+ * @type {Record<string, { label: string, color: string, neutral?: boolean, phone?: boolean }>}
+ */
 export const CONTACT_TYPE_META = {
-  whatsapp: { label: 'WhatsApp', color: '#25d366' },
+  whatsapp: { label: 'WhatsApp', color: '#25d366', phone: true },
   telegram: { label: 'Telegram', color: '#2aabee' },
   facebook: { label: 'Facebook', color: '#0866ff' },
   outros:   { label: 'Outros',   color: '#6b7280', neutral: true },
@@ -74,6 +81,18 @@ export function contactTypeMeta(type) {
   }
   const label = key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Outros';
   return { label, color: '#6b7280', neutral: true };
+}
+
+/**
+ * Se o tipo de contato carrega um telefone real (seguro para o formatador
+ * `+CC (AA) …`). Só o WhatsApp; todo o resto (Telegram/Facebook/site/…) usa um
+ * identificador não-telefônico que deve ser mostrado cru. Tipos desconhecidos ou
+ * descobertos do catálogo caem no default `false` (exibição plana).
+ * @param {string|null|undefined} type
+ * @returns {boolean}
+ */
+export function contactTypeIsPhone(type) {
+  return contactTypeMeta(type).phone === true;
 }
 
 /**
