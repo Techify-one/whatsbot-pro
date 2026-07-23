@@ -30,9 +30,9 @@ import httpx
 
 from channels.base import AccountIdentity, ChannelCapabilities
 from channels.base import SendResult
-from channels.providers.meta_graph import (DEFAULT_GRAPH_VERSION, HTTP_TIMEOUT,
-                                           MEDIA_TIMEOUT, MetaGraphChannel,
-                                           graph_error)
+from .meta_graph import (DEFAULT_GRAPH_VERSION, HTTP_TIMEOUT,
+                         MEDIA_TIMEOUT, MetaGraphChannel,
+                         graph_error)
 
 logger = logging.getLogger(__name__)
 

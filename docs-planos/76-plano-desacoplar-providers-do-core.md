@@ -370,11 +370,16 @@ WAVE 3   F9 (meta_graph — só se P1 decidir "mover")                🔴 opcio
 **Pronto quando:** `grep -rn meta_graph channels/ server/ app/` vazio e a suíte do Messenger verde.
 
 #### Status de execução — Fase F9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (P1 = (b) "mover pro plugin", decisão do usuário 2026-07-23)
+- **O que foi feito:**
+  - `channels/providers/meta_graph.py` → `assets/plugin_examples/facebook_messenger/meta_graph.py`; `channels/media_urls.py` → `assets/plugin_examples/facebook_messenger/media_urls.py`. **Ambos** movidos (confirmado por grep que só `meta_graph` + testes consumiam as funções de `media_urls`; a config key `public_base_url` é lida via `config_repo` por outros e NÃO se move).
+  - Imports viraram RELATIVOS: `channels.py` → `from .meta_graph import …`; `meta_graph.py` → `from .media_urls import public_media_url`. O loader real resolve como submódulos de `whatsbot_plugins.facebook_messenger` (registra o pacote com `submodule_search_locations`).
+  - `tests/test_facebook_messenger.py` + `tests/test_meta_graph_core.py`: passaram a carregar o plugin **como PACOTE** (`whatsbot_plugins.facebook_messenger` com `__path__` sintético, molde do runtime/protocolos) — sem isso os imports relativos não resolvem fora do loader. Monkeypatches de `public_base_url`/`httpx.Client` reapontados para os módulos-irmãos.
+  - `tests/test_endpoints.py` `_p32_load_provider`: passou a registrar o pacote antes do exec (necessário pro `facebook_messenger`; harmless pra cloud/telegram).
+  - Zip regenerado (agora carrega `meta_graph.py` + `media_urls.py`); `plugin.yaml` bump 1.2.0 → 1.3.0; `storages/` sincronizado. CLAUDE.md aponta os caminhos novos.
+- **Como foi feito / decisões:** imports relativos (não try/except dual-path) — é a forma idiomática do loader e o que o `protocolos` (plugin real) já usa. Smoke test com o loader REAL (`plugins.loader._load_plugin_module`) confirma que `meta_graph`/`media_urls` resolvem como `whatsbot_plugins.facebook_messenger.*`.
+- **Problemas / pendências:** ⚠️ **CONSEQUÊNCIA REGISTRADA (D2·F9):** quando o **Instagram** (sub-plano 46·03) entrar, ele precisa carregar a **PRÓPRIA cópia** de `meta_graph`/`media_urls` (o usuário confirmou: "vou deixar tudo no plugin do instagram também") — as duas cópias podem divergir; um fix de API da Meta terá que ser aplicado nos dois. Alternativa futura se o custo incomodar: promover a base a um pacote compartilhado explícito.
+- **Verificação:** `grep -rn meta_graph channels/ server/ app/` VAZIO; idem `media_urls`. Testes: `test_facebook_messenger` 20/20, `test_meta_graph_core` 18/18, canais 91/91, `test_endpoints` 1596 pass / 3 fail (as 3 pré-existentes de protocolos, incl. os 12 checks P76 verdes). Smoke do loader real OK.
 
 ---
 
@@ -397,14 +402,18 @@ WAVE 3   F9 (meta_graph — só se P1 decidir "mover")                🔴 opcio
 
 ## 7. Perguntas em aberto
 
-**P1 — `meta_graph.py` (615 l.) + `media_urls.py` (91 l.): ficam no core ou vão pro plugin?** ⏸️ **ADIADO — decisão do usuário**
+**P1 — `meta_graph.py` (615 l.) + `media_urls.py` (91 l.): ficam no core ou vão pro plugin?** ✅ **RESOLVIDO (2026-07-23): (b) MOVER pro plugin.** O usuário escolheu tornar o zip do Messenger autossuficiente e replicar a base no plugin do Instagram. Implementado na Fase F9 (ver status acima). Consequência aceita: ~700 linhas duplicadas quando o Instagram chegar.
+
+<details><summary>Contexto original (mantido para histórico)</summary>
 
 - *Contexto:* foi decisão explícita do plano 46 (P-01B1) colocar no core, para Messenger e Instagram compartilharem. Nenhum código do core importa esses módulos — só o plugin e os testes ([meta_graph.py:42](../channels/providers/meta_graph.py#L42) importa `media_urls`; nada mais). O import de irmão dentro do plugin **funciona** (`whatsbot_plugins.<id>`), então mover é tecnicamente viável.
 - *(a) Manter no core:* Instagram herda de graça; **mas** o zip do Messenger não instala num core anterior ao plano 46 e o `whatsbot_api_version: ">=1.0,<2.0"` não detecta isso (falha com `load_error` no import).
 - *(b) Mover pro plugin:* zip autossuficiente de verdade — o objetivo declarado pelo usuário; custo = ~700 linhas duplicadas quando o Instagram chegar.
 - **Recomendação:** **(b)**, mas **só depois de F1–F8**, e idealmente **antes** de iniciar o Instagram. Alternativa que preserva os dois lados: manter no core e **bump de `WHATSBOT_API_VERSION`** para `1.1`, com o `facebook_messenger` declarando `>=1.1` — aí o core antigo recusa a importação com mensagem clara em vez de quebrar no import.
 
-**P2 — O `website` deve virar zip importável em `assets/channel_plugins/`?** ⏸️ **A CONFIRMAR**
+</details>
+
+**P2 — O `website` deve virar zip importável em `assets/channel_plugins/`?** ✅ **RESOLVIDO: sim** (feito em F7).
 Hoje só `whatsapp_cloud` e `facebook_messenger` têm zip lá ([assets/channel_plugins/](../assets/channel_plugins/)); o `website` está em `assets/plugin_examples/` e instalado em `storages/plugins/`. Afeta o escopo de F7. Recomendação: sim, por consistência.
 
 **P3 — Abrir mais slots de card agora (`channel.card.actions`) ou só `channel.card.rows`?** ⏸️ **ADIADO**

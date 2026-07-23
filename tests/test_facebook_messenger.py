@@ -17,24 +17,51 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "assets" / "plugin_examples" / "facebook_messenger"
+PKG = "whatsbot_plugins.facebook_messenger"
 APP_SECRET = "app-secret-fb"
 
 
-def _load(mod_name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(mod_name, PLUGIN / filename)
+# Plano 76 · F9 — a base ``meta_graph`` + ``media_urls`` agora VIVEM no plugin, e
+# ``channels.py`` as importa RELATIVAMENTE (``from .meta_graph import …``). Para os
+# imports relativos resolverem fora do loader real, registramos o plugin como
+# PACOTE (molde do runtime e do teste do protocolos): ``whatsbot_plugins`` como
+# namespace pai + ``whatsbot_plugins.facebook_messenger`` com ``__path__`` na pasta
+# do plugin. Aí ``from .meta_graph``/``from .media_urls`` acham os irmãos por path.
+def _ensure_pkg() -> None:
+    if "whatsbot_plugins" not in sys.modules:
+        parent = types.ModuleType("whatsbot_plugins")
+        parent.__path__ = []  # namespace package
+        sys.modules["whatsbot_plugins"] = parent
+    if PKG not in sys.modules:
+        pkg = types.ModuleType(PKG)
+        pkg.__path__ = [str(PLUGIN)]
+        sys.modules[PKG] = pkg
+
+
+def _load(modname: str, filename: str):
+    _ensure_pkg()
+    full = f"{PKG}.{modname}"
+    spec = importlib.util.spec_from_file_location(full, PLUGIN / filename)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[full] = mod  # antes do exec: o pacote precisa se auto-resolver
     spec.loader.exec_module(mod)
     return mod
 
 
-channels_mod = _load("fb_messenger_channels_ut", "channels.py")
+channels_mod = _load("channels", "channels.py")
 FacebookMessengerChannel = channels_mod.FacebookMessengerChannel
+# A base + o módulo de mídia agora são irmãos do plugin — carregados pelo import
+# relativo de channels.py acima; pegamos as referências para os monkeypatches.
+media_urls_mod = sys.modules[f"{PKG}.media_urls"]
+meta_graph_mod = sys.modules[f"{PKG}.meta_graph"]
 
 
 def _channel(**creds):
@@ -127,8 +154,7 @@ def fake_http(monkeypatch):
     _Client.calls = []
     _Client.responses = []
     monkeypatch.setattr(channels_mod.httpx, "Client", _Client)
-    monkeypatch.setattr(
-        "channels.providers.meta_graph.httpx.Client", _Client)
+    monkeypatch.setattr(meta_graph_mod.httpx, "Client", _Client)
     return _Client
 
 
@@ -149,7 +175,7 @@ def test_send_text_body_and_appsecret_proof(fake_http):
 
 
 def test_send_media_uses_public_url(fake_http, monkeypatch):
-    monkeypatch.setattr("channels.media_urls.public_base_url",
+    monkeypatch.setattr(media_urls_mod, "public_base_url",
                         lambda: "https://bot.example.com")
     fake_http.responses.append(_Resp(200, {"message_id": "mid_out_2"}))
     res = _channel().send_media("PSID1", "image", "statics/outbox/foto.jpg")
@@ -161,7 +187,7 @@ def test_send_media_uses_public_url(fake_http, monkeypatch):
 
 
 def test_send_document_maps_to_file(fake_http, monkeypatch):
-    monkeypatch.setattr("channels.media_urls.public_base_url",
+    monkeypatch.setattr(media_urls_mod, "public_base_url",
                         lambda: "https://bot.example.com")
     fake_http.responses.append(_Resp(200, {"message_id": "mid_out_3"}))
     _channel().send_media("PSID1", "document", "statics/outbox/nota.pdf")
@@ -333,9 +359,7 @@ def test_mp4_sent_as_document_goes_out_as_video_attachment(monkeypatch):
     O painel manda vídeo pelo botão "documento" (kind=document); o tipo do anexo
     tem que sair do MIME real do arquivo, senão o envio falha.
     """
-    import channels.media_urls as media_urls
-
-    monkeypatch.setattr(media_urls, "public_base_url", lambda: "https://bot.example.com")
+    monkeypatch.setattr(media_urls_mod, "public_base_url", lambda: "https://bot.example.com")
     ch = _channel()
     payload = ch._media_payload("PSID1", "document", "statics/outbox/clip.mp4")
     assert payload["message"]["attachment"]["type"] == "video"

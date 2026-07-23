@@ -8,16 +8,19 @@ escape hatch, and the same ``X-Hub-Signature-256`` verification. Everything that
 is common lives here so a provider plugin only declares host, credential keys,
 capabilities and its descriptor.
 
-This is CORE code (importable as ``channels.providers.meta_graph``) rather than a
-copy inside each plugin, exactly like ``channels.base`` — plugins import it from
-a stable path. It registers NO provider by itself: it is abstract (no
-``provider`` string, no descriptor), so nothing appears in the channel picker
-until a plugin ships a subclass.
+This lives INSIDE the plugin (plano 76 · F9): the ``.zip`` is self-sufficient,
+carrying everything the Messenger needs that the core does not. Sibling modules
+import it relatively (``from .meta_graph import …``), which the plugin loader
+resolves as ``whatsbot_plugins.facebook_messenger.meta_graph``. It registers NO
+provider by itself: it is abstract (no ``provider`` string, no descriptor), so
+nothing appears in the channel picker until a subclass ships. When the Instagram
+plugin arrives it carries its OWN copy of this base (D2 trade-off: two Meta
+channels, two copies — the price of self-contained zips).
 
 Note this is NOT the WhatsApp Cloud API shape. Cloud walks
 ``entry[].changes[].value.messages[]`` and uploads media to ``/media``; Messenger
 and Instagram walk ``entry[].messaging[]`` and send media by **public URL**
-(D4 — see ``channels.media_urls``).
+(D4 — see the sibling ``media_urls`` module).
 
 Credentials model (same as every provider): with a ``registry`` the values come
 from ``registry.get_credential(channel_id, key)``; without one (unit tests) from
@@ -39,7 +42,7 @@ import httpx
 
 from channels.base import Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
-from channels.media_urls import public_media_url
+from .media_urls import public_media_url
 
 logger = logging.getLogger(__name__)
 

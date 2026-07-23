@@ -6583,12 +6583,29 @@ section("Account-identity dedup (plano 32)")
 # (as production does when they're enabled) to exercise the generic dedup
 # enforcement end to end. Appended at the very end so it can't affect earlier tests.
 import importlib.util as _p32_ilu
+import sys as _p32_sys
+import types as _p32_types
 
 
 def _p32_load_provider(prov, clsname):
-    p = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov / "channels.py"
-    spec = _p32_ilu.spec_from_file_location(f"_p32_{prov}", p)
+    # Carrega o channels.py do plugin como PACOTE (whatsbot_plugins.<prov>), igual
+    # ao runtime — necessário porque providers como facebook_messenger importam a
+    # base RELATIVAMENTE (plano 76·F9: `from .meta_graph import …`). Harmless para
+    # quem não usa import relativo (whatsapp_cloud/telegram).
+    plugin_dir = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov
+    if "whatsbot_plugins" not in _p32_sys.modules:
+        _parent = _p32_types.ModuleType("whatsbot_plugins")
+        _parent.__path__ = []
+        _p32_sys.modules["whatsbot_plugins"] = _parent
+    pkg_name = f"whatsbot_plugins.{prov}"
+    if pkg_name not in _p32_sys.modules:
+        _pkg = _p32_types.ModuleType(pkg_name)
+        _pkg.__path__ = [str(plugin_dir)]
+        _p32_sys.modules[pkg_name] = _pkg
+    full = f"{pkg_name}.channels"
+    spec = _p32_ilu.spec_from_file_location(full, plugin_dir / "channels.py")
     m = _p32_ilu.module_from_spec(spec)
+    _p32_sys.modules[full] = m
     spec.loader.exec_module(m)
     return getattr(m, clsname)
 

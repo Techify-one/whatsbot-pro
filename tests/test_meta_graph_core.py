@@ -1,6 +1,7 @@
-"""Habilitadores do core da Wave 0 (plano 46 · sub-plano 01).
+"""Habilitadores dos canais Meta (plano 46 · sub-plano 01; base movida ao plugin no 76·F9).
 
-Cobre, sem rede e sem depender de plugin:
+Cobre, sem rede (a base ``meta_graph``/``media_urls`` é carregada do plugin
+``facebook_messenger`` — ver bloco de import):
 
 * **01-A** — hook ``Channel.verify_inbound_signature`` (default permissivo) + a
   costura no POST ``/api/webhook/{provider}/{channel_id}``: assinatura inválida
@@ -19,13 +20,55 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.util as _ilu
 import json
+import sys as _sys
+import types as _types
+from pathlib import Path as _Path
 
 import pytest
 
 from channels.base import Channel, ChannelCapabilities
-from channels.media_urls import public_media_url
-from channels.providers.meta_graph import MetaGraphChannel, attachment_type_for
+
+# Plano 76 · F9 — a base ``meta_graph`` + ``media_urls`` foram para DENTRO do
+# plugin ``facebook_messenger`` (zip autossuficiente). Este teste continua cobrindo
+# os habilitadores (assinatura/parse/URL de mídia), mas carregando-os do plugin
+# como PACOTE (para os imports relativos ``from .media_urls`` resolverem), no molde
+# do runtime e do teste do protocolos. ``Channel``/``ChannelCapabilities`` seguem
+# do core (o contrato-base é core; a assinatura default é testada por ele).
+_PLUGIN = (_Path(__file__).resolve().parents[1]
+           / "assets" / "plugin_examples" / "facebook_messenger")
+_PKG = "whatsbot_plugins.facebook_messenger"
+
+
+def _ensure_pkg() -> None:
+    if "whatsbot_plugins" not in _sys.modules:
+        parent = _types.ModuleType("whatsbot_plugins")
+        parent.__path__ = []
+        _sys.modules["whatsbot_plugins"] = parent
+    if _PKG not in _sys.modules:
+        pkg = _types.ModuleType(_PKG)
+        pkg.__path__ = [str(_PLUGIN)]
+        _sys.modules[_PKG] = pkg
+
+
+def _load(modname: str):
+    _ensure_pkg()
+    full = f"{_PKG}.{modname}"
+    if full in _sys.modules:
+        return _sys.modules[full]
+    spec = _ilu.spec_from_file_location(full, _PLUGIN / f"{modname}.py")
+    mod = _ilu.module_from_spec(spec)
+    _sys.modules[full] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+media_urls = _load("media_urls")
+_meta_graph = _load("meta_graph")
+public_media_url = media_urls.public_media_url
+MetaGraphChannel = _meta_graph.MetaGraphChannel
+attachment_type_for = _meta_graph.attachment_type_for
 
 APP_SECRET = "s3cr3t"
 
@@ -223,8 +266,6 @@ def test_attachment_type_follows_the_file_mime_not_the_label():
 
 
 def test_send_media_payload_uses_resolved_attachment_type(monkeypatch):
-    import channels.media_urls as media_urls
-
     monkeypatch.setattr(media_urls, "public_base_url", lambda: "https://bot.example.com")
     ch = _channel(app_secret=APP_SECRET, access_token="T")
     payload = ch._media_payload("PSID1", "document", "statics/outbox/a.mp4")
