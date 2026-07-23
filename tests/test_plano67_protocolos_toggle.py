@@ -72,3 +72,26 @@ def test_general_config_roundtrip(build_app):
     # Payload legado (sem a chave) NÃO zera o valor já gravado.
     logic.set_general_config({"relink_prompt_enabled": True})
     assert logic.get_general_config()["resolve_keep_assignee"] is True
+
+
+def test_reactivate_ai_on_close_toggle_roundtrip(build_app):
+    """O toggle "Religar a IA ao finalizar" (exposto na aba Configurações gerais) usa a
+    MESMA chave que o getter/rota de fechar leem (plugin.protocolos.reactivate_ai_on_close,
+    NÃO _general_key). Default ON; set persiste; payload sem a chave não zera."""
+    build_app(["gowa", "protocolos"])
+    logic = _logic()
+    from db.repositories import config_repo
+    key = f"plugin.{logic.PLUGIN_ID}.reactivate_ai_on_close"
+    config_repo.delete_prefix(key)
+
+    cfg = logic.get_general_config()
+    assert cfg["reactivate_ai_on_close"] is True          # default ON
+    assert logic.get_reactivate_ai_on_close_setting() is True
+
+    logic.set_general_config({"reactivate_ai_on_close": False})
+    assert logic.get_general_config()["reactivate_ai_on_close"] is False
+    assert logic.get_reactivate_ai_on_close_setting() is False  # a rota de fechar lê o mesmo
+
+    # Payload legado (sem a chave) NÃO religa o valor já gravado.
+    logic.set_general_config({"resolve_keep_assignee": True})
+    assert logic.get_reactivate_ai_on_close_setting() is False
