@@ -1611,6 +1611,10 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
         ${readOnly ? html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-1.5">Dados do protocolo</div>
+            <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-2">
+              <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
+              <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
+            </div>
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
                 ${readOnlyInfo.map((d) => html`<div key=${d.key}>
@@ -1621,6 +1625,10 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
         : html`
           <div class="mb-4 p-3 rounded-lg bg-wa-panel border border-wa-border">
             <div class="text-wa-iconActive text-[13px] font-semibold mb-2">Dados do protocolo</div>
+            <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-3">
+              <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
+              <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
+            </div>
             ${showAssigneeSeedNotice ? html`
               <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
                 Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?

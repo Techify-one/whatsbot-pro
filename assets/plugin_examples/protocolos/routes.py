@@ -251,19 +251,22 @@ async def relink_suggestion(contact_id: int, conversation_id: int | None = None)
 
 
 @router.post("/contacts/{contact_id}/protocolo/ensure", dependencies=[plugin_permission("edit")])
-async def ensure_contact_protocolo(contact_id: int):
+async def ensure_contact_protocolo(contact_id: int, request: Request):
     """Garante (cria se preciso) o protocolo aberto do contato — ação explícita
     do painel quando ainda não há nenhum (evita criar só ao visualizar). Ao CRIAR um
-    protocolo novo, grava a nota privada de abertura (announce_open)."""
+    protocolo novo, grava a nota privada de abertura (announce_open) e registra o
+    atendente logado como quem ABRIU (opener)."""
     from db.repositories import contact_repo, conversation_repo
     contact = contact_repo.get(contact_id)
     if not contact:
         return _err("Contato não encontrado.", status=404)
     atend = (conversation_repo.get_open_for_contact(contact_id)
             or conversation_repo.get_latest_for_contact(contact_id))
+    uid, name = _atendente(request)
+    opener = logic._resolve_opener("agent", (atend or {}).get("id"), user_id=uid, name=name)
     at = logic.ensure_protocolo_for_contact(
         contact_id, phone=contact.get("phone", ""), name=logic._contact_name(contact),
-        conversation_id=(atend or {}).get("id"), announce_open=True)
+        conversation_id=(atend or {}).get("id"), announce_open=True, opener=opener)
     return {"ok": True, "data": {"protocolo": at, "atendimentos": logic.list_atendimentos(at["id"])}}
 
 
@@ -348,10 +351,13 @@ async def relink_protocolo(previous_id: int, request: Request):
 
 @router.post("/conversas/{conversation_id}/open-new-protocolo",
              dependencies=[plugin_permission("edit")])
-async def open_new_protocolo(conversation_id: int):
+async def open_new_protocolo(conversation_id: int, request: Request):
     """Ação "É um novo protocolo" do popup de continuidade: abre AGORA o protocolo novo
-    desta conversa (o auto_link foi adiado até esta decisão)."""
-    at, err = logic.open_new_protocolo(conversation_id)
+    desta conversa (o auto_link foi adiado até esta decisão). Registra o atendente
+    logado como quem ABRIU (opener)."""
+    uid, name = _atendente(request)
+    opener = logic._resolve_opener("agent", conversation_id, user_id=uid, name=name)
+    at, err = logic.open_new_protocolo(conversation_id, opener=opener)
     if err:
         return _err(err, status=404 if "encontrada" in err else 409)
     logic.record_relink_attr_decision("new", (at or {}).get("contact_id"), conversation_id)

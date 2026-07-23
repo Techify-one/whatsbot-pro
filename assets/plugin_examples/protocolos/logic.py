@@ -38,9 +38,11 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import IntegrityError
 
 from plugins.context import broadcast, make_plugin_db
+from db.engine import get_engine
 from db.repositories import (channel_repo, config_repo, contact_repo,
                              conversation_repo, custom_attribute_repo, user_repo)
 from db.tables import conversations as _conversations_tbl
+from db.tables import messages as _messages_tbl
 from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
 logger = logging.getLogger(__name__)
@@ -621,27 +623,85 @@ def get_protocolo(atid: int) -> dict | None:
     return _proto_dict(row) if row else None
 
 
+def _last_operator_actor(conversation_id: int | None) -> tuple[int | None, str]:
+    """(user_id, name) do atendente da mensagem de operador MAIS RECENTE da conversa —
+    best-effort para atribuir "Aberto por" quando a abertura veio de um envio manual
+    (``message.sent source=operator``, cujo payload NÃO carrega o usuário). Lê a tabela
+    core ``messages`` (``sent_by_user_id``/``sent_by_name`` gravados no save do operador).
+    Qualquer falha ⇒ (None, "") e o chamador cai no rótulo genérico "Atendente"."""
+    if not conversation_id:
+        return None, ""
+    try:
+        from sqlalchemy import select
+        m = _messages_tbl
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(m.c.sent_by_user_id, m.c.sent_by_name)
+                .where(m.c.conversation_id == conversation_id, m.c.status == "operator")
+                .order_by(m.c.ts.desc(), m.c.id.desc()).limit(1)
+            ).first()
+        if row:
+            return row[0], str(row[1] or "")
+    except Exception as e:  # noqa: BLE001 — resolução do ator nunca quebra a abertura
+        logger.debug("protocolos: _last_operator_actor falhou: %s", e)
+    return None, ""
+
+
+def _resolve_opener(source: str, conversation_id: int | None = None,
+                    user_id: int | None = None, name: str = "") -> dict:
+    """Descreve QUEM abriu, a partir da origem do evento/ação:
+    ``{"kind", "user_id", "name"}`` — name é o snapshot exibido ('Contato'/'IA'/nome).
+
+    - ``agent``           → ação explícita do painel (usa user_id/name do current_user)
+    - ``inbound``         → mensagem recebida do cliente → "Contato"
+    - ``ai``/``private_ai`` → resposta automática da IA → "IA"
+    - ``operator``/``echo``/``retry`` → envio do atendente (resolve o nome best-effort)
+    - qualquer outro      → assume contato (rótulo seguro)"""
+    if source == "agent":
+        return {"kind": "agent", "user_id": user_id, "name": name or "Atendente"}
+    if source == "inbound":
+        return {"kind": "contact", "user_id": None, "name": "Contato"}
+    if source in ("ai", "private_ai"):
+        return {"kind": "ia", "user_id": None, "name": "IA"}
+    if source in ("operator", "echo", "retry"):
+        uid, nm = _last_operator_actor(conversation_id)
+        return {"kind": "agent", "user_id": uid, "name": nm or "Atendente"}
+    return {"kind": "contact", "user_id": None, "name": "Contato"}
+
+
+_EMPTY_OPENER = {"kind": "", "user_id": None, "name": ""}
+
+
 def ensure_protocolo_for_contact(contact_id: int, phone: str = "", name: str = "",
                                    conversation_id: int | None = None,
-                                   announce_open: bool = False) -> dict:
+                                   announce_open: bool = False,
+                                   opener: dict | None = None) -> dict:
     """Get-or-create do protocolo ABERTO do contato (race-safe via índice parcial).
 
     Quando ``announce_open`` e ESTA chamada criou o protocolo, grava UMA nota privada
     marcando a abertura com um ID pesquisável (ver ``_write_open_note``). Quem perde a
-    corrida (re-seleciona o existente) não grava → idempotente, 1 nota por protocolo."""
+    corrida (re-seleciona o existente) não grava → idempotente, 1 nota por protocolo.
+
+    ``opener`` (``{kind,user_id,name}`` de ``_resolve_opener``) é gravado SÓ na criação
+    real — quem re-seleciona o existente não sobrescreve quem abriu."""
     existing = _select_open_protocolo(contact_id)
     if existing:
         return existing
     ts = now()
+    op = opener or _EMPTY_OPENER
     created = False
     try:
         with make_plugin_db() as conn:
             conn.execute(
                 text("INSERT INTO plugin_protocolos_protocolos "
                      "(contact_id, contact_phone, contact_name, status, fields, "
+                     " opened_by_kind, opened_by_user_id, opened_by_name, "
                      " opened_at, created_at, updated_at) "
-                     "VALUES (:cid, :phone, :name, 'aberto', '{}', :ts, :ts, :ts)"),
-                {"cid": contact_id, "phone": phone or "", "name": name or "", "ts": ts},
+                     "VALUES (:cid, :phone, :name, 'aberto', '{}', "
+                     " :okind, :ouid, :oname, :ts, :ts, :ts)"),
+                {"cid": contact_id, "phone": phone or "", "name": name or "", "ts": ts,
+                 "okind": op.get("kind") or "", "ouid": op.get("user_id"),
+                 "oname": op.get("name") or ""},
             )
         created = True
     except IntegrityError:
@@ -1207,10 +1267,13 @@ def mark_relink_reviewed(protocolo_id: int) -> None:
         )
 
 
-def open_new_protocolo(conversation_id: int) -> tuple[dict | None, str | None]:
+def open_new_protocolo(conversation_id: int,
+                       opener: dict | None = None) -> tuple[dict | None, str | None]:
     """Ação "É um novo protocolo" do popup de continuidade: abre AGORA o protocolo novo do
     contato desta conversa (o ``auto_link`` foi adiado até esta decisão) + garante o ciclo
-    aberto. A partir daqui existe um protocolo aberto, então a sugestão para de aparecer."""
+    aberto. A partir daqui existe um protocolo aberto, então a sugestão para de aparecer.
+
+    ``opener`` = quem executou a ação (atendente do painel); default vazio → "—"."""
     atend = conversation_repo.get(conversation_id)
     if not atend:
         return None, "Conversa não encontrada."
@@ -1218,8 +1281,8 @@ def open_new_protocolo(conversation_id: int) -> tuple[dict | None, str | None]:
     contact = contact_repo.get(contact_id) or {}
     at = ensure_protocolo_for_contact(
         contact_id, phone=contact.get("phone", ""), name=_contact_name(contact),
-        conversation_id=conversation_id, announce_open=True)
-    ensure_open_cycle(conversation_id, contact_id, at["id"])
+        conversation_id=conversation_id, announce_open=True, opener=opener)
+    ensure_open_cycle(conversation_id, contact_id, at["id"], opener=opener)
     _broadcast_changed(contact_id, at["id"])
     return at, None
 
@@ -1329,7 +1392,8 @@ def apply_resolve_decision(conversation_id: int, kind: str, *, previous_id=None,
     else:
         # Protocolo novo DE FATO: reusa o aberto (auto_link) ou cria, e garante o ciclo
         # aberto — é o atendimento novo que o atendente segue tocando.
-        at, err = open_new_protocolo(conversation_id)
+        at, err = open_new_protocolo(
+            conversation_id, opener=_resolve_opener("agent", conversation_id, name=actor or ""))
         if err:
             return {}, err
         out["protocolo_id"] = (at or {}).get("id")
@@ -2401,36 +2465,44 @@ def _count_cycles(conversation_id: int, protocolo_id: int) -> int:
 
 
 def _insert_cycle(conversation_id: int, contact_id: int, protocolo_id: int,
-                  assignee_name: str = "") -> dict:
+                  assignee_name: str = "", opener: dict | None = None) -> dict:
     ts = now()
+    op = opener or _EMPTY_OPENER
     with make_plugin_db() as conn:
         conn.execute(
             text("INSERT INTO plugin_protocolos_atendimentos "
                  "(protocolo_id, conversation_id, contact_id, assignee_name, "
+                 " opened_by_kind, opened_by_user_id, opened_by_name, "
                  " fields, started_at, created_at, updated_at) "
-                 "VALUES (:aid, :cid, :ctid, :aname, '{}', :ts, :ts, :ts)"),
+                 "VALUES (:aid, :cid, :ctid, :aname, "
+                 " :okind, :ouid, :oname, '{}', :ts, :ts, :ts)"),
             {"aid": protocolo_id, "cid": conversation_id, "ctid": contact_id,
-             "aname": assignee_name or "", "ts": ts},
+             "aname": assignee_name or "", "ts": ts,
+             "okind": op.get("kind") or "", "ouid": op.get("user_id"),
+             "oname": op.get("name") or ""},
         )
     return get_open_cycle(conversation_id, protocolo_id)
 
 
 def ensure_open_cycle(conversation_id: int, contact_id: int, protocolo_id: int,
-                      assignee_name: str = "") -> dict:
+                      assignee_name: str = "", opener: dict | None = None) -> dict:
     """Ciclo aberto da atendimento neste protocolo; cria um NOVO se não houver
-    (o último foi resolvido ou nunca existiu) — é isso que acumula as linhas."""
+    (o último foi resolvido ou nunca existiu) — é isso que acumula as linhas.
+
+    ``opener`` (quem abriu ESTE ciclo) só é gravado quando um ciclo novo é criado."""
     cur = get_open_cycle(conversation_id, protocolo_id)
     if cur:
         return cur
-    return _insert_cycle(conversation_id, contact_id, protocolo_id, assignee_name)
+    return _insert_cycle(conversation_id, contact_id, protocolo_id, assignee_name, opener)
 
 
-def ensure_cycle_exists(conversation_id: int, contact_id: int, protocolo_id: int) -> dict | None:
+def ensure_cycle_exists(conversation_id: int, contact_id: int, protocolo_id: int,
+                        opener: dict | None = None) -> dict | None:
     """Bootstrap (saída do operador): cria um ciclo SÓ se não houver NENHUM neste
     protocolo — nunca abre um ciclo novo logo após uma resolução."""
     if _count_cycles(conversation_id, protocolo_id) > 0:
         return None
-    return _insert_cycle(conversation_id, contact_id, protocolo_id)
+    return _insert_cycle(conversation_id, contact_id, protocolo_id, opener=opener)
 
 
 def resolve_atendimento(conversation_id: int, values: dict, assignee_name: str = "",
@@ -2537,10 +2609,12 @@ def on_inbound(ctx, payload: dict) -> None:
         # depois, ao resolver. A única exceção é o valor de BLOQUEIO do atributo.
         if read_relink_attr_decision(contact["id"], atend["id"]) == "block":
             return
+        # Mensagem RECEBIDA → quem abriu (protocolo/ciclo) é o próprio contato.
+        opener = _resolve_opener("inbound", atend["id"])
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
-            conversation_id=atend["id"], announce_open=True)
-        ensure_open_cycle(atend["id"], contact["id"], at["id"])
+            conversation_id=atend["id"], announce_open=True, opener=opener)
+        ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
     except Exception as e:  # noqa: BLE001 — um handler que falha nunca quebra o pipeline
         logger.debug("protocolos.on_inbound falhou: %s", e)
 
@@ -2556,9 +2630,11 @@ def on_outbound(ctx, payload: dict) -> None:
             return
         if read_relink_attr_decision(contact["id"], atend["id"]) == "block":
             return
+        # Mensagem ENVIADA → quem abriu depende da origem (atendente logado / IA / echo).
+        opener = _resolve_opener((payload or {}).get("source") or "", atend["id"])
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
-            conversation_id=atend["id"], announce_open=True)
+            conversation_id=atend["id"], announce_open=True, opener=opener)
         # Conversa ABERTA → garante um ciclo ABERTO: o envio do atendente numa conversa
         # fechada a REABRE antes deste evento (o core salva e só então emite message.sent),
         # e isso é um atendimento NOVO dentro do protocolo. Sem isto o protocolo ficava sem
@@ -2566,9 +2642,9 @@ def on_outbound(ctx, payload: dict) -> None:
         # Conversa FECHADA (ex.: a mensagem de avaliação do fechar, enviada com
         # reopen=False) → só bootstrap: nunca abre ciclo logo após uma resolução.
         if (atend.get("status") or "") != "closed":
-            ensure_open_cycle(atend["id"], contact["id"], at["id"])
+            ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
         else:
-            ensure_cycle_exists(atend["id"], contact["id"], at["id"])
+            ensure_cycle_exists(atend["id"], contact["id"], at["id"], opener=opener)
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos.on_outbound falhou: %s", e)
 

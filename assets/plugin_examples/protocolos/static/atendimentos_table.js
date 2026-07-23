@@ -32,6 +32,8 @@ const BASE = [
   { key: '__inicio', label: 'Início', base: true, group: 'atendimento' },
   { key: '__fim', label: 'Fim', base: true, group: 'atendimento' },
   { key: '__atendente', label: 'Atendente', base: true, group: 'atendimento' },
+  { key: '__aberto', label: 'Aberto por', base: true, group: 'atendimento' },
+  { key: '__fechado', label: 'Fechado por', base: true, group: 'atendimento' },
 ];
 
 export function AtendimentosTable({ atendimentos = [], fieldDefs = [],
@@ -81,6 +83,10 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [],
     if (col.key === '__inicio') return fmtTs(c[startField]);
     if (col.key === '__fim') return fmtTs(c[endField]);
     if (col.key === '__atendente') return c.assignee_name || '—';
+    // "Aberto por" = quem abriu o ciclo (opened_by_name: Contato/IA/atendente).
+    if (col.key === '__aberto') return c.opened_by_name || '—';
+    // "Fechado por" = o atendente salvo, só quando o ciclo já foi encerrado (ended_at).
+    if (col.key === '__fechado') return c[endField] ? (c.assignee_name || '—') : '—';
     const v = (c.fields || {})[col.key];
     if (col.type === 'checkbox') return v === true ? 'Sim' : (v === false ? 'Não' : '—');
     return (v === null || v === undefined || v === '') ? '—' : String(v);

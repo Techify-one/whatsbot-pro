@@ -3267,6 +3267,43 @@ check("_is_orphan_protocolo -> True após conversa excluída",
 _alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
 check("send_protocol_on_close(órfão) não levanta", True)
 
+# ── "Aberto por" (opener) no protocolo e nos atendimentos (ciclos) ──
+# _resolve_opener é puro: mapeia a origem do evento/ação para {kind,user_id,name}.
+check("_resolve_opener(inbound) -> Contato",
+      _alogic._resolve_opener("inbound") == {"kind": "contact", "user_id": None, "name": "Contato"})
+check("_resolve_opener(ai) -> IA",
+      _alogic._resolve_opener("ai") == {"kind": "ia", "user_id": None, "name": "IA"})
+check("_resolve_opener(agent) -> usa nome do current_user",
+      _alogic._resolve_opener("agent", None, user_id=7, name="Fulano")
+      == {"kind": "agent", "user_id": 7, "name": "Fulano"})
+check("_resolve_opener(operator) sem conversa -> Atendente (best-effort vazio)",
+      _alogic._resolve_opener("operator", None)["name"] == "Atendente")
+check("_resolve_opener(desconhecido) -> cai em Contato",
+      _alogic._resolve_opener("")["kind"] == "contact")
+# Criação real GRAVA o opener; get_protocolo devolve as colunas via dict(row).
+_op_c = contact_repo.get_or_create("5511900000090")
+_op_proto = _alogic.ensure_protocolo_for_contact(
+    _op_c["id"], phone="5511900000090", name="Opener Teste",
+    opener=_alogic._resolve_opener("inbound"))
+_op_row = _alogic.get_protocolo(_op_proto["id"])
+check("ensure_protocolo grava opened_by (Contato)",
+      _op_row.get("opened_by_kind") == "contact" and _op_row.get("opened_by_name") == "Contato")
+# O ciclo carrega SEU próprio opener (aqui simulamos abertura pela IA).
+_op_conv = _sk_conv_repo.resolve_for_contact(_op_c["id"], "5511900000090@s.whatsapp.net")
+_op_cyc = _alogic._insert_cycle(_op_conv["id"], _op_c["id"], _op_proto["id"],
+                                opener=_alogic._resolve_opener("ai"))
+check("_insert_cycle grava opened_by no ciclo (IA)", _op_cyc.get("opened_by_name") == "IA")
+# list_atendimentos (usado pelo popup) expõe opened_by_name na linha.
+_op_list = _alogic.list_atendimentos(_op_proto["id"])
+check("list_atendimentos -> opened_by_name na linha",
+      any(a.get("opened_by_name") == "IA" for a in _op_list))
+# Registro SEM opener (histórico antigo) fica com '' -> a UI mostra '—'.
+_op_c2 = contact_repo.get_or_create("5511900000091")
+_op_proto2 = _alogic.ensure_protocolo_for_contact(
+    _op_c2["id"], phone="5511900000091", name="Sem opener")
+check("ensure_protocolo sem opener -> opened_by_name vazio (histórico)",
+      _alogic.get_protocolo(_op_proto2["id"]).get("opened_by_name") == "")
+
 # ── Religar IA ao fechar: setting (default ON) + helper best-effort ──
 check("get_reactivate_ai_on_close_setting -> default True",
       _alogic.get_reactivate_ai_on_close_setting() is True)
