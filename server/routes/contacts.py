@@ -17,6 +17,7 @@ from db.repositories import contact_repo, message_repo, config_repo, conversatio
 from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories import inbox_repo
 from db.repositories import mention_repo, inbox_member_repo
+from db.repositories import contact_inbox_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from channels.contact_type import resolve_contact_type
@@ -181,6 +182,41 @@ def register_routes(app, deps):
         if channel_id:
             return str(channel_id)
         return "default"
+
+    def _wire_target(phone: str, conversation_id=None) -> str:
+        """Real send address (the JID the conversation RECEIVES from), not the saved
+        ``contacts.phone``.
+
+        ``contacts.phone`` can drift from the WhatsApp account's JID — the classic
+        Brazilian 9th-digit case: a number saved with 13 digits whose WhatsApp is
+        registered on 12 (or vice-versa). Inbound and the AI auto-reply always use the
+        exact JID that came in the received message, so they deliver; a manual/operator
+        send that used the raw ``phone`` went to a GHOST JID (GOWA still returns a
+        msg_id, but WhatsApp silently drops it → the client never sees it, no delivery
+        ack). This resolves the conversation's ``contact_inbox.source_jid`` (the address
+        the conversation actually receives from) and returns its bare digits for a
+        person (``@s.whatsapp.net``) or the full JID for a group (``@g.us``); anything
+        else (lid / Telegram / Cloud / unknown) keeps ``phone`` unchanged, so only the
+        exact bug is corrected and other providers are untouched. Falls back to
+        ``phone`` on any lookup failure — never raises."""
+        if not conversation_id:
+            return phone
+        try:
+            conv = conversation_repo.get(int(conversation_id))
+            ci_id = (conv or {}).get("contact_inbox_id")
+            if not ci_id:
+                return phone
+            ci = contact_inbox_repo.get(int(ci_id))
+            cand = ((ci or {}).get("source_jid")
+                    or (ci or {}).get("source_id") or "").strip()
+        except Exception:  # noqa: BLE001 — a resolution glitch must never block a send
+            return phone
+        if cand.endswith("@g.us"):
+            return cand
+        if cand.endswith("@s.whatsapp.net"):
+            digits = cand.split("@", 1)[0]
+            return digits if digits.isdigit() else phone
+        return phone
 
     def _resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
         """Inbox id targeted by an operator write (plano inboxes/canais §4.7).
@@ -920,6 +956,10 @@ def register_routes(app, deps):
             return denied_inbox
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        # Wire target = the JID the conversation actually receives from (fixes the BR
+        # 9th-digit ghost-send). `phone` stays the contact key for save/broadcast.
+        wire_phone = await asyncio.to_thread(
+            _wire_target, phone, body.get("conversation_id"))
         block = await asyncio.to_thread(
             _session_window_block, channel_id, body.get("conversation_id"), phone)
         if block:
@@ -932,8 +972,9 @@ def register_routes(app, deps):
             send_text, mentions = await asyncio.to_thread(
                 group_mentions.resolve_outgoing, phone, message)
 
-        # Track sent message to filter echo-backs (key matches the webhook: channel:phone:text)
-        state.recently_sent[f"{channel_id}:{phone}:{send_text[:120]}"] = time.time()
+        # Track sent message to filter echo-backs — key on the WIRE target (the echo
+        # comes back stamped with the real JID, not the saved phone).
+        state.recently_sent[f"{channel_id}:{wire_phone}:{send_text[:120]}"] = time.time()
 
         # Send via the conversation's channel — always save message (status on failure)
         send_failed = False
@@ -941,7 +982,7 @@ def register_routes(app, deps):
         msg_id = None
         try:
             msg_id = await asyncio.to_thread(
-                _route_send_text, channel_id, phone, send_text, mentions, reply_to)
+                _route_send_text, channel_id, wire_phone, send_text, mentions, reply_to)
         except GOWASendError as e:
             logger.error("[Send] Failed to send message to %s: %s", phone, e)
             send_failed = True
@@ -1173,6 +1214,7 @@ def register_routes(app, deps):
         # privada iniciada num canal não-default (ex.: Telegram) misfila pro
         # WhatsApp 'default'.
         run_channel = _channel_for(phone, conversation_id)
+        run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
         try:
             result = await agent_handler.aprocess_message(
                 phone, text,
@@ -1249,13 +1291,13 @@ def register_routes(app, deps):
                 continue
 
             channel_id = run_channel
-            state.recently_sent[f"{channel_id}:{phone}:{part[:120]}"] = time.time()
+            state.recently_sent[f"{channel_id}:{run_wire}:{part[:120]}"] = time.time()
             send_failed = False
             send_error = ""
             msg_id = None
             try:
                 msg_id = await asyncio.to_thread(
-                    _route_send_text, channel_id, phone, part)
+                    _route_send_text, channel_id, run_wire, part)
             except GOWASendError as e:
                 logger.error("[PrivateAI] send failed for %s: %s", phone, e)
                 send_failed = True
@@ -1736,16 +1778,18 @@ def register_routes(app, deps):
             return denied_inbox
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        wire_phone = await asyncio.to_thread(
+            _wire_target, phone, body.get("conversation_id"))
         block = await asyncio.to_thread(
             _session_window_block, channel_id, body.get("conversation_id"), phone)
         if block:
             return block
-        # Track for echo-back filtering (key matches the webhook: channel:phone:text)
-        state.recently_sent[f"{channel_id}:{phone}:{message[:120]}"] = time.time()
+        # Track for echo-back filtering — key on the WIRE target (real JID).
+        state.recently_sent[f"{channel_id}:{wire_phone}:{message[:120]}"] = time.time()
 
         msg_id = None
         try:
-            msg_id = await asyncio.to_thread(_route_send_text, channel_id, phone, message)
+            msg_id = await asyncio.to_thread(_route_send_text, channel_id, wire_phone, message)
         except GOWASendError as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
             await _emit_send_error(ws_manager, phone, f"Falha ao reenviar mensagem: {e}")
@@ -1793,6 +1837,7 @@ def register_routes(app, deps):
         # Sandbox/test contact — keep the image local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
@@ -1817,7 +1862,8 @@ def register_routes(app, deps):
             is_sandbox=is_sandbox, content=caption, emit_text=caption,
             caption=caption, error_label="imagem",
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            wire_phone=wire_phone)
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
@@ -1845,6 +1891,7 @@ def register_routes(app, deps):
         # Sandbox/test contact — keep the audio local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
@@ -1906,7 +1953,8 @@ def register_routes(app, deps):
             is_sandbox=is_sandbox, content="[Áudio]", emit_text="",
             error_label="áudio", transcribe_audio=True,
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            wire_phone=wire_phone)
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
@@ -1934,6 +1982,7 @@ def register_routes(app, deps):
             return denied_inbox
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
@@ -1965,7 +2014,8 @@ def register_routes(app, deps):
             is_sandbox=is_sandbox, content=text_content, emit_text=caption,
             caption=caption, filename=safe_name, error_label="documento",
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            wire_phone=wire_phone)
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
@@ -2002,6 +2052,7 @@ def register_routes(app, deps):
             return denied_inbox
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
         if not is_sandbox:
@@ -2057,7 +2108,8 @@ def register_routes(app, deps):
             is_sandbox=is_sandbox, content=caption or "[Vídeo]", emit_text=caption,
             caption=caption, error_label="vídeo",
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            wire_phone=wire_phone)
         if not result["ok"]:
             verb = "Falha" if result["kind"] == "send" else "Erro"
             # Meta rejects a codec ffprobe could not inspect (131053) — surface it

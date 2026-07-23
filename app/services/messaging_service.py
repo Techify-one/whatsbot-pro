@@ -195,7 +195,8 @@ class MessagingService:
                          error_label: str,
                          transcribe_audio: bool = False,
                          sent_by_user_id: int | None = None,
-                         sent_by_name: str | None = None) -> dict:
+                         sent_by_name: str | None = None,
+                         wire_phone: str | None = None) -> dict:
         """Send an operator-uploaded media file and persist/broadcast/emit it (R14).
 
         UNIFIES the three near-duplicate operator send handlers
@@ -229,11 +230,16 @@ class MessagingService:
         state = self.state
         agent_handler = self.agent_handler
 
+        # Wire target = the JID the conversation actually receives from (real address),
+        # falling back to `phone`. `phone` stays the contact key for save/broadcast;
+        # only the on-the-wire send uses `wire`. Mirrors the text path — fixes the BR
+        # 9th-digit ghost-send where a saved 13-digit number never reached the account.
+        wire = wire_phone or phone
         msg_id = None
         try:
             if not is_sandbox:
                 res = await asyncio.to_thread(
-                    outbound.send_media, channel_id, phone, kind, str(dest),
+                    outbound.send_media, channel_id, wire, kind, str(dest),
                     caption=caption, filename=filename)
                 if not res.ok:
                     raise GOWASendError(res.error or "Falha no envio de mídia")
