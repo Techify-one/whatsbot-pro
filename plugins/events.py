@@ -136,6 +136,11 @@ KNOWN_FILTERS: set[str] = {
     "filter.tool.args", "filter.tool.result",
     # Outbound reply (raw → parts → each part)
     "filter.reply.raw", "filter.reply.parts", "filter.reply.part",
+    # Outbound wire text (send-only): applied to the text that goes to the
+    # provider AFTER the panel copy is captured, so a transform here (e.g. a
+    # signature) reaches the contact WITHOUT appearing in the saved/broadcast
+    # message. Transform-only — returning None is treated as "no change".
+    "filter.outbound.text",
     # AuthZ ABAC seam
     "filter.authz.decision",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.

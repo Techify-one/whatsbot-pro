@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -201,7 +202,13 @@ class TelegramChannel(Channel):
                   mentions=None) -> SendResult:
         # Telegram has no separate mentions list — @username goes inline in the
         # text. ``mentions`` is accepted for contract parity and ignored.
-        payload: dict = {"chat_id": chat_id, "text": text}
+        # WhatsApp-style ``*bold*`` markup is not native on Telegram; convert it
+        # to Bot API ``entities`` (no parse_mode → nothing needs escaping) so the
+        # text renders bold instead of showing literal asterisks.
+        body, entities = _bold_to_entities(text)
+        payload: dict = {"chat_id": chat_id, "text": body}
+        if entities:
+            payload["entities"] = entities
         if reply_to:
             payload["reply_parameters"] = {"message_id": _to_int(reply_to)}
         res = self._request("sendMessage", payload)
@@ -507,6 +514,37 @@ def _local_file(path_or_url: str) -> Optional[Path]:
         return p if p.is_file() else None
     except Exception:  # noqa: BLE001
         return None
+
+
+_BOLD_RE = re.compile(r"\*([^*\n]+)\*")
+
+
+def _bold_to_entities(text: str) -> tuple[str, list[dict]]:
+    """Convert WhatsApp-style ``*bold*`` markup to plain text + Telegram bold
+    entities. Offsets/lengths are in UTF-16 code units (Bot API requirement).
+    No ``parse_mode`` is used, so nothing in the text needs escaping.
+    """
+    if "*" not in text:
+        return text, []
+
+    def _u16(s: str) -> int:
+        return len(s.encode("utf-16-le")) // 2
+
+    out: list[str] = []
+    entities: list[dict] = []
+    last = 0
+    units = 0  # UTF-16 code units already emitted into `out`
+    for m in _BOLD_RE.finditer(text):
+        before = text[last:m.start()]
+        out.append(before)
+        units += _u16(before)
+        inner = m.group(1)
+        entities.append({"type": "bold", "offset": units, "length": _u16(inner)})
+        out.append(inner)
+        units += _u16(inner)
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out), entities
 
 
 def _to_int(value) -> int:

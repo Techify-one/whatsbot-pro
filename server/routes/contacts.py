@@ -916,7 +916,7 @@ def register_routes(app, deps):
         # Plugin filter: allow plugins to add signature/formatting/redact to operator sends
         filtered = await apply_filter(
             "filter.reply.part", message,
-            {"phone": phone, "index": 0, "total": 1, "source": "operator"},
+            {"phone": phone, "index": 0, "total": 1, "source": "operator", "sent_by_name": _uname},
         )
         if filtered is None:
             return _err("Mensagem bloqueada por plugin.", status=400)
@@ -971,6 +971,16 @@ def register_routes(app, deps):
         if "@g.us" in phone and outbound.supports(channel_id, "groups"):
             send_text, mentions = await asyncio.to_thread(
                 group_mentions.resolve_outgoing, phone, message)
+
+        # Plugin filter: WIRE-ONLY transform (e.g. signature) — reaches the contact
+        # but NOT the saved/broadcast copy (which keeps using `message`).
+        _wired = await apply_filter(
+            "filter.outbound.text", send_text,
+            {"phone": phone, "channel_id": channel_id, "source": "operator",
+             "sent_by_name": _uname, "index": 0, "total": 1},
+        )
+        if _wired is not None:
+            send_text = _wired
 
         # Track sent message to filter echo-backs — key on the WIRE target (the echo
         # comes back stamped with the real JID, not the saved phone).
@@ -1291,13 +1301,23 @@ def register_routes(app, deps):
                 continue
 
             channel_id = run_channel
-            state.recently_sent[f"{channel_id}:{run_wire}:{part[:120]}"] = time.time()
+            # WIRE-ONLY transform (e.g. signature): reaches the contact but not the
+            # saved copy (save below keeps using `part`).
+            wire_text = part
+            _wired = await apply_filter(
+                "filter.outbound.text", part,
+                {"phone": phone, "channel_id": channel_id, "source": "private_ai",
+                 "index": i, "total": len(parts)},
+            )
+            if _wired is not None:
+                wire_text = _wired
+            state.recently_sent[f"{channel_id}:{run_wire}:{wire_text[:120]}"] = time.time()
             send_failed = False
             send_error = ""
             msg_id = None
             try:
                 msg_id = await asyncio.to_thread(
-                    _route_send_text, channel_id, run_wire, part)
+                    _route_send_text, channel_id, run_wire, wire_text)
             except GOWASendError as e:
                 logger.error("[PrivateAI] send failed for %s: %s", phone, e)
                 send_failed = True

@@ -393,6 +393,16 @@ class MessagingService:
                 send_text, mentions = await asyncio.to_thread(
                     group_mentions.resolve_outgoing, phone, part)
 
+            # Plugin filter: WIRE-ONLY transform (e.g. signature) — reaches the
+            # contact but NOT the saved/broadcast copy (which keeps using `part`).
+            _wired = await apply_filter(
+                "filter.outbound.text", send_text,
+                {"phone": phone, "channel_id": channel_id, "source": "ai",
+                 "index": i, "total": len(parts)},
+            )
+            if _wired is not None:
+                send_text = _wired
+
             # Track for echo-back filtering (key on the wire text we actually send)
             sent_key = f"{channel_id}:{phone}:{send_text[:120]}"
             state.recently_sent[sent_key] = time.time()
