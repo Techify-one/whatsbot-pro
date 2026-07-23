@@ -218,6 +218,66 @@ def _register_app_webhook(channel_id: str, callback_url: str) -> tuple[bool, str
         return False, str(e)[:200]
 
 
+def _read_configured_url(creds: dict) -> tuple[str | None, str]:
+    """URL de callback que a Meta tem configurada no webhook ``object=page`` do app.
+
+    Lê ``GET /{app_id}/subscriptions`` (precisa do app access token
+    ``{app_id}|{app_secret}``) e devolve o ``callback_url`` da entrada
+    ``object=page``. Retorna ``(callback_url|None, reason)``; ``reason`` só
+    preenchido em erro de leitura. Sem ``callback_url`` cadastrado ⇒ ``(None, "")``
+    = ``unset``."""
+    secret = creds.get("app_secret") or ""
+    if not secret:
+        return None, "sem app_secret (necessário para ler o callback do app)"
+    app_id, err = _app_id(creds)
+    if not app_id:
+        return None, err or "app_id indisponível"
+    url = f"{_graph_base(creds)}/{app_id}/subscriptions"
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            resp = client.get(url, params={"access_token": f"{app_id}|{secret}"})
+        if resp.status_code != 200:
+            return None, _graph_error(resp)
+        for item in ((resp.json() or {}).get("data") or []):
+            if item.get("object") == "page":
+                return (item.get("callback_url") or None), ""
+        return None, ""
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)[:200]
+
+
+# ── URL normalization + classification (espelha whatsapp_cloud · D3) ──────────
+
+def _normalize_url(u: str) -> dict:
+    """Normaliza pra comparação: host lowercase (+porta), path sem trailing ``/``,
+    ignora querystring/fragment. Retorna ``{host, full}``."""
+    try:
+        parts = urlsplit((u or "").strip())
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        path = (parts.path or "").rstrip("/")
+        return {"host": host, "full": f"{scheme}://{host}{path}"}
+    except Exception:  # noqa: BLE001
+        return {"host": "", "full": (u or "")}
+
+
+def _classify(configured: str | None, expected: str) -> str:
+    """``ok`` / ``wrong_domain`` / ``wrong_path`` / ``unset`` / ``unknown``."""
+    if not configured:
+        return "unset"
+    if not expected:
+        return "unknown"
+    c = _normalize_url(configured)
+    e = _normalize_url(expected)
+    if c["full"] == e["full"]:
+        return "ok"
+    if c["host"] != e["host"]:
+        return "wrong_domain"
+    return "wrong_path"
+
+
 def _base_from_request(request: Request) -> str:
     """Base pública: ``public_base_url`` da config; senão os headers de proxy."""
     saved = (config_repo.get("public_base_url", "") or "").strip().rstrip("/")
@@ -285,39 +345,80 @@ async def autoconfigure(body: dict, request: Request):
     }}
 
 
-def _webhook_status(channel_id: str) -> dict:
+def _webhook_status(channel_id: str, expected_url: str = "") -> dict:
+    """Saúde do webhook do canal. Junta DUAS checagens:
+
+    1. **Página assinada** nos campos de webhook (``/{page_id}/subscribed_apps``,
+       só precisa do page token) → ``subscribed`` / ``subscribed_fields``.
+    2. **Callback do app** vs a URL que ESTA instância espera → ``configured_url``
+       + ``match`` (``ok``/``wrong_domain``/``wrong_path``/``unset``/``unknown``),
+       espelhando o WebhookHealthRow do whatsapp_cloud. ``can_set`` diz se dá pra
+       repointar com 1 clique (precisa de ``app_secret`` + ``verify_token``)."""
     creds = _creds(channel_id)
-    expected = _expected_webhook_url(channel_id)
+    expected = (expected_url or "").strip() or _expected_webhook_url(channel_id)
     page_id = creds.get("page_id") or ""
+    can_set = bool(creds.get("app_secret") and creds.get("verify_token"))
     result = {"expected_url": expected, "subscribed_fields": [],
               "subscribed": False, "reason": "",
-              "has_app_secret": bool(creds.get("app_secret"))}
+              "has_app_secret": bool(creds.get("app_secret")),
+              "configured_url": None, "match": "unknown", "can_set": can_set}
     if not page_id or not creds.get("page_access_token"):
         result["reason"] = "canal sem page_id ou page_access_token"
         return result
+    # 1. A Página está assinada nos campos deste app?
     url = f"{_graph_base(creds)}/{page_id}/subscribed_apps"
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             resp = client.get(url, params=_auth_params(creds))
-        if resp.status_code != 200:
+        if resp.status_code == 200:
+            fields: list[str] = []
+            for item in ((resp.json() or {}).get("data") or []):
+                fields.extend(item.get("subscribed_fields") or [])
+            result["subscribed_fields"] = fields
+            result["subscribed"] = "messages" in fields
+            if not result["subscribed"]:
+                result["reason"] = "o app não está assinado no campo 'messages' da Página"
+        else:
             result["reason"] = _graph_error(resp)
-            return result
-        fields: list[str] = []
-        for item in ((resp.json() or {}).get("data") or []):
-            fields.extend(item.get("subscribed_fields") or [])
-        result["subscribed_fields"] = fields
-        result["subscribed"] = "messages" in fields
-        if not result["subscribed"]:
-            result["reason"] = "o app não está assinado no campo 'messages' da Página"
     except Exception as e:  # noqa: BLE001
         result["reason"] = str(e)[:200]
+    # 2. O callback do app aponta pra ESTA instância?
+    configured, cb_reason = _read_configured_url(creds)
+    result["configured_url"] = configured
+    if configured is None and cb_reason:
+        result["match"] = "unknown"
+        if not result["reason"]:
+            result["reason"] = cb_reason
+    else:
+        result["match"] = _classify(configured, expected)
     return result
 
 
 @router.get("/webhook-status")
-async def webhook_status(channel_id: str = ""):
-    """Saúde: a Página está assinada nos campos de webhook deste app?"""
+async def webhook_status(channel_id: str = "", expected_url: str = ""):
+    """Saúde do webhook: Página assinada + o callback do app aponta pra cá?"""
     if not channel_id:
         return {"ok": False, "error": "channel_id é obrigatório"}
-    data = await asyncio.to_thread(_webhook_status, channel_id)
+    data = await asyncio.to_thread(_webhook_status, channel_id, expected_url)
+    return {"ok": True, "data": data}
+
+
+@router.post("/set-webhook")
+async def set_webhook(body: dict):
+    """Aponta o callback do webhook (nível do app, ``object=page``) para ``url`` e
+    reassina a Página. Mesma mecânica do ``/autoconfigure``, mas com a URL vinda do
+    frontend (a que ESTA instância espera) — é o botão "Configurar webhook" do card.
+    Em sucesso, re-lê e devolve o novo ``match``."""
+    channel_id = (body.get("channel_id") or "").strip()
+    url = (body.get("url") or "").strip()
+    if not channel_id or not url:
+        return {"ok": False, "error": "channel_id e url são obrigatórios"}
+    ok, err = await asyncio.to_thread(_register_app_webhook, channel_id, url)
+    if not ok:
+        return {"ok": False, "error": err or "falha ao configurar o webhook"}
+    sub_ok, sub_err = await asyncio.to_thread(_subscribe, channel_id)
+    data = await asyncio.to_thread(_webhook_status, channel_id, url)
+    data["page_subscribed"] = sub_ok
+    if not sub_ok and not data.get("reason"):
+        data["reason"] = sub_err
     return {"ok": True, "data": data}

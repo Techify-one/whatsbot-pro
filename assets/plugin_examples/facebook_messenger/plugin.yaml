@@ -1,6 +1,6 @@
 id: facebook_messenger
 name: Canal · Facebook Messenger
-version: 1.1.1
+version: 1.2.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada de Página do Facebook via Messenger Platform (Meta Graph
@@ -11,6 +11,8 @@ description: >-
 short_description: >-
   Provider de canal para o Facebook Messenger (Meta Graph API): cole o token da Página, assine o webhook e atenda as DMs da Página no painel.
 author: WhatsBot
+frontend_extends: /plugins/facebook_messenger/static/extends.js
+frontend_api_version: "1.0"
 entry:
   channels: channels
   routes: routes
