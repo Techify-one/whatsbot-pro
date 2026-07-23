@@ -21,7 +21,8 @@ import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { OptionListSelect } from '../OptionListSelect.js';
-import { CONTACT_TYPE_ORDER, contactTypeMeta } from '../../services/contactTypes.js';
+import { contactTypeOrder, contactTypeMeta } from '../../services/contactTypes.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 import { splitSort, combineSort } from '../../services/conversationRows.js';
 
 const html = htm.bind(h);
@@ -194,8 +195,8 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'contact_type') {
-    // Conjunto fixo de tipos conhecidos (whatsapp/telegram/outros). Rótulos via catálogo.
-    const options = CONTACT_TYPE_ORDER.map(v => ({ value: v, label: contactTypeMeta(v).label }));
+    // Tipos conhecidos + os descobertos do catálogo de providers (plano 76). Rótulos via catálogo.
+    const options = contactTypeOrder().map(v => ({ value: v, label: contactTypeMeta(v).label }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'agent') {
@@ -266,6 +267,7 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
 export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
   convLabelNames = [], contactAttrDefs = [], convAttrDefs = [],
   sortBy, onSortChange, readSortOptions = [], timeSortOptions = [], onApply, onClose }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (opções de tipo)
   // Dimensões = core + atributos personalizados (contato e atendimento), dinâmicas.
   const dimensions = useMemo(() => [
     ...CORE_DIMENSIONS,

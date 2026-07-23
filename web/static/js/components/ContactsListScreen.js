@@ -32,6 +32,7 @@ import {
   buildContactFilterParams, isContactFilterServerExpressible,
 } from '../services/conversationFilterSpec.js';
 import { contactTypeMeta, contactTypeBadge } from '../services/contactTypes.js';
+import { useProviderCatalog } from '../hooks/useProviderCatalog.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 import { hasPermission } from '../utils/permissions.js';
 
@@ -310,6 +311,7 @@ const CONTACTS_URL_SCHEMA = [
 
 // ── Tela principal ───────────────────────────────────────────────────────
 export default function ContactsListScreen({ initialEntity = null, currentUser = null }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (tipos de contato)
   const canImport = hasPermission(currentUser, 'contact.import');
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');

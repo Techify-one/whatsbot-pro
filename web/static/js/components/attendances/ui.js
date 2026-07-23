@@ -5,6 +5,7 @@ import { h } from 'preact';
 import htm from 'htm';
 
 import { channelMetaFor } from '../contacts/ChannelChip.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
@@ -46,6 +47,7 @@ export function StatusBadge({ status }) {
 // Mesmo catálogo do selo da sidebar/cabeçalho (rótulo + cor por provider); aqui a
 // pílula é maior por causa da densidade desta tela, mas as cores nunca divergem.
 export function ChannelBadge({ provider, name }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar
   if (!provider) return null;
   const meta = channelMetaFor(provider);
   return html`

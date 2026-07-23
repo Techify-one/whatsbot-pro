@@ -102,12 +102,14 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   const hasConfig = descriptor && (descriptor.config_fields || [])
     .some((f) => f.type !== 'generated');
   const hasCreds = descriptor && (descriptor.credential_fields || []).length;
-  // Widget (plano 46): if the provider declares the `embed_snippet` post-create
-  // kind, show the always-available copy-again block, built from the channel's
-  // public widget_token (a generated config field, immutable → read from config).
-  const embedToken = (descriptor && descriptor.post_create
-    && descriptor.post_create.kind === 'embed_snippet')
-    ? (parseChannelConfig(channel.config).widget_token || '')
+  // Widget (plano 46/76): se o provider declara o post-create `embed_snippet`,
+  // mostra o bloco copiar-de-novo. O token público e o TEMPLATE do snippet vêm do
+  // descriptor (token_config_key / snippet_template) — o core não conhece o nome
+  // literal da chave nem o path do plugin.
+  const embedPc = (descriptor && descriptor.post_create
+    && descriptor.post_create.kind === 'embed_snippet') ? descriptor.post_create : null;
+  const embedToken = embedPc
+    ? (parseChannelConfig(channel.config)[embedPc.token_config_key] || '')
     : '';
 
   return html`
@@ -127,7 +129,8 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
           ${embedToken ? html`
             <div class="border-t border-wa-border pt-3">
               <label class="block text-[12px] text-wa-secondary mb-2">Snippet de instalação</label>
-              <${EmbedSnippetBlock} widgetToken=${embedToken} baseUrl=${window.location.origin} />
+              <${EmbedSnippetBlock} widgetToken=${embedToken} baseUrl=${window.location.origin}
+                template=${embedPc.snippet_template} />
             </div>
           ` : null}
 

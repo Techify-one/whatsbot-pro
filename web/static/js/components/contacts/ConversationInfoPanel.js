@@ -16,6 +16,8 @@ import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { useInfoPanelResize } from './hooks/useInfoPanelResize.js';
+import { providerLabel as providerLabelFor } from '../../services/providerCatalog.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
@@ -24,13 +26,6 @@ const html = htm.bind(h);
 // conversation labels (Onda 3), conversation custom attributes and read-only
 // metadata. Opened from the "Informações do atendimento" (ℹ️) button in the chat
 // header; the contact photo/name still opens ContactInfoPanel. Dark-mode-safe.
-
-const PROVIDER_LABELS = {
-  gowa: 'WhatsApp',
-  whatsapp_cloud: 'WhatsApp Cloud API',
-  telegram: 'Telegram',
-  test: 'Teste',
-};
 
 function fmtTs(ts) {
   if (!ts) return '—';
@@ -42,6 +37,7 @@ function fmtTs(ts) {
 }
 
 export function ConversationInfoPanel({ phone, conversationId = null, onClose, onOpenContactInfo = null, contactInfo = null, convAttrPatch = null }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar
   const [conv, setConv] = useState(null);
   const [loading, setLoading] = useState(true);
   const [convDefs, setConvDefs] = useState([]);
@@ -212,7 +208,7 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
   }
 
   const isOpen = conv && conv.status === 'open';
-  const providerLabel = conv && (conv.channel_name || PROVIDER_LABELS[conv.channel_provider] || conv.channel_provider || '—');
+  const providerLabel = conv && (conv.channel_name || providerLabelFor(conv.channel_provider) || '—');
   const canResolve = hasPermission(user, 'conversation.resolve');
   const canAssign = hasPermission(user, 'conversation.assign');
   const canReply = hasPermission(user, 'conversation.reply');

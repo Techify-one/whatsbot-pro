@@ -19,6 +19,7 @@ POST = inbound delivery → ``parse_inbound`` (always answers 200 so the provide
 """
 
 import asyncio
+import json
 import logging
 import time
 
@@ -566,10 +567,43 @@ def register_routes(app, deps):
     @app.post("/api/webhook/{provider}/{channel_id}")
     async def webhook_inbound(provider: str, channel_id: str, request: Request):
         # Must never 500 — a provider that gets an error retries forever.
+        # Read the body as RAW BYTES first (plano 46 · 01-A): the Meta signature is
+        # an HMAC over the exact bytes, so parsing to a dict and re-serializing
+        # would break it. The dict is derived from the same bytes.
         try:
-            raw = await request.json()
+            body_bytes = await request.body()
+        except Exception:
+            body_bytes = b""
+        try:
+            raw = json.loads(body_bytes or b"{}")
         except Exception:
             raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+
+        # Signature verification (plano 46 · 01-A, D3) — opt-in per PROVIDER, never
+        # by name: the base ``Channel`` hook returns True, so GOWA/Telegram/Cloud are
+        # byte-identical to before. Meta providers override it and validate
+        # ``X-Hub-Signature-256`` over the RAW body with the channel's app_secret.
+        # Runs BEFORE the plugin filter and the debug buffers, so a forged payload
+        # never reaches a plugin nor is recorded. Answers 200 anyway (Meta retries a
+        # 4xx forever) but ingests NOTHING. Called INLINE on purpose: the hook's
+        # contract is fast + I/O-free (an HMAC), and this is EVERY inbound's hot
+        # path — a thread hop per message would cost more than the check itself.
+        # Resolved against the URL's channel (the GOWA device re-routing below only
+        # matters for GOWA, which never verifies).
+        inst = registry.get(channel_id) if registry is not None else None
+        if inst is not None:
+            try:
+                signature_ok = inst.verify_inbound_signature(body_bytes, request.headers)
+            except Exception:
+                logger.warning("verify_inbound_signature falhou em %s/%s — payload "
+                               "descartado", provider, channel_id, exc_info=True)
+                signature_ok = False
+            if not signature_ok:
+                logger.warning("Webhook inbound %s/%s REJEITADO: assinatura inválida",
+                               provider, channel_id)
+                return _ok({"status": "bad_signature"})
 
         # Plugin filter: full webhook payload before any parse (plano 13 Fase 0 —
         # same hook the legacy /api/webhook handler offers, now for every provider).
@@ -614,6 +648,7 @@ def register_routes(app, deps):
             return _ok({"status": "ignored", "reason": "unknown_channel"})
 
         events = []
+        # Re-resolve: the GOWA device re-routing above may have changed channel_id.
         inst = registry.get(channel_id) if registry is not None else None
         if inst is not None and hasattr(inst, "parse_inbound"):
             try:

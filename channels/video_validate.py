@@ -124,6 +124,14 @@ def validate_video(path: str, caps) -> VideoVerdict:
     if limits is None:
         return VideoVerdict(OK)
 
+    # A provider may declare a plain ``MediaLimits`` for "video" (size/container
+    # only — Messenger/Instagram accept any common container). Read the codec
+    # fields through ``getattr`` so that stays a valid, codec-free policy instead
+    # of blowing up here and failing every video send.
+    allowed_video_codecs = tuple(getattr(limits, "video_codecs", ()) or ())
+    allowed_audio_codecs = tuple(getattr(limits, "audio_codecs", ()) or ())
+    max_audio_streams = getattr(limits, "max_audio_streams", 0) or 0
+
     ext = os.path.splitext(path)[1].lower()
     if limits.extensions and ext not in limits.extensions:
         allowed = "/".join(e.lstrip(".").upper() for e in limits.extensions)
@@ -141,6 +149,10 @@ def validate_video(path: str, caps) -> VideoVerdict:
             f"Vídeo acima do limite de {_fmt_size(limits.max_bytes)} deste canal. "
             "Reduza o tamanho e tente novamente.")
 
+    if not (allowed_video_codecs or allowed_audio_codecs or max_audio_streams):
+        # No codec policy declared: extension + size are the whole contract.
+        return VideoVerdict(OK, codec_checked=False)
+
     streams = _ffprobe_streams(path)
     if streams is None:
         # ffprobe unavailable: extension + size passed, codec unverifiable.
@@ -151,24 +163,24 @@ def validate_video(path: str, caps) -> VideoVerdict:
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
 
     codec_hint = (f"Use {'/'.join(e.lstrip('.').upper() for e in limits.extensions)} "
-                  f"com vídeo {'/'.join(c.upper() for c in limits.video_codecs)} "
-                  f"e áudio {'/'.join(c.upper() for c in limits.audio_codecs)}."
-                  ) if limits.video_codecs and limits.audio_codecs else ""
+                  f"com vídeo {'/'.join(c.upper() for c in allowed_video_codecs)} "
+                  f"e áudio {'/'.join(c.upper() for c in allowed_audio_codecs)}."
+                  ) if allowed_video_codecs and allowed_audio_codecs else ""
 
-    if limits.video_codecs and video_codecs \
-            and not any(c in limits.video_codecs for c in video_codecs):
+    if allowed_video_codecs and video_codecs \
+            and not any(c in allowed_video_codecs for c in video_codecs):
         return VideoVerdict(
             BAD_CODEC, f"Codec de vídeo não suportado. {codec_hint}".strip(),
             codec_checked=True)
-    if limits.max_audio_streams and len(audio_streams) > limits.max_audio_streams:
+    if max_audio_streams and len(audio_streams) > max_audio_streams:
         return VideoVerdict(
             BAD_CODEC,
             f"O vídeo tem mais de uma faixa de áudio; este canal aceita apenas "
-            f"{limits.max_audio_streams}.",
+            f"{max_audio_streams}.",
             codec_checked=True)
-    if limits.audio_codecs and audio_streams:
+    if allowed_audio_codecs and audio_streams:
         audio_codecs = [s.get("codec_name", "") for s in audio_streams]
-        if not any(c in limits.audio_codecs for c in audio_codecs):
+        if not any(c in allowed_audio_codecs for c in audio_codecs):
             return VideoVerdict(
                 BAD_CODEC, f"Codec de áudio não suportado. {codec_hint}".strip(),
                 codec_checked=True)

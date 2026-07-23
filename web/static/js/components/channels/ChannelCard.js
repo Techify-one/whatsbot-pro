@@ -6,7 +6,7 @@ import { h } from 'preact';
 import htm from 'htm';
 import { providerMeta, credLabel, missingCredsFor } from './constants.js';
 import { Dot } from './notices.js';
-import { WebhookHealthRow } from './WebhookHealthRow.js';
+import { Slot } from '../../plugins/Slot.js';
 import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 
 const html = htm.bind(h);
@@ -58,7 +58,7 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
           ` : null}
         </div>
 
-        <${WebhookHealthRow} channel=${channel} />
+        <${Slot} name="channel.card.rows" ctx=${{ channel, descriptor }} />
 
         ${credEntries.length ? html`
           <div class="text-[12px] text-wa-secondary mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">

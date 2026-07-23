@@ -98,17 +98,19 @@ export function serializeAudioModes(set) {
   return ordered.length ? ordered.join(',') : 'off';
 }
 
-// Build the <script> embed snippet for a widget channel (plano 46). PURE.
-// Shared by the post-create notice AND the channel edit form's "copy again" block,
-// so the snippet is byte-identical wherever it is shown. The core doesn't know the
-// provider — it renders this only when the descriptor's post_create.kind is
-// 'embed_snippet'. `\/script` keeps the literal from closing this module's script.
-export function buildEmbedSnippet(baseUrl, widgetToken) {
+// Interpolate a widget channel's embed snippet from the descriptor-provided
+// TEMPLATE (plano 76 · F3). PURE. The core no longer knows the provider's path —
+// the template (com {base_url}/{token}) vem de post_create.snippet_template do
+// descriptor do provider; aqui só substituímos os marcadores. Sem template
+// (descriptor ausente / provider antigo) devolve string vazia — o caller não
+// mostra o bloco. Shared pelo post-create notice E pelo bloco "copiar de novo" do
+// form de edição, então a saída é idêntica onde quer que apareça.
+export function buildEmbedSnippet(baseUrl, widgetToken, template) {
+  if (!template) return '';
   const b = (baseUrl || '').replace(/\/+$/, '');
-  return `<script>(function(d,t){var g=d.createElement(t);` +
-    `g.src="${b}/plugins/website/static/sdk.js";g.async=true;d.body.appendChild(g);` +
-    `g.onload=function(){window.WhatsBotChat.run({widgetToken:'${widgetToken}',baseUrl:'${b}'})}` +
-    `})(document,'script')<\/script>`;
+  return String(template)
+    .split('{base_url}').join(b)
+    .split('{token}').join(widgetToken || '');
 }
 
 // Random URL-safe token, used for the "sugerir" verify-token button and for

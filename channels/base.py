@@ -108,12 +108,32 @@ class ChannelCapabilities:
     # with ``message_id``); gates the "Editar" menu item.
     edit_message: bool = False
     inbound_route: str = "path"           # "path" | "poll" | "none"
+    # Whether this provider's access token EXPIRES and must be renewed in the
+    # background (plano 46 · 01-C, D8). ``False`` = the token never expires by time
+    # (GOWA session, WhatsApp Cloud permanent token, Telegram bot token) and NO
+    # refresh loop should run. ``True`` opts the provider into
+    # :meth:`Channel.refresh_token_if_needed` being called periodically by the
+    # plugin's own lifecycle loop (Instagram's 60-day user token, which dies
+    # SILENTLY if not renewed). Capability-driven — the core never branches on
+    # provider name, and a provider that leaves it False never starts a loop.
+    token_refresh: bool = False
     # Customer-care session window in hours (plano 11 Fase 6). 0 = always-open
     # (GOWA/linked-device): free text any time. >0 = providers like the WhatsApp
     # Cloud API where free text is only allowed within N hours of the last inbound;
     # outside it requires an approved template (HSM). Drives the pipeline by
     # CAPABILITY, never by provider name.
     session_window_hours: int = 0
+    # EXTENDED free-text window, in hours, that applies ONLY to a send made by a
+    # HUMAN operator (plano 46 · 02.2). 0 = no extension (the ``session_window_
+    # hours`` rule applies to everyone — WhatsApp Cloud, where outside the 24h only
+    # an approved template is allowed). >0 = the provider has a human-agent escape
+    # hatch beyond the normal window: Messenger/Instagram accept
+    # ``messaging_type=MESSAGE_TAG`` + ``tag=HUMAN_AGENT`` for up to 7 days, but
+    # ONLY for a real human reply — using it for the AI is a compliance tripwire.
+    # The core evaluates it in ``OutboundRouter.session_open(..., by_human=True)``,
+    # which only the operator-initiated send routes pass; the agentic auto-reply
+    # never does. Capability-driven, never by provider name.
+    human_window_hours: int = 0
     # Credential keys a channel of this provider MUST have to ever become
     # operational (plano 02 — anti zombie-channel). Empty for QR/linked-device
     # providers (GOWA): they legitimately bootstrap from an empty channel via the
@@ -478,7 +498,53 @@ class Channel(ABC):
         """
         return {"registered": True, "canonical_phone": phone, "name": ""}
 
+    # ── Token lifecycle (plano 46 · 01-C, D8) ────────────────────────
+    def refresh_token_if_needed(self) -> None:
+        """Renew this channel's access token when it is close to expiring.
+
+        Opt-in hook, gated by ``ChannelCapabilities.token_refresh``: the CORE never
+        schedules it — the provider's own plugin registers a supervised loop in its
+        ``lifecycle.setup(ctx)`` (``ctx.spawn_task("token_refresh", loop)``, molde
+        ``telegram/lifecycle.py``) that walks its channels every N minutes and calls
+        this. The supervisor cancels the task on plugin disable (``stop_owner``), so
+        a provider that does not declare the capability never starts a loop at all.
+
+        Contract for an implementation (Instagram's 60-day token is the reference —
+        it dies SILENTLY if not renewed):
+
+        * Only refresh a token that is still VALID (an expired one cannot be
+          exchanged) — a dead token must surface as an error, not a retry storm.
+        * Respect the provider's minimum age (IG: the token must be ≥24h old) and
+          only act when it is close to expiring (IG: <10 days left).
+        * Persist BOTH the new token and its expiry via
+          ``registry.set_credential(channel_id, "access_token"/"expires_at", …)``
+          so the value survives a restart.
+        * Never raise: the loop must survive a provider outage. Log and return.
+
+        Default: no-op (the token never expires by time).
+        """
+
     # ── Inbound ──────────────────────────────────────────────────────
+    def verify_inbound_signature(self, raw_body: bytes, headers) -> bool:
+        """Whether an inbound webhook POST is authentic (plano 46 · 01-A, D3).
+
+        The core calls this in ``POST /api/webhook/{provider}/{channel_id}`` with
+        the **RAW** request body (never a re-serialized dict — re-encoding JSON
+        changes the bytes and breaks any HMAC) and the request headers, BEFORE
+        ``parse_inbound``. Returning ``False`` makes the core drop the payload
+        without ingesting anything (it still answers 200, so the provider does not
+        retry a forged request forever).
+
+        Default: ``True`` — no verification. Providers whose transport carries no
+        signature (GOWA's local subprocess, Telegram long-poll) keep the exact
+        pre-existing behaviour. Meta providers override it to validate
+        ``X-Hub-Signature-256`` = ``sha256=HMAC_SHA256(app_secret, raw_body)``, and
+        treat a channel with NO ``app_secret`` configured as "not verifying" (return
+        ``True`` + warn) so a half-configured channel keeps working. Must be pure
+        of DB writes and fast — it runs in the request path.
+        """
+        return True
+
     @abstractmethod
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a provider-specific raw payload into InboundEvents."""

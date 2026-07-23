@@ -254,7 +254,11 @@ def register_routes(app, deps):
                     contact["id"], inbox["id"]) if inbox else None)
                 if conv:
                     last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
-        if outbound.session_open(channel_id, last_ts):
+        # ``by_human=True``: every caller of this guard is an OPERATOR action from
+        # the panel, so a provider that grants humans an extended window
+        # (Messenger/Instagram, ``human_window_hours``) is honoured here — while the
+        # agentic reply, which never passes through this guard, can't reach it.
+        if outbound.session_open(channel_id, last_ts, by_human=True):
             return None
         return _err(
             "Fora da janela de 24h: só é possível enviar um template aprovado.",

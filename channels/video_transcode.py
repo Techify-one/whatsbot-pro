@@ -88,7 +88,9 @@ def transcode_to_limits(path: str, limits: Optional[VideoLimits] = None) -> Opti
     caller then blocks the send (F5A). The caller owns cleanup of the temp file.
     """
     limits = limits or LEGACY_CLOUD_VIDEO_LIMITS
-    if not limits.transcode or not limits.max_bytes:
+    # ``limits`` may be a plain ``MediaLimits`` (provider that declares size only),
+    # which has no ``transcode`` flag — default to allowing the re-encode.
+    if not getattr(limits, "transcode", True) or not limits.max_bytes:
         return None
     if not available():
         return None
