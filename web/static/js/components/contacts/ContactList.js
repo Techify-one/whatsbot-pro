@@ -177,7 +177,7 @@ function RowTags({ tags, globalTags, expanded, onToggle }) {
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
 export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
+  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
@@ -202,6 +202,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   const selectedSet = new Set(selectedKeys || []);
   // For the bulk-tag toggle indicator: does every selected conversation have this tag?
   const selectedContacts = (contacts || []).filter(c => selectedSet.has(rowKeyFor(c)));
+  // "Selecionar todas" é um TOGGLE: quando todas as conversas exibidas já estão marcadas,
+  // apertar de novo DESMARCA todas (sem sair do modo de seleção).
+  const allSelected = (contacts || []).length > 0 && (contacts || []).every(c => selectedSet.has(rowKeyFor(c)));
 
   // Arrastar arquivos direto para uma conversa da lista (plano 64 · F11). O
   // drop NÃO envia às cegas (P7): abre a conversa com a prévia já montada, e o
@@ -455,19 +458,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               </button>
               <div class="border-t border-wa-border">
                 <button
-                  onClick=${() => { onSelectAll && onSelectAll(); }}
+                  onClick=${() => { if (allSelected) { onDeselectAll && onDeselectAll(); } else { onSelectAll && onSelectAll(); } }}
                   class="w-full text-left px-4 py-[10px] text-[14px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                  Selecionar todas
-                </button>
-                <button
-                  disabled=${selCount === 0}
-                  onClick=${() => { onClearSelection && onClearSelection(); closeMenus(); }}
-                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
-                >
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM7 13v-2h10v2H7z"/></svg>
-                  Limpar conversas selecionadas
+                  ${allSelected ? 'Desmarcar todas' : 'Selecionar todas'}
                 </button>
               </div>
             </div>

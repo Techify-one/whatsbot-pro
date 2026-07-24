@@ -54,6 +54,9 @@ export function useBulkSelection({
     setSelectedKeys([...new Set(displayedRef.current.map(rowKeyFor))]);
   }, [displayedRef]);
   const clearSelection = useCallback(() => { setSelectedKeys([]); setSelectionMode(false); }, []);
+  // Desmarca todas SEM sair do modo de seleção (usado pelo toggle "Selecionar todas": apertar
+  // de novo com tudo marcado desmarca, mas a barra de seleção continua aberta).
+  const deselectAll = useCallback(() => { setSelectedKeys([]); }, []);
 
   // Resolve the selected row keys back to their conversation rows. Each key maps to
   // a single row (a specific conversation/channel), so the two channels of the same
@@ -241,7 +244,7 @@ export function useBulkSelection({
 
   return {
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
-    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection,
+    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection, deselectAll,
     handleBulkAI, handleBulkArchive, handleBulkTag, handleBulkRemoveAllTags,
     handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread, handleBulkAssign,
   };

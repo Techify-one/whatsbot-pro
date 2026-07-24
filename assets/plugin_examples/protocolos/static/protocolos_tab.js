@@ -1298,9 +1298,17 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   // Campos nativos (widgets próprios), cada um gated pelo seu availFilter — compõem a seção
   // "Nativas". Cada item guarda a CHAVE p/ o particionamento favorito x não-favorito abaixo.
   // Rótulos INLINE: o nome do filtro vira o placeholder do OptionListSelect (aparece quando nada
-  // está selecionado) — sem <label> empilhada, a barra fica mais baixa. `q` (Buscar) NÃO entra aqui:
-  // subiu para a toolbar do topo. Período mantém um rótulo curto inline (date input não tem placeholder).
+  // está selecionado) — sem <label> empilhada, a barra fica mais baixa. Período mantém um rótulo
+  // curto inline (date input não tem placeholder).
+  // Buscar (`q`) é SEMPRE o primeiro item desta lista → como "Nativas" é a 1ª categoria e a ordem
+  // de render vem da posição em nativeItems (não da ordem em que o filtro foi habilitado na config),
+  // Buscar aparece como PRIMEIRO campo da área de filtros sempre que estiver disponível.
   const nativeItems = [
+    availFilter('q') ? { key: 'q', el: html`
+      <div key="q" class="w-64">
+        <input class="wa-field w-full px-3 py-2 rounded-md text-[13px]" type="text" value=${q}
+          placeholder="nome, telefone ou nº do protocolo" onInput=${(e) => setQ(e.target.value)} />
+      </div>` } : null,
     availFilter('status') ? { key: 'status', el: html`
       <div key="status" class="w-[150px]">
         <${OptionListSelect} options=${[{ value: 'aberto', label: 'Aberto' }, { value: 'fechado', label: 'Fechado' }]}
@@ -1367,14 +1375,15 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   const restEls = buildSections((k) => !isFavorite(k)).flatMap((s) => s.els);
   const hasRest = restEls.length > 0;
 
-  // Popover ⚙ aparece só quando há uma view REAL (não o fallback). Dentro: origem (Pessoal/Equipe)
-  // + Salvar visualização + (se puder editar a view) o checklist "Configurar filtros da aba".
+  // "Visualização do agrupamento" (origem Pessoal/Equipe + Salvar) e o ⚙ aparecem só quando há uma
+  // view REAL (não o fallback). O ⚙ (popover "Configurar filtros da aba") exige poder editar a view.
   const showSettings = !!(activeView && activeView.id != null && activeView.id !== FALLBACK_VIEW.id);
 
   return html`
     <div>
-      <!-- Toolbar unificada (Linha A): esquerda = Voltar + título + Kanban/Lista; direita (ml-auto) =
-           Buscar + ⚙ + contagem + Atualizar + Limpar. Aproveita o espaço vazio do topo. -->
+      <!-- Toolbar unificada (Linha A): tudo à ESQUERDA, em fila — Voltar + título + Kanban/Lista e,
+           logo ao lado, ⚙ + contagem + Atualizar + Limpar + Visualização (origem). (Buscar mora na
+           barra de filtros.) -->
       <div class="flex flex-wrap items-center gap-2 mb-3">
         ${backAndTitle}
         <div class="inline-flex rounded-lg border border-wa-border overflow-hidden">
@@ -1382,45 +1391,19 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
             <button key=${k} onClick=${() => setMode(k)}
               class="px-3 py-1.5 text-[13px] ${mode === k ? 'bg-wa-teal text-white' : 'bg-wa-panel text-wa-text hover:bg-wa-hover'}">${lbl}</button>`)}
         </div>
-        <div class="ml-auto flex flex-wrap items-center gap-2">
-          ${availFilter('q') ? html`<input class="wa-field w-56 px-3 py-1.5 rounded-md text-[13px]" type="text" value=${q}
-            placeholder="nome, telefone ou nº do protocolo" onInput=${(e) => setQ(e.target.value)} />` : null}
-          ${showSettings ? html`
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- ⚙ = só o checklist "Configurar filtros da aba". Abre para a DIREITA (left-0) e é largo. -->
+          ${showSettings && canEditView(activeView) ? html`
             <div ref=${settingsRef} class="relative">
               <button type="button" onClick=${() => setSettingsOpen((o) => !o)}
-                title="Configurações do agrupamento"
+                title="Configurar filtros da aba"
                 class="px-2.5 py-1.5 rounded-md text-[13px] border ${settingsOpen ? 'bg-wa-hover border-wa-teal' : 'border-wa-border hover:bg-wa-hover'} text-wa-text">⚙</button>
               ${settingsOpen ? html`
-                <div class="absolute right-0 mt-1 z-30 w-80 max-h-[70vh] overflow-y-auto p-3 rounded-lg bg-wa-panel border border-wa-border shadow-lg text-left">
-                  <!-- Origem (Pessoal/Equipe) + salvar a VISUALIZAÇÃO atual como padrão da aba. -->
-                  <div class="text-[12px] text-wa-secondary mb-1.5">Visualização do agrupamento</div>
-                  <div class="flex items-center gap-4 text-[13px] text-wa-text mb-2">
-                    <label class="inline-flex items-center gap-1.5 cursor-pointer">
-                      <input type="radio" name=${`src-${activeView.id}`} checked=${!!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(true)} /> Pessoal
-                    </label>
-                    <label class="inline-flex items-center gap-1.5 cursor-pointer">
-                      <input type="radio" name=${`src-${activeView.id}`} checked=${!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(false)} /> Equipe
-                    </label>
-                  </div>
-                  ${(() => {
-                    // Em Equipe sem permissão de editar a view não dá pra salvar o padrão da equipe:
-                    // botão desabilitado + dica p/ trocar pra Pessoal. (Alternar o rádio é sempre livre.)
-                    const usePersonal = !!(activeView.pref && activeView.pref.use_personal);
-                    const blockedTeam = !usePersonal && !canEditView(activeView);
-                    return html`
-                      <button onClick=${saveViewFilters} disabled=${savingPref || blockedTeam}
-                        title=${blockedTeam ? 'Sem permissão para salvar a visualização da equipe — selecione Pessoal' : ''}
-                        class="w-full px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização de filtros</button>
-                      ${blockedTeam ? html`<div class="mt-1 text-[12px] text-wa-secondary">Sem permissão para salvar a visualização da equipe — selecione Pessoal.</div>` : null}`;
-                  })()}
-                  ${prefMsg ? html`<div class="mt-1 text-[12px] ${prefMsg.includes('Falha') ? 'text-red-500' : 'text-wa-teal'}">${prefMsg}</div>` : null}
-                  ${canEditView(activeView) ? html`
-                    <div class="mt-3 pt-3 border-t border-wa-border">
-                      <${ViewGroupingConfig} key=${activeView.id} embedded=${true}
-                        view=${activeView} filterFields=${filterFields} contactAttrDefs=${contactAttrDefs}
-                        apiBase=${apiBase} authHeaders=${authHeaders}
-                        onSaved=${() => { appliedViewRef.current = null; loadViews(); }} />
-                    </div>` : null}
+                <div class="absolute left-0 mt-1 z-30 w-[52rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto p-3 rounded-lg bg-wa-panel border border-wa-border shadow-lg text-left">
+                  <${ViewGroupingConfig} key=${activeView.id} embedded=${true}
+                    view=${activeView} filterFields=${filterFields} contactAttrDefs=${contactAttrDefs}
+                    apiBase=${apiBase} authHeaders=${authHeaders}
+                    onSaved=${() => { appliedViewRef.current = null; loadViews(); }} />
                 </div>` : null}
             </div>` : null}
           ${(mode === 'kanban' ? !kanbanLoading : !loading) ? html`<span class="text-[12px] text-wa-secondary">${shownTotal} protocolo${shownTotal === 1 ? '' : 's'}${shownPartial ? '+' : ''}</span>` : null}
@@ -1430,6 +1413,28 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
           <button onClick=${() => { loadMeta(); reload(); }} class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Atualizar</button>
           ${hasViewFilters ? html`<button onClick=${clearFilters}
             class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">Limpar filtros</button>` : null}
+          <!-- Visualização do agrupamento (origem Pessoal/Equipe + Salvar) — na toolbar, ao lado de
+               Atualizar/Limpar. Só quando há uma view real. -->
+          ${showSettings ? html`
+            <div class="inline-flex flex-wrap items-center gap-2">
+              <span class="text-[12px] text-wa-secondary">Visualização:</span>
+              <label class="inline-flex items-center gap-1.5 cursor-pointer text-[13px] text-wa-text">
+                <input type="radio" name=${`src-${activeView.id}`} checked=${!!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(true)} /> Pessoal
+              </label>
+              <label class="inline-flex items-center gap-1.5 cursor-pointer text-[13px] text-wa-text">
+                <input type="radio" name=${`src-${activeView.id}`} checked=${!(activeView.pref && activeView.pref.use_personal)} onChange=${() => switchSource(false)} /> Equipe
+              </label>
+              ${(() => {
+                // Em Equipe sem permissão de editar a view não dá pra salvar o padrão da equipe:
+                // botão desabilitado + dica (title) p/ trocar pra Pessoal. (Alternar o rádio é sempre livre.)
+                const usePersonal = !!(activeView.pref && activeView.pref.use_personal);
+                const blockedTeam = !usePersonal && !canEditView(activeView);
+                return html`<button onClick=${saveViewFilters} disabled=${savingPref || blockedTeam}
+                  title=${blockedTeam ? 'Sem permissão para salvar a visualização da equipe — selecione Pessoal' : ''}
+                  class="px-3 py-1.5 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50">Salvar visualização de filtros</button>`;
+              })()}
+              ${prefMsg ? html`<span class="text-[12px] ${prefMsg.includes('Falha') ? 'text-red-500' : 'text-wa-teal'}">${prefMsg}</span>` : null}
+            </div>` : null}
         </div>
       </div>
 
@@ -1438,13 +1443,15 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
       ${(favEls.length || hasRest) ? html`
       <div class="mb-3 p-3 rounded-lg bg-wa-panel border border-wa-border">
         ${favEls.length ? html`<div class="flex flex-wrap items-center gap-3">${favEls}</div>` : null}
+        <!-- Botão "Filtros" + campos NÃO-favoritos na MESMA linha flex-wrap: ao abrir, os campos
+             começam ao LADO do botão e só quebram para baixo quando atingem o fim da área. -->
         ${hasRest ? html`
-          <div class="${favEls.length ? 'mt-3 pt-3 border-t border-wa-border' : ''}">
+          <div class="${favEls.length ? 'mt-3 pt-3 border-t border-wa-border' : ''} flex flex-wrap items-center gap-3">
             <button type="button" onClick=${() => setFiltersOpen((o) => !o)}
               class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover">
               <span class="text-wa-secondary w-3">${filtersOpen ? '▾' : '▸'}</span>Filtros
             </button>
-            ${filtersOpen ? html`<div class="mt-3 flex flex-wrap items-center gap-3">${restEls}</div>` : null}
+            ${filtersOpen ? restEls : null}
           </div>` : null}
       </div>` : null}
 

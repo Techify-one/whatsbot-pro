@@ -163,7 +163,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   });
   const {
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
-    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection,
+    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection, deselectAll,
     handleBulkAI, handleBulkArchive, handleBulkTag, handleBulkRemoveAllTags,
     handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread, handleBulkAssign,
   } = bulk;
@@ -396,6 +396,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onSelectAll=${selectAllContacts}
           onCreateTag=${handleCreateTag}
           onClearSelection=${clearSelection}
+          onDeselectAll=${deselectAll}
           onBulkAI=${handleBulkAI}
           onBulkArchive=${handleBulkArchive}
           onBulkTag=${handleBulkTag}
