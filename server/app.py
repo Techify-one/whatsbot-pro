@@ -229,6 +229,17 @@ def create_app(
         agent_factory.migrate_legacy_config_to_default_agent()
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
+    # Core RBAC permissions: backfill any catalog key missing from the
+    # ``permissions`` table (idempotent). Self-heals an orphaned/skipped
+    # permission migration — otherwise those keys can't be granted (the checkbox
+    # saves as a no-op). Mirrors how plugins reconcile their perms at load.
+    try:
+        from db.repositories import rbac_repo as _rbac_repo
+        _n = _rbac_repo.sync_core_permissions()
+        if _n:
+            logger.warning("RBAC: backfilled %d missing core permission(s)", _n)
+    except Exception as e:
+        logger.warning("Core permissions sync failed: %s", e)
     # Built-in system custom-attributes (plano 19): seed CPF & friends (idempotent).
     try:
         from db.system_attributes import seed_system_attributes

@@ -89,6 +89,30 @@ def user_has_permission(user_id: int, permission_key: str) -> bool:
     return "*" in perms or permission_key in perms
 
 
+def sync_core_permissions() -> int:
+    """Reconcile the ``permissions`` table with the static core catalog (idempotent).
+
+    Core permission rows are otherwise seeded only by migrations. If a
+    permission-adding migration is ever skipped (e.g. ``alembic_version``
+    reconciled past it — the "orphan migration" case), its keys stay ABSENT from
+    the table. That silently breaks granting them: ``_insert_role_permissions``
+    resolves keys to ``permissions.id`` and just skips any key without a row — so
+    the checkbox saves as a no-op and the permission count never moves.
+
+    Called at boot (mirrors how plugins self-heal via ``upsert_plugin_permission``)
+    so a missing core key is always backfilled from ``PERMISSION_CATALOG`` — the
+    runtime source of truth. INSERT-only: never touches existing rows or grants.
+    Returns the number of rows inserted."""
+    from domain.permission_catalog import PERMISSION_CATALOG
+    with get_engine().begin() as conn:
+        have = {r[0] for r in conn.execute(select(permissions.c.key))}
+        missing = [(k, d) for k, d in PERMISSION_CATALOG if k not in have]
+        if missing:
+            conn.execute(insert(permissions), [
+                {"key": k, "description": d, "plugin_id": None} for k, d in missing])
+    return len(missing)
+
+
 # ── Plugin permissions (plano "RBAC para Plugins" §3.3-3.4) ────────────────
 
 def upsert_plugin_permission(
