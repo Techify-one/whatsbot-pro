@@ -2320,14 +2320,23 @@ def register_routes(app, deps):
                 ca_repo.list_definitions, "contact", True)  # include soft-deleted
             defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
             known_keys = {d["attribute_key"] for d in all_defs}
+            # Keys already stored on this contact but without any definition — e.g.
+            # `cw_id`/`cw_identifier` left behind by the Chatwoot migration. The panel
+            # re-sends the whole JSON on save; tolerating these avoids a 400 that would
+            # abort the entire save (name, email, tags). Still preserves P50 for a
+            # genuinely new + undefined key (typo from code) → 400.
+            stored = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+            stored_keys = set((stored or {}).get("custom_attributes") or {})
             for key, value in custom_attrs.items():
                 definition = defs.get(key)
                 if definition is None:
                     # A value left behind by a DELETED attribute (soft-delete keeps
-                    # stored values, P49) is tolerated — the frontend re-sends it from
-                    # the stored JSON. Leave it untouched instead of 500-blocking the
-                    # save. Only a key that NEVER existed is a genuine typo → 400 (P50).
-                    if key in known_keys:
+                    # stored values, P49) or by the Chatwoot migration (never defined,
+                    # but already in the stored JSON) is tolerated — the frontend
+                    # re-sends it. Leave it untouched instead of blocking the save.
+                    # Only a key that is BOTH undefined AND not stored is a genuine
+                    # typo → 400 (P50).
+                    if key in known_keys or key in stored_keys:
                         continue
                     return _err(f"Atributo '{key}' não existe.", 400)  # P50
                 if value is None:

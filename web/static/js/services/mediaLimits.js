@@ -62,6 +62,7 @@ export function limitsSummary(kind, entry) {
 const EXT_FALLBACK = {
   video: ['mp4', '3gp', '3gpp', 'mov', 'm4v', 'mkv', 'webm', 'avi'],
   audio: ['ogg', 'opus', 'mp3', 'm4a', 'aac', 'wav', 'amr', 'flac', 'wma', 'oga', 'weba'],
+  image: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif', 'tif', 'tiff'],
 };
 
 /**

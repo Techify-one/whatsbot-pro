@@ -187,8 +187,8 @@ def register_routes(app, deps):
 
         Fatorado porque roda em DOIS caminhos: o normal (a linha já estava no
         banco quando o webhook chegou) e o da retentativa
-        (``_retry_failed_match``, quando a linha só apareceu depois). Duplicar
-        isso nos dois lugares era como o card e a bolha vermelha saíam de sincronia.
+        (``_retry_failed_match``, quando a linha só apareceu depois). Duplicar o
+        corpo nos dois lugares é como bolha vermelha e card sairiam de sincronia.
 
         Só é chamado com ``failed_row`` truthy — ou seja, quando
         ``mark_failed_by_msg_id`` GANHOU a transição. Esse UPDATE com

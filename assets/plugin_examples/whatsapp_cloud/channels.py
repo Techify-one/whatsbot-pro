@@ -120,6 +120,64 @@ try:
 except ImportError:  # pragma: no cover - core antigo
     _MEDIA_LIMITS = None
 
+# ── MIME por extensão (o upload NÃO pode depender de ``mimetypes``) ──────────
+# ``mimetypes.guess_type`` consulta ``/etc/mime.types``, que NÃO existe numa
+# imagem slim (o pacote ``media-types`` não é instalado). Sem esse arquivo o
+# Python cai na tabela embutida, que não conhece ``.ogg``/``.m4a``/``.amr``/
+# ``.webp``/``.docx``/``.xlsx``/``.pptx`` — todos viravam
+# ``application/octet-stream`` e a Meta recusava o upload com
+# ``(#100) Param file must be a file with one of the following types: …``,
+# ironicamente listando o tipo correto do arquivo. Caso real em produção: um
+# Ogg/Opus VÁLIDO (o formato nativo de voz do WhatsApp, e o alvo preferencial do
+# transcode do core) era recusado 100% das vezes, incluindo toda gravação feita
+# pelo microfone do painel.
+# Por isso a tabela é FIXA aqui: são exatamente os formatos que este provider
+# declara aceitar em ``_MEDIA_LIMITS`` acima, então o mapa é a contraparte
+# natural daquela política e não depende do sistema de arquivos da imagem.
+# Mesmo precedente do ``_MIME_EXT_OVERRIDE`` em ``server/upload_names.py``.
+_EXT_MIME = {
+    # Áudio (Meta: audio/ogg só com OPUS — ver AudioLimits acima).
+    ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg", ".aac": "audio/aac", ".amr": "audio/amr",
+    ".m4a": "audio/mp4",
+    # Imagem / figurinha.
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp",
+    # Vídeo.
+    ".mp4": "video/mp4", ".3gp": "video/3gpp", ".3gpp": "video/3gpp",
+    # Documento.
+    ".pdf": "application/pdf", ".txt": "text/plain",
+    ".doc": "application/msword",
+    ".docx": ("application/vnd.openxmlformats-officedocument"
+              ".wordprocessingml.document"),
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": ("application/vnd.openxmlformats-officedocument"
+              ".presentationml.presentation"),
+}
+
+
+# Inverso, para o caminho INBOUND (a Meta manda o mime, precisamos da extensão).
+# Primeira extensão declarada vence — ``.ogg`` sobre ``.oga``/``.opus``,
+# ``.jpg`` sobre ``.jpeg``.
+_MIME_EXT: dict[str, str] = {}
+for _e, _m in _EXT_MIME.items():
+    _MIME_EXT.setdefault(_m, _e)
+
+
+def _mime_for(path: str) -> str:
+    """MIME do arquivo: tabela fixa primeiro, ``mimetypes`` só como reserva.
+
+    A ordem importa. ``mimetypes`` é a RESERVA, não a fonte: numa imagem com
+    ``/etc/mime.types`` ele acerta o mesmo resultado, e sem ela erraria — logo
+    consultar a tabela antes é o que torna o upload independente do ambiente.
+    """
+    ext = os.path.splitext(path or "")[1].lower()
+    return (_EXT_MIME.get(ext)
+            or mimetypes.guess_type(path or "")[0]
+            or "application/octet-stream")
+
 # ── Formatter PT-BR dos tipos inbound (plano 75 F1/F2) ──────────────────────
 # Toda a tradução tipo→texto mora em ``inbound_text`` (puro, stdlib-only). Aqui
 # só ligamos o resultado em ``InboundEvent.text`` — antes o parse deixava
@@ -385,7 +443,7 @@ class WhatsAppCloudChannel(Channel):
         phone_id = self._phone_number_id
         if not phone_id or not self._access_token or not path:
             return None
-        mime = mime_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
+        mime = mime_type or _mime_for(path)
         url = f"{self._base_url()}/{phone_id}/media"
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT) as client, open(path, "rb") as fh:
@@ -887,7 +945,12 @@ class WhatsAppCloudChannel(Channel):
                                    media_id, blob.status_code)
                     return None
                 data = blob.content
-            ext = mimetypes.guess_extension((mime or "").split(";")[0].strip() or "") or ""
+            # Mesma razão do ``_mime_for`` no upload: a tabela fixa primeiro, o
+            # ``mimetypes`` só como reserva. Sem isso ``audio/mp4`` (m4a) e
+            # ``audio/ogg`` caíam em ``.bin`` numa imagem sem ``/etc/mime.types``
+            # — e um arquivo sem extensão não toca no player do painel.
+            _m = (mime or "").split(";")[0].strip()
+            ext = _MIME_EXT.get(_m) or mimetypes.guess_extension(_m or "") or ""
             # Normalise the two WhatsApp voice/ogg variants stdlib gets wrong.
             if not ext and "ogg" in mime:
                 ext = ".ogg"

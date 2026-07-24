@@ -702,22 +702,24 @@ def register_routes(app, deps):
                 custom_attribute_repo.list_definitions, "conversation", True)
             defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
             known_keys = {d["attribute_key"] for d in all_defs}
+            previous = dict(conv.get("custom_attributes") or {})
             # Validate keys (P50: unknown → error) AND values (type/regex parity
             # with the contact PUT /info), returning a clean 400 before writing. A
-            # value orphaned by a deleted attribute (P49 keeps it) is tolerated —
-            # left untouched — instead of blocking the save.
+            # value orphaned by a deleted attribute (P49 keeps it) OR already stored
+            # without a definition (Chatwoot migration leftover) is tolerated — left
+            # untouched — instead of blocking the save. Only a key that is BOTH
+            # undefined AND not stored is a genuine typo → 400.
             valid: dict = {}
             for key, value in attrs.items():
                 definition = defs.get(key)
                 if definition is None:
-                    if key in known_keys:
+                    if key in known_keys or key in previous:
                         continue
                     return _err(f"Atributo '{key}' não existe.", status=400)
                 norm, err = validate_value(definition, value)
                 if err:
                     return _err(err, status=400)
                 valid[key] = norm
-            previous = dict(conv.get("custom_attributes") or {})
             # Only the keys whose value actually changed feed the notice (no card
             # for a no-op save). A None value clears the attribute (mirrors set_values).
             changed = {k: v for k, v in valid.items() if previous.get(k) != v}

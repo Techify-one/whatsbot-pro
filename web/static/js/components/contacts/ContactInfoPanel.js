@@ -144,6 +144,21 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
     name => name.toLowerCase() === tagSearch.trim().toLowerCase()
   );
 
+  // Payload de custom_attributes p/ salvar: SÓ os atributos DEFINIDOS (`customDefs`),
+  // mandando `null` para os que ficaram vazios (limpos). Espelha o painel de conversa
+  // (`buildConvAttrsPayload`). Evita reenviar chaves órfãs herdadas da migração Chatwoot
+  // (ex.: `cw_id`, `cw_identifier`) que ainda vivem no JSON armazenado mas não têm
+  // definição — o backend rejeitava o save inteiro com 400 (P50). `vazio→null`, NÃO ''
+  // (rejeitado por tipos select/list na validação do backend).
+  const buildCustomAttrsPayload = () => {
+    const payload = {};
+    for (const def of customDefs) {
+      const v = customValues[def.attribute_key];
+      payload[def.attribute_key] = (v === undefined || v === null || v === '') ? null : v;
+    }
+    return payload;
+  };
+
   async function handleSave() {
     setSaving(true);
     setError(null);
@@ -179,7 +194,7 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
       }
 
       const [infoRes, tagsRes] = await Promise.all([
-        updateContactInfo(phone, { ...form, observations, custom_attributes: customValues }),
+        updateContactInfo(phone, { ...form, observations, custom_attributes: buildCustomAttrsPayload() }),
         updateContactTags(phone, finalTags),
       ]);
 

@@ -147,6 +147,11 @@ export function useMediaUpload({
     if (!checkMediaFile(file, 'document', mediaLimits)) return kind;
     if (isAttachmentOfKind(file, 'video', mediaLimits)) return 'video';
     if (isAttachmentOfKind(file, 'audio', mediaLimits)) return 'audio';
+    // Imagem pelo mesmo motivo: o WhatsApp oficial não aceita JPG/PNG COMO
+    // documento, então arrastar uma foto na zona de arquivo era recusado com o
+    // popup "Formato de documento não suportado". Enviar como imagem é a única
+    // forma de entregá-la — bloquear seria pior que reencaminhar.
+    if (isAttachmentOfKind(file, 'image', mediaLimits)) return 'image';
     return kind;
   }
 
@@ -196,11 +201,11 @@ export function useMediaUpload({
         keep.push(item);
         continue;
       }
-      // Rerroteado (documento → áudio/vídeo): o item nasceu como documento e
-      // por isso veio SEM `previewUrl` (só imagem/vídeo ganham miniatura no
-      // `buildQueueItems`). A prévia de áudio/vídeo precisa da URL local, senão
-      // o player abre vazio (0:00) e o operador não consegue ouvir antes de
-      // enviar.
+      // Rerroteado (documento → imagem/áudio/vídeo): o item nasceu como
+      // documento e por isso veio SEM `previewUrl` (só imagem/vídeo ganham
+      // miniatura no `buildQueueItems`). A prévia precisa da URL local, senão o
+      // player abre vazio (0:00) / a miniatura não aparece e o operador não
+      // consegue conferir antes de enviar.
       const previewUrl = item.previewUrl
         || (() => { try { return URL.createObjectURL(item.file); } catch { return null; } })();
       keep.push({ ...item, kind, previewUrl });

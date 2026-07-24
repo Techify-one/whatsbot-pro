@@ -1298,6 +1298,37 @@ check("PUT /info (invalid custom_attributes) -> ok False", _e.get("ok") is False
 check("PUT /info (invalid) -> error is non-empty str",
       isinstance(_e.get("error"), str) and _e.get("error") != "")
 
+# Plano 77 — an orphan custom_attribute already stored on the contact (e.g. the
+# `cw_id`/`cw_identifier` leftovers from the Chatwoot migration, which have no
+# definition) must NOT block the save when the panel re-sends the whole JSON.
+from db.engine import get_engine as _p77_engine
+from db.tables import contacts as _p77_contacts
+from sqlalchemy import update as _p77_update, select as _p77_select
+_p77_row = contact_repo.get_by_phone("5511999990001")
+with _p77_engine().begin() as _c77:
+    _c77.execute(
+        _p77_update(_p77_contacts)
+        .where(_p77_contacts.c.id == _p77_row["id"])
+        .values(custom_attributes={"cw_id": "42", "cw_identifier": "abc"})
+    )
+# A genuinely new + undefined key still 400s (P50 preserved)
+r = client.put("/api/contacts/5511999990001/info",
+               json={"custom_attributes": {"totally_unknown_key": "x"}})
+check("PUT /info (new undefined key) -> ok False (P50)", r.json().get("ok") is False)
+# Re-sending the stored orphan alongside a real edit succeeds
+r = client.put("/api/contacts/5511999990001/info",
+               json={"name": "Alice Orphan", "custom_attributes": {"cw_id": "42"}})
+check("PUT /info (stored orphan re-sent) -> 200", r.status_code == 200)
+check("PUT /info (stored orphan) -> name saved",
+      r.json()["data"].get("name") == "Alice Orphan")
+with _p77_engine().connect() as _c77:
+    _p77_saved = _c77.execute(
+        _p77_select(_p77_contacts.c.custom_attributes)
+        .where(_p77_contacts.c.id == _p77_row["id"])
+    ).scalar()
+check("PUT /info (stored orphan) -> orphan key preserved",
+      (_p77_saved or {}).get("cw_id") == "42")
+
 # ═══════════════════════════════════════════════════════════════════
 #  15. Tags
 # ═══════════════════════════════════════════════════════════════════

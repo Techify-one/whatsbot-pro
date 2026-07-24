@@ -333,3 +333,16 @@ def test_receipt_changed_payload_always_carries_status_and_errors(build_app,
     assert [p["status"] for p in emitted] == ["sent", "delivered", "read", "failed"]
     for payload in emitted:
         assert "status" in payload and "errors" in payload
+
+
+# ── Higiene do próprio coletor ──────────────────────────────────────────────
+
+def test_capture_leaves_no_handler_behind():
+    """Sem a fixture de propósito: prova que os testes acima já devolveram o bus
+    ao estado anterior. Um assinante esquecido receberia eventos de OUTROS
+    arquivos de teste (e os pagaria com falhas fantasma difíceis de rastrear)."""
+    from plugins import events as bus
+
+    leaked = [(name, pid) for name, bucket in bus._handlers.items()
+              for pid, _fn in bucket if pid.startswith("_p75_bus_subscriber_")]
+    assert leaked == [], leaked
