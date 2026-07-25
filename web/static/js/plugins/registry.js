@@ -31,6 +31,12 @@
 //       attendances.toolbar, gear.menu.items                     (pre-existing)
 //     • ai.settings.sections — ctx {}                            (AI settings tab,
 //                                   at the bottom of "Configurações")
+//     • channel.card.rows   — ctx {channel, descriptor}          (ChannelCard, no
+//                                   corpo do card de canal, abaixo dos status dots)
+//       Aditivo: cada componente registrado renderiza uma linha extra no card do
+//       canal. O provider é dono da sua linha — o whatsapp_cloud injeta aqui o
+//       WebhookHealthRow (plano 76 · V6); o componente filtra por
+//       ctx.channel.provider DENTRO do plugin. Vazio ⇒ card byte-idêntico.
 //
 //   FILTERS (applyFilter/addFilter) — priority-ordered; null aborts the chain.
 //     • filter.message.contextMenu.items — value: the per-message context-menu

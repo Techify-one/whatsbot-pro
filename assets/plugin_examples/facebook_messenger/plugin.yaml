@@ -1,0 +1,29 @@
+id: facebook_messenger
+name: Canal · Facebook Messenger
+version: 1.3.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Caixa de entrada de Página do Facebook via Messenger Platform (Meta Graph
+  API). Adiciona o provider "facebook_messenger" à tela Canais do core — sem QR,
+  recebendo por webhook (entry[].messaging[]) e enviando pela Send API. Mídia
+  sai por URL pública e a assinatura X-Hub-Signature-256 dos webhooks é
+  validada quando o App Secret está configurado.
+short_description: >-
+  Provider de canal para o Facebook Messenger (Meta Graph API): cole o token da Página, assine o webhook e atenda as DMs da Página no painel.
+author: WhatsBot
+frontend_extends: /plugins/facebook_messenger/static/extends.js
+frontend_api_version: "1.0"
+entry:
+  channels: channels
+  routes: routes
+screens:
+  - id: facebook-messenger-config
+    title: Facebook Messenger
+    path: /facebook_messenger/config
+    icon: chat
+    config: true
+    component: /plugins/facebook_messenger/static/facebook_messenger.js
+permissions:
+  - channel.provider
+  - net.outbound
+dependencies: []

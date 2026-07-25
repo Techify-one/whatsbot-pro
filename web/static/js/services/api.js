@@ -717,7 +717,7 @@ export async function deleteChannelTemplate(channelId, name) {
 }
 
 // ── Channels (plano 02 Fase 2) ────────────────────────────────────
-// Messaging channels (providers: gowa, whatsapp_cloud, telegram, test).
+// Messaging channels — each provider ships as a plugin (plano 33).
 // Credentials are ALWAYS returned masked by the backend; sending a new
 // credential value replaces it. All responses are {ok, data, error}.
 
@@ -765,34 +765,15 @@ export async function createChannel(payload) {
 export async function providerPostCreateAction(endpoint, channelId) {
   return request('POST', endpoint, { channel_id: channelId });
 }
-// Telegram plugin: ao criar uma inbox, detecta domínio público e registra o
-// webhook automaticamente (ou cai em long-poll). Retorna {mode, webhook_url, ...}.
-export async function telegramAutoconfigure(channelId) {
-  return request('POST', '/api/plugins/telegram/autoconfigure', { channel_id: channelId });
-}
-// Telegram plugin: estado do canal (modo por-canal + getMe + getWebhookInfo).
-// Retorna {configured, mode, me, webhook:{url,...}}.
-export async function telegramChannelStatus(channelId) {
-  return request('GET', `/api/plugins/telegram/status?channel_id=${encodeURIComponent(channelId)}`);
-}
+// (plano 76 · V11) telegramAutoconfigure/telegramChannelStatus saíram do core: o
+// autoconfigure é coberto pelo genérico providerPostCreateAction; o status do
+// canal é consumido só pela screen do plugin telegram, que já usa seu próprio
+// apiFetch namespaceado (/api/plugins/telegram/status).
 
-// WhatsApp Cloud plugin (plano 26): saúde do webhook. Lê o que a Meta tem
-// configurado e compara com a URL que ESTA instância espera (origin + path com
-// o channel_id). Retorna {configured_url, expected_url, match, can_set, reason}.
-export async function cloudWebhookStatus(channelId, expectedUrl) {
-  return request('GET', '/api/plugins/whatsapp_cloud/webhook-status'
-    + `?channel_id=${encodeURIComponent(channelId)}`
-    + `&expected_url=${encodeURIComponent(expectedUrl)}`);
-}
-// Aponta o webhook (override no nível da WABA) de volta pra ESTA instância.
-// Re-lê após o set e devolve {match, configured_url}.
-export async function cloudSetWebhook(channelId, url) {
-  return request('POST', '/api/plugins/whatsapp_cloud/set-webhook', { channel_id: channelId, url });
-}
-// Remove o override de webhook da WABA (volta pro webhook do App).
-export async function cloudDeleteWebhook(channelId) {
-  return request('POST', '/api/plugins/whatsapp_cloud/delete-webhook', { channel_id: channelId });
-}
+// (plano 76 · V7) As funções cloudWebhookStatus/cloudSetWebhook/cloudDeleteWebhook
+// saíram do core: o WebhookHealthRow virou componente do plugin whatsapp_cloud e
+// fala com os próprios endpoints via o `http` de buildPluginHttp. O core não
+// chama mais endpoint de plugin daqui.
 
 // body: {display_name?, enabled?, config?, credentials?:{key:value}}
 export async function updateChannel(id, payload) {

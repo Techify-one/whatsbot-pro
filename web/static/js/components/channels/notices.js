@@ -106,20 +106,29 @@ export function AutoconfigureNotice({ result, onDismiss }) {
       navigator.clipboard.writeText(url).then(flagCopied).catch(fallbackCopy);
     } else { fallbackCopy(); }
   }
+  // `message` (opcional) é o texto que o PRÓPRIO provider escreveu — quando vem,
+  // manda nele; sem ele, cai no par histórico webhook/long-poll do Telegram.
+  const message = (result && result.message) || '';
+  // mode === 'manual' → o provider não conseguiu registrar sozinho e a URL precisa
+  // ser colada à mão, então o bloco da URL aparece mesmo fora do caso webhook.
+  const isManual = result && result.mode === 'manual';
   const tint = isWebhook ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200';
   const titleColor = isWebhook ? 'text-green-700' : 'text-amber-700';
   return html`
     <div class=${`${tint} border rounded-lg p-4 mb-4`}>
       <div class=${`text-[14px] font-medium ${titleColor} mb-1`}>
-        ${isWebhook ? '✓ Inbox criada — webhook registrado automaticamente'
-                    : 'Inbox criada — usando long-poll'}
+        ${isWebhook ? '✓ Canal criado — webhook registrado automaticamente'
+                    : (isManual ? 'Canal criado — falta registrar o webhook'
+                                : 'Inbox criada — usando long-poll')}
       </div>
       <p class="text-[13px] text-wa-text mb-2">
-        ${isWebhook
-          ? html`O Telegram já está entregando as mensagens neste endereço. Guarde a URL caso precise reconfigurar:`
-          : html`Não foi possível usar webhook${result && result.reason ? html` (${result.reason})` : ''} — a inbox recebe por <span class="font-medium">long-poll</span> e já está funcionando. Para usar webhook é necessário um domínio público (HTTPS).`}
+        ${message
+          ? html`${isManual && result.reason ? html`Não foi possível registrar automaticamente (${result.reason}). ` : ''}${message}`
+          : (isWebhook
+            ? html`O Telegram já está entregando as mensagens neste endereço. Guarde a URL caso precise reconfigurar:`
+            : html`Não foi possível usar webhook${result && result.reason ? html` (${result.reason})` : ''} — a inbox recebe por <span class="font-medium">long-poll</span> e já está funcionando. Para usar webhook é necessário um domínio público (HTTPS).`)}
       </p>
-      ${isWebhook ? html`
+      ${isWebhook || (isManual && url) ? html`
         <div class="flex gap-2 items-center flex-wrap">
           <code class="flex-1 min-w-0 break-all px-3 py-2 rounded-md text-[13px] bg-wa-bg border border-wa-border text-wa-text">${url || '—'}</code>
           <button class="px-3 py-2 rounded-md text-[13px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
@@ -137,11 +146,14 @@ export function AutoconfigureNotice({ result, onDismiss }) {
 // The <script> install snippet built from the channel's public `widget_token` + the
 // panel base URL, with a copy button. Shown BOTH in the post-create notice and in
 // the channel edit form (so the operator can always copy it again). No dismiss —
-// this is the always-available block. `widgetToken` comes from the channel config.
-export function EmbedSnippetBlock({ widgetToken, baseUrl, help }) {
+// this is the always-available block. `widgetToken` comes from the channel config;
+// `template` (plano 76 · F3) é o `post_create.snippet_template` do descriptor do
+// provider — o core só interpola. Sem template ⇒ nada renderiza.
+export function EmbedSnippetBlock({ widgetToken, baseUrl, help, template }) {
   const [copied, setCopied] = useState(false);
   const b = (baseUrl || window.location.origin || '').replace(/\/+$/, '');
-  const snippet = buildEmbedSnippet(b, widgetToken);
+  const snippet = buildEmbedSnippet(b, widgetToken, template);
+  if (!snippet) return null;
   function flagCopied() { setCopied(true); setTimeout(() => setCopied(false), 2000); }
   function copy() {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -162,11 +174,11 @@ export function EmbedSnippetBlock({ widgetToken, baseUrl, help }) {
 
 // ── Embed-snippet post-create notice (post-create `embed_snippet`, plano 46) ──
 // Shown right after creating a widget channel. Wraps the reusable block + a dismiss.
-export function EmbedSnippetNotice({ widgetToken, baseUrl, onDismiss }) {
+export function EmbedSnippetNotice({ widgetToken, baseUrl, template, onDismiss }) {
   return html`
     <div class="bg-wa-teal/10 border border-wa-teal/30 rounded-lg p-4 mb-4">
       <div class="text-[14px] font-medium text-wa-teal mb-1">✓ Widget criado</div>
-      <${EmbedSnippetBlock} widgetToken=${widgetToken} baseUrl=${baseUrl}
+      <${EmbedSnippetBlock} widgetToken=${widgetToken} baseUrl=${baseUrl} template=${template}
         help=${html`Cole este trecho antes de <code>&lt;/body&gt;</code> no seu site. Você pode
           copiá-lo de novo depois em <span class="font-medium">Canais → Editar</span> ou em
           <span class="font-medium">Plugins → Widget de site → Configurar</span>.`} />

@@ -8,6 +8,8 @@ import { TemplatePicker } from './TemplatePicker.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
 import { avatarUrl } from './utils.js';
 import { DefaultAvatar } from './icons.js';
+import { channelPickerMeta } from '../../services/providerCatalog.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
@@ -36,14 +38,7 @@ function highlightParts(text, query) {
   return parts;
 }
 
-// Rótulo/cor por provider — espelha o ChannelPickerModal (paleta dark-mode-safe).
-const PROVIDER_META = {
-  gowa:           { label: 'WhatsApp',  dot: 'bg-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', dot: 'bg-blue-500' },
-  telegram:       { label: 'Telegram',  dot: 'bg-blue-500' },
-  test:           { label: 'Teste',     dot: 'bg-wa-secondary' },
-};
-
+// Rótulo/cor por provider — do CATÁLOGO ÚNICO (plano 76), espelha o ChannelPickerModal.
 function normalizePhone(input) {
   const digits = (input || '').replace(/\D/g, '');
   if (digits.length < 10) return null;
@@ -57,8 +52,7 @@ function looksLikePhone(input) {
 
 
 function channelLabel(ch) {
-  const meta = PROVIDER_META[ch.provider] || { label: ch.provider || 'Canal' };
-  return ch.display_name || meta.label;
+  return ch.display_name || channelPickerMeta(ch.provider).label;
 }
 
 // Modal de "Novo atendimento" (estilo Chatwoot): digita o número (mostra o nome do
@@ -67,6 +61,7 @@ function channelLabel(ch) {
 // refresh + abre a thread). Roteia pelo `channel_id` escolhido (o atendimento ainda
 // não existe, então o backend a cria nesse canal).
 export function NewConversationModal({ contacts = [], onClose, onSent }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar
   const [phoneInput, setPhoneInput] = useState('');
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState(null);  // {phone, registered, name} | null
@@ -393,7 +388,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
                 class="wa-field w-full rounded-lg px-3 py-2 text-[14px] outline-none border border-wa-border focus:border-wa-teal cursor-pointer"
               >
                 ${channels.map((ch) => {
-                  const meta = PROVIDER_META[ch.provider] || { label: ch.provider || 'Canal' };
+                  const meta = channelPickerMeta(ch.provider);
                   const phoneSuffix = ch.own_phone ? ` (+${String(ch.own_phone).replace(/^\+/, '')})` : '';
                   return html`<option key=${ch.id} value=${ch.id}>${channelLabel(ch)} · ${meta.label}${phoneSuffix}</option>`;
                 })}

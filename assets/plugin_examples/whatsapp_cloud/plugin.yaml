@@ -2,6 +2,8 @@ id: whatsapp_cloud
 name: WhatsApp Cloud API
 version: 1.5.0
 whatsbot_api_version: ">=1.0,<2.0"
+frontend_extends: /plugins/whatsapp_cloud/static/extends.js
+frontend_api_version: "1.0"
 description: >-
   Provider de canal para a WhatsApp Cloud API oficial da Meta (Graph API).
   Adiciona o provider "whatsapp_cloud" à tela Canais do core — sem QR, com

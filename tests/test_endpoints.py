@@ -6651,12 +6651,29 @@ section("Account-identity dedup (plano 32)")
 # (as production does when they're enabled) to exercise the generic dedup
 # enforcement end to end. Appended at the very end so it can't affect earlier tests.
 import importlib.util as _p32_ilu
+import sys as _p32_sys
+import types as _p32_types
 
 
 def _p32_load_provider(prov, clsname):
-    p = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov / "channels.py"
-    spec = _p32_ilu.spec_from_file_location(f"_p32_{prov}", p)
+    # Carrega o channels.py do plugin como PACOTE (whatsbot_plugins.<prov>), igual
+    # ao runtime — necessário porque providers como facebook_messenger importam a
+    # base RELATIVAMENTE (plano 76·F9: `from .meta_graph import …`). Harmless para
+    # quem não usa import relativo (whatsapp_cloud/telegram).
+    plugin_dir = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov
+    if "whatsbot_plugins" not in _p32_sys.modules:
+        _parent = _p32_types.ModuleType("whatsbot_plugins")
+        _parent.__path__ = []
+        _p32_sys.modules["whatsbot_plugins"] = _parent
+    pkg_name = f"whatsbot_plugins.{prov}"
+    if pkg_name not in _p32_sys.modules:
+        _pkg = _p32_types.ModuleType(pkg_name)
+        _pkg.__path__ = [str(plugin_dir)]
+        _p32_sys.modules[pkg_name] = _pkg
+    full = f"{pkg_name}.channels"
+    spec = _p32_ilu.spec_from_file_location(full, plugin_dir / "channels.py")
     m = _p32_ilu.module_from_spec(spec)
+    _p32_sys.modules[full] = m
     spec.loader.exec_module(m)
     return getattr(m, clsname)
 
@@ -6862,6 +6879,88 @@ _mem_x.invalidate_channel_caches(_new_id)
 check("resolve_inbox_id(novo canal) -> inbox do canal",
       _mem_x.resolve_inbox_id(_new_id) is not None)
 
+
+# ── Plano 76 · F0/F5 — mascaramento de credencial na borda da API ────────────
+# CARACTERIZAÇÃO + contrato: o que é PÚBLICO sai em claro (o form de edição
+# precisa pré-preencher), o resto é mascarado. A regra deixou de ser a lista
+# NON_SECRET_CRED_KEYS e passou a ser o descriptor do provider
+# (credential_fields[].type == "text"), com uma GUARDA DE NOME que mascara
+# qualquer chave que "cheire" a segredo mesmo declarada como texto.
+_p76_reg = app.state.deps.channel_registry
+
+
+def _p76_creds(channel_id):
+    return (client.get(f"/api/channels/{channel_id}").json()["data"] or {}).get("credentials", {})
+
+
+r = client.post("/api/channels", json={
+    "id": "p76_cloud", "provider": "whatsapp_cloud", "display_name": "Cloud P76",
+    "credentials": {"access_token": "EAAsegredoLongo1234", "phone_number_id": "PN_P76",
+                    "waba_id": "WABA_P76", "verify_token": "vtok_p76"}})
+check("P76: cria canal cloud -> 200", r.status_code == 200)
+_c76 = _p76_creds("p76_cloud")
+check("P76: phone_number_id (type=text) em claro", _c76.get("phone_number_id") == "PN_P76")
+check("P76: waba_id (type=text) em claro", _c76.get("waba_id") == "WABA_P76")
+check("P76: access_token (type=secret) mascarado",
+      _c76.get("access_token", "").startswith("••••") and "segredo" not in _c76.get("access_token", ""))
+check("P76: verify_token (token_suggest) mascarado",
+      _c76.get("verify_token", "").startswith("••••"))
+
+# Messenger: page_id é identificador público (type=text); os dois segredos, não.
+_p76_fb = _p32_load_provider("facebook_messenger", "FacebookMessengerChannel")
+_p76_reg.register_provider(_p76_fb)
+r = client.post("/api/channels", json={
+    "id": "p76_fb", "provider": "facebook_messenger", "display_name": "Página P76",
+    "credentials": {"page_id": "PAGE_P76", "page_access_token": "EAApageSegredo987",
+                    "app_secret": "appsecret_p76", "verify_token": "vt_p76"}})
+check("P76: cria canal messenger -> 200", r.status_code == 200)
+_f76 = _p76_creds("p76_fb")
+check("P76: page_id (type=text) em claro", _f76.get("page_id") == "PAGE_P76")
+check("P76: page_access_token mascarado", _f76.get("page_access_token", "").startswith("••••"))
+check("P76: app_secret mascarado", _f76.get("app_secret", "").startswith("••••"))
+
+# Guarda de nome (F5 item 4): um provider fictício declara uma credencial
+# ``type: "text"`` cujo NOME cheira a segredo (api_token) — o core mascara mesmo
+# assim (um plugin de terceiro que erre o type não pode virar vazamento).
+class _P76GuardChannel(_Channel):
+    provider = "p76guard"
+
+    def __init__(self, channel_id, registry=None, credentials=None):
+        super().__init__(channel_id, _Caps(qr=False, templates=False, inbound_route="path"))
+
+    @classmethod
+    def provider_descriptor(cls):
+        return {
+            "provider": "p76guard", "label": "Guard P76", "color": "gray",
+            "credential_fields": [
+                {"key": "public_id", "label": "ID público", "type": "text", "required": True},
+                {"key": "api_token", "label": "Token (erro de type)", "type": "text", "required": True},
+            ],
+            "config_fields": [], "capabilities": {"needs_qr": False, "templates": False},
+        }
+
+    def status(self):
+        return {"connected": True, "logged_in": True, "needs_qr": False, "error": None}
+
+    def send_text(self, chat_id, text, *, reply_to=None, mentions=None):
+        return _SendResult(ok=True, external_msg_id="x")
+
+    def send_media(self, chat_id, kind, path_or_url, *, caption="", filename=None):
+        return _SendResult(ok=True, external_msg_id="x")
+
+    def parse_inbound(self, raw):
+        return []
+
+
+_p76_reg.register_provider(_P76GuardChannel)
+r = client.post("/api/channels", json={
+    "id": "p76_guard", "provider": "p76guard", "display_name": "Guard",
+    "credentials": {"public_id": "PUB_P76", "api_token": "segredo_vazando_123"}})
+check("P76 guarda: cria canal -> 200", r.status_code == 200)
+_g76 = _p76_creds("p76_guard")
+check("P76 guarda: public_id (type=text) em claro", _g76.get("public_id") == "PUB_P76")
+check("P76 guarda: api_token (type=text mas nome-segredo) MASCARADO",
+      _g76.get("api_token", "").startswith("••••") and "segredo" not in _g76.get("api_token", ""))
 
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")

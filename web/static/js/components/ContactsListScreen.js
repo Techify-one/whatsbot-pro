@@ -31,7 +31,8 @@ import { matchesAdvFilters } from '../services/conversationRows.js';
 import {
   buildContactFilterParams, isContactFilterServerExpressible,
 } from '../services/conversationFilterSpec.js';
-import { contactTypeMeta, contactTypeBadge } from '../services/contactTypes.js';
+import { contactTypeMeta, contactTypeBadge, contactTypeIsPhone } from '../services/contactTypes.js';
+import { useProviderCatalog } from '../hooks/useProviderCatalog.js';
 import { formatPhoneDisplay } from '../utils/phone.js';
 import { hasPermission } from '../utils/permissions.js';
 
@@ -242,8 +243,12 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
 function ContactRow({ c, onOpenDetail, onStartConversation }) {
   const resolved = useContactSubtitle(c.phone, { channelId: c.channel_id, contact: c });
   // `resolved !== c.phone` ⇒ um plugin sobrescreveu (mostra o código curto);
-  // senão cai no telefone formatado (contatos normais mantêm +55 (AA) …).
-  const phoneLabel = resolved !== c.phone ? resolved : formatPhoneDisplay(c.phone);
+  // senão, só formata como telefone quando o tipo do contato carrega um telefone
+  // real (WhatsApp mantém +55 (AA) …). Facebook (PSID), Telegram (chat_id) e
+  // outros mostram o identificador cru, sem virar telefone falso.
+  const phoneLabel = resolved !== c.phone
+    ? resolved
+    : (contactTypeIsPhone(c.contact_type) ? formatPhoneDisplay(c.phone) : c.phone);
   const badge = contactTypeBadge(c.contact_type);
   return html`
     <div
@@ -310,6 +315,7 @@ const CONTACTS_URL_SCHEMA = [
 
 // ── Tela principal ───────────────────────────────────────────────────────
 export default function ContactsListScreen({ initialEntity = null, currentUser = null }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (tipos de contato)
   const canImport = hasPermission(currentUser, 'contact.import');
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');

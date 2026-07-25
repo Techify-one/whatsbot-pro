@@ -22,8 +22,10 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS` e confirmar com *
    - `needs_qr` (deriva de `qr`) → abre o painel de QR pra conectar.
    - `webhook_url` → mostra uma URL de callback pra colar no provider (declare `post_create.path`, ex: `/api/webhook/<id>/{channel_id}`).
    - `autoconfigure` → o core faz POST num endpoint seu pós-criação e mostra o resultado (declare `post_create.endpoint` + opcional `webhook_path` de fallback).
+   - `embed_snippet` → o core mostra um `<script>` de instalação montado do seu `post_create.snippet_template` (com `{base_url}`/`{token}`) + `token_config_key` (a chave de config do token público). O core interpola — NÃO hardcode o path do plugin no core.
    - nada.
 8. **Form rico?** (opcional) — se os campos genéricos (text/secret/token_suggest/multiselect/generated) não bastam, um `form_component` (JS via `import()`). Na dúvida, **não** — o form genérico cobre a maioria.
+9. **Rótulo/cor/tipo nas telas** (plano 76): saem AUTOMÁTICOS do descriptor (`label`/`color`/`contact_type`) via o catálogo do cliente — **não** crie mapa de rótulo/cor por provider em lugar nenhum. **Mascaramento de credencial** também: marque `type: "text"` só o que é PÚBLICO (identificador que o form de edição pré-preenche); todo o resto é mascarado (e uma chave `type:text` cujo nome cheire a segredo é mascarada mesmo assim). **Linha extra no card** (opcional, ex: saúde de webhook): ship um `frontend_extends` (JS) que registra um componente no slot `channel.card.rows` (ctx `{channel, descriptor}`), filtrando por `ctx.channel.provider` DENTRO do plugin — o core não muda.
 
 ## Passo 2 — Ler referências do core (NÃO modificar)
 

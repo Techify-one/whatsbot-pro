@@ -36,11 +36,11 @@ D3 (assinatura), D4 (mídia por URL), D8 (refresh), D7/P1 (WS do widget), D11 (s
 **Pronto quando:** um POST com `X-Hub-Signature-256` inválido num canal que tem `app_secret` → resposta `bad_signature` e nada é ingerido; assinatura válida passa; canais **sem** `app_secret` (GOWA/telegram) seguem byte-idênticos (teste de caracterização verde antes e depois).
 
 #### Status de execução — Fase 01-A
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(o hook ficou no base `Channel`? capability nova?)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(teste de assinatura + caracterização GOWA)_
+**Estado:** ✅ Concluída (2026-07-22)
+- **O que foi feito:** `Channel.verify_inbound_signature(raw_body, headers) -> bool` (default `True`) em [channels/base.py](../channels/base.py); o POST `/api/webhook/{provider}/{channel_id}` ([server/routes/channel_webhook.py](../server/routes/channel_webhook.py)) passou a ler `await request.body()` e derivar o dict com `json.loads` dos MESMOS bytes, e chama o hook (em `asyncio.to_thread`) depois de resolver `inst` e ANTES do `parse_inbound`; assinatura inválida ⇒ resposta 200 `{"status":"bad_signature"}` sem ingerir nada.
+- **Como foi feito / decisões:** hook no base `Channel` (NÃO capability nova) — a decisão "verifica ou não" é do provider e depende de credencial (`app_secret`), não é estática. `MetaGraphChannel` implementa o HMAC uma vez para todos os providers Meta; canal Meta SEM `app_secret` retorna `True` + WARNING (não deixa a caixa muda). Exceção no hook ⇒ trata como assinatura inválida (fail-closed). O `filter.webhook.payload` continua rodando antes (o plugin ainda vê o payload cru).
+- **Problemas / pendências:** o corpo que não é um objeto JSON (lista/escalar) agora vira `{}` em vez de estourar mais adiante — endurecimento, não regressão.
+- **Verificação:** [tests/test_meta_graph_core.py](../tests/test_meta_graph_core.py) (default permissivo, HMAC válido/adulterado/segredo errado/header ausente) + [tests/test_facebook_messenger.py](../tests/test_facebook_messenger.py) (rota real: `bad_signature` em assinatura errada/ausente, `received` na válida, handshake GET com `verify_token`, e caracterização do POST do GOWA continuando 200/ingerindo).
 
 ---
 
@@ -61,11 +61,11 @@ D3 (assinatura), D4 (mídia por URL), D8 (refresh), D7/P1 (WS do widget), D11 (s
 **Pronto quando:** `parse_inbound` converte um payload `entry[].messaging[]` de exemplo em `InboundEvent` correto (texto, anexo com URL, echo com `direction=out`); o helper de URL pública devolve um link `https://…` a partir de um path local + `public_base_url`.
 
 #### Status de execução — Fase 01-B
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _(base virou mixin compartilhado ou copiado por plugin?)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(unit test do parser verde)_
+**Estado:** ✅ Concluída (2026-07-22)
+- **O que foi feito:** [channels/providers/meta_graph.py](../channels/providers/meta_graph.py) — `MetaGraphChannel` com `_graph_base()` (host por subclasse), `_cred`/`_channel_config` (config do canal com cache 30s), `appsecret_proof`, `_post_message` em `/me/messages`, `verify_inbound_signature`, `parse_inbound` sobre `entry[].messaging[]` (texto, anexos, echo, reaction, delivery/read, postback, location), `download_media` (1 GET direto na URL do CDN), `resolve_sender_name` (cache 6h), `send_text`/`send_media`/`react`/`mark_read`/`send_presence`. Helper de URL pública em [channels/media_urls.py](../channels/media_urls.py) (`public_media_url`, ancorado no componente `statics/`).
+- **Como foi feito / decisões:** **P-01B1 resolvida** — módulo compartilhado no CORE (`channels/providers/meta_graph.py`), importável pelos plugins pelo mesmo caminho estável de `channels.base`; a classe é abstrata (sem `provider`/descriptor), então **não registra provider nenhum** sozinha. Anexo inbound carrega a URL do CDN em `media_extras["media_id"]` — assim o resolver de mídia do core (`download_media(media_id, …)`) funciona sem mudança e a URL (que expira) nunca é persistida. No echo os papéis invertem: `chat_id` é sempre o HUMANO.
+- **Problemas / pendências:** caption de anexo vai como mensagem de texto de follow-up (a Send API não aceita caption no attachment).
+- **Verificação:** [tests/test_meta_graph_core.py](../tests/test_meta_graph_core.py) — 16 casos, sem rede (parser com fixtures reais + URL pública + `appsecret_proof`).
 
 ---
 
@@ -81,11 +81,11 @@ D3 (assinatura), D4 (mídia por URL), D8 (refresh), D7/P1 (WS do widget), D11 (s
 **Pronto quando:** um plugin fictício que declara a capability e registra o loop tem a task supervisionada iniciada e cancelada no disable; provider sem a capability não inicia loop nenhum.
 
 #### Status de execução — Fase 01-C
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _()_
-- **Problemas / pendências:** _()_
-- **Verificação:** _()_
+**Estado:** ✅ Concluída (2026-07-22)
+- **O que foi feito:** `ChannelCapabilities.token_refresh: bool = False` + `Channel.refresh_token_if_needed() -> None` (no-op) em [channels/base.py](../channels/base.py), com o CONTRATO documentado na docstring (só renova token válido, ≥24h de idade, <10 dias p/ expirar; persiste `access_token`+`expires_at` via `set_credential`; nunca levanta).
+- **Como foi feito / decisões:** nenhum código de core além do flag+hook, como o plano previu: quem precisa registra o loop no próprio `lifecycle.setup(ctx)` via `ctx.spawn_task("token_refresh", …)` e o supervisor já cancela no disable (`stop_owner`). Provider sem a capability não inicia loop nenhum. O consumidor real é o Instagram (sub-plano 03).
+- **Problemas / pendências:** nenhuma — sem consumidor ainda; o loop concreto entra no 03.
+- **Verificação:** [tests/test_meta_graph_core.py](../tests/test_meta_graph_core.py) (`test_token_refresh_capability_defaults_off_and_hook_is_noop`).
 
 ---
 
@@ -107,11 +107,11 @@ D3 (assinatura), D4 (mídia por URL), D8 (refresh), D7/P1 (WS do widget), D11 (s
 **Pronto quando:** dois "visitantes" (dois session tokens) conectam ao WS do widget; um `broadcast`/`deliver` para o token A chega **só** no socket A; o token B não vê nada; o `/ws` do operador não é acessível com um session token de visitante.
 
 #### Status de execução — Fase 01-D
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_
-- **Como foi feito / decisões:** _(rota (a) ou (b)? ponte via registry ou broadcast?)_
-- **Problemas / pendências:** _()_
-- **Verificação:** _(teste de isolamento entre sessões)_
+**Estado:** ✅ Já concluída anteriormente (junto com o sub-plano 05 — widget)
+- **O que foi feito:** a infra já está no repo: exceção de auth GENÉRICA por convenção `/api/plugins/<id>/public/…` ([server/app.py](../server/app.py):50 e :539) e o hub de WebSocket por-visitante do plugin `website` ([assets/plugin_examples/website/bridge.py](../assets/plugin_examples/website/bridge.py) `WsHub`, rota `/public/ws` em `routes.py`).
+- **Como foi feito / decisões:** **P-01D1 resolvida na direção recomendada** — dono é o PLUGIN (registry `{session_token → set[WebSocket]}` + `deliver`), o core só cede a exceção de auth. `send_text` entrega pelo hub (`run_coroutine_threadsafe`, mesmo padrão de `plugins.context.broadcast`); o `/ws` do operador nunca é tocado.
+- **Problemas / pendências:** nenhuma — nada foi alterado nesta execução.
+- **Verificação:** [tests/test_website_widget.py](../tests/test_website_widget.py) (isolamento entre sessões + auth-exempt + CSP).
 
 ---
 
@@ -129,9 +129,9 @@ D3 (assinatura), D4 (mídia por URL), D8 (refresh), D7/P1 (WS do widget), D11 (s
 - **P-01D1:** dono da infra do widget = core (rota+WS no core, provider-agnóstico) ou plugin `website`? Recomendo **plugin** dono do WS+registry, usando só a exceção de auth do core.
 
 ## Checklist
-- [ ] Caracterização GOWA/telegram/whatsapp_cloud verde antes e depois de 01-A.
-- [ ] POST forjado rejeitado; válido aceito; sem `app_secret` inalterado.
-- [ ] Unit test do parser `messaging[]` (01-B) verde (`node`/pytest conforme a linguagem do parser).
-- [ ] Loop de refresh (01-C) inicia/cancela com enable/disable.
-- [ ] Isolamento de sessão do WS do widget (01-D) testado.
-- [ ] Suíte `tests/` verde no Postgres.
+- [x] Caracterização GOWA/telegram/whatsapp_cloud verde antes e depois de 01-A.
+- [x] POST forjado rejeitado; válido aceito; sem `app_secret` inalterado.
+- [x] Unit test do parser `messaging[]` (01-B) verde (pytest).
+- [x] Hook/capability de refresh (01-C) — o loop concreto (e seu teste de start/cancel) entra no sub-plano 03, que é o único consumidor.
+- [x] Isolamento de sessão do WS do widget (01-D) testado (já existente).
+- [x] Suíte `tests/` verde no Postgres.

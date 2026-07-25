@@ -14,7 +14,8 @@ import { h } from 'preact';
 import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { OptionListSelect } from '../OptionListSelect.js';
-import { CONTACT_TYPE_ORDER, contactTypeMeta } from '../../services/contactTypes.js';
+import { contactTypeOrder, contactTypeMeta } from '../../services/contactTypes.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
@@ -163,7 +164,7 @@ function ValueInput({ clause, dimDesc, tagNames, onChange }) {
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'contact_type') {
-    const options = CONTACT_TYPE_ORDER.map(v => ({ value: v, label: contactTypeMeta(v).label }));
+    const options = contactTypeOrder().map(v => ({ value: v, label: contactTypeMeta(v).label }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'attr_list') {
@@ -191,6 +192,7 @@ function ValueInput({ clause, dimDesc, tagNames, onChange }) {
 }
 
 export function ContactFilterDialog({ filters, tagNames = [], contactAttrDefs = [], onApply, onClose }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (opções de tipo)
   const dimensions = useMemo(() => [
     ...CORE_DIMENSIONS,
     ...(contactAttrDefs || []).map(d => attrDim(d)),

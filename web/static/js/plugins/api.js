@@ -68,7 +68,6 @@ export const PLUGIN_SERVICES_DENY = Object.freeze([
   // Channel administration (create/delete/membership/credentials)
   'createChannel', 'updateChannel', 'deleteChannel', 'restoreChannel',
   'setChannelMembers', 'getChannelMembers',
-  'telegramAutoconfigure', 'telegramChannelStatus',
   // Audit log + raw log access
   'listAudit', 'getAuditActions', 'downloadAuditExport', 'getLogs', 'clearLogs',
   // Runtime/subprocess introspection

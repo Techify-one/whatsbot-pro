@@ -54,8 +54,11 @@ ChannelCapabilities(qr=False, templates=False, groups=False, presence=False,
 **Pronto quando:** com um canal criado (token colado) e o webhook assinado, uma DM enviada à Página (por uma conta testadora) vira conversa no painel; a resposta da IA/operador chega no Messenger; um anexo de imagem entra e sai; assinatura inválida é rejeitada (01-A).
 
 #### Status de execução — Fase 02.1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_ • **Decisões:** _()_ • **Pendências:** _()_ • **Verificação:** _(fixtures de `entry[].messaging[]` + teste de send mockado)_
+**Estado:** ✅ Concluída (2026-07-22)
+- **O que foi feito:** plugin [assets/plugin_examples/facebook_messenger/](../assets/plugin_examples/facebook_messenger/) — `channels.py` (`FacebookMessengerChannel(MetaGraphChannel)`: capabilities, descriptor, `identity_from_credentials`→`page_id`, `contact_type`→`facebook`, `status()` pingando o nó da Página, `send_text`/`send_media`), `routes.py` (`/info`, `/channels`, `POST /subscribe` → `POST /{page_id}/subscribed_apps` com os 7 campos, `GET /webhook-status`), `static/facebook_messenger.js` (screen `config:true`: copiar a URL de callback, assinar o webhook, ver campos assinados e se há App Secret), `plugin.yaml`. Zip importável em `assets/channel_plugins/facebook_messenger-plugin.zip` (D10 — não auto-instalado). `page_id` entrou em `NON_SECRET_CRED_KEYS` (identificador público) e `facebook` no catálogo de tipos de contato do painel ([contactTypes.js](../web/static/js/services/contactTypes.js)).
+- **Decisões:** `parse_inbound`/`verify_inbound_signature`/`download_media`/perfil vêm inteiros da base 01-B (o plugin não reimplementa nada). `appsecret_proof` em toda chamada Graph quando há `app_secret`. Mídia por URL pública (D4) — sem `public_base_url` o envio falha com mensagem acionável em vez de mandar link quebrado. `graph_api_version` e `human_agent_tag` são `config_fields` (não credenciais).
+- **Pendências:** perfil do usuário depende da feature "Business Asset User Profile Access" (P-02.2) — sem ela o nome cai no PSID, como previsto no MVP.
+- **Verificação:** [tests/test_facebook_messenger.py](../tests/test_facebook_messenger.py) — descriptor/capabilities/identidade, corpo da Send API + `appsecret_proof`, mídia por URL pública (`image`/`file`), e a rota real de webhook com assinatura válida/ inválida.
 
 ---
 
@@ -68,8 +71,11 @@ ChannelCapabilities(qr=False, templates=False, groups=False, presence=False,
 **Pronto quando:** um send fora das 24h sem humano é marcado `failed` com mensagem explicativa; com humano designado + toggle on, sai com a tag.
 
 #### Status de execução — Fase 02.2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _()_ • **Decisões:** _()_ • **Pendências:** _()_ • **Verificação:** _()_
+**Estado:** ✅ Concluída (2026-07-22)
+- **O que foi feito:** capability nova **`human_window_hours`** ([channels/base.py](../channels/base.py)) = janela ESTENDIDA válida só p/ envio HUMANO; `OutboundRouter.session_open(..., by_human=False)` ([channels/outbound.py](../channels/outbound.py)) a considera, e `_session_window_block` ([server/routes/contacts.py](../server/routes/contacts.py)) passa `by_human=True` (todo call site dele é ação de operador). O Messenger declara `session_window_hours=24` + `human_window_hours=168`. No provider, `_post_with_window_fallback` reenvia UMA vez como `messaging_type=MESSAGE_TAG` + `tag=HUMAN_AGENT` **só** se o toggle `human_agent_tag` estiver ligado E a conversa estiver com humano (tag `transferido_atendente`); senão devolve `failed` com texto explicativo.
+- **Decisões:** a decisão da tag é REATIVA (dispara no erro de janela da própria Meta), não pré-calculada — provider fica sem estado, sem clock skew e sem leitura extra de DB no caminho feliz. O gate de humano reusa o sinal de handoff que o core já mantém, então **a IA nunca alcança a tag** (falha fechada: qualquer erro na consulta ⇒ "não é humano" ⇒ sem tag).
+- **Pendências:** 02.3 (embedded signup) segue adiada, como previsto; Handover Protocol permanece documentado e não implementado (single-app).
+- **Verificação:** [tests/test_facebook_messenger.py](../tests/test_facebook_messenger.py) — fora da janela sem toggle ⇒ erro claro e SEM retry; com toggle mas conversa da IA ⇒ sem retry; com handoff humano ⇒ retry com `MESSAGE_TAG`/`HUMAN_AGENT`; erro não-de-janela nunca reenviado; `session_open` (2 dias: fecha p/ IA, abre p/ humano; 10 dias: fecha p/ ambos).
 
 ---
 
@@ -97,10 +103,11 @@ ChannelCapabilities(qr=False, templates=False, groups=False, presence=False,
 - **P-02.2:** perfil do usuário exige a feature "Business Asset User Profile Access" (app review) — sem ela, `{}`. ⏸️ Aceitar fallback ao PSID no MVP.
 
 ## Checklist
-- [ ] `parse_inbound` (fixtures texto/anexo/echo/receipt/reaction) verde.
-- [ ] Send texto+mídia mockado; `appsecret_proof` presente; `messaging_type` correto.
-- [ ] Assinatura inválida rejeitada (01-A).
-- [ ] Janela 24h: fora → `failed` ou `HUMAN_AGENT` conforme handoff.
-- [ ] Modo escuro na config screen.
-- [ ] Dedup por `page_id` (dois canais mesma Página → 409).
-- [ ] Suíte `tests/` verde no Postgres.
+- [x] `parse_inbound` (fixtures texto/anexo/echo/receipt/reaction) verde.
+- [x] Send texto+mídia mockado; `appsecret_proof` presente; `messaging_type` correto.
+- [x] Assinatura inválida rejeitada (01-A).
+- [x] Janela 24h: fora → `failed` ou `HUMAN_AGENT` conforme handoff.
+- [x] Modo escuro na config screen (classes `wa-*` + `.wa-field`).
+- [x] Dedup por `page_id` (`identity_from_credentials` → o guard genérico do core devolve 409).
+- [x] Suíte `tests/` verde no Postgres.
+- [ ] **Validação em campo** (exige app Meta + Página reais): assinar o webhook, receber uma DM e responder.

@@ -8,6 +8,7 @@ import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { contactTypeBadge } from '../../services/contactTypes.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
@@ -22,6 +23,7 @@ const TAG_COLORS = [
 // attributes live in ConversationInfoPanel.
 
 export function ContactInfoPanel({ phone, currentUser = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (tipo de contato)
   // P48: editing controls are gated by contact.write; the destructive delete by
   // contact.delete. Permissive with no user identity (open install, no admin yet).
   const canWrite = hasPermission(currentUser, 'contact.write');

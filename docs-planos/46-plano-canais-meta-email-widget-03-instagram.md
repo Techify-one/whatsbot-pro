@@ -5,7 +5,9 @@
 > **Como usar:** preencha o "Status de execução" de cada fase antes da próxima.
 
 ## Objetivo
-Plugin `instagram`: DM do Instagram via "Instagram API with Instagram Login". Quase igual ao Messenger (base `meta_graph`, 01-B) — difere em host (`graph.instagram.com`), token (IG User token 60d **com refresh**, 01-C), escopos e id (IGSID). MVP = colar token; OAuth (Instagram Business Login) vira fase 2.
+Plugin `instagram`: DM do Instagram via "Instagram API with Instagram Login". Quase igual ao Messenger (base `meta_graph`) — difere em host (`graph.instagram.com`), token (IG User token 60d **com refresh**, 01-C), escopos e id (IGSID). MVP = colar token; OAuth (Instagram Business Login) vira fase 2.
+
+> ⚠️ **A base `meta_graph`/`media_urls` NÃO está mais no core** (plano 76·F9, 2026-07-23 — decisão do usuário de zips autossuficientes). Ela vive em `assets/plugin_examples/facebook_messenger/{meta_graph,media_urls}.py`. **Este plugin carrega a PRÓPRIA cópia** desses dois arquivos (copiar do Messenger para `assets/plugin_examples/instagram/`), importados relativamente (`from .meta_graph import …`). Consequência: um fix na API da Meta precisa ser aplicado nas DUAS cópias. Se a duplicação incomodar no futuro, promover a base a um pacote compartilhado explícito — não é o caso agora.
 
 ## Fatos pinados (usar exatamente — confirmados na verificação)
 | Item | Valor |

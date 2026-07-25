@@ -45,7 +45,8 @@ class OutboundRouter:
     def supports(self, channel_id: str, cap: str) -> bool:
         return bool(getattr(self.capabilities(channel_id), cap, False))
 
-    def session_open(self, channel_id: str, last_inbound_ts: float | None) -> bool:
+    def session_open(self, channel_id: str, last_inbound_ts: float | None, *,
+                     by_human: bool = False) -> bool:
         """Whether FREE TEXT is allowed to ``channel_id`` right now (plano 11 Fase 6).
 
         Channels with ``session_window_hours == 0`` (GOWA/linked-device) are always
@@ -54,8 +55,17 @@ class OutboundRouter:
         template (HSM, via :meth:`send_template`) is required. Driven by CAPABILITY,
         never provider name. The agentic auto-reply is inherently in-window (it
         answers a just-received inbound); this guards proactive/operator sends.
+
+        ``by_human=True`` (plano 46 · 02.2) additionally honours
+        ``capabilities.human_window_hours`` — the EXTENDED window a provider grants
+        to a real human reply (Messenger/Instagram: 7 days via the ``HUMAN_AGENT``
+        tag). Only the operator-initiated send paths pass it; the AI never does, so
+        the AI can never reach a human-only escape hatch.
         """
-        hours = self.capabilities(channel_id).session_window_hours
+        caps = self.capabilities(channel_id)
+        hours = caps.session_window_hours
+        if by_human:
+            hours = max(hours, getattr(caps, "human_window_hours", 0) or 0)
         if not hours:
             return True
         if not last_inbound_ts:

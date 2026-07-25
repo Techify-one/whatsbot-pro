@@ -14,8 +14,29 @@ import {
   buildEmbedSnippet,
 } from './constants.js';
 
+// Plano 76 · F0 — CARACTERIZAÇÃO: a string do snippet é copiada pelo operador e
+// colada no HTML do site dele, então ela é contrato de saída. Este teste a fixa
+// BYTE A BYTE para que a virada de F3 (o template deixa de ser literal do core e
+// passa a vir do descriptor do provider) seja provadamente byte-equivalente.
+const SNIPPET_TEMPLATE =
+  '<script>(function(d,t){var g=d.createElement(t);'
+  + 'g.src="{base_url}/plugins/website/static/sdk.js";g.async=true;d.body.appendChild(g);'
+  + "g.onload=function(){window.WhatsBotChat.run({widgetToken:'{token}',baseUrl:'{base_url}'})}"
+  + "})(document,'script')<\/script>";
+
+const SNIPPET_EXPECTED =
+  '<script>(function(d,t){var g=d.createElement(t);'
+  + 'g.src="https://x.example/plugins/website/static/sdk.js";g.async=true;d.body.appendChild(g);'
+  + "g.onload=function(){window.WhatsBotChat.run({widgetToken:'wgt_abc123',baseUrl:'https://x.example'})}"
+  + "})(document,'script')<\/script>";
+
+test('buildEmbedSnippet: string byte-idêntica (caracterização F0)', () => {
+  assert.equal(buildEmbedSnippet('https://x.example/', 'wgt_abc123', SNIPPET_TEMPLATE),
+    SNIPPET_EXPECTED);
+});
+
 test('buildEmbedSnippet: trims trailing slash and embeds token + base', () => {
-  const s = buildEmbedSnippet('https://x.example/', 'wgt_abc123');
+  const s = buildEmbedSnippet('https://x.example/', 'wgt_abc123', SNIPPET_TEMPLATE);
   assert.ok(s.includes("widgetToken:'wgt_abc123'"));
   assert.ok(s.includes("baseUrl:'https://x.example'"));
   assert.ok(s.includes('https://x.example/plugins/website/static/sdk.js'));

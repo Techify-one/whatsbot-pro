@@ -3,8 +3,8 @@
 // connected/logged-in status, own_phone, last_error) with per-card actions
 // (enable/disable, refresh status, delete). A modal creates a new channel:
 // pick a provider, an id (snake_case), a display name, and the provider's
-// credential fields. After creating a whatsapp_cloud channel the modal shows
-// the webhook URL to paste into the Meta App configuration.
+// credential fields. The post-create step is driven by the descriptor's
+// capabilities/post_create (QR, webhook URL to paste, or autoconfigure).
 //
 // Plano 23 · D4 — decomposed: this file is the thin container (data fetching +
 // CRUD orchestration + layout). The presentational pieces live in
@@ -32,10 +32,11 @@ import {
   channelReconnect,
   channelLogout,
   setChannelMembers,
-  listChannelProviders,
   providerPostCreateAction,
   getConfig,
 } from '../services/api.js';
+import { fetchedProviders, requiredCredentials } from '../services/providerCatalog.js';
+import { useProviderCatalog } from '../hooks/useProviderCatalog.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, bool } from '../services/urlState.js';
@@ -51,8 +52,10 @@ const html = htm.bind(h);
 
 // Deep-link do estado da tela (Plano 24) — flags de query sobre o path
 // /channels/{id} (ou /channels/new). `provider` pré-seleciona o form de criação;
-// connect/webhook/telegram (mutuamente exclusivas) reabrem o modal do canal do
+// connect/webhook/autoconfig (mutuamente exclusivas) reabrem o modal do canal do
 // path. `archived` abre a seção de arquivados. Serialize omite defaults → URL limpa.
+// As flags são dirigidas pela CAPABILITY/post_create do descriptor, nunca por nome
+// de provider (connect=QR, webhook=webhook_url, autoconfig=autoconfigure).
 // Substitui {channel_id} num path/endpoint declarado pelo descriptor.
 function subPath(tmpl, channelId) {
   return (tmpl || '').replace('{channel_id}', encodeURIComponent(channelId));
@@ -60,12 +63,13 @@ function subPath(tmpl, channelId) {
 const CHANNELS_URL_SCHEMA = [
   enumStr('provider', ''),   // pré-seleção do form de criação (/channels/new)
   bool('connect'),           // reabre o QR/conexão do canal do path
-  bool('webhook'),           // reabre o aviso de webhook (whatsapp_cloud)
-  bool('telegram'),          // reabre o aviso do Telegram
+  bool('webhook'),           // reabre o aviso de webhook (post_create webhook_url)
+  bool('autoconfig'),        // reabre o aviso de autoconfigure (post_create autoconfigure)
   bool('archived'),          // seção de canais arquivados
 ];
 
 export default function ChannelsManager({ initialEntity }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar (async)
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -78,9 +82,10 @@ export default function ChannelsManager({ initialEntity }) {
   // Canais arquivados (soft-delete) + visibilidade da seção de restauração.
   const [archived, setArchived] = useState([]);
   const [showArchived, setShowArchived] = useState(false);
-  // {id} of a just-created whatsapp_cloud channel — shows the webhook notice.
+  // {id, provider} of a just-created channel whose post_create is webhook_url —
+  // shows the callback-URL notice. Provider-agnostic (capability-driven).
   const [webhookFor, setWebhookFor] = useState(null);
-  const [telegramNotice, setTelegramNotice] = useState(null);
+  const [autoconfigNotice, setAutoconfigNotice] = useState(null);
   const [embedFor, setEmbedFor] = useState(null);
   // {id, display_name} of the GOWA channel whose QR-connect panel is open.
   const [connectFor, setConnectFor] = useState(null);
@@ -91,18 +96,16 @@ export default function ChannelsManager({ initialEntity }) {
   // Per-channel AI defaults, derived from the global config (plano 21): a new
   // channel inherits the values that used to be global.
   const [aiDefaults, setAiDefaults] = useState(() => aiDefaultsFrom({}));
-  // Providers offered in the "Novo canal" picker — only those whose plugin is
-  // enabled (null while loading → ChannelForm shows the full catalogue).
-  const [providers, setProviders] = useState(null);
-  // Required credentials per provider (capability-driven, from the providers
-  // fetch) — gates the create form and flags zombie channels on the cards.
-  const [requiredCreds, setRequiredCreds] = useState({});
   const channelsRef = useRef([]);
   channelsRef.current = channels;
 
-  // Descriptors do que está instalado, indexados por provider (plano 33). Toda a
-  // UI (badge, form, pós-criação, ações de sessão) é dirigida por eles — sem
-  // nenhum provider hardcoded no core.
+  // Providers + required credentials vêm do CATÁLOGO ÚNICO (plano 76 · H1), a
+  // mesma fonte das demais telas — uma requisição só para o app inteiro.
+  // `providers` é null enquanto o fetch não chegou (→ ChannelForm mostra o
+  // catálogo completo). Descriptors indexados por provider dirigem toda a UI
+  // (badge, form, pós-criação, ações de sessão) — sem provider hardcoded no core.
+  const providers = fetchedProviders();
+  const requiredCreds = requiredCredentials();
   const descriptorsById = {};
   for (const d of (providers || [])) descriptorsById[d.provider] = d;
 
@@ -118,7 +121,7 @@ export default function ChannelsManager({ initialEntity }) {
 
   // Deep-link /channels/<id>: a URL reflete o canal aberto no editor. Também
   // resolve /channels/new (form de criação, com ?provider=) e as flags de modal
-  // (?connect|?webhook|?telegram=1) sobre um canal existente — lidas do search
+  // (?connect|?webhook|?autoconfig=1) sobre um canal existente — lidas do search
   // aqui porque só neste ponto (ready + lista carregada) o canal do path resolve.
   const pushUrl = useDeepLink({
     tab: 'channels',
@@ -142,12 +145,12 @@ export default function ChannelsManager({ initialEntity }) {
       if (!c) return;
       setEditingChannel(c);
       // Flags de modal sobre o canal do path (mutuamente exclusivas: só a 1ª vale).
-      // Dirigidas pelo descriptor do provider, não por nome (connect=QR,
-      // webhook=webhook_url, telegram=autoconfigure — nomes históricos das flags).
+      // Dirigidas pela capability/post_create do descriptor, não por nome
+      // (connect=QR, webhook=webhook_url, autoconfig=autoconfigure).
       const q = readParams(window.location.search, CHANNELS_URL_SCHEMA);
       if (q.connect) setConnectFor({ id: c.id, display_name: c.display_name || c.id });
       else if (q.webhook) setWebhookFor({ id: c.id, provider: c.provider });
-      else if (q.telegram) setTelegramNotice({ channel_id: c.id, deep_link: true });
+      else if (q.autoconfig) setAutoconfigNotice({ channel_id: c.id, deep_link: true });
     },
   });
 
@@ -162,10 +165,10 @@ export default function ChannelsManager({ initialEntity }) {
       provider: creating ? initialProvider : '',
       connect: !!connectFor,
       webhook: !!webhookFor,
-      telegram: !!telegramNotice,
+      autoconfig: !!autoconfigNotice,
       archived: showArchived,
     }, CHANNELS_URL_SCHEMA),
-    deps: [creating, initialProvider, connectFor, webhookFor, telegramNotice, showArchived],
+    deps: [creating, initialProvider, connectFor, webhookFor, autoconfigNotice, showArchived],
   });
 
   useEffect(() => {
@@ -173,18 +176,6 @@ export default function ChannelsManager({ initialEntity }) {
     (async () => {
       const res = await getConfig();
       if (alive && res && res.ok) setAiDefaults(aiDefaultsFrom(res.data));
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const res = await listChannelProviders();
-      if (alive && res && res.ok) {
-        setProviders(res.data.providers || []);
-        setRequiredCreds(res.data.required_credentials || {});
-      }
     })();
     return () => { alive = false; };
   }, []);
@@ -250,7 +241,7 @@ export default function ChannelsManager({ initialEntity }) {
       setCreating(false);
       setInitialProvider('');
       // Sai de /channels/new e ancora as flags de modal pós-criação no canal novo
-      // (/channels/{newId}?connect|webhook|telegram=1 via useUrlState).
+      // (/channels/{newId}?connect|webhook|autoconfig=1 via useUrlState).
       pushUrl(newId ? { id: newId } : null);
       // Pós-criação dirigido pelo DESCRIPTOR (plano 33), sem `if provider ===`:
       //  • needs_qr  → abre o QR pra conectar (GOWA);
@@ -267,11 +258,11 @@ export default function ChannelsManager({ initialEntity }) {
       } else if (pc && pc.kind === 'autoconfigure' && newId) {
         const auto = await providerPostCreateAction(pc.endpoint, newId);
         if (auto && auto.ok && auto.data) {
-          setTelegramNotice(auto.data);
+          setAutoconfigNotice(auto.data);
         } else {
           // Autoconfigure falhou (plugin off?): ainda mostra a URL de webhook com
           // fallback long-poll, pra inbox não ficar no limbo.
-          setTelegramNotice({
+          setAutoconfigNotice({
             mode: 'poll', registered: false,
             reason: (auto && auto.error) || 'provider indisponível',
             webhook_url: pc.webhook_path
@@ -279,10 +270,11 @@ export default function ChannelsManager({ initialEntity }) {
           });
         }
       } else if (pc && pc.kind === 'embed_snippet' && newId) {
-        // Widget de site (plano 46): mostra o snippet de instalação montado a
-        // partir do widget_token público do canal recém-criado.
-        const token = parseChannelConfig(created.config).widget_token || '';
-        setEmbedFor({ id: newId, widgetToken: token });
+        // Widget de site (plano 46/76): o snippet é montado do TEMPLATE do
+        // descriptor; a chave de config do token pública também vem do descriptor
+        // (token_config_key) — o core não conhece o nome literal.
+        const token = parseChannelConfig(created.config)[pc.token_config_key] || '';
+        setEmbedFor({ id: newId, widgetToken: token, template: pc.snippet_template });
       }
       load();
     } else {
@@ -387,7 +379,7 @@ export default function ChannelsManager({ initialEntity }) {
       <div class="flex items-center justify-between mb-4 gap-3">
         <p class="text-[13px] text-wa-secondary">
           Canais de mensagens conectados ao WhatsBot-Pro. Cada canal usa um provider
-          (GOWA, WhatsApp Cloud, Telegram ou Teste) com suas próprias credenciais.
+          (instalado como plugin) com suas próprias credenciais.
         </p>
         ${!creating ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
@@ -403,8 +395,8 @@ export default function ChannelsManager({ initialEntity }) {
         return html`<${WebhookNotice} url=${url} title=${pc.title} help=${pc.help}
           onDismiss=${() => setWebhookFor(null)} />`;
       })() : null}
-      ${telegramNotice ? html`<${AutoconfigureNotice} result=${telegramNotice} onDismiss=${() => setTelegramNotice(null)} />` : null}
-      ${embedFor ? html`<${EmbedSnippetNotice} widgetToken=${embedFor.widgetToken} baseUrl=${window.location.origin} onDismiss=${() => setEmbedFor(null)} />` : null}
+      ${autoconfigNotice ? html`<${AutoconfigureNotice} result=${autoconfigNotice} onDismiss=${() => setAutoconfigNotice(null)} />` : null}
+      ${embedFor ? html`<${EmbedSnippetNotice} widgetToken=${embedFor.widgetToken} baseUrl=${window.location.origin} template=${embedFor.template} onDismiss=${() => setEmbedFor(null)} />` : null}
 
       ${connectFor ? html`<${QRConnect}
         channelId=${connectFor.id}

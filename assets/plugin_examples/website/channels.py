@@ -113,10 +113,24 @@ class WebsiteChannel(Channel):
             ],
             "capabilities": {"needs_qr": False, "templates": False},
             "ai_sequential_default": False,
-            # New post-create kind: render the <script> embed snippet with the
-            # channel's widget_token + public base URL (frontend addition).
-            "post_create": {"kind": "embed_snippet",
-                            "widget_path": "/api/plugins/website/public/widget"},
+            # Post-create kind ``embed_snippet`` (plano 76 · F3): o PROVIDER é dono
+            # do template do <script> e da chave de config do token. O core só
+            # interpola {base_url}/{token} — não conhece mais o path /plugins/website/.
+            # O template viaja como DADO (JSON → JS), então usa </script> literal;
+            # {base_url} (2×) e {token} (1×) são os únicos marcadores substituídos.
+            "post_create": {
+                "kind": "embed_snippet",
+                "widget_path": "/api/plugins/website/public/widget",
+                "token_config_key": "widget_token",
+                "snippet_template": (
+                    "<script>(function(d,t){var g=d.createElement(t);"
+                    "g.src=\"{base_url}/plugins/website/static/sdk.js\";"
+                    "g.async=true;d.body.appendChild(g);"
+                    "g.onload=function(){window.WhatsBotChat.run("
+                    "{widgetToken:'{token}',baseUrl:'{base_url}'})}"
+                    "})(document,'script')</script>"
+                ),
+            },
             "form_component": None,
         }
 

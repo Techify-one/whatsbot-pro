@@ -1,14 +1,18 @@
-// Channels — WebhookHealthRow (Plano 26). Linha de saúde do webhook que só
-// aparece em canais ``whatsapp_cloud`` (D1). Self-fetch (não toca o caminho de
-// status em massa — P1): no mount, pergunta à Meta qual webhook está configurado
-// e compara com a URL que ESTA instância espera
-// (``${origin}/api/webhook/whatsapp_cloud/${channel.id}`` — mesma fórmula de
-// notices.js). O botão "Configurar webhook" repointa o override (com confirmação,
-// D5) e re-checa. Cores com fallback dark via custom.css (padrão ChannelCard).
+// WhatsApp Cloud — WebhookHealthRow (Plano 26; movido do core para o plugin no
+// plano 76 · V6). Linha de saúde do webhook que aparece SÓ nos cards de canal
+// ``whatsapp_cloud``. Registrada no slot genérico ``channel.card.rows`` pelo
+// extends.js deste plugin — o core não conhece mais este componente nem os seus
+// endpoints. Self-fetch (não toca o status em massa): no mount, pergunta à Meta
+// qual webhook está configurado e compara com a URL que ESTA instância espera
+// (``${origin}/api/webhook/whatsapp_cloud/${channel.id}``). O botão "Configurar
+// webhook" repointa o override (com confirmação) e re-checa.
+//
+// `http` chega por prop do extends.js (buildPluginHttp('/api/plugins/whatsapp_cloud'))
+// — a transporte status-aware do plugin, no lugar das funções cloud* que viviam
+// no core api.js. Cores com fallback dark via custom.css (padrão ChannelCard).
 import { h } from 'preact';
 import { useEffect, useState, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { cloudWebhookStatus, cloudSetWebhook } from '../../services/api.js';
 
 const html = htm.bind(h);
 
@@ -20,9 +24,11 @@ const MATCH_META = {
   unknown:      { tint: 'bg-wa-hover border-wa-border text-wa-secondary', label: 'Webhook: não verificável' },
 };
 
-export function WebhookHealthRow({ channel }) {
-  // Hard gate: only WhatsApp Cloud channels (D1). Hooks below are unconditional
-  // (provider never changes for a mounted card), so the early return is safe.
+export function WebhookHealthRow({ channel, http }) {
+  // Hard gate: só cards de canal WhatsApp Cloud. O slot renderiza para TODO
+  // provider; o filtro por provider aqui DENTRO do plugin é legítimo. Hooks abaixo
+  // são incondicionais (o provider nunca muda para um card montado), então o
+  // early-return é seguro.
   if (channel.provider !== 'whatsapp_cloud') return null;
 
   const expectedUrl = `${window.location.origin}/api/webhook/whatsapp_cloud/${channel.id}`;
@@ -32,7 +38,9 @@ export function WebhookHealthRow({ channel }) {
 
   const check = useCallback(async () => {
     setState(s => ({ ...s, loading: true }));
-    const res = await cloudWebhookStatus(channel.id, expectedUrl);
+    const res = await http.get('/webhook-status'
+      + `?channel_id=${encodeURIComponent(channel.id)}`
+      + `&expected_url=${encodeURIComponent(expectedUrl)}`);
     if (res && res.ok && res.data) setState({ loading: false, ...res.data });
     else setState({ loading: false, match: 'unknown', configured_url: null,
       reason: (res && res.error) || 'falha ao consultar' });
@@ -43,7 +51,7 @@ export function WebhookHealthRow({ channel }) {
   async function handleSet() {
     if (!confirm('Apontar o webhook deste número para ESTA instância? Isso substitui o webhook atual na Meta.')) return;
     setBusy(true); setActionError('');
-    const res = await cloudSetWebhook(channel.id, expectedUrl);
+    const res = await http.post('/set-webhook', { channel_id: channel.id, url: expectedUrl });
     setBusy(false);
     if (res && res.ok) check();
     else setActionError((res && res.error) || 'Falha ao configurar o webhook.');

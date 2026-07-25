@@ -1,16 +1,12 @@
 import { h } from 'preact';
 import htm from 'htm';
+import { channelPickerMeta } from '../../services/providerCatalog.js';
+import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
 
 const html = htm.bind(h);
 
-// Rótulo/cor por provider — alinhado ao ChannelChip da sidebar, dentro da paleta
-// dark-mode-safe (wa-*/blue) conforme a regra de tema do CLAUDE.md.
-const PROVIDER_META = {
-  gowa:           { label: 'WhatsApp',  dot: 'bg-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', dot: 'bg-blue-500' },
-  telegram:       { label: 'Telegram',  dot: 'bg-blue-500' },
-  test:           { label: 'Teste',     dot: 'bg-wa-secondary' },
-};
+// Rótulo/cor por provider — do CATÁLOGO ÚNICO (plano 76), alinhado ao ChannelChip
+// da sidebar. Não há mais mapa estático aqui.
 
 // Distinct from utils/phone.js `formatPhoneDisplay` ON PURPOSE: a channel's
 // `own_phone` may already carry a leading `+` and is not always a BR-grouped
@@ -24,6 +20,7 @@ function formatPhone(p) {
 // `channels` já vem filtrado pelo backend (somente conectadas + logadas).
 // Clicar numa caixa chama onPick(channel); a 1ª mensagem é roteada por ela.
 export function ChannelPickerModal({ phoneDisplay, channels = [], onPick, onClose }) {
+  useProviderCatalog();  // re-render quando o catálogo de providers carregar
   return html`
     <div
       class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
@@ -50,7 +47,7 @@ export function ChannelPickerModal({ phoneDisplay, channels = [], onPick, onClos
         ` : html`
           <div class="flex flex-col gap-2">
             ${channels.map((ch) => {
-              const meta = PROVIDER_META[ch.provider] || { label: ch.provider || 'Canal', dot: 'bg-wa-secondary' };
+              const meta = channelPickerMeta(ch.provider);
               const name = ch.display_name || meta.label;
               return html`
                 <button

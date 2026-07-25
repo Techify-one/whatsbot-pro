@@ -104,11 +104,12 @@ def _persist_identity(provider: str, channel_id: str, identity) -> None:
 ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ALLOWED_PROVIDERS = {"gowa", "whatsapp_cloud", "telegram", "test"}
 
-# Non-secret credential keys returned in CLEAR so the edit form can show + pre-fill
-# them (they are public identifiers, not secrets). Everything else is masked (P15).
-NON_SECRET_CRED_KEYS = {"waba_id", "phone_number_id"}
-
 TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+
+# Name guard (plano 76 · V9): mesmo declarada ``type: "text"``, uma credencial cujo
+# NOME cheire a segredo nunca sai em claro — um plugin de terceiro que erre o tipo
+# não pode virar vazamento. Default é sempre mascarar.
+_SECRET_NAME_RE = re.compile(r"(token|secret|password|senha|key)", re.IGNORECASE)
 
 
 # ── Serialization / masking (P15) ───────────────────────────────────────────────
@@ -120,11 +121,43 @@ def _mask(value: str) -> str:
     return f"••••{tail}"
 
 
-def serialize(row: dict, creds: dict) -> dict:
-    """Mask a channel row's credentials at the API boundary (P15)."""
+def _public_cred_keys(deps, provider: str) -> set[str]:
+    """Credential keys the provider marks PUBLIC (``type: "text"``) — o que sai em
+    claro para o form de edição pré-preencher (plano 76 · V9). Derivado do
+    DESCRIPTOR do provider, não de uma lista hardcoded. Guarda de nome obrigatória:
+    uma chave cujo nome case ``_SECRET_NAME_RE`` é mascarada mesmo com ``type:text``
+    (+ WARNING). Provider não registrado / descriptor quebrado ⇒ conjunto vazio =
+    tudo mascarado (default seguro)."""
+    try:
+        desc = provider_descriptor(deps, provider)
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[str] = set()
+    for field in desc.get("credential_fields") or []:
+        if field.get("type") != "text":
+            continue
+        key = field.get("key") or ""
+        if not key:
+            continue
+        if _SECRET_NAME_RE.search(key):
+            logger.warning(
+                "Canal (%s): credencial %r marcada type=text mas o nome parece "
+                "segredo — mascarada por segurança.", provider, key)
+            continue
+        out.add(key)
+    return out
+
+
+def serialize(row: dict, creds: dict, public_keys: set[str] | None = None) -> dict:
+    """Mask a channel row's credentials at the API boundary (P15).
+
+    ``public_keys`` (plano 76 · V9) é o conjunto de chaves que o provider marcou
+    ``type: "text"`` (resolvido por ``_public_cred_keys``); só elas saem em claro.
+    Ausente/``None`` ⇒ tudo mascarado (default seguro, ex.: caminhos sem deps)."""
     row = dict(row)
+    pub = public_keys or set()
     row["credentials"] = {
-        k: (v if k in NON_SECRET_CRED_KEYS else _mask(v))
+        k: (v if k in pub else _mask(v))
         for k, v in creds.items()
     }
     return row
@@ -229,7 +262,7 @@ async def list_channels(deps, archived: bool = False) -> list[dict]:
     out = []
     for row in rows:
         creds = await asyncio.to_thread(channel_credential_repo.get_all, row["id"])
-        out.append(serialize(row, creds))
+        out.append(serialize(row, creds, _public_cred_keys(deps, row.get("provider"))))
     return out
 
 
@@ -321,7 +354,7 @@ async def get_serialized(deps, channel_id: str) -> dict | None:
     if row is None:
         return None
     creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, creds)
+    return serialize(row, creds, _public_cred_keys(deps, row.get("provider")))
 
 
 def provider_descriptor(deps, provider: str) -> dict:
@@ -546,7 +579,7 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     # Register the live channel now so status/QR/send work without a restart.
     register_live(deps, cid, provider, row)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
-    return serialize(row, stored)
+    return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
 async def update(deps, row: dict, body: dict) -> dict:
@@ -607,7 +640,7 @@ async def update(deps, row: dict, body: dict) -> dict:
             await asyncio.to_thread(_persist_identity, provider, channel_id, identity)
             row = await asyncio.to_thread(channel_repo.get, channel_id)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, stored)
+    return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
 async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
@@ -659,4 +692,4 @@ async def restore(deps, channel_id: str) -> dict:
     """Undo a soft-delete: unarchive (stays disabled until re-enabled)."""
     row = await asyncio.to_thread(channel_repo.restore, channel_id)
     creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, creds)
+    return serialize(row, creds, _public_cred_keys(deps, row.get("provider")))

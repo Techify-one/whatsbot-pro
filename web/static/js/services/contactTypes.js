@@ -5,33 +5,94 @@
 // backend) e persiste em `contacts.contact_type`. Aqui mora só o mapa de exibição
 // (rótulo + cor) usado pela marca no painel do contato e pelo filtro por tipo.
 //
-// PURO: sem preact, sem DOM, sem rede. Cores em hex para casarem com o formato de
-// chip das tags (background {color}20, texto {color}, borda {color}40).
+// Cores em hex para casarem com o formato de chip das tags (background {color}20,
+// texto {color}, borda {color}40).
+//
+// Plano 76 · V5 — o mapa estático abaixo é a BASE CURADA (rótulos + cores de brand
+// dos tipos conhecidos, e o fallback `outros`). Tipos NOVOS (um provider recém
+// instalado, ex.: o `site` do widget) são DESCOBERTOS do catálogo de providers
+// (providerCatalog.contactTypeColorTokens) e semeados por cima — deduplicados por
+// tipo. Assim um provider novo aparece no filtro sem editar o core, sem perder as
+// cores de brand curadas. O catálogo cai num fallback estático sem rede, então
+// isto continua funcionando (só sem os tipos ainda-não-carregados) antes do fetch.
+import { contactTypeColorTokens } from './providerCatalog.js';
+
+// Token de cor do descriptor → hex para o chip de tipo (o descriptor fala em
+// tokens verde/azul/…, o badge de tipo pinta com hex translúcido).
+const TOKEN_HEX = {
+  green: '#25d366',
+  teal: '#0ea5a4',
+  blue: '#0866ff',
+  purple: '#8b5cf6',
+  amber: '#f59e0b',
+  orange: '#f97316',
+  red: '#ef4444',
+  pink: '#ec4899',
+  gray: '#6b7280',
+};
 
 // `neutral: true` ⇒ badge renderizado com classes semânticas wa-* (legível nos dois
 // temas), em vez de hex inline. Marcas de brand (whatsapp/telegram) usam hex.
-/** @type {Record<string, { label: string, color: string, neutral?: boolean }>} */
+/**
+ * `phone: true` ⇒ o identificador do contato é um telefone de verdade e pode
+ * passar pelo formatador `+CC (AA) …`. Só o WhatsApp é assim; os demais canais
+ * chaveiam o contato por um identificador NÃO-telefônico (chat_id do Telegram,
+ * PSID do Facebook, token de sessão do widget de site, …) que deve ser exibido
+ * verbatim, nunca transformado num telefone falso.
+ * @type {Record<string, { label: string, color: string, neutral?: boolean, phone?: boolean }>}
+ */
 export const CONTACT_TYPE_META = {
-  whatsapp: { label: 'WhatsApp', color: '#25d366' },
+  whatsapp: { label: 'WhatsApp', color: '#25d366', phone: true },
   telegram: { label: 'Telegram', color: '#2aabee' },
+  facebook: { label: 'Facebook', color: '#0866ff' },
   outros:   { label: 'Outros',   color: '#6b7280', neutral: true },
 };
 
-/** Ordem canônica dos tipos conhecidos (para dropdowns/filtros). */
-export const CONTACT_TYPE_ORDER = ['whatsapp', 'telegram', 'outros'];
+/** Ordem canônica dos tipos conhecidos (base curada, para dropdowns/filtros). */
+export const CONTACT_TYPE_ORDER = ['whatsapp', 'telegram', 'facebook', 'outros'];
 
 /**
- * Metadados de exibição de um tipo. Tipos desconhecidos (um provider novo que
- * ainda não está no mapa) caem num rótulo capitalizado + estilo neutro, então a UI
- * nunca quebra ao encontrar um tipo inesperado.
+ * Ordem completa dos tipos: a base curada + os tipos DESCOBERTOS do catálogo que
+ * ainda não estão nela (ex.: `site`), com `outros` sempre por último. Deduplicado.
+ * @returns {string[]}
+ */
+export function contactTypeOrder() {
+  const seen = new Set(CONTACT_TYPE_ORDER);
+  const discovered = Object.keys(contactTypeColorTokens())
+    .filter((t) => t && t !== 'outros' && !seen.has(t));
+  const base = CONTACT_TYPE_ORDER.filter((t) => t !== 'outros');
+  return [...base, ...discovered, 'outros'];
+}
+
+/**
+ * Metadados de exibição de um tipo. Ordem de resolução: base curada → tipo
+ * descoberto do catálogo (cor do descriptor, rótulo capitalizado) → fallback
+ * capitalizado neutro. A UI nunca quebra ao encontrar um tipo inesperado.
  * @param {string|null|undefined} type
  * @returns {{ label: string, color: string, neutral?: boolean }}
  */
 export function contactTypeMeta(type) {
   const key = (type || 'outros').toLowerCase();
   if (CONTACT_TYPE_META[key]) return CONTACT_TYPE_META[key];
+  const token = contactTypeColorTokens()[key];
+  if (token) {
+    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    return { label, color: TOKEN_HEX[token] || '#6b7280' };
+  }
   const label = key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Outros';
   return { label, color: '#6b7280', neutral: true };
+}
+
+/**
+ * Se o tipo de contato carrega um telefone real (seguro para o formatador
+ * `+CC (AA) …`). Só o WhatsApp; todo o resto (Telegram/Facebook/site/…) usa um
+ * identificador não-telefônico que deve ser mostrado cru. Tipos desconhecidos ou
+ * descobertos do catálogo caem no default `false` (exibição plana).
+ * @param {string|null|undefined} type
+ * @returns {boolean}
+ */
+export function contactTypeIsPhone(type) {
+  return contactTypeMeta(type).phone === true;
 }
 
 /**
