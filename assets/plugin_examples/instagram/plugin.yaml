@@ -1,0 +1,32 @@
+id: instagram
+name: Canal · Instagram Direct
+version: 2.1.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Caixa de entrada de DM do Instagram via login do Facebook (Instagram messaging
+  usando a Messenger Platform, graph.facebook.com): uma Página do Facebook
+  conectada à conta profissional do Instagram. Adiciona o provider "instagram" à
+  tela Canais do core — sem QR, recebendo por webhook (entry[].messaging[]) e
+  enviando pela Send API com o Page Access Token. Mídia sai por URL pública e a
+  assinatura X-Hub-Signature-256 dos webhooks é validada quando o App Secret está
+  configurado. O webhook é registrado na Meta automaticamente ao criar o canal e
+  o Page Access Token não expira por tempo (sem renovação automática).
+short_description: >-
+  Provider de canal para o Instagram Direct via login do Facebook (Meta Graph API): conecte a Página, o webhook se configura sozinho e você atende as DMs no painel.
+author: WhatsBot
+frontend_extends: /plugins/instagram/static/extends.js
+frontend_api_version: "1.0"
+entry:
+  channels: channels
+  routes: routes
+screens:
+  - id: instagram-config
+    title: Instagram
+    path: /instagram/config
+    icon: chat
+    config: true
+    component: /plugins/instagram/static/instagram.js
+permissions:
+  - channel.provider
+  - net.outbound
+dependencies: []
