@@ -2346,7 +2346,7 @@ check("gestor restored to 35 perms", len(_rrepo.get_role_permissions("gestor")) 
 import asyncio as _asyncio
 import types as _types
 from plugins.manifest import _parse_rbac as _parse_rbac
-from plugins.context import plugin_permission as _plugin_permission
+from plugins.context import plugin_permission as _plugin_permission, core_permission as _core_permission
 from plugins import events as _events
 from server import authz as _authz
 from server.deps import PermissionDeniedError as _PermissionDeniedError
@@ -2482,6 +2482,30 @@ check("plugin_permission -> user with perm -> allowed", True)
 # non-plugin path -> cannot infer id -> allowed (no raise)
 _asyncio.run(_dep(_freq(user={"id": _pu_id}, path="/api/contacts")))
 check("plugin_permission -> non-plugin path allowed", True)
+
+# 5b) core_permission() dependency (plano 81): gates a plugin route on a LITERAL
+# core catalog key (channel.manage), NOT plugin.<id>.<key>. Used by the channel
+# providers (gowa/telegram/whatsapp_cloud/website) so the same permission that
+# governs the core Channels screen also governs each provider's config endpoints.
+_cdep = _core_permission("channel.manage").dependency
+# legacy/open (no user) -> allowed (no raise)
+_asyncio.run(_cdep(_freq(user=None)))
+check("core_permission -> legacy/open allowed", True)
+# logged-in user WITHOUT channel.manage -> PermissionDeniedError (unified 403 envelope)
+_cpu = _urepo.create(email="corepu@test.com", name="CorePU",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_cpu_id = _cpu["id"]
+_cdenied = False
+try:
+    _asyncio.run(_cdep(_freq(user={"id": _cpu_id})))
+except _PermissionDeniedError:
+    _cdenied = True
+check("core_permission -> user without channel.manage -> 403", _cdenied)
+# grant channel.manage (custom) -> allowed
+_urepo.set_custom_permissions(_cpu_id, ["channel.manage"])
+_asyncio.run(_cdep(_freq(user={"id": _cpu_id})))
+check("core_permission -> user with channel.manage -> allowed", True)
+_urepo.delete(_cpu_id)  # cleanup
 
 # 6) ABAC seam: filter.authz.decision can downgrade allow->deny.
 def _abac_deny(ctx, value):

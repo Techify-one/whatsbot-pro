@@ -1,6 +1,6 @@
 id: whatsapp_cloud
 name: WhatsApp Cloud API
-version: 1.5.0
+version: 1.6.0
 whatsbot_api_version: ">=1.0,<2.0"
 frontend_extends: /plugins/whatsapp_cloud/static/extends.js
 frontend_api_version: "1.0"

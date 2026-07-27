@@ -19,6 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from db.repositories import config_repo
+from plugins.context import core_permission
 
 router = APIRouter()
 
@@ -70,7 +71,7 @@ def _all_timezones() -> list[dict]:
     return _TZ_CACHE
 
 
-@router.get("/alert-settings")
+@router.get("/alert-settings", dependencies=[core_permission("channel.manage")])
 async def get_alert_settings(request: Request, tz: str = ""):
     """Configuração atual do alerta + auto-detecta o fuso do navegador.
 
@@ -106,7 +107,7 @@ async def get_alert_settings(request: Request, tz: str = ""):
     return {"ok": True, "data": data}
 
 
-@router.put("/alert-settings")
+@router.put("/alert-settings", dependencies=[core_permission("channel.manage")])
 async def put_alert_settings(payload: dict = Body(...)):
     """Salva a configuração do alerta. Campos ausentes não são tocados."""
     def _save():
@@ -137,7 +138,7 @@ async def put_alert_settings(payload: dict = Body(...)):
     return {"ok": True}
 
 
-@router.post("/alert-test")
+@router.post("/alert-test", dependencies=[core_permission("channel.manage")])
 async def alert_test(payload: dict = Body(default={})):
     """Envia uma mensagem de teste ao Telegram com o token/chat_id salvos (ou os
     enviados no corpo, ainda não salvos) para o usuário validar a configuração."""

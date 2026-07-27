@@ -22,6 +22,7 @@ import httpx
 from fastapi import APIRouter, Request
 
 from db.repositories import channel_repo, channel_credential_repo
+from plugins.context import core_permission
 from whatsbot_plugins.telegram.mode import set_mode
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ def _call(token: str, method: str, payload: dict | None = None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/channels")
+@router.get("/channels", dependencies=[core_permission("channel.manage")])
 async def list_telegram_channels():
     """Canais com provider=telegram (id + display_name) para a tela de config."""
     rows = await asyncio.to_thread(channel_repo.list_all)
@@ -96,7 +97,7 @@ async def list_telegram_channels():
     return {"ok": True, "data": out}
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[core_permission("channel.manage")])
 async def channel_status(channel_id: str = ""):
     """Valida o token do canal (getMe) + estado do webhook (getWebhookInfo)."""
     token = await asyncio.to_thread(channel_credential_repo.get, channel_id, "bot_token")
@@ -115,7 +116,7 @@ async def channel_status(channel_id: str = ""):
     }}
 
 
-@router.get("/public-base")
+@router.get("/public-base", dependencies=[core_permission("channel.manage")])
 async def public_base(request: Request):
     """Detecta se a instalação tem domínio público (HTTPS) apontado.
 
@@ -167,7 +168,7 @@ async def _set_webhook(channel_id: str, url: str) -> dict:
             "webhook": info.get("result") if info.get("ok") else None}
 
 
-@router.post("/set-webhook")
+@router.post("/set-webhook", dependencies=[core_permission("channel.manage")])
 async def set_webhook(body: dict):
     channel_id = (body.get("channel_id") or "").strip()
     url = (body.get("url") or "").strip()
@@ -178,7 +179,7 @@ async def set_webhook(body: dict):
             "data": res.get("data"), "webhook": res.get("webhook")}
 
 
-@router.post("/autoconfigure")
+@router.post("/autoconfigure", dependencies=[core_permission("channel.manage")])
 async def autoconfigure(body: dict, request: Request):
     """Chamado pelo core ao CRIAR uma inbox Telegram (default = webhook se der).
 

@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter
 
 from db.repositories import channel_credential_repo, config_repo
+from plugins.context import core_permission
 
 # Default Graph API version. Kept in sync with settings.Settings.graph_api_version
 # (the real configured value is read from plugin settings by the core). Avoids a
@@ -186,7 +187,7 @@ def _read_configured_url(access_token: str, phone_number_id: str,
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
 
-@router.get("/info")
+@router.get("/info", dependencies=[core_permission("channel.manage")])
 async def info():
     """Metadados do provider para a tela de configuração."""
     return {
@@ -214,7 +215,7 @@ async def info():
     }
 
 
-@router.get("/webhook-status")
+@router.get("/webhook-status", dependencies=[core_permission("channel.manage")])
 async def webhook_status(channel_id: str = "", expected_url: str = ""):
     """Saúde do webhook: lê o que a Meta tem configurado e classifica contra
     ``expected_url`` (a URL que ESTA instância espera, vinda do frontend)."""
@@ -245,7 +246,7 @@ async def webhook_status(channel_id: str = "", expected_url: str = ""):
         "match": match, "can_set": can_set, "reason": ""}}
 
 
-@router.post("/set-webhook")
+@router.post("/set-webhook", dependencies=[core_permission("channel.manage")])
 async def set_webhook(body: dict):
     """Aponta o webhook (override no nível da WABA) de volta para ``url``.
 
@@ -277,7 +278,7 @@ async def set_webhook(body: dict):
         "match": _classify(configured_url, url), "configured_url": configured_url}}
 
 
-@router.post("/delete-webhook")
+@router.post("/delete-webhook", dependencies=[core_permission("channel.manage")])
 async def delete_webhook(body: dict):
     """Remove o override de webhook da WABA (volta pro webhook do App)."""
     channel_id = (body.get("channel_id") or "").strip()

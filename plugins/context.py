@@ -244,6 +244,40 @@ def plugin_permission(key: str):
     return Depends(_dep)
 
 
+def core_permission(key: str):
+    """FastAPI dependency that gates a plugin route on a CORE permission key.
+
+    Sibling of :func:`plugin_permission`, but ``key`` is a literal entry from the
+    core permission catalog (e.g. ``channel.manage``) — it is NOT prefixed with
+    ``plugin.<id>.``. Use it when a plugin route belongs to a core-owned domain:
+    the channel-provider plugins (gowa/telegram/whatsapp_cloud/website) gate their
+    OPERATOR routes on ``channel.manage`` so the same permission that governs the
+    core Channels screen also governs each provider's own config endpoints.
+
+    Same semantics as :func:`plugin_permission`: 403 when a logged-in user lacks
+    the permission; default-allow for legacy/open installs (no user identity); the
+    ABAC seam (``filter.authz.decision``) is honored via :func:`server.authz.acheck`.
+
+    Usage in a plugin ``routes.py``::
+
+        from plugins.context import core_permission
+
+        @router.get("/reveal-hmac", dependencies=[core_permission("channel.manage")])
+        async def reveal_hmac(channel_id: str = ""): ...
+    """
+
+    async def _dep(request: Request) -> None:
+        from server.authz import acheck
+        from server.deps import PermissionDeniedError
+        if not await acheck(request, key):
+            # Same exception the core routes use → unified 403 envelope
+            # ``{"ok": false, "error": "Permissão negada."}`` (not FastAPI's
+            # ``{"detail": ...}``), so the frontend's ``res.ok === false`` guards fire.
+            raise PermissionDeniedError()
+
+    return Depends(_dep)
+
+
 @dataclasses.dataclass
 class ToolContext:
     """Context passed to a tool executor.

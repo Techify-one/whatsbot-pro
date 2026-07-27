@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse
 from db.repositories import (channel_repo, channel_credential_repo, config_repo,
                              contact_repo, conversation_repo, inbox_repo,
                              message_repo)
-from plugins.context import broadcast, get_channel_runtime
+from plugins.context import broadcast, core_permission, get_channel_runtime
 
 from whatsbot_plugins.website import sessions
 from whatsbot_plugins.website.bridge import hub
@@ -300,7 +300,7 @@ async def widget_ws(websocket: WebSocket):
 
 # ── OPERATOR: config-screen APIs (normal auth) ────────────────────────────
 
-@router.get("/channels")
+@router.get("/channels", dependencies=[core_permission("channel.manage")])
 async def list_website_channels():
     """Website channels + the data the config screen needs to render the embed
     snippet. ``widget_token`` is public; the HMAC secret is NOT returned here."""
@@ -324,7 +324,7 @@ async def list_website_channels():
     return {"ok": True, "data": {"channels": out, "public_base_url": base or ""}}
 
 
-@router.get("/reveal-hmac")
+@router.get("/reveal-hmac", dependencies=[core_permission("channel.manage")])
 async def reveal_hmac(channel_id: str = ""):
     """Return the channel's HMAC secret in clear (operator-only route — used by the
     config screen so the operator can wire ``setUser`` on their backend)."""
