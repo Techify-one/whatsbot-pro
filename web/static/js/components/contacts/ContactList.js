@@ -83,16 +83,19 @@ export function operatorTypingFor(state, c) {
   return state[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] || null;
 }
 
-// "Teste está digitando…" — para o operador não responder por cima do colega.
-// Cor: nome em `wa-text` + resto em `wa-secondary` (mesmo tratamento do balão no
-// chat). NÃO usar `wa-teal` aqui: sobre `--wa-selected` no tema escuro ele mede
-// 2,3:1 (ver themeContrast.js), e a conversa aberta é justamente a que costuma
-// ter um colega digitando.
+// "● Teste está digitando…" — para o operador não responder por cima do colega.
+// Aparência PEDIDA pelo usuário: a MESMA do indicador "IA respondendo…" logo
+// abaixo (bolinha pulsando + texto em `wa-teal`), para os três indicadores da
+// linha lerem como a mesma família. Ressalva conhecida: sobre `--wa-selected` no
+// tema escuro o teal mede 2,3:1 (ver themeContrast.js) e a conversa aberta é
+// justamente a que costuma ter um colega digitando — o nome fica em `semibold`
+// para não sumir de vez. Mesma escolha já feita no "IA respondendo…".
 function OperatorTypingLine({ who }) {
   return html`
-    <span class="text-[14px] truncate leading-[20px] text-wa-secondary"
+    <span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5"
           title=${`${who.name} está respondendo esta conversa agora`}>
-      <span class="text-wa-text font-semibold">${who.name}</span>${' está digitando...'}
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse shrink-0"></span>
+      <span class="truncate"><span class="font-semibold">${who.name}</span>${' está digitando...'}</span>
     </span>
   `;
 }
