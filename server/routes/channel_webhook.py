@@ -542,6 +542,69 @@ def register_routes(app, deps):
                         "subtype": extras.get("subtype", ""),
                         "channel_id": ev.channel_id, "ts": time.time(), "raw": ev.raw})
                     handled += 1
+                elif kind == "system":
+                    # plano 82: a channel LIFECYCLE notice (Cloud API
+                    # ``user_changed_number``/``customer_identity_changed``, and the
+                    # future Telegram ``migrate_to_chat_id``) — NOT a message from the
+                    # counterpart. Surface it as a PANEL-ONLY card (``conversation_event``
+                    # role — already black-listed from the LLM context, sidebar preview
+                    # and unread badge) on the contact's EXISTING conversation and
+                    # NOTHING else: it never materializes a contact, never creates or
+                    # reopens a conversation, never runs the agent, and never emits
+                    # ``message.saved``/``message.received`` — so automation plugins
+                    # (protocolos) never fire. The distinct, opt-in bus event
+                    # ``channel.system_event`` is the ONLY hook a plugin gets. Generic
+                    # in the core: the provider merely DECLARES ``kind="system"`` (no
+                    # ``if provider ==`` here). Idempotency mirrors the ingest funnel
+                    # (P18) — a Meta redelivery must not duplicate the card nor re-fire
+                    # the bus event.
+                    dedup_key = (f"{ev.channel_id}:{ev.external_msg_id}"
+                                 if ev.external_msg_id else None)
+                    if state is not None and dedup_key:
+                        if dedup_key in state.processed_messages:
+                            logger.info("[Webhook %s] evento de sistema reentregue "
+                                        "(%s) — ignorado", ev.channel_id,
+                                        ev.external_msg_id)
+                            continue
+                        state.processed_messages.add(dedup_key)
+                    system_type = extras.get("system_type", "")
+                    wa_id = extras.get("wa_id")
+                    body = extras.get("body", "")
+                    card_text = ev.text or ev.display_text or body
+                    # Resolve the EXISTING conversation only — never create one (P2).
+                    # get_latest_for_contact returns the most recent thread regardless
+                    # of status, and we attach WITHOUT set_status, so a closed
+                    # conversation stays closed.
+                    existing = await asyncio.to_thread(
+                        contact_repo.get_by_phone, ev.chat_id)
+                    conv = None
+                    if existing:
+                        conv = await asyncio.to_thread(
+                            conversation_repo.get_latest_for_contact, existing["id"])
+                    conv_id = conv["id"] if conv else None
+                    if conv and card_text:
+                        saved = await asyncio.to_thread(
+                            message_repo.add, existing["id"], "conversation_event",
+                            card_text, conversation_id=conv_id, msg_id=None,
+                            ts=ev.ts or time.time())
+                        if ws_manager is not None:
+                            await ws_manager.broadcast("new_message", {
+                                "phone": ev.chat_id, "channel_id": ev.channel_id,
+                                "message": {"role": "conversation_event",
+                                            "content": card_text,
+                                            "conversation_id": conv_id,
+                                            "ts": saved.get("ts")}})
+                    else:
+                        logger.info("[Webhook %s] evento de sistema (%s) não gerou "
+                                    "card (contato=%s, conversa=%s, texto=%s) — "
+                                    "plano 82 P2", ev.channel_id, system_type or "?",
+                                    bool(existing), bool(conv), bool(card_text))
+                    await emit_with_filter("channel.system_event", {
+                        "phone": ev.chat_id, "channel_id": ev.channel_id,
+                        "system_type": system_type, "wa_id": wa_id, "body": body,
+                        "conversation_id": conv_id, "ts": ev.ts or time.time(),
+                        "raw": ev.raw})
+                    handled += 1
             except Exception:
                 logger.warning("Falha ao processar evento %s do canal %s",
                                kind, getattr(ev, "channel_id", "?"), exc_info=True)

@@ -191,6 +191,8 @@ def test_contacts_vira_texto_com_nome_e_telefone(cloud):
     assert "Barbara J. Johnson" in ev.text
     assert "+1 (415) 555-0829" in ev.text
     assert "Social Tsunami" in ev.text
+    # plano 82 (regressão): vCard é fala REAL do cliente ⇒ segue kind="message".
+    assert ev.kind == "message"
 
 
 def test_order_vira_texto_com_itens(cloud):
@@ -199,12 +201,20 @@ def test_order_vira_texto_com_itens(cloud):
     assert "Pedido do catálogo" in ev.text
     assert "di9ozbzfi4" in ev.text and "nqryix03ez" in ev.text
     assert "Love these!" in ev.text
+    # plano 82 (regressão): pedido do catálogo é fala REAL ⇒ segue kind="message".
+    assert ev.kind == "message"
 
 
 def test_system_usa_o_body_pronto_da_meta(cloud):
     ev = _parse(cloud, SYSTEM_MSG)
     assert ev.media_type == "system"
     assert "User Sheena Nelson changed from" in ev.text
+    # plano 82: system é AVISO DE CICLO DE VIDA (não fala do cliente) ⇒ kind próprio,
+    # roteado para o card painel-only sem IA/conversa/automação.
+    assert ev.kind == "system"
+    assert ev.media_extras["system_type"] == "user_changed_number"
+    assert ev.media_extras["wa_id"] == "12195555358"
+    assert ev.media_extras["body"] == SYSTEM_MSG["system"]["body"]
 
 
 def test_system_nao_traz_contacts_entao_sender_name_fica_vazio(cloud):

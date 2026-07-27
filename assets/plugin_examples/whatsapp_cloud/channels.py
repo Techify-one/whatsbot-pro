@@ -1104,9 +1104,43 @@ class WhatsAppCloudChannel(Channel):
             # quatro e mantém a saída do ``button`` byte-idêntica. O ``or`` é a
             # rede para o caso do import defensivo ter caído no stub.
             text = describe_message(msg) or (inter.get("text") or "")
-        elif msg_type in ("contacts", "order", "system"):
-            # Tipos estruturados que a Cloud API entrega SEM texto próprio. O
-            # despacho de formatação está em ``inbound_text`` — não duplicar aqui.
+        elif msg_type == "system":
+            # plano 82: um AVISO DE CICLO DE VIDA do canal (número trocado /
+            # identidade trocada: ``user_changed_number`` / ``customer_identity_changed``),
+            # NÃO uma fala do cliente. Emite ``kind="system"`` — o dispatch do core
+            # o grava como card painel-only na conversa EXISTENTE, sem abrir/reabrir
+            # conversa, sem materializar contato, sem IA e sem disparar automação
+            # (protocolos). O texto pronto vem de ``describe_system`` (via
+            # ``describe_message``, prefixo ℹ️); o subtipo estruturado + a nova
+            # identidade (``wa_id``) viajam em ``media_extras`` para quem quiser
+            # reagir ao evento ``channel.system_event``. ``chat_id`` continua sendo
+            # o número ANTIGO (``from``) — nunca respondemos a ele.
+            sys_obj = msg.get("system") or {}
+            return InboundEvent(
+                channel_id=channel_id,
+                provider=self.provider,
+                kind="system",
+                direction="in",
+                external_msg_id=external_id,
+                chat_id=sender,
+                sender_id=sender,
+                sender_name=sender_name,
+                is_group=False,
+                text=describe_message(msg),   # "" degenerado ⇒ dispatch não grava card
+                media_type="system",
+                media_extras={
+                    "system_type": sys_obj.get("type"),
+                    "wa_id": sys_obj.get("wa_id"),
+                    "body": sys_obj.get("body"),
+                },
+                ts=ts,
+                raw=msg,
+            )
+        elif msg_type in ("contacts", "order"):
+            # Tipos estruturados que a Cloud API entrega SEM texto próprio, mas que
+            # SÃO falas reais do cliente (vCard compartilhado / pedido do catálogo)
+            # ⇒ seguem ``kind="message"``. O despacho de formatação está em
+            # ``inbound_text`` — não duplicar aqui.
             media_type = msg_type
             media_extras = {"payload": msg.get(msg_type)}
             text = describe_message(msg) or _unsupported_text(msg_type)
