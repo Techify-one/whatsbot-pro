@@ -75,6 +75,28 @@ export function typingKey({ conversationId = null, channelId = null, phone = nul
   return `${channelId || 'default'}::${phone}`;
 }
 
+// Multi-operador: outro ATENDENTE digitando nesta linha (WS `operator_typing`),
+// ou null. O estado já vem sem o próprio usuário logado — aqui é só o casamento
+// da linha, pela MESMA chave da presença do cliente.
+export function operatorTypingFor(state, c) {
+  if (!state) return null;
+  return state[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] || null;
+}
+
+// "Teste está digitando…" — para o operador não responder por cima do colega.
+// Cor: nome em `wa-text` + resto em `wa-secondary` (mesmo tratamento do balão no
+// chat). NÃO usar `wa-teal` aqui: sobre `--wa-selected` no tema escuro ele mede
+// 2,3:1 (ver themeContrast.js), e a conversa aberta é justamente a que costuma
+// ter um colega digitando.
+function OperatorTypingLine({ who }) {
+  return html`
+    <span class="text-[14px] truncate leading-[20px] text-wa-secondary"
+          title=${`${who.name} está respondendo esta conversa agora`}>
+      <span class="text-wa-text font-semibold">${who.name}</span>${' está digitando...'}
+    </span>
+  `;
+}
+
 function normalizePhone(input) {
   const digits = input.replace(/\D/g, '');
   if (digits.length < 10) return null;
@@ -180,7 +202,7 @@ function RowTags({ tags, globalTags, expanded, onToggle }) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
@@ -716,6 +738,8 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
                             ${typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
+                        : operatorTypingFor(operatorTypingState, c)
+                        ? html`<${OperatorTypingLine} who=${operatorTypingFor(operatorTypingState, c)} />`
                         : c.match_snippet
                           ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                               ${highlightParts(c.match_snippet, search).map(p =>

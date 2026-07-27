@@ -27,6 +27,10 @@ import { toWhatsAppMarkup } from '../../../utils/formatWhatsApp.js';
 import { draftKeyFor, getDraft, setDraft, clearDraft, migrateDraft } from '../../../services/drafts.js';
 
 const INPUT_MAX_HEIGHT = 120;
+// De quanto em quanto tempo o 'start' de presença é reemitido enquanto o operador
+// digita sem parar (ver handleInputChange). Precisa ser MENOR que a auto-limpeza do
+// indicador "Fulano está digitando…" no painel dos outros atendentes.
+const PRESENCE_REFRESH_MS = 10000;
 
 /**
  * @param {Object} opts
@@ -60,6 +64,8 @@ export function useComposer({
   const inputRef = useRef(null);
   const emojiRef = useRef(null);
   const presenceTimerRef = useRef(null);
+  // Quando o 'start' de presença mais recente foi enviado (0 = não está digitando).
+  const presenceStartedAtRef = useRef(0);
 
   // ── Rascunho (draft) ──────────────────────────────────────────────────
   // O texto digitado pertence à CONVERSA e sobrevive à troca de conversa, no
@@ -144,6 +150,7 @@ export function useComposer({
       if (presenceTimerRef.current) {
         clearTimeout(presenceTimerRef.current);
         presenceTimerRef.current = null;
+        presenceStartedAtRef.current = 0;
         if (phone) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
       }
     };
@@ -175,17 +182,25 @@ export function useComposer({
     if (!phone || sandbox) return;
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
-      if (!presenceTimerRef.current) {
+      const now = Date.now();
+      // Reemissão periódica ("heartbeat"): sem ela, um texto longo digitado sem
+      // pausas manda UM único 'start' e nada mais — o "Fulano está digitando…" dos
+      // outros atendentes (WS `operator_typing`, que expira sozinho por segurança)
+      // apagaria no meio da digitação. Barato: 1 request a cada PRESENCE_REFRESH_MS.
+      if (!presenceTimerRef.current || (now - presenceStartedAtRef.current) > PRESENCE_REFRESH_MS) {
+        presenceStartedAtRef.current = now;
         sendPresence(phone, 'start', conversationId, channelId).catch(() => {});
       }
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = setTimeout(() => {
+        presenceStartedAtRef.current = 0;
         sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
         presenceTimerRef.current = null;
       }, 3000);
     } else {
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = null;
+      presenceStartedAtRef.current = 0;
       sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
     }
   }
@@ -208,6 +223,7 @@ export function useComposer({
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
+    presenceStartedAtRef.current = 0;
     if (!sandbox) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
 
     // Enviou → o rascunho morre (e o "Rascunho:" sai da sidebar na hora).
@@ -344,6 +360,7 @@ export function useComposer({
   function stopPresence() {
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
+    presenceStartedAtRef.current = 0;
   }
 
   return {
