@@ -90,6 +90,33 @@ def _should_retry_without_fields(err: str) -> bool:
 
 router = APIRouter()
 
+PLUGIN_ID = "instagram"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é importável por .zip e pode cair num core anterior
+# ao seam — sem o helper ele continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, channel_id: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota.
+
+    Plugin de CANAL: grava como ``channel:<channel_id>`` (não ``plugin:<id>``)
+    para cair no MESMO recurso dos eventos de canal do core — um filtro por canal
+    devolve a história inteira dele.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, resource_type="channel",
+                    resource_id=channel_id, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
 
 def _creds(channel_id: str) -> dict:
     if not channel_id:
@@ -284,6 +311,9 @@ async def subscribe(body: dict):
     if not channel_id:
         return {"ok": False, "error": "channel_id é obrigatório"}
     ok, err = await asyncio.to_thread(_subscribe, channel_id)
+    if ok:
+        _audit("pagina.subscribe", channel_id,
+               after={"fields": PAGE_SUBSCRIBED_FIELDS.split(",")})
     return {"ok": ok, "error": err or None,
             "data": {"fields": PAGE_SUBSCRIBED_FIELDS.split(",")} if ok else None}
 
@@ -453,6 +483,11 @@ async def autoconfigure(body: dict, request: Request):
     sub_ok, sub_err = await asyncio.to_thread(_subscribe, channel_id)
     if not sub_ok:
         logger.warning("instagram: subscribed_apps falhou (%s): %s", channel_id, sub_err)
+    # Registro automático no create: grava o callback do APP + assina a Página —
+    # e SOBRESCREVE a callback_url de qualquer outro sistema no mesmo app.
+    _audit("webhook.autoconfigure", channel_id,
+           after={"mode": "webhook", "registered": True, "url": webhook_url,
+                  "page_subscribed": sub_ok})
     return {"ok": True, "data": {
         "mode": "webhook", "registered": True, "webhook_url": webhook_url,
         "page_subscribed": sub_ok, "reason": "" if sub_ok else sub_err,
@@ -545,6 +580,11 @@ async def set_webhook(body: dict):
     data["page_subscribed"] = sub_ok
     if not sub_ok and not data.get("reason"):
         data["reason"] = sub_err
+    # Um app tem UMA callback_url por objeto: apontar aqui SOBRESCREVE a URL de
+    # qualquer outro sistema que use o mesmo app. Fica na trilha com quem mandou.
+    _audit("webhook.set", channel_id,
+           after={"url": url, "page_subscribed": sub_ok,
+                  "match": data.get("match")})
     return {"ok": True, "data": data}
 
 

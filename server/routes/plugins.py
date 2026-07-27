@@ -271,7 +271,14 @@ def register_routes(app, deps):
                 "permissions_removed": perms_removed,
             }
 
+        existing = await asyncio.to_thread(plugin_repo.get, plugin_id)
         result = await asyncio.to_thread(_do_delete)
+        emit_event("plugin.deleted", {
+            "plugin_id": plugin_id, "ts": _time.time(),
+            "_audit_before": {"version": (existing or {}).get("version"),
+                              "enabled": bool((existing or {}).get("enabled"))},
+            "_audit_after": {"removed": True, **result},
+        })
         # plano 09 Fase 2: run teardown before exiting (cleanup before the folder is gone).
         schedule_restart(
             reason=f"plugin {plugin_id} deleted",
@@ -420,6 +427,11 @@ def register_routes(app, deps):
         # tombstone so the boot-time bootstrap can manage it again (plano 13).
         if pid == "gowa":
             await asyncio.to_thread(config_repo.set, "gowa_uninstalled", "0")
+        emit_event("plugin.imported", {
+            "plugin_id": pid, "ts": _time.time(),
+            "_audit_after": {"version": version, "enabled": False,
+                             "source": "zip", "filename": file.filename},
+        })
         return _ok({"id": pid, "version": version, "enabled": False})
 
     @app.post("/api/plugins/{plugin_id}/update",

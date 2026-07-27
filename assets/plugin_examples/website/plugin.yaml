@@ -1,6 +1,6 @@
 id: website
 name: Site (Widget)
-version: 1.0.0
+version: 1.1.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de chat embarcável ("live-chat") que você cola em qualquer site — o

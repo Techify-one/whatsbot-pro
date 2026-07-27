@@ -23,6 +23,7 @@ refuse path.
 from __future__ import annotations
 
 import logging
+import time
 
 from sqlalchemy.exc import IntegrityError
 
@@ -111,3 +112,17 @@ def _refuse(channel_id: str, inst: object, conflict_id: str) -> None:
         logger.debug("refuse set_status failed for channel %s", channel_id, exc_info=True)
     logger.info("Canal %s recusado: conta duplicada (conflito com %s).",
                 channel_id, conflict_id or "?")
+    # Trilha de auditoria: o canal foi desconectado por decisão do SISTEMA (roda
+    # no sweep de fundo, sem usuário na request) — sem esta linha o operador vê o
+    # número cair sem explicação. Best-effort, nunca quebra o sweep.
+    try:
+        from plugins.events import emit_with_filter_sync
+        emit_with_filter_sync("channel.duplicate_refused", {
+            "channel_id": channel_id,
+            "conflict_channel_id": conflict_id or None,
+            "ts": time.time(),
+            "_audit_after": {"reason": msg, "conflict_channel_id": conflict_id or None,
+                             "logged_in": 0},
+        })
+    except Exception:  # noqa: BLE001
+        logger.debug("emit channel.duplicate_refused failed", exc_info=True)

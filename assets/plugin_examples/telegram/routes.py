@@ -28,6 +28,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+PLUGIN_ID = "telegram"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é importável por .zip e pode cair num core anterior
+# ao seam — sem o helper ele continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, channel_id: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota.
+
+    Plugin de CANAL: a linha é gravada como ``channel:<channel_id>`` (e não
+    ``plugin:telegram``) para cair no MESMO recurso que os eventos de canal do
+    core — filtrar por um canal devolve a história inteira dele: criação, edição,
+    e o redirecionamento de webhook feito por aqui.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, resource_type="channel",
+                    resource_id=channel_id, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
 HTTP_TIMEOUT = 20.0
 
 # Telegram só entrega webhook por HTTPS (portas 443/80/88/8443).
@@ -174,6 +202,10 @@ async def set_webhook(body: dict):
     if not channel_id or not url:
         return {"ok": False, "error": "channel_id e url são obrigatórios"}
     res = await _set_webhook(channel_id, url)
+    if res.get("ok"):
+        # Redireciona PARA ONDE o Telegram entrega as mensagens deste bot — se
+        # apontar para outra instância, a caixa aqui emudece. Fica na trilha.
+        _audit("webhook.set", channel_id, after={"url": url})
     return {"ok": bool(res.get("ok")), "error": res.get("error"),
             "data": res.get("data"), "webhook": res.get("webhook")}
 
@@ -206,6 +238,8 @@ async def autoconfigure(body: dict, request: Request):
         await asyncio.to_thread(_call, token, "deleteWebhook", {"drop_pending_updates": False})
         await asyncio.to_thread(set_mode, channel_id, "poll")
         _ensure_poll_running()
+        _audit("inbound.autoconfigure", channel_id,
+               after={"mode": "poll", "registered": False, "reason": reason})
         return {"ok": True, "data": {"mode": "poll", "registered": False,
                                      "reason": reason, "webhook_url": webhook_url}}
 
@@ -217,6 +251,8 @@ async def autoconfigure(body: dict, request: Request):
         return await _fallback_poll(res.get("error") or "setWebhook falhou")
 
     await asyncio.to_thread(set_mode, channel_id, "webhook")
+    _audit("inbound.autoconfigure", channel_id,
+           after={"mode": "webhook", "registered": True, "url": webhook_url})
     return {"ok": True, "data": {"mode": "webhook", "registered": True,
                                  "webhook_url": webhook_url,
                                  "webhook": res.get("webhook")}}

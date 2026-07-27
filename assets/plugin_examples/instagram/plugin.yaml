@@ -1,6 +1,6 @@
 id: instagram
 name: Canal · Instagram Direct
-version: 2.1.0
+version: 2.2.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada de DM do Instagram via login do Facebook (Instagram messaging

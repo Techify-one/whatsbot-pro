@@ -63,16 +63,27 @@ KNOWN_EVENTS: set[str] = {
     # Chat-level
     "chat.archived",
     # Channel lifecycle (plano 23 Fase B6 — minimal seam, C3 normalizes fully).
-    # ``channel.updated``: a channel config/credential edit (payload
-    #   ``{channel_id, keys_changed, ts}``) — cache invalidation is driven off it.
+    # ``channel.updated``: a channel edit (payload ``{channel_id, provider,
+    #   keys_changed, ts}``) — cache invalidation is driven off it. Cobre nome,
+    #   enabled, config (inclui a IA por canal) e credenciais.
     # ``channel.status_changed``: a live status read (payload
     #   ``{channel_id, status, is_connected, is_logged_in, ts}``).
+    # Os demais (created/deleted/restored/members_changed/session_action/
+    # duplicate_refused) fecham o ciclo de vida do canal e alimentam a trilha de
+    # auditoria (db/audit_actions.AUDITABLE_EVENTS) — ``status_changed`` fica de
+    # fora dela de propósito (é um read, roda a cada poll do painel).
     "channel.updated", "channel.status_changed",
+    "channel.created", "channel.deleted", "channel.restored",
+    "channel.members_changed", "channel.session_action",
+    "channel.duplicate_refused",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",
     "plugin.loaded", "plugin.enabled", "plugin.disabled",
     "plugin.settings.changed", "plugin.updated",
+    # Instalar/remover plugin (auditoria): ``plugin.imported`` (upload de .zip) e
+    # ``plugin.deleted`` (remoção da pasta + tabelas + settings).
+    "plugin.imported", "plugin.deleted",
     # LLM / tools
     "llm.before", "llm.after",
     "tool.before", "tool.after",

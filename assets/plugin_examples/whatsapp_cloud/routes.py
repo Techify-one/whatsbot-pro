@@ -36,6 +36,32 @@ HTTP_TIMEOUT = 20.0
 
 router = APIRouter()
 
+PLUGIN_ID = "whatsapp_cloud"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é importável por .zip e pode cair num core anterior
+# ao seam — sem o helper ele continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, channel_id: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota.
+
+    Plugin de CANAL: grava como ``channel:<channel_id>`` (não ``plugin:<id>``)
+    para cair no MESMO recurso dos eventos de canal do core — um filtro por canal
+    devolve a história inteira dele.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, resource_type="channel",
+                    resource_id=channel_id, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
 
 # ── Graph helpers (inline — não importar de channels.py, ver docstring) ─────
 
@@ -273,6 +299,11 @@ async def set_webhook(body: dict):
 
     configured_url, _reason = await asyncio.to_thread(
         _read_configured_url, access_token, creds.get("phone_number_id") or "", waba_id)
+    # Override de callback NA WABA: aponta para onde a Meta entrega as mensagens
+    # deste número. Errado, a caixa emudece — por isso fica na trilha.
+    _audit("webhook.set", channel_id,
+           after={"url": url, "waba_id": waba_id,
+                  "match": _classify(configured_url, url)})
     return {"ok": True, "error": None, "data": {
         "match": _classify(configured_url, url), "configured_url": configured_url}}
 
@@ -290,6 +321,8 @@ async def delete_webhook(body: dict):
     data, err = await asyncio.to_thread(_graph_delete, f"{waba_id}/subscribed_apps", access_token)
     if data is None:
         return {"ok": False, "error": err}
+    _audit("webhook.delete", channel_id,
+           after={"waba_id": waba_id, "override_removido": True})
     return {"ok": True, "error": None}
 
 
