@@ -4,6 +4,7 @@ import htm from 'htm';
 import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState, getContacts } from '../../services/api.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { highlightComposerMarkup, toWhatsAppMarkup } from '../../utils/formatWhatsApp.js';
+import { syncMirror } from '../../utils/composerMirror.js';
 import { TemplatePicker } from './TemplatePicker.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
 import { avatarUrl } from './utils.js';
@@ -83,12 +84,12 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   const [quickReplyMenu, setQuickReplyMenu] = useState(null);  // {query, start, index} | null
   const inputRef = useRef(null);
   // Overlay de highlight (WYSIWYG no campo): espelho atrás do textarea que mostra
-  // o texto com negrito/itálico/tachado/mono reais. Sincroniza o scroll.
+  // o texto com negrito/itálico/tachado/mono reais. Sincroniza a rolagem E a
+  // largura de conteúdo (a barra de rolagem encolhe só o textarea — sem isso as
+  // quebras de linha divergem e o cursor descola do fim do texto).
   const mirrorRef = useRef(null);
   useEffect(() => {
-    if (mirrorRef.current && inputRef.current) {
-      mirrorRef.current.scrollTop = inputRef.current.scrollTop;
-    }
+    syncMirror(inputRef.current, mirrorRef.current);
   }, [message]);
   // Autocomplete do campo "Para": busca contatos por NOME ou número (server-side,
   // cobre todos os contatos independente do filtro da sidebar). Escolher um item
@@ -495,7 +496,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
                 value=${message}
                 onInput=${onMessageInput}
                 onKeyDown=${onTextKeyDown}
-                onScroll=${(e) => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.target.scrollTop; }}
+                onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
                 disabled=${!freeTextAllowed && !sessionLoading}
                 placeholder=${freeTextAllowed ? 'Escreva sua mensagem aqui...  (use / para respostas rápidas)' : 'Texto livre indisponível fora da janela de 24h — envie um template.'}
                 rows="4"

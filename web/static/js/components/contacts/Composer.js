@@ -7,6 +7,7 @@ import { EmojiPicker } from './EmojiPicker.js';
 import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
+import { syncMirror } from '../../utils/composerMirror.js';
 
 const html = htm.bind(h);
 
@@ -55,13 +56,19 @@ export function Composer({
 
   // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
   // with real bold/italic/strike/mono styling behind a transparent-text
-  // textarea. Keep the mirror scrolled in sync with the textarea so long
-  // messages (past the 6-line cap) line up.
+  // textarea. Keep the mirror scrolled AND as wide as the textarea's content
+  // box so long messages (past the 6-line cap, quando a barra de rolagem
+  // aparece e rouba 6px) quebrem as linhas no mesmo ponto — senão o cursor
+  // desencontra do fim do texto visível.
   const mirrorRef = useRef(null);
   useEffect(() => {
-    if (mirrorRef.current && inputRef.current) {
-      mirrorRef.current.scrollTop = inputRef.current.scrollTop;
-    }
+    const sync = () => syncMirror(inputRef.current, mirrorRef.current);
+    sync();
+    // O auto-resize do textarea vive num effect do componente PAI (useComposer),
+    // que roda depois deste — remede na frame seguinte, já com a altura final
+    // (é o instante em que a barra de rolagem nasce).
+    const raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
   }, [input]);
 
   const hasText = input.trim().length > 0;
@@ -343,7 +350,7 @@ export function Composer({
             onInput=${handleInputChange}
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
-            onScroll=${(e) => { if (mirrorRef.current) mirrorRef.current.scrollTop = e.target.scrollTop; }}
+            onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
             placeholder=${mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
             style="caret-color: rgb(var(--wa-text));"
             class="relative z-[1] box-border w-full block bg-transparent text-transparent text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
