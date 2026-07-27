@@ -13,6 +13,10 @@ import { ConversationFilterBar } from './ConversationFilterBar.js';
 // Selo do canal — compartilhado com o cabeçalho do chat (mesma aparência nos dois).
 import { ChannelChip } from './ChannelChip.js';
 import { Slot } from '../../plugins/Slot.js';
+// Rascunho do compositor (services/drafts.js): a linha mostra "Rascunho: …" no
+// lugar da última mensagem enquanto houver texto não enviado naquela conversa.
+import { getDraft } from '../../services/drafts.js';
+import { useDrafts } from '../../hooks/useDrafts.js';
 
 const html = htm.bind(h);
 
@@ -183,6 +187,22 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
   loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
+  // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
+  // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
+  // chave do rascunho É o rowKeyFor (a conversa é a dona do texto); truncado no
+  // mesmo tamanho do preview da última mensagem.
+  //
+  // A conversa ABERTA fica de fora: com o chat na tela o operador já vê o que
+  // escreveu no compositor, e trocar o preview a cada tecla era ruído. O
+  // "Rascunho:" aparece quando ele SAI da conversa deixando texto para trás.
+  useDrafts(selected);
+  const rowDrafts = {};
+  for (const c of (contacts || [])) {
+    const key = rowKeyFor(c);
+    if (key === selected) continue;
+    const text = getDraft(key);
+    if (text) rowDrafts[key] = text.substring(0, 80);
+  }
   // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
   // há próxima página. plano 62 F6: os DOIS modos paginam (conversa-first e busca), então
   // o gatilho é só `hasMore`. Usa o mesmo primitivo reutilizável `useScrollSentinel` das
@@ -701,6 +721,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                               ${highlightParts(c.match_snippet, search).map(p =>
                                 p.hit ? html`<span class="font-semibold text-wa-text">${p.s}</span>` : p.s
                               )}
+                            </span>`
+                          : rowDrafts[rowKeyFor(c)]
+                          ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
+                              <span class="text-wa-draft font-medium">Rascunho:</span>${' ' + rowDrafts[rowKeyFor(c)]}
                             </span>`
                           : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                             ${c.last_message_role === 'private_note' ? html`<${LockIcon} />` : ''}${c.last_message_role === 'assistant' ? (() => {

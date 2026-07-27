@@ -12,6 +12,7 @@ import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { LoginScreen } from '../LoginScreen.js';
 import { checkAuth, logoutSession, getMe } from '../../services/api.js';
+import { setDraftUser } from '../../services/drafts.js';
 import { App } from './App.js';
 
 const html = htm.bind(h);
@@ -75,6 +76,13 @@ export function AuthGate() {
       setAuthState('ready');
     });
   }, []);
+
+  // Rascunhos do compositor são PESSOAIS (services/drafts.js): o mapa é
+  // namespaceado pelo id do usuário, então dois operadores no mesmo navegador
+  // nunca veem o rascunho um do outro e o logout não vaza para o próximo login.
+  useEffect(() => {
+    setDraftUser(currentUser ? currentUser.id : null);
+  }, [currentUser && currentUser.id]);
 
   useEffect(() => {
     function onUnauthorized() {

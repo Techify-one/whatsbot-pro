@@ -390,13 +390,21 @@ export function combineSort(read, time) {
  * Fixadas (`is_pinned`) só vão ao topo no default puro ('activity') — qualquer
  * reordenação explícita por leitura/antiguidade ignora o pin (senão o pin
  * "vazaria" pra uma ordem onde não faz sentido). Returns a NEW array.
+ * `draftTsFor` (opcional) devolve, em SEGUNDOS, quando o operador deixou um
+ * rascunho naquela conversa — ela então conta como atividade recente e sobe na
+ * lista, como no WhatsApp. Sem o callback nada muda (a hora EXIBIDA na linha
+ * continua sendo a da última mensagem; só a ordenação considera o rascunho).
  * @param {Record<string, any>[]} list
  * @param {string} sortBy - 'activity'|'oldest'|'unread'|'read'|'unread_oldest'|'read_oldest'
+ * @param {((row: Record<string, any>) => number)|null} [draftTsFor]
  * @returns {Record<string, any>[]}
  */
-export function sortContactsBy(list, sortBy) {
+export function sortContactsBy(list, sortBy, draftTsFor = null) {
   const arr = [...list];
-  const ts = (c) => c.last_message_ts || c.updated_at || 0;
+  const ts = (c) => Math.max(
+    c.last_message_ts || c.updated_at || 0,
+    draftTsFor ? (draftTsFor(c) || 0) : 0,
+  );
   const unread = (c) => (c.unread_count || 0) + (c.unread_ai_count || 0);
   const { read, time } = splitSort(sortBy);
   const timeCmp = (a, b) => (time === 'oldest' ? ts(a) - ts(b) : ts(b) - ts(a));

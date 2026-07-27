@@ -17,9 +17,14 @@
 //
 // The @mention / quick-reply autocomplete lives in useTokenAutocomplete; this
 // hook calls `updateMenus(el, val)` on input and `closeMentionMenu()` on send.
-import { useState, useEffect, useRef } from 'preact/hooks';
+//
+// Rascunho: o texto NÃO é mais zerado na troca de conversa — ele é salvo por
+// conversa e por usuário (services/drafts.js) e restaurado ao reabrir a
+// conversa, como no WhatsApp/Chatwoot. Some no envio.
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'preact/hooks';
 import { sendPresence, sendPrivateMessage, retrySend } from '../../../services/api.js';
 import { toWhatsAppMarkup } from '../../../utils/formatWhatsApp.js';
+import { draftKeyFor, getDraft, setDraft, clearDraft, migrateDraft } from '../../../services/drafts.js';
 
 const INPUT_MAX_HEIGHT = 120;
 
@@ -42,7 +47,7 @@ export function useComposer({
   setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
   collectMentions = null, resetMentions = null,
 }) {
-  const [input, setInput] = useState('');
+  const [input, setInputState] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   // mode: 'reply' sends to the contact; 'private' stays in the panel only
   const [mode, setMode] = useState('reply');
@@ -56,9 +61,49 @@ export function useComposer({
   const emojiRef = useRef(null);
   const presenceTimerRef = useRef(null);
 
-  // Reset composer state when switching conversation.
+  // ── Rascunho (draft) ──────────────────────────────────────────────────
+  // O texto digitado pertence à CONVERSA e sobrevive à troca de conversa, no
+  // molde do WhatsApp/Chatwoot; a sidebar mostra "Rascunho: …" na linha.
+  // Persistência pessoal, por-dispositivo: services/drafts.js. A chave fica num
+  // ref porque os callbacks abaixo são estáveis (o autocomplete recebe
+  // `setInput` uma vez e não é recriado a cada troca de conversa).
+  // Sandbox é tela de teste (o phone é digitado à mão e não tem linha na
+  // sidebar): não guarda rascunho — troca de número segue limpando o compositor.
+  const draftKey = sandbox ? null : draftKeyFor({ conversationId, phone });
+  const draftKeyRef = useRef(draftKey);
+  const inputValueRef = useRef('');
+
+  // Escreve no state SEM tocar no rascunho salvo (hidratação e limpeza no envio).
+  const applyInput = useCallback((val) => {
+    inputValueRef.current = val;
+    setInputState(val);
+  }, []);
+
+  // Setter público: TODO caminho que muda o texto (digitação, emoji, @menção,
+  // /atalho) passa por aqui, então o rascunho da conversa aberta fica em dia.
+  const setInput = useCallback((next) => {
+    const val = typeof next === 'function' ? next(inputValueRef.current) : next;
+    applyInput(val);
+    setDraft(draftKeyRef.current, val);
+  }, [applyInput]);
+
+  // Troca de conversa: hidrata o compositor com o rascunho salvo (ou esvazia).
+  // Layout effect — o operador nunca vê o texto da conversa anterior piscar.
+  useLayoutEffect(() => {
+    const prev = draftKeyRef.current;
+    draftKeyRef.current = draftKey;
+    if (!draftKey) { applyInput(''); return; }
+    // Conversa recém-criada: a linha só ganha conversation_id depois do 1º
+    // envio — o rascunho vai junto em vez de ser descartado na virada da chave.
+    if (prev && prev !== draftKey && prev === `phone:${phone}` && draftKey.startsWith('conv:')) {
+      migrateDraft(prev, draftKey);
+    }
+    applyInput(getDraft(draftKey));
+  }, [draftKey, phone, applyInput]);
+
+  // Reset composer state when switching conversation. O texto NÃO entra aqui —
+  // ele é restaurado do rascunho pelo layout effect acima.
   useEffect(() => {
-    setInput('');
     setMode('reply');
     setAiReadPrivate(false);
     setAiReplyInChat(true);
@@ -165,7 +210,9 @@ export function useComposer({
     presenceTimerRef.current = null;
     if (!sandbox) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
 
-    setInput('');
+    // Enviou → o rascunho morre (e o "Rascunho:" sai da sidebar na hora).
+    applyInput('');
+    clearDraft(draftKeyRef.current);
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const msgTs = Date.now() / 1000;
 
