@@ -30,11 +30,22 @@ const FALLBACK = {
   test: { label: 'Teste', color: 'gray', contact_type: 'outros' },
 };
 
+// plano 85 B1 — teto de tentativas + backoff. O `ensureLoaded` original só marcava
+// `_loading = false` no fim: enquanto a requisição não voltasse `ok:true`, a PRÓXIMA
+// leitura de qualquer getter rearmava tudo. Como os getters são lidos no corpo de
+// render (o ChannelChip de cada linha da sidebar), uma falha persistente virava uma
+// requisição por re-render. Agora a re-tentativa é agendada por timer, fora do caminho
+// de render, e para depois de MAX_ATTEMPTS.
+export const MAX_ATTEMPTS = 3;
+export const RETRY_BASE_MS = 1500;
+
 /** @type {Record<string, any> | null} */
 let _descriptors = null;         // provider -> descriptor (null até o 1º fetch)
 /** @type {Record<string, string[]>} */
 let _required = {};              // provider -> [credential keys required]
 let _loading = false;
+let _attempts = 0;               // tentativas já gastas desde o último refresh()
+let _retryTimer = null;          // re-tentativa agendada (não dispare outra em cima)
 let _version = 0;
 const _subscribers = new Set();
 
@@ -47,13 +58,17 @@ function bump() {
 export function subscribe(fn) { _subscribers.add(fn); return () => _subscribers.delete(fn); }
 export function getVersion() { return _version; }
 
-// Dispara o fetch único (idempotente). Chamado preguiçosamente na 1ª leitura de
-// qualquer getter. Falha silenciosa: mantém o fallback e permite um novo retry na
-// próxima leitura (não trava o cache num estado ruim).
-function ensureLoaded() {
-  if (_descriptors !== null || _loading) return;
+// Dispara o fetch (idempotente). Falha silenciosa: mantém o fallback e AGENDA a
+// próxima tentativa com backoff — a leitura seguinte nunca dispara rede por conta
+// própria, então nenhum re-render pode virar uma requisição.
+function startFetch(force = false) {
+  if (_loading || _retryTimer !== null) return;
+  if (!force && _descriptors !== null) return;
+  if (_attempts >= MAX_ATTEMPTS) return;
+  _attempts++;
   _loading = true;
   (async () => {
+    let ok = false;
     try {
       const res = await listChannelProviders();
       if (res && res.ok && res.data) {
@@ -61,11 +76,33 @@ function ensureLoaded() {
         for (const d of (res.data.providers || [])) if (d && d.provider) map[d.provider] = d;
         _descriptors = map;
         _required = res.data.required_credentials || {};
+        ok = true;
         bump();
       }
-    } catch (_) { /* mantém fallback; retry na próxima leitura */ }
-    finally { _loading = false; }
+    } catch (_) { /* mantém fallback */ }
+    _loading = false;
+    if (ok || _attempts >= MAX_ATTEMPTS) return;
+    // Backoff exponencial, agendado FORA do caminho de render.
+    const delay = RETRY_BASE_MS * Math.pow(2, _attempts - 1);
+    _retryTimer = setTimeout(() => { _retryTimer = null; startFetch(); }, delay);
   })();
+}
+
+// Chamado preguiçosamente na 1ª leitura de qualquer getter.
+function ensureLoaded() {
+  if (_descriptors !== null) return;
+  startFetch();
+}
+
+/**
+ * Re-tentativa DELIBERADA do catálogo (sessão (re)estabelecida, canal salvo na tela
+ * Canais): zera o teto de tentativas e busca de novo. Mantém os descriptors atuais
+ * enquanto a nova busca não chega — nenhuma tela pisca para o fallback.
+ */
+export function refresh() {
+  if (_retryTimer !== null) { clearTimeout(_retryTimer); _retryTimer = null; }
+  _attempts = 0;
+  startFetch(true);
 }
 
 /**

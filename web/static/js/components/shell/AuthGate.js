@@ -13,6 +13,7 @@ import htm from 'htm';
 import { LoginScreen } from '../LoginScreen.js';
 import { checkAuth, logoutSession, getMe } from '../../services/api.js';
 import { setDraftUser } from '../../services/drafts.js';
+import { refresh as refreshProviderCatalog } from '../../services/providerCatalog.js';
 import { App } from './App.js';
 
 const html = htm.bind(h);
@@ -76,6 +77,15 @@ export function AuthGate() {
       setAuthState('ready');
     });
   }, []);
+
+  // plano 85 B1 — o catálogo de providers é lido no CORPO DE RENDER das telas do hub
+  // (o selo de canal de cada linha) e, desde a B1, só re-tenta por timer com teto de
+  // tentativas. A sessão recém-estabelecida é o ponto natural de re-tentar de forma
+  // deliberada: as tentativas gastas antes do login voltam 401 e deixariam os selos no
+  // fallback (cinza) até um F5.
+  useEffect(() => {
+    if (authState === 'ready') refreshProviderCatalog();
+  }, [authState]);
 
   // Rascunhos do compositor são PESSOAIS (services/drafts.js): o mapa é
   // namespaceado pelo id do usuário, então dois operadores no mesmo navegador
