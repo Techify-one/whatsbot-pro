@@ -316,23 +316,21 @@ def _expire(logic, conv_id: int) -> None:
                      {"t": time.time() - 1, "c": conv_id})
 
 
-def test_vencimento_devolve_a_conversa_a_ia(logic, monkeypatch, _deps):
+def test_vencimento_devolve_a_conversa_a_ia_sem_agente(logic, monkeypatch, _deps):
+    """A devolução é CRUA: humano fora, IA ligada e SEM agente vinculado — quem escolhe
+    o agente é o turno seguinte (roteador/triagem), não o carimbo do inbox."""
     conv = _conversation(assignee_user_id=4242)
+    conversation_repo.set_agent(conv["id"], "comercial")   # agente de antes do fechamento
     logic.arm_ai_hold(conv)
     _expire(logic, conv["id"])
-
-    calls = []
-
-    async def _fake_set_ai(deps, c, active, **kw):
-        calls.append((c["id"], active, kw))
-        return c
-
-    from app.services import conversation_service
-    monkeypatch.setattr(conversation_service, "set_ai", _fake_set_ai)
     monkeypatch.setattr(logic, "_ai_master_gate", lambda _cid: True)
 
     assert asyncio.run(logic.expire_ai_holds_once()) == 1
-    assert calls == [(conv["id"], 1, {"actor_name": None, "clear_transfer_tag": False})]
+
+    after = conversation_repo.get(conv["id"])
+    assert after["assignee_user_id"] is None      # humano saiu
+    assert after["ai_active"] == 1                # IA ligada
+    assert after["active_agent_key"] is None      # NENHUM agente carimbado
     assert logic.get_ai_hold(conv["id"]) is None
 
 
@@ -342,15 +340,10 @@ def test_vencimento_respeita_o_gate_global_do_canal(logic, monkeypatch, _deps):
     conv = _conversation(assignee_user_id=4242)
     logic.arm_ai_hold(conv)
     _expire(logic, conv["id"])
-
-    async def _boom(*a, **kw):  # pragma: no cover — não deve ser chamado
-        raise AssertionError("set_ai não deveria ser chamado com o gate desligado")
-
-    from app.services import conversation_service
-    monkeypatch.setattr(conversation_service, "set_ai", _boom)
     monkeypatch.setattr(logic, "_ai_master_gate", lambda _cid: False)
 
     assert asyncio.run(logic.expire_ai_holds_once()) == 0
+    assert conversation_repo.get(conv["id"])["assignee_user_id"] == 4242  # intocada
     assert logic.get_ai_hold(conv["id"]) is None
 
 
@@ -358,14 +351,28 @@ def test_hold_no_prazo_nao_e_devolvido(logic, monkeypatch, _deps):
     conv = _conversation(assignee_user_id=4242)
     logic.arm_ai_hold(conv)   # 30 min à frente
 
-    async def _boom(*a, **kw):  # pragma: no cover
-        raise AssertionError("set_ai não deveria ser chamado antes do vencimento")
-
-    from app.services import conversation_service
-    monkeypatch.setattr(conversation_service, "set_ai", _boom)
-
     assert asyncio.run(logic.expire_ai_holds_once()) == 0
+    assert conversation_repo.get(conv["id"])["assignee_user_id"] == 4242
     assert logic.get_ai_hold(conv["id"]) is not None
+
+
+def test_devolucao_imediata_com_janela_zero_tambem_nao_carimba_agente(logic, monkeypatch,
+                                                                     _deps):
+    """Janela 0 (comportamento legado: devolve ao FINALIZAR o protocolo) passa pela
+    mesma porta — também sem vincular agente."""
+    conv = _conversation(assignee_user_id=4242, ai_active=0)
+    conversation_repo.set_agent(conv["id"], "comercial")
+    logic.set_general_config({"ai_takeover_delay_minutes": 0})
+    monkeypatch.setattr(logic, "_ai_master_gate", lambda _cid: True)
+    monkeypatch.setattr(logic, "_is_orphan_protocolo", lambda _at: False)
+    monkeypatch.setattr(logic, "_latest_conversation_of_protocolo", lambda _pid: conv["id"])
+
+    asyncio.run(logic.reactivate_ai_after_close({"id": 1}))
+
+    after = conversation_repo.get(conv["id"])
+    assert after["assignee_user_id"] is None
+    assert after["ai_active"] == 1
+    assert after["active_agent_key"] is None
 
 
 def test_vencimento_de_conversa_apagada_so_limpa_a_linha(logic, monkeypatch, _deps):
