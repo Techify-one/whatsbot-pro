@@ -43,6 +43,21 @@ const SCOPE_GROUP = { contact: 'Contato', conversation: 'Conversa', protocolo: '
 const attrOptions = (defs) => (defs || []).map((a) => ({
   value: `${a.scope}::${a.key}`, label: a.label, group: SCOPE_GROUP[a.scope] || a.scope,
 }));
+// Operadores de uma condição da regra "não enviar avaliação". Os 2 últimos dispensam
+// o campo de valor (a comparação é sobre o atributo estar preenchido ou não).
+const SKIP_OPS = [
+  ['eq', 'é igual a'], ['neq', 'é diferente de'],
+  ['contains', 'contém'], ['not_contains', 'não contém'],
+  ['filled', 'está preenchido'], ['empty', 'está vazio'],
+];
+const SKIP_OPS_NO_VALUE = ['filled', 'empty'];
+// Como as condições da MESMA linha se combinam (entre linhas é sempre OU).
+const SKIP_JOINS = [['any', 'Qualquer uma (OU)'], ['all', 'Todas (E)']];
+const CONDITION_EMPTY = { op: 'eq', value: '' };
+// Regra vinda do servidor no formato antigo (um único `value` = igualdade) → condições.
+const ruleConditions = (r) => (Array.isArray(r && r.conditions) && r.conditions.length
+  ? r.conditions
+  : [{ op: 'eq', value: (r && r.value) || '' }]);
 // Direções da regra "ignorar abertura" (qual lado da conversa é analisado).
 const SKIP_DIRECTIONS = [
   ['sent', 'Mensagens enviadas (pelo atendente/IA)'],
@@ -206,11 +221,12 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
     setGeneralMsg(ok ? 'Configurações salvas.' : ((g && g.error) || (s && s.error) || 'Falha ao salvar.'));
   }
 
-  // Regras {key, scope, value} de "não enviar avaliação" — vivem em proto.skip_attrs
-  // (salvas junto no PUT /protocol-config pelo botão "Salvar avaliação").
+  // Regras {key, scope, join, conditions[]} de "não enviar avaliação" — vivem em
+  // proto.skip_attrs (salvas junto no PUT /protocol-config pelo botão "Salvar avaliação").
   function addSkipAttr() {
     setProto((p) => ({ ...(p || PROTO_EMPTY),
-      skip_attrs: [...(((p || {}).skip_attrs) || []), { key: '', scope: 'contact', value: '' }] }));
+      skip_attrs: [...(((p || {}).skip_attrs) || []),
+                   { key: '', scope: 'contact', join: 'any', conditions: [{ ...CONDITION_EMPTY }] }] }));
   }
   function updateSkipAttr(i, patch) {
     setProto((p) => ({ ...p,
@@ -218,6 +234,22 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
   }
   function removeSkipAttr(i) {
     setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).filter((_, j) => j !== i) }));
+  }
+  // Condições DENTRO de uma linha (mesmo atributo, combinadas por `join`).
+  function updateSkipCond(i, ci, patch) {
+    setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).map((r, j) => (j === i
+      ? { ...r, conditions: ruleConditions(r).map((c, k) => (k === ci ? { ...c, ...patch } : c)) }
+      : r)) }));
+  }
+  function addSkipCond(i) {
+    setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).map((r, j) => (j === i
+      ? { ...r, join: r.join || 'any', conditions: [...ruleConditions(r), { ...CONDITION_EMPTY }] }
+      : r)) }));
+  }
+  function removeSkipCond(i, ci) {
+    setProto((p) => ({ ...p, skip_attrs: (((p || {}).skip_attrs) || []).map((r, j) => (j === i
+      ? { ...r, conditions: ruleConditions(r).filter((_, k) => k !== ci) }
+      : r)) }));
   }
 
   // Regra "decidir a continuidade pelo atributo personalizado" — vive em
@@ -369,37 +401,81 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
         <div class="p-3 rounded-lg border border-wa-border bg-wa-panel space-y-2">
           <div class="text-[12px] font-semibold text-wa-text">Não enviar avaliação quando o contato/conversa/protocolo tiver o atributo:</div>
           <p class="text-[12px] text-wa-secondary">
-            Se o contato (ou a conversa) tiver um dos atributos personalizados abaixo — ou se um
-            <b>rótulo da aba Protocolo</b> estiver preenchido — com o valor indicado, ao finalizar o
-            protocolo <b>nem</b> a mensagem normal <b>nem</b> a privada são enviadas.
+            Cada linha é um atributo — do contato, da conversa ou um <b>rótulo da aba Protocolo</b> —
+            com uma ou mais condições sobre ele. Várias condições na mesma linha se combinam por
+            <b>Qualquer uma (OU)</b> ou <b>Todas (E)</b>; entre linhas diferentes é sempre <b>OU</b>.
+            Bastando uma linha casar, ao finalizar o protocolo <b>nem</b> a mensagem normal <b>nem</b>
+            a privada são enviadas.
           </p>
           ${((proto.skip_attrs) || []).map((r, i) => {
             const def = skipDefs.find((a) => a.key === r.key && a.scope === r.scope);
             const opts = (def && def.options) || [];
+            const conds = ruleConditions(r);
+            // O escopo do atributo escolhido vira parte do rótulo — "Atributo (conversa)".
+            const scopeName = def ? (SCOPE_LABEL[def.scope] || def.scope) : '';
             return html`
-            <div key=${i} class="flex flex-wrap gap-2 items-end">
-              <div class="flex-1 min-w-[160px]">
-                <label class="block text-[12px] text-wa-secondary mb-1">Atributo</label>
-                ${canEdit ? html`
-                  <${OptionListSelect} options=${attrOptions(skipDefs)} grouped=${true} float=${true}
-                    value=${r.key ? `${r.scope}::${r.key}` : ''}
-                    placeholder="— selecione —" searchPlaceholder="Pesquisar atributo…"
-                    onChange=${(v) => { const ix = String(v || '').indexOf('::');
-                      updateSkipAttr(i, ix < 0
-                        ? { scope: 'contact', key: '', value: '' }
-                        : { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '' }); }} />`
-                : html`<div class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] opacity-60">
-                    ${def ? `${def.label} (${SCOPE_LABEL[def.scope] || def.scope})` : '— selecione —'}
-                  </div>`}
+            <div key=${i} class="p-2 rounded-md border border-wa-border space-y-2">
+              <div class="flex flex-wrap gap-2 items-end">
+                <div class="flex-1 min-w-[160px]">
+                  <label class="block text-[12px] text-wa-secondary mb-1">
+                    ${scopeName ? `Atributo (${scopeName})` : 'Atributo'}
+                  </label>
+                  ${canEdit ? html`
+                    <${OptionListSelect} options=${attrOptions(skipDefs)} grouped=${true} float=${true}
+                      value=${r.key ? `${r.scope}::${r.key}` : ''}
+                      placeholder="— selecione —" searchPlaceholder="Pesquisar atributo…"
+                      onChange=${(v) => { const ix = String(v || '').indexOf('::');
+                        // Trocar de atributo zera as condições: as opções do valor são
+                        // as do campo antigo e não valem mais para o novo.
+                        updateSkipAttr(i, ix < 0
+                          ? { scope: 'contact', key: '', value: '', conditions: [{ ...CONDITION_EMPTY }] }
+                          : { scope: v.slice(0, ix), key: v.slice(ix + 2), value: '',
+                              conditions: [{ ...CONDITION_EMPTY }] }); }} />`
+                  : html`<div class="wa-field w-full px-2 py-1.5 rounded-md text-[13px] opacity-60">
+                      ${def ? `${def.label} (${scopeName})` : '— selecione —'}
+                    </div>`}
+                </div>
+                ${conds.length > 1 ? html`
+                  <div class="min-w-[150px]">
+                    <label class="block text-[12px] text-wa-secondary mb-1">Combinação</label>
+                    <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
+                      value=${r.join || 'any'}
+                      onChange=${(e) => updateSkipAttr(i, { join: e.target.value })}>
+                      ${SKIP_JOINS.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
+                    </select>
+                  </div>` : null}
+                ${canEdit ? html`<button onClick=${() => removeSkipAttr(i)}
+                  class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}
               </div>
-              <div class="flex-1 min-w-[140px]">
-                <label class="block text-[12px] text-wa-secondary mb-1">Valor</label>
-                <${AttributeValueInput} type=${def && def.type} options=${opts}
-                  value=${r.value} disabled=${!canEdit}
-                  onChange=${(v) => updateSkipAttr(i, { value: v })} />
-              </div>
-              ${canEdit ? html`<button onClick=${() => removeSkipAttr(i)}
-                class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover</button>` : null}
+              ${conds.map((c, ci) => {
+                const noValue = SKIP_OPS_NO_VALUE.includes(c.op || 'eq');
+                return html`
+                <div key=${ci} class="flex flex-wrap gap-2 items-end">
+                  <div class="min-w-[150px]">
+                    <label class="block text-[12px] text-wa-secondary mb-1">
+                      ${ci === 0 ? 'Condição' : ((r.join || 'any') === 'all' ? 'E também' : 'Ou então')}
+                    </label>
+                    <select class="wa-field w-full px-2 py-1.5 rounded-md text-[13px]" disabled=${!canEdit}
+                      value=${c.op || 'eq'}
+                      onChange=${(e) => updateSkipCond(i, ci, { op: e.target.value })}>
+                      ${SKIP_OPS.map(([v, lbl]) => html`<option key=${v} value=${v}>${lbl}</option>`)}
+                    </select>
+                  </div>
+                  ${noValue ? null : html`
+                    <div class="flex-1 min-w-[140px]">
+                      <label class="block text-[12px] text-wa-secondary mb-1">Valor</label>
+                      <${AttributeValueInput} type=${def && def.type} options=${opts}
+                        value=${c.value} disabled=${!canEdit}
+                        onChange=${(v) => updateSkipCond(i, ci, { value: v })} />
+                    </div>`}
+                  ${canEdit && conds.length > 1 ? html`<button onClick=${() => removeSkipCond(i, ci)}
+                    class="text-red-500 hover:text-red-600 text-[13px] pb-1.5">Remover condição</button>` : null}
+                </div>`;
+              })}
+              ${canEdit ? html`<button onClick=${() => addSkipCond(i)}
+                class="px-2 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover">
+                + Adicionar condição
+              </button>` : null}
             </div>`;
           })}
           ${canEdit ? html`<button onClick=${addSkipAttr}
