@@ -4925,6 +4925,32 @@ check("providers -> required_credentials é um dict por provider",
 check("providers -> provider NÃO registrado não aparece",
       "provider_que_nao_existe" not in _prov_by)
 
+# plano 85 B2: desde o plano 76 H1 este endpoint é TAMBÉM o catálogo de APRESENTAÇÃO
+# do hub (rótulo/cor/tipo de contato do selo de canal em toda linha da sidebar), então
+# ele é gated por `conversation.reply`, não por `channel.manage` — um atendente sem
+# gestão de canais ficava com os selos no fallback cinza por causa do 403. A ESCRITA
+# continua em `channel.manage`. Sessão descartável (criar usuário liga o gate has_users):
+# removida no fim para o intervalo seguinte voltar ao modo aberto.
+_b2_at = _urepo.create(email="_b2_atendente@x.com", name="B2 Atendente",
+                       password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_b2_h = {"Authorization": "Bearer " + client.post(
+    "/api/auth/login", json={"email": "_b2_atendente@x.com", "password": "supersecret"}
+).json()["data"]["token"]}
+_b2_r = client.get("/api/channels/providers", headers=_b2_h)
+check("plano 85 B2: atendente sem channel.manage -> GET /channels/providers 200",
+      _b2_r.status_code == 200)
+_b2_provs = _b2_r.json().get("data", {}).get("providers", [])
+check("plano 85 B2: atendente recebe os descriptors", bool(_b2_provs))
+check("plano 85 B2: descriptor não carrega valor de credencial",
+      all("credentials" not in d for d in _b2_provs)
+      and all("value" not in f
+              for d in _b2_provs for f in (d.get("credential_fields") or [])))
+check("plano 85 B2: atendente continua SEM criar canal (escrita segue channel.manage)",
+      client.post("/api/channels",
+                  json={"id": "b2_nope", "provider": "test", "display_name": "x"},
+                  headers=_b2_h).status_code == 403)
+_urepo.delete(_b2_at["id"])
+
 # OutboundRouter: capability gating + routing + missing channel
 check("router caps fake (media on, presence off)",
       _router.capabilities("fake_ch").media and not _router.capabilities("fake_ch").presence)

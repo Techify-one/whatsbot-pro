@@ -267,9 +267,19 @@ def register_routes(app, deps):
 
         A provider is only offered when its backing plugin is enabled — i.e. its
         ``CHANNEL_PROVIDERS`` class is registered in the live ``ChannelRegistry``.
-        GOWA is core and always present. Gated by ``channel.manage``. Registered
-        before ``/{channel_id}`` so the literal path wins the match."""
-        denied = permission_denied(request, "channel.manage")
+        GOWA is core and always present. Registered before ``/{channel_id}`` so the
+        literal path wins the match.
+
+        Gated by ``conversation.reply``, not ``channel.manage`` (plano 85 B2): desde o
+        plano 76 H1 este é também o catálogo de APRESENTAÇÃO do hub — rótulo, cor e
+        tipo de contato de cada provider, lido pelo selo de canal de toda linha da
+        sidebar. Um operador sem permissão de GESTÃO de canais levava 403 e ficava com
+        os selos no fallback cinza. O payload é a auto-descrição da CLASSE do provider
+        (definição de campo: ``credential_fields``/``config_fields``), nunca valor de
+        credencial armazenado — segue o mesmo precedente de ``/connected`` e
+        ``/for-filter``, as outras rotas de operador desta tela. Escrita (criar, editar,
+        excluir canal) continua em ``channel.manage``."""
+        denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
         return _ok(await svc.providers(deps))
