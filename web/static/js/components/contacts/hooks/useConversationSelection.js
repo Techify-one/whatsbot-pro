@@ -17,7 +17,7 @@
 // from the selection refs and consumed by the list/WS optimistic patches.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { getContact, getConversationMessages } from '../../../services/api.js';
-import { mergeBufferedMessages } from '../../../services/messages.js';
+import { applyThreadResponse, prependOlder } from '../../../services/threadData.js';
 import { shapeConvData } from '../../../services/conversationRows.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
 
@@ -270,30 +270,13 @@ export function useConversationSelection({
         // Opened by conversation id alone (row not in the sidebar) — adopt the
         // phone from the response so contact-level handlers key correctly.
         if (!selectedRef.current && data.phone) setSelected(data.phone);
-        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch
-        // (arrived during loading). plano 57: mergeBufferedMessages honra `supersedes`
-        // (colapsa as bolhas otimistas que uma linha combinada do batch substituiu)
-        // além do dedup R12.
+        // Buffer de WS: pré-fetch (chegou antes do clique) + durante-fetch. O merge, a
+        // hidratação dos `failed` e o carimbo da thread (plano 85 A4) vivem em
+        // services/threadData.js — a MESMA regra dos outros dois call sites.
         const duringFetch = pendingWsMessages.current[bufKey] || [];
         const pending = [...preFetchBuffer, ...duringFetch];
-        if (pending.length > 0) {
-          data.messages = mergeBufferedMessages(data.messages || [], pending);
-        }
-        // Hydrate failed messages with _localId so retry button works after reload
-        data.messages = (data.messages || []).map(m => {
-          if (m.status === 'failed') {
-            return { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' };
-          }
-          return m;
-        });
         pendingWsMessages.current[bufKey] = [];
-        // plano 85 A4 — carimbo da thread a que estes dados pertencem. O container só
-        // renderiza `contactData` quando o carimbo casa com a seleção corrente, então
-        // exibir a thread de A sob o cabeçalho de B passa a ser impossível por
-        // construção — inclusive no frame ENTRE o clique e o efeito de carga (que roda
-        // depois do paint), onde nenhuma guarda dentro do efeito chegaria a tempo.
-        data._threadKey = threadKey;
-        setContactData(data);
+        setContactData(applyThreadResponse(data, pending, threadKey));
         loadedThreadKeyRef.current = threadKey;
       } else {
         // plano 85 A3 — 404/500/403 deixavam o painel mudo com a conversa anterior.
@@ -345,14 +328,8 @@ export function useConversationSelection({
       if (data.channel_id) setSelectedChannelId(data.channel_id);
       const duringFetch = pendingWsMessages.current[bufKey] || [];
       const pending = [...preFetchBuffer, ...duringFetch];
-      if (pending.length > 0) {
-        data.messages = mergeBufferedMessages(data.messages || [], pending);  // plano 57
-      }
-      data.messages = (data.messages || []).map(m =>
-        m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
       pendingWsMessages.current[bufKey] = [];
-      data._threadKey = threadKeyOf(sel, convId);   // plano 85 A4
-      setContactData(data);
+      setContactData(applyThreadResponse(data, pending, threadKeyOf(sel, convId)));
     });
   }, []);
 
@@ -387,17 +364,9 @@ export function useConversationSelection({
       setLoadingOlder(false);
       if (token !== detailSeqRef.current) return;  // trocou de conversa — descarta
       if (!res.ok) return;
-      let older = res.data.messages || [];
+      const older = res.data.messages || [];
       const newHasMore = !!res.data.has_more;
-      older = older.map(m =>
-        m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
-      setContactData(prev => {
-        if (!prev) return prev;
-        const existing = prev.messages || [];
-        const existingIds = new Set(existing.map(m => m._id).filter(v => v != null));
-        const fresh = older.filter(m => m._id == null || !existingIds.has(m._id));
-        return { ...prev, messages: [...fresh, ...existing], has_more: newHasMore };
-      });
+      setContactData(prev => prependOlder(prev, older, newHasMore));
     });
   }, []);
 
