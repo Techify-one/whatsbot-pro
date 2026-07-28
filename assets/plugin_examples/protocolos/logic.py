@@ -27,6 +27,7 @@ Conceito:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -3800,9 +3801,8 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
     devolve é a varredura de vencimento. Sem janela (``0``), comportamento legado: devolve
     na hora.
 
-    Reusa ``conversation_service.set_ai`` (limpa o assignee humano, revincula o agente
-    de IA padrão do inbox e grava ``ai_active=1``) porque só gravar ``ai_active=1`` não
-    passa o gate de humano quando um atendente assumiu a conversa."""
+    Devolve via :func:`handoff_to_ai` — a IA volta SEM agente vinculado (quem escolhe é
+    o roteamento no próximo turno)."""
     try:
         # Protocolo órfão (conversa excluída): sem alvo válido — não religa.
         if _is_orphan_protocolo(at):
@@ -3821,10 +3821,6 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
             if get_ai_hold(conv_id) is None:
                 arm_ai_hold(conv, protocolo_id=(at or {}).get("id"), reason="finalizar")
             return
-        from plugins.context import get_deps
-        deps = get_deps()
-        if not deps:
-            return
         # Guard anti-ruído: só age se a IA está de fato desligada nesta conversa
         # (ai_active=0 OU humano no comando sem agente de IA) — evita card "ai_on"
         # espúrio em protocolos fechados onde a IA nunca foi desligada.
@@ -3832,14 +3828,83 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
                        and not conv.get("active_agent_key"))
         if conv.get("ai_active") and not human_owned:
             return
-        from app.services import conversation_service
-        # Ação AUTOMÁTICA (efeito de fechar o protocolo, não um toggle manual do
-        # atendente): actor_name=None ⇒ o card lê "🤖 SISTEMA reativou a IA.", nunca
-        # o nome de quem fechou. (O ``actor_name`` recebido fica só para logs futuros.)
-        await conversation_service.set_ai(
-            deps, conv, 1, actor_name=None, clear_transfer_tag=False)
+        await handoff_to_ai(conv)
     except Exception as e:  # noqa: BLE001
         logger.warning("protocolos: reactivate_ai_after_close falhou: %s", e)
+
+
+# ── Devolver a conversa à IA (sem carimbar agente) ───────────────────────────
+# NÃO usa ``conversation_service.set_ai``: aquele religa a IA JÁ VINCULANDO o agente
+# padrão do inbox (``default_agent_key_for_inbox``), e a conversa reabre carimbada com
+# ele. Aqui a devolução é deliberadamente "crua": humano fora, ``ai_active=1`` e
+# ``active_agent_key`` NULO — quem decide o agente é o turno seguinte (o roteador/a
+# triagem por palavra-chave), quando a mensagem do cliente chegar.
+#
+# Como não passamos pelo serviço, reproduzimos aqui os efeitos VISÍVEIS dele: os dois
+# broadcasts que o painel escuta + o card "🤖 SISTEMA reativou a IA.". A tag
+# ``transferido_atendente`` é PRESERVADA (é só rótulo visual desde o plano 37) — mesmo
+# comportamento do ``clear_transfer_tag=False`` que o fechar-protocolo sempre usou.
+#
+# Os broadcasts são WS PURO (``plugins.context.broadcast``), não o bus ``emit`` — mesmo
+# padrão que o espelho do modo ``muted``. Emitir ``conversation.ai_toggled`` daqui
+# realimentaria :func:`on_conversation_ai_toggled` (o plugin reagindo à própria ação) e
+# faria a devolução reentrar no bus dentro do event loop da varredura.
+
+def _conv_ws_payload(conv: dict) -> dict:
+    """Espelha o payload que ``conversation_service._broadcast`` manda ao painel."""
+    return {
+        "conversation_id": conv.get("id"),
+        "display_id": conv.get("display_id"),
+        "contact_id": conv.get("contact_id"),
+        "status": conv.get("status"),
+        "assignee_user_id": conv.get("assignee_user_id"),
+        "active_agent_key": conv.get("active_agent_key"),
+        "ai_active": conv.get("ai_active"),
+        "is_archived": conv.get("is_archived"),
+        "inbox_id": conv.get("inbox_id"),
+        "ts": now(),
+    }
+
+
+async def handoff_to_ai(conv: dict) -> bool:
+    """Tira o humano e devolve a conversa à IA **sem vincular agente**.
+
+    Uma escrita atômica (``assign_agent``): ``assignee_user_id=None``,
+    ``active_agent_key=None``, ``ai_active=1``. Best-effort; ``True`` quando gravou."""
+    conv_id = int(conv["id"])
+    try:
+        updated = await asyncio.to_thread(
+            conversation_repo.assign_agent, conv_id,
+            assignee_user_id=None, active_agent_key=None, ai_active=1)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: falha ao devolver a conversa %s à IA: %s", conv_id, e)
+        return False
+    if not updated:
+        return False
+    payload = _conv_ws_payload(updated)
+    for event in ("conversation_assigned", "conversation_ai_toggled"):
+        try:
+            broadcast(event, payload)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("protocolos: broadcast %s falhou conv=%s: %s", event, conv_id, e)
+    # Card no fio da conversa. actor=None ⇒ "🤖 SISTEMA reativou a IA." (ação automática).
+    # Vai num to_thread: grava mensagem + broadcast, e estamos no event loop da varredura.
+    await asyncio.to_thread(
+        _emit_proto_notice, "ai_on", conversation_id=conv_id,
+        contact_id=updated.get("contact_id"),
+        phone=_phone_of_contact(updated.get("contact_id")), actor=None)
+    return True
+
+
+def _phone_of_contact(contact_id) -> str | None:
+    """Telefone do contato (o ``get`` da conversa não traz) — chave do broadcast do card."""
+    if contact_id is None:
+        return None
+    try:
+        contact = contact_repo.get(int(contact_id))
+        return (contact or {}).get("phone")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ── Posse temporária do atendente pós-fechamento ─────────────────────────────
@@ -4141,21 +4206,17 @@ def cancel_ai_hold_on_human_send(payload: dict) -> None:
 async def expire_ai_holds_once() -> int:
     """Uma passada da varredura: devolve à IA as conversas cujo prazo venceu.
 
-    Reusa ``conversation_service.set_ai`` (limpa o dono humano, revincula o agente padrão
-    do inbox, grava ``ai_active=1`` e emite o card "🤖 SISTEMA reativou a IA.") — a mesma
-    porta que o finalizar-protocolo sempre usou. Gates global/canal desligados ⇒ a linha é
-    apagada sem religar (a IA está desligada de propósito). Devolve quantas foram
-    devolvidas. Nunca levanta."""
-    import asyncio
-
+    Usa :func:`handoff_to_ai` (tira o humano, ``ai_active=1``, SEM carimbar agente — quem
+    escolhe é o roteamento no próximo turno) e emite o card "🤖 SISTEMA reativou a IA.".
+    Gates global/canal desligados ⇒ a linha é apagada sem religar (a IA está desligada de
+    propósito). Devolve quantas foram devolvidas. Nunca levanta."""
     rows = await asyncio.to_thread(list_expired_ai_holds, now())
     if not rows:
         return 0
     from plugins.context import get_deps
-    deps = get_deps()
-    if not deps:
-        # Runtime não cabeado (boot degradado): não dá para devolver nada AGORA, e
-        # apagar a linha perderia a intenção. Deixa para a próxima passada.
+    if not get_deps():
+        # Runtime não cabeado (boot degradado): sem ``deps`` o gate global nem dá para
+        # avaliar, e apagar a linha perderia a intenção. Deixa para a próxima passada.
         logger.debug("protocolos: varredura sem deps — %d hold(s) adiado(s)", len(rows))
         return 0
     released = 0
@@ -4169,10 +4230,7 @@ async def expire_ai_holds_once() -> int:
             if not await asyncio.to_thread(_ai_master_gate, conv_id):
                 await asyncio.to_thread(clear_ai_hold, conv_id)
                 continue
-            from app.services import conversation_service
-            # actor_name=None ⇒ card "🤖 SISTEMA reativou a IA." (ação automática).
-            await conversation_service.set_ai(
-                deps, conv, 1, actor_name=None, clear_transfer_tag=False)
+            await handoff_to_ai(conv)
             await asyncio.to_thread(clear_ai_hold, conv_id)
             released += 1
         except Exception as e:  # noqa: BLE001 — uma conversa ruim não para a varredura
