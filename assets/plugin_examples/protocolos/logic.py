@@ -3150,11 +3150,50 @@ def _skip_open_matches(text_value: str, msg_direction: str) -> bool:
 _SKIP_ATTR_SCOPES = ("contact", "conversation", "protocolo")
 
 
+# Operadores de uma condição. Os 2 últimos não usam valor (o campo some na tela).
+_SKIP_OPS = ("eq", "neq", "contains", "not_contains", "filled", "empty")
+_SKIP_OPS_NO_VALUE = ("filled", "empty")
+# Como as condições da MESMA linha se combinam: qualquer uma (OU) ou todas (E).
+_SKIP_JOINS = ("any", "all")
+
+
+def _sanitize_skip_conditions(raw, legacy_value: str = "") -> list:
+    """Normaliza as condições ``[{op, value}]`` de UMA regra — só a FORMA.
+
+    Aceita o formato ANTIGO (a regra tinha um único ``value`` implicitamente "igual a")
+    via ``legacy_value`` — config gravada antes das condicionais continua valendo.
+
+    Condição com valor em branco é PRESERVADA (quem a ignora é a avaliação, ver
+    :func:`_condition_is_active`): o operador costuma escolher o operador antes de
+    digitar o valor, e descartar aqui apagaria a escolha dele ao salvar.
+    """
+    items = raw if isinstance(raw, list) else None
+    if items is None:
+        items = [{"op": "eq", "value": legacy_value}] if legacy_value else []
+    out = []
+    for c in items:
+        if not isinstance(c, dict):
+            continue
+        op = str(c.get("op") or "eq").strip().lower()
+        if op not in _SKIP_OPS:
+            continue
+        value = "" if op in _SKIP_OPS_NO_VALUE else str(c.get("value") or "").strip()
+        out.append({"op": op, "value": value})
+    return out
+
+
 def _sanitize_skip_attrs(raw) -> list:
-    """Normaliza a lista de regras {key, scope, value} da aba Avaliação.
+    """Normaliza as regras da aba Avaliação: ``{key, scope, join, conditions[]}``.
 
     Descarta itens inválidos (key vazia, escopo fora de :data:`_SKIP_ATTR_SCOPES`).
-    O valor é coagido para string (comparação feita em ``_attr_value_matches``).
+    Uma regra ainda em branco é MANTIDA (a linha continua na tela até o operador
+    removê-la) — quem a ignora é a avaliação.
+
+    Compatibilidade: a chave legada ``value`` (uma regra = uma igualdade) é lida quando
+    não há ``conditions``, e é REGRAVADA quando a regra é uma única condição "igual a"
+    — assim uma versão anterior do plugin ainda entende a config. Com qualquer outro
+    operador a chave é omitida de propósito: uma versão antiga leria ``value`` vazio e
+    trataria a regra como inerte (não pula o envio), que é o lado seguro do erro.
     """
     out = []
     for r in (raw or []):
@@ -3164,7 +3203,14 @@ def _sanitize_skip_attrs(raw) -> list:
         scope = r.get("scope")
         if not key or scope not in _SKIP_ATTR_SCOPES:
             continue
-        out.append({"key": key, "scope": scope, "value": str(r.get("value") or "")})
+        conds = _sanitize_skip_conditions(r.get("conditions"), str(r.get("value") or ""))
+        join = str(r.get("join") or "any").strip().lower()
+        rule = {"key": key, "scope": scope,
+                "join": join if join in _SKIP_JOINS else "any",
+                "conditions": conds}
+        if len(conds) == 1 and conds[0]["op"] == "eq":
+            rule["value"] = conds[0]["value"]  # espelho legado (ver docstring)
+        out.append(rule)
     return out
 
 
@@ -3304,24 +3350,91 @@ def _attr_value_matches(stored, wanted) -> bool:
     return False
 
 
+def _stored_parts(stored) -> list:
+    """Valor armazenado → lista de pedaços normalizados (minúsculo, sem espaços).
+
+    Cobre os 3 formatos que chegam aqui: lista nativa (checkboxes/atributo de lista),
+    string multi espelhada (``", ".join`` do mirror de campos do plugin) e string
+    simples. Um valor com vírgula vira vários pedaços — é assim que "igual a" já
+    casava um item dentro de uma seleção múltipla."""
+    if isinstance(stored, list):
+        raw = [str(x) for x in stored]
+    else:
+        s = str(stored if stored is not None else "")
+        raw = s.split(",") if "," in s else [s]
+    return [p.strip().lower() for p in raw if p.strip()]
+
+
+def _condition_is_active(cond: dict) -> bool:
+    """Condição que de fato filtra. Operador que exige valor e está sem valor é
+    ignorado (regra antiga: "valor vazio nunca casa") — vale tanto para o modo OU
+    quanto para o E, onde senão um campo em branco travaria a linha inteira."""
+    op = (cond or {}).get("op") or "eq"
+    return op in _SKIP_OPS_NO_VALUE or bool(str((cond or {}).get("value") or "").strip())
+
+
+def _condition_matches(stored, cond: dict) -> bool:
+    """Uma condição ``{op, value}`` contra o valor armazenado do atributo."""
+    op = (cond or {}).get("op") or "eq"
+    parts = _stored_parts(stored)
+    if op == "filled":
+        return bool(parts)
+    if op == "empty":
+        return not parts
+    want = str((cond or {}).get("value") or "").strip().lower()
+    if op == "eq":
+        return any(p == want for p in parts)
+    if op == "neq":
+        # "diferente de" NÃO exige o atributo preenchido: um contato sem o atributo
+        # é, de fato, diferente do valor. Espelha o comportamento de um filtro comum.
+        return not any(p == want for p in parts)
+    if op == "contains":
+        return any(want in p for p in parts)
+    if op == "not_contains":
+        return not any(want in p for p in parts)
+    return False
+
+
+def _rule_matches(stored, rule: dict) -> bool:
+    """Regra de uma LINHA: várias condições sobre o MESMO atributo, combinadas por
+    ``join`` (``any`` = OU, ``all`` = E). Sem condição efetiva → não casa (inerte)."""
+    conds = [c for c in ((rule or {}).get("conditions") or []) if _condition_is_active(c)]
+    if not conds:
+        # Regra legada (só ``value``) que não passou pelo saneamento novo.
+        legacy = str((rule or {}).get("value") or "").strip()
+        return _condition_matches(stored, {"op": "eq", "value": legacy}) if legacy else False
+    if (rule or {}).get("join") == "all":
+        return all(_condition_matches(stored, c) for c in conds)
+    return any(_condition_matches(stored, c) for c in conds)
+
+
 def _should_skip_evaluation(at: dict, conv_id) -> bool:
     """Decide se as mensagens da aba Avaliação devem ser PULADAS para este contato.
 
-    Lê as regras {key, scope, value} da config e compara com os custom_attributes
-    do contato e/ou da conversa E com os rótulos da aba "Protocolo" (escopo
-    ``protocolo``, campos próprios do plugin). Qualquer regra que casar → pula
-    (retorna True). Best-effort: erro de leitura NÃO bloqueia o envio (False)."""
+    Lê as regras {key, scope, join, conditions[]} da config e compara com os
+    custom_attributes do contato e/ou da conversa E com os rótulos da aba "Protocolo"
+    (escopo ``protocolo``, campos próprios do plugin). Dentro de uma LINHA as condições
+    se combinam por ``join`` (OU/E); ENTRE linhas é sempre OU — qualquer regra que casar
+    → pula (retorna True). Best-effort: erro de leitura NÃO bloqueia o envio (False)."""
     try:
         rules = get_protocol_config().get("skip_attrs") or []
         if not rules:
             return False
         contact_vals, conv_vals, proto_vals = {}, {}, {}
+        # Escopos cujos valores dá para LER neste fechamento. Um escopo de fora (ex.:
+        # regra de conversa num fechamento sem conversation_id) é ignorado em vez de
+        # lido como vazio — senão um "está vazio" pularia o envio por falta de dado.
+        available = {"protocolo"}
         cid = (at or {}).get("contact_id")
         if cid and any(r.get("scope") == "contact" for r in rules):
             from db.tables import contacts as _contacts_tbl
             contact_vals = custom_attribute_repo.get_values(_contacts_tbl, cid) or {}
+        if cid:
+            available.add("contact")
         if conv_id and any(r.get("scope") == "conversation" for r in rules):
             conv_vals = custom_attribute_repo.get_values(_conversations_tbl, conv_id) or {}
+        if conv_id:
+            available.add("conversation")
         if any(r.get("scope") == "protocolo" for r in rules):
             # `at` já vem hidratado com `fields` (``_proto_dict``); re-hidrata só se
             # o chamador passou uma row crua.
@@ -3331,8 +3444,10 @@ def _should_skip_evaluation(at: dict, conv_id) -> bool:
         by_scope = {"contact": contact_vals, "conversation": conv_vals,
                     "protocolo": proto_vals}
         for r in rules:
+            if r.get("scope") not in available:
+                continue
             vals = by_scope.get(r.get("scope")) or {}
-            if _attr_value_matches(vals.get(r.get("key")), r.get("value")):
+            if _rule_matches(vals.get(r.get("key")), r):
                 return True
         return False
     except Exception as e:  # noqa: BLE001 — nunca travar o envio por erro de leitura

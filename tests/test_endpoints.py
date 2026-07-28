@@ -3222,7 +3222,8 @@ _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "h
                              "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
 check("skip_attrs round-trip na protocol-config",
       _alogic.get_protocol_config().get("skip_attrs")
-      == [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}])
+      == [{"key": "curso_de_interesse", "scope": "contact", "join": "any",
+           "conditions": [{"op": "eq", "value": "não possui"}], "value": "não possui"}])
 check("skip avaliação por atributo de CONTATO -> True",
       _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
 _ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
@@ -3242,7 +3243,8 @@ check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": 
 # campos próprio do plugin), lido de ``at["fields"]`` — não é atributo do core.
 check("sanitize aceita scope protocolo",
       _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
-      == [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+      == [{"key": "resultado", "scope": "protocolo", "join": "any",
+           "conditions": [{"op": "eq", "value": "sem contato"}], "value": "sem contato"}])
 _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                              "privado": {"title": "", "link": ""},
                              "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
