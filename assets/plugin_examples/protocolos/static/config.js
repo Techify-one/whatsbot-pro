@@ -104,7 +104,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
   const RELINK_ATTR_EMPTY = { enabled: false, scope: 'contact', key: '', values: { previous: '', new: '', block: '' }, consume: true };
-  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, relink_prompt_enabled: true, relink_window_minutes: 30, relink_attr: RELINK_ATTR_EMPTY };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, reactivate_ai_on_close: true, relink_prompt_enabled: true, relink_window_minutes: 30, relink_attr: RELINK_ATTR_EMPTY };
   const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
@@ -518,6 +518,20 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
               <span class="block text-[12px] text-wa-secondary mt-0.5">
                 Por padrão o WhatsBot desatribui o atendente ao resolver. Com esta opção ativa a
                 conversa resolvida continua vinculada a quem atendeu.
+              </span>
+            </span>
+          </label>
+          <label class="flex items-start gap-2 text-[13px] text-wa-text">
+            <input class="mt-0.5" type="checkbox"
+              checked=${general.reactivate_ai_on_close !== false}
+              disabled=${!canEdit}
+              onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), reactivate_ai_on_close: e.target.checked }))} />
+            <span>
+              <span class="font-medium">Religar a IA ao finalizar o protocolo</span>
+              <span class="block text-[12px] text-wa-secondary mt-0.5">
+                Ao finalizar, se o interruptor global da IA e a IA do canal estiverem ligados, a IA
+                é religada na conversa na hora (o card "SISTEMA reativou a IA."). Desligue se outro
+                plugin (ex.: Vendas IA) controla quando a IA volta após o fechamento.
               </span>
             </span>
           </label>
