@@ -65,6 +65,14 @@ export function useConversationSelection({
   const [scrollToMsg, setScrollToMsg] = useState(null);  // DB id of a message to focus on open (search hit)
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // plano 85 A3 — falha de carregamento do detalhe. Antes o `if (res.ok)` simplesmente
+  // não fazia nada num 404/500/403 e a promise rejeitada não era tratada: o painel
+  // ficava mudo, exibindo a conversa anterior, sem erro e sem saída.
+  const [detailError, setDetailError] = useState(null);
+  // Incrementado pelo botão "Tentar de novo" E por um clique na linha JÁ selecionada —
+  // as deps do efeito são `[selected, selectedConvId]`, então sem isto reclicar a mesma
+  // conversa depois de uma falha era um no-op (nada re-tentava).
+  const [retryNonce, setRetryNonce] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);  // plano 50 F4: scroll-up
   // Which side drawer is open: 'contact' (foto/nome) | 'conversation' (botão ℹ️) |
   // null. Single state so opening one closes the other (no overlapping drawers).
@@ -110,6 +118,8 @@ export function useConversationSelection({
   // Push URL when selecting/deselecting a conversation row. Accepts a sidebar row
   // (conversation-centric) OR a bare phone string (legacy callers — start
   // conversation / context-menu edit), resolving the latter to its newest row.
+  const retryDetail = useCallback(() => setRetryNonce(n => n + 1), []);
+
   const selectContact = useCallback((rowOrPhone, msgId = null) => {
     setScrollToMsg(msgId != null ? msgId : null);
     if (rowOrPhone == null) {
@@ -126,6 +136,13 @@ export function useConversationSelection({
     if (typeof rowOrPhone === 'string') {
       row = contactsRef.current.find(c => c.phone === rowOrPhone)
         || { phone: rowOrPhone, conversation_id: null, channel_id: 'default', contact_id: null, id: null };
+    }
+    // plano 85 A3 — clique na linha JÁ selecionada re-tenta: as deps do efeito de carga
+    // não mudam, então sem o nonce um painel travado numa falha não tinha como se
+    // recuperar pela própria sidebar (só F5 ou abrir outra conversa).
+    if (threadKeyOf(row.phone, row.conversation_id ?? null)
+        === threadKeyOf(selectedRef.current, selectedConvIdRef.current)) {
+      setRetryNonce(n => n + 1);
     }
     setSelected(row.phone);
     setSelectedConvId(row.conversation_id ?? null);
@@ -217,6 +234,7 @@ export function useConversationSelection({
     // deep-link, que só adota o telefone da resposta) roda em silêncio, sem piscar.
     const threadKey = threadKeyOf(selected, selectedConvId);
     if (loadedThreadKeyRef.current !== threadKey) setLoadingDetail(true);
+    setDetailError(null);   // plano 85 A3 — cada tentativa começa limpa
     // Preserve any messages already buffered for this thread (arrived before selection)
     // but reset the accumulator for new messages arriving during fetch
     const bufKey = selected || (selectedConvId != null ? `conv:${selectedConvId}` : '');
@@ -271,17 +289,22 @@ export function useConversationSelection({
         pendingWsMessages.current[bufKey] = [];
         setContactData(data);
         loadedThreadKeyRef.current = threadKey;
+      } else {
+        // plano 85 A3 — 404/500/403 deixavam o painel mudo com a conversa anterior.
+        // `handleErrorResponse` já normaliza a mensagem das duas formas de corpo.
+        setDetailError(res.error || 'Não foi possível carregar esta conversa.');
       }
       setLoadingDetail(false);
-    }).catch(() => {
-      // plano 85 A2 — `httpClient.request` não engole rejeição (rede caiu, 502 num
+    }).catch((e) => {
+      // plano 85 A2/A3 — `httpClient.request` não engole rejeição (rede caiu, 502 num
       // redeploy): sem este catch a promise ficava não-tratada e `setLoadingDetail(false)`
-      // nunca rodava — a tela travava em "Carregando..." para sempre. A mensagem de erro
-      // visível + "Tentar de novo" entram na A3.
+      // nunca rodava — a tela travava em "Carregando..." para sempre.
       if (token !== detailSeqRef.current) return;
+      if (e && e.name === 'AbortError') { setLoadingDetail(false); return; }
+      setDetailError('Não foi possível carregar esta conversa. Verifique sua conexão.');
       setLoadingDetail(false);
     });
-  }, [selected, selectedConvId]);
+  }, [selected, selectedConvId, retryNonce]);
 
   // Plano 33 F2 — re-fetch the OPEN thread after a WS RECONNECT. The bus has no
   // replay, so a `new_message` that arrived during a connection gap (sleep / NAT
@@ -378,6 +401,7 @@ export function useConversationSelection({
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    detailError, retryDetail,      // plano 85 A3
     loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,

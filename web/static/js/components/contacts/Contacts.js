@@ -128,6 +128,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    detailError, retryDetail,      // plano 85 A3
     loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
@@ -422,7 +423,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       <!-- Chat panel -->
       <div class="flex-1 min-w-0 min-h-0 ${!selected ? 'hidden lg:flex' : 'flex'} relative">
         <div class="w-full h-full flex flex-col">
-          ${loadingDetail
+          ${detailError && selectedKey
+            ? html`<div class="flex flex-col items-center justify-center gap-3 h-full bg-wa-panel px-6 text-center">
+                <div class="text-[15px] text-wa-text">Não foi possível abrir esta conversa</div>
+                <div class="text-[13px] text-wa-secondary max-w-md">${detailError}</div>
+                <button
+                  class="mt-1 px-4 py-2 rounded-lg bg-wa-teal text-white text-[13px] hover:opacity-90 transition-opacity"
+                  onClick=${retryDetail}
+                >Tentar de novo</button>
+              </div>`
+          : loadingDetail
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
             : html`<${ContactDetail}
                 phone=${selected}
