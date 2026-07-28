@@ -27,6 +27,7 @@ import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
+import { threadKeyOf } from './useConversationSelection.js';
 import { useWebSocket } from '../../../hooks/useWebSocket.js';
 
 // Papéis painel-only (cards que nunca vão ao WhatsApp — ver CLAUDE.md). Só
@@ -740,7 +741,12 @@ export function useConversationWsEvents(opts) {
 
     if (belongsToOpen) {
       setContactData(prev => {
-        if (!prev) {
+        // plano 85 A4 — `prev` que ainda carrega o carimbo de OUTRA thread é a conversa
+        // anterior esperando ser substituída pela carga em voo: anexar a mensagem ali a
+        // perderia (o loader troca o objeto inteiro) além de sujar a thread errada. Trata
+        // igual a "detalhe ainda carregando" e vai para o buffer, que o loader drena.
+        const openKey = threadKeyOf(selectedRef.current, selectedConvIdRef.current);
+        if (!prev || (prev._threadKey && prev._threadKey !== openKey)) {
           // Detail still loading — buffer under the SAME key the loader will drain
           // (plano 57). Deep-link `/conversations/:id` (row not in the sidebar) has
           // `selected==null`, so the loader reads `conv:<id>` while this used to write

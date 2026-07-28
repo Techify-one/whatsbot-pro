@@ -287,6 +287,12 @@ export function useConversationSelection({
           return m;
         });
         pendingWsMessages.current[bufKey] = [];
+        // plano 85 A4 — carimbo da thread a que estes dados pertencem. O container só
+        // renderiza `contactData` quando o carimbo casa com a seleção corrente, então
+        // exibir a thread de A sob o cabeçalho de B passa a ser impossível por
+        // construção — inclusive no frame ENTRE o clique e o efeito de carga (que roda
+        // depois do paint), onde nenhuma guarda dentro do efeito chegaria a tempo.
+        data._threadKey = threadKey;
         setContactData(data);
         loadedThreadKeyRef.current = threadKey;
       } else {
@@ -345,6 +351,7 @@ export function useConversationSelection({
       data.messages = (data.messages || []).map(m =>
         m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
       pendingWsMessages.current[bufKey] = [];
+      data._threadKey = threadKeyOf(sel, convId);   // plano 85 A4
       setContactData(data);
     });
   }, []);

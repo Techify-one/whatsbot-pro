@@ -12,7 +12,7 @@ import { ChannelPickerModal } from './ChannelPickerModal.js';
 import { NewConversationModal } from './NewConversationModal.js';
 import { useSidebarResize } from './hooks/useSidebarResize.js';
 import { useConversationList } from './hooks/useConversationList.js';
-import { useConversationSelection } from './hooks/useConversationSelection.js';
+import { useConversationSelection, threadKeyOf } from './hooks/useConversationSelection.js';
 import { useConversationFilters } from './hooks/useConversationFilters.js';
 import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
@@ -305,9 +305,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setCheckPhoneError(null);
   }, [handleSearchChange, setCheckPhoneError]);
 
-  const messages = contactData ? contactData.messages || [] : [];
-  const info = contactData ? contactData.info || {} : {};
-  const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  const selectedKey = threadKeyOf(selected, selectedConvId);
+  // plano 85 A4 — `contactData` carrega o carimbo (`_threadKey`) da thread de onde veio.
+  // Enquanto ele não casar com a seleção corrente os dados são da conversa ANTERIOR:
+  // nada deles pode ir para a tela (nem as bolhas, nem o nome/telefone do drawer). É a
+  // guarda que fecha o frame entre o clique e o efeito de carga — o efeito roda depois
+  // do paint, então sem isto sempre haveria um quadro exibindo a conversa errada.
+  const detailStale = selectedKey != null
+    && (!contactData || contactData._threadKey !== selectedKey);
+  const messages = (contactData && !detailStale) ? contactData.messages || [] : [];
+  const info = (contactData && !detailStale) ? contactData.info || {} : {};
   // Linha da conversa aberta: é ela que carrega `channel_provider`/`channel_name`
   // (só a query da LISTA traz o canal — o detalhe do contato não). O cabeçalho do
   // chat mostra o mesmo selo da sidebar a partir daqui, sem requisição nova.
@@ -432,7 +439,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                   onClick=${retryDetail}
                 >Tentar de novo</button>
               </div>`
-          : loadingDetail
+          : (loadingDetail || detailStale)
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
             : html`<${ContactDetail}
                 phone=${selected}
@@ -442,7 +449,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 messages=${messages}
                 setContactData=${setContactData}
                 info=${info}
-                contact=${contactData}
+                contact=${detailStale ? null : contactData}
                 channelProvider=${headerChannelProvider}
                 channelName=${headerChannelName}
                 showChannel=${showChannel}
