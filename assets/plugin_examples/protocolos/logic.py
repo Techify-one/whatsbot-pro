@@ -3059,6 +3059,7 @@ def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
         "resolve_keep_assignee": resolve_keep_assignee_enabled(),
+        "reactivate_ai_on_close": get_reactivate_ai_on_close_setting(),
         "relink_prompt_enabled": relink_prompt_enabled(),
         "relink_window_minutes": relink_window_minutes(),
         "relink_attr": get_relink_attr_config(),
@@ -3073,6 +3074,11 @@ def set_general_config(cfg: dict) -> dict:
     if "resolve_keep_assignee" in cfg:
         config_repo.set(_general_key("resolve_keep_assignee"),
                         bool(cfg.get("resolve_keep_assignee")))
+    # Religar a IA ao finalizar (key das settings declarativas, mesma que o getter lê —
+    # não usa _general_key; só grava quando presente p/ não zerar o default em payload antigo).
+    if "reactivate_ai_on_close" in cfg:
+        config_repo.set(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close",
+                        bool(cfg.get("reactivate_ai_on_close")))
     # Chaves do plano 49: só grava quando presentes (payloads antigos não zeram o default).
     if "relink_prompt_enabled" in cfg:
         config_repo.set(_general_key("relink_prompt_enabled"),
