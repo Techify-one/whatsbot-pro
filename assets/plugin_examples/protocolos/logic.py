@@ -61,6 +61,9 @@ _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
 _CA_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.custom_attrs_backfilled"
 # Liga/desliga o espelho dos campos de resolução no core (conversations.custom_attributes).
 _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
+# Registro das chaves que ESTE plugin espelhou como atributo de conversa no core. É o
+# critério de posse do reconcile: só aposentamos definição que nós criamos.
+_MIRROR_KEYS_FLAG = f"plugin.{PLUGIN_ID}.mirrored_attr_keys"
 # One-time: obs deixou de ser rótulo FIXO (coluna própria) e virou rótulo EXTRA comum.
 _OBS_MIGRATE_FLAG = f"plugin.{PLUGIN_ID}.obs_to_extra_migrated"
 
@@ -538,18 +541,91 @@ def _mirror_value(d: dict, value):
     return "" if value is None else str(value)
 
 
+def _owned_mirror_keys(system_keys: set[str]) -> set[str]:
+    """Chaves que ESTE plugin espelhou no core — o "de quem é" do reconcile.
+
+    Sem esse registro a única heurística de posse seria "todo atributo de conversa com
+    ``is_system=1``", e um outro plugin que espelhasse atributos de conversa teria as
+    definições dele apagadas por nós. O registro é aditivo: cresce a cada sync e nunca
+    encolhe (uma chave aposentada continua nossa, senão o órfão voltaria a ser intocável).
+
+    Na PRIMEIRA execução o registro não existe e adotamos as linhas ``is_system=1`` já
+    presentes — é o que traz os espelhos criados antes deste reconcile (hoje os únicos
+    ``is_system=1`` de conversa do produto) para dentro da gestão.
+    """
+    raw = config_repo.get(_MIRROR_KEYS_FLAG, None)
+    if raw is None:
+        adopted = set(system_keys)
+        config_repo.set(_MIRROR_KEYS_FLAG, sorted(adopted))
+        return adopted
+    return {str(k) for k in (raw or []) if str(k)}
+
+
 def sync_core_atendimento_defs() -> None:
-    """Registra (idempotente) as defs EDITÁVEIS da atendimento como atributos de atendimento
-    no core, p/ os valores espelhados aparecerem/serem editáveis no painel de info.
-    ``ensure_system_definition`` é no-op se a def já existe (respeita edição/remoção do
-    usuário) — best-effort, nunca quebra o fluxo de resolução."""
+    """Reconcilia (idempotente) as defs EDITÁVEIS da atendimento com os atributos de
+    conversa do core, p/ os valores espelhados aparecerem/serem editáveis no painel de
+    info. Roda no boot, ao SALVAR os rótulos e a cada espelho de resolução.
+
+    Três direções (antes só existia a primeira, e por isso rótulo apagado virava opção
+    fantasma no seletor da aba Avaliação — que lista os atributos do core sem filtro):
+
+    * **Rótulo novo** → cria a definição (``ensure_system_definition``).
+    * **Rótulo renomeado/reordenado** → atualiza ``display_name``/``position``. Sem isso
+      o nome fica congelado no dia da criação.
+    * **Rótulo apagado** → soft-delete da definição, contanto que a chave seja NOSSA
+      (ver ``_owned_mirror_keys``). Soft delete: a linha e os valores já gravados em
+      ``conversations.custom_attributes`` permanecem no banco, só somem das telas.
+
+    Um rótulo que VOLTA depois de apagado é restaurado (``restore_definition``) — a
+    criação seria no-op, já que a linha soft-deletada ocupa a chave.
+
+    Limite conhecido: o ``type`` do core é imutável no update, então trocar o tipo de um
+    rótulo já espelhado não re-tipa a definição (o valor continua sendo gravado; só a
+    renderização no painel do core segue o tipo antigo). Best-effort de ponta a ponta —
+    nunca quebra o fluxo de resolução.
+    """
     try:
+        desired: dict[str, tuple[str, str, int]] = {}  # key → (label, tipo core, posição)
         for i, d in enumerate(get_field_defs("atendimento")):
             if d.get("readonly") or d.get("type") == "atendente":
                 continue  # "atendente" já É a coluna nativa; não vira atributo do core
-            custom_attribute_repo.ensure_system_definition(
-                attribute_key=d["key"], display_name=d.get("label") or d["key"],
-                type=_core_attr_type(d.get("type")), applies_to="conversation", position=i)
+            desired[d["key"]] = (d.get("label") or d["key"],
+                                 _core_attr_type(d.get("type")), i)
+
+        rows = custom_attribute_repo.list_definitions(
+            applies_to="conversation", include_deleted=True)
+        mirrored = {r["attribute_key"]: r for r in rows if r.get("is_system")}
+        owned = _owned_mirror_keys(set(mirrored))
+        # Chave tomada por um atributo do USUÁRIO (is_system=0, ativo ou apagado): a
+        # criação seria no-op silenciosa. Não sequestramos a definição dele.
+        taken = {r["attribute_key"] for r in rows if not r.get("is_system")}
+
+        for key, (label, ctype, pos) in desired.items():
+            row = mirrored.get(key)
+            if row is None:
+                if key in taken:
+                    logger.debug("protocolos: rótulo '%s' colide com atributo de conversa "
+                                 "do usuário — espelho não registrado", key)
+                    continue
+                custom_attribute_repo.ensure_system_definition(
+                    attribute_key=key, display_name=label, type=ctype,
+                    applies_to="conversation", position=pos)
+                continue
+            if row.get("deleted_at") is not None:
+                custom_attribute_repo.restore_definition(row["id"])
+            if row.get("display_name") != label or row.get("position") != pos:
+                custom_attribute_repo.update_definition(
+                    row["id"], display_name=label, position=pos)
+
+        # Aposenta o que é nosso e não é mais rótulo. Linha de outro dono fica intacta.
+        for key, row in mirrored.items():
+            if key in desired or key not in owned or row.get("deleted_at") is not None:
+                continue
+            custom_attribute_repo.delete_definition(row["id"])
+
+        grown = owned | set(desired)
+        if grown != owned:
+            config_repo.set(_MIRROR_KEYS_FLAG, sorted(grown))
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos: sync_core_atendimento_defs falhou: %s", e)
 
