@@ -1067,6 +1067,7 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
       const picked = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
           defaultAssignee=${currentUser && currentUser.id}
+          defaultAssigneeName=${currentUser && (currentUser.name || currentUser.email)}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return false; // cancelou → não finaliza
       fields = picked.fields || {}; // onOk devolve { fields, custom_attributes, goTo }
@@ -1478,9 +1479,11 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
             ? html`<div class="text-[12px] text-wa-secondary p-2 text-center">Role para carregar mais (${rows.length}/${totalCount})</div>`
             : null)}
 
-      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs}
+      ${detail ? html`<${DetailModal} key=${detail.protocolo && detail.protocolo.id}
+        data=${detail} fieldDefs=${atendDefs}
         protoDefs=${cols} warning=${detailWarning} api=${api} canEdit=${canEdit}
         defaultAssignee=${currentUser && currentUser.id}
+        defaultAssigneeName=${currentUser && (currentUser.name || currentUser.email)}
         onClose=${closeDetail}
         onChanged=${reload} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
@@ -1521,7 +1524,7 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
 // protocolo já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
 // atendimentos (histórico, read-only) fica abaixo.
 function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
-                      defaultAssignee = null, api, canEdit = true, onClose, onChanged, onFinalize }) {
+                      defaultAssignee = null, defaultAssigneeName = null, api, canEdit = true, onClose, onChanged, onFinalize }) {
   const at = data.protocolo || {};
   const atendimentos = data.atendimentos || [];
   const fechado = at.status === 'fechado';                  // status REAL (rótulo do topo)
@@ -1666,8 +1669,16 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
               </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {
-                const def = (d.type === 'atendente' && hasSavedAssignee)
-                  ? { ...d, fallbackUser: { id: at.assignee_user_id, name: at.assignee_name } }
+                // O rótulo "atendente" precisa de um fallbackUser para o AttendantSelect
+                // conseguir EXIBIR um id que não esteja na lista de atendentes atribuíveis
+                // (ex.: usuário logado sem conversation.read, ou fora da lista). Sem ele o
+                // select cai no placeholder "Não atribuído" mesmo com o valor semeado.
+                // Cobre os dois casos: assignee JÁ salvo e o seed do usuário logado.
+                const fallbackUser = hasSavedAssignee
+                  ? { id: at.assignee_user_id, name: at.assignee_name }
+                  : (shouldSeedCurrentAssignee ? { id: defaultAssignee, name: defaultAssigneeName } : null);
+                const def = (d.type === 'atendente' && fallbackUser)
+                  ? { ...d, fallbackUser }
                   : d;
                 return html`<${LabeledField} key=${d.key} def=${def}
                   value=${vals[d.key]}

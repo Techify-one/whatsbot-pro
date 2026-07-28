@@ -104,7 +104,7 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
 
   const PROTO_EMPTY = { enabled: false, normal: { title: '', link: '' }, privado: { title: '', link: '' }, skip_attrs: [] };
   const RELINK_ATTR_EMPTY = { enabled: false, scope: 'contact', key: '', values: { previous: '', new: '', block: '' }, consume: true };
-  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, reactivate_ai_on_close: true, relink_prompt_enabled: true, relink_window_minutes: 30, relink_attr: RELINK_ATTR_EMPTY };
+  const GENERAL_EMPTY = { auto_assign_conversation_on_close: true, resolve_keep_assignee: false, reactivate_ai_on_close: true, ai_takeover_delay_minutes: 30, relink_prompt_enabled: true, relink_window_minutes: 30, relink_attr: RELINK_ATTR_EMPTY };
   const SKIP_EMPTY = { enabled: false, regex: '', direction: 'sent' };
   const loadProto = useCallback(async () => {
     try {
@@ -510,31 +510,51 @@ export default function ProtocolosConfig({ apiBase = '/api/plugins/protocolos', 
           </label>
           <label class="flex items-start gap-2 text-[13px] text-wa-text">
             <input class="mt-0.5" type="checkbox"
-              checked=${general.resolve_keep_assignee === true}
-              disabled=${!canEdit}
-              onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), resolve_keep_assignee: e.target.checked }))} />
-            <span>
-              <span class="font-medium">Manter o atendente ao resolver a conversa</span>
-              <span class="block text-[12px] text-wa-secondary mt-0.5">
-                Por padrão o WhatsBot desatribui o atendente ao resolver. Com esta opção ativa a
-                conversa resolvida continua vinculada a quem atendeu.
-              </span>
-            </span>
-          </label>
-          <label class="flex items-start gap-2 text-[13px] text-wa-text">
-            <input class="mt-0.5" type="checkbox"
               checked=${general.reactivate_ai_on_close !== false}
               disabled=${!canEdit}
               onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), reactivate_ai_on_close: e.target.checked }))} />
             <span>
-              <span class="font-medium">Religar a IA ao finalizar o protocolo</span>
+              <span class="font-medium">Devolver a conversa à IA depois de resolver</span>
               <span class="block text-[12px] text-wa-secondary mt-0.5">
-                Ao finalizar, se o interruptor global da IA e a IA do canal estiverem ligados, a IA
-                é religada na conversa na hora (o card "SISTEMA reativou a IA."). Desligue se outro
-                plugin (ex.: Vendas IA) controla quando a IA volta após o fechamento.
+                Se o interruptor global da IA e a IA do canal estiverem ligados, a conversa volta
+                para a IA sozinha (com o card "SISTEMA reativou a IA."). Desligue para que o
+                fechamento nunca mexa na IA.
               </span>
             </span>
           </label>
+          ${general.reactivate_ai_on_close !== false ? html`
+            <div class="pl-6 space-y-1">
+              <div class="flex items-center gap-2">
+                <label class="text-[12px] text-wa-secondary">Tempo mínimo para a IA reassumir (minutos)</label>
+                <input class="wa-field w-24 px-2 py-1.5 rounded-md text-[13px]" type="number" min="0" max="10080"
+                  value=${general.ai_takeover_delay_minutes == null ? 30 : general.ai_takeover_delay_minutes}
+                  disabled=${!canEdit}
+                  onInput=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), ai_takeover_delay_minutes: e.target.value === '' ? '' : Number(e.target.value) }))} />
+              </div>
+              <p class="text-[12px] text-wa-secondary">
+                Durante esse tempo o atendente que resolveu continua com a conversa e a IA fica
+                calada — se o cliente voltar, a conversa reabre com ele mesmo. Se ele responder,
+                fica com a conversa e a IA não reassume. Quando a conversa é resolvida sem
+                atendente, a IA apenas fica muda até o prazo vencer.
+                <span class="block mt-0.5">0 = a IA reassume assim que o protocolo é finalizado.</span>
+              </p>
+            </div>
+          ` : html`
+            <label class="flex items-start gap-2 text-[13px] text-wa-text pl-6">
+              <input class="mt-0.5" type="checkbox"
+                checked=${general.resolve_keep_assignee === true}
+                disabled=${!canEdit}
+                onChange=${(e) => setGeneral((g) => ({ ...(g || GENERAL_EMPTY), resolve_keep_assignee: e.target.checked }))} />
+              <span>
+                <span class="font-medium">Manter o atendente ao resolver a conversa</span>
+                <span class="block text-[12px] text-wa-secondary mt-0.5">
+                  Por padrão o WhatsBot desatribui o atendente ao resolver. Com esta opção ativa a
+                  conversa resolvida continua vinculada a quem atendeu — sem prazo, já que a
+                  devolução à IA está desligada.
+                </span>
+              </span>
+            </label>
+          `}
         </div>
       `}
 

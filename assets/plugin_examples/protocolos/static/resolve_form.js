@@ -131,7 +131,8 @@ function isFilled(def, v) {
 // Os botões de finalizar ("Resolver" e "Resolver e ir ao protocolo") só habilitam
 // quando todos os obrigatórios estão preenchidos. onOk devolve { fields, goTo } —
 // goTo=true só no botão "ir ao protocolo".
-export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = null, onOk, onCancel }) {
+export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = null,
+                              defaultAssigneeName = null, onOk, onCancel }) {
   const init0 = initialValues || {};
   const [vals, setVals] = useState(() => {
     const init = {};
@@ -164,9 +165,19 @@ export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = n
         ${defs.length ? html`
           <div>
             <div class="space-y-3">
-              ${defs.map((d) => html`<${LabeledField} key=${d.key} def=${d}
-                value=${vals[d.key]}
-                onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`)}
+              ${defs.map((d) => {
+                // Seed do usuário logado: dá ao AttendantSelect um fallbackUser para ele
+                // conseguir EXIBIR o id semeado mesmo quando não está na lista de atendentes
+                // atribuíveis (senão cairia no placeholder "Não atribuído"). Só quando o
+                // campo de fato carrega o usuário semeado (não sobrescreve um assignee prévio).
+                const def = (d.type === 'atendente' && defaultAssignee != null
+                  && String(vals[d.key] == null ? '' : vals[d.key]) === String(defaultAssignee))
+                  ? { ...d, fallbackUser: { id: defaultAssignee, name: defaultAssigneeName } }
+                  : d;
+                return html`<${LabeledField} key=${d.key} def=${def}
+                  value=${vals[d.key]}
+                  onChange=${(v) => setVals((s) => ({ ...s, [d.key]: v }))} />`;
+              })}
             </div>
           </div>` : null}
 

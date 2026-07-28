@@ -35,6 +35,12 @@ function currentUser() {
   try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); }
   catch (_) { return null; }
 }
+// Nome do usuário conectado — usado como fallback de EXIBIÇÃO do rótulo "atendente"
+// semeado (para o AttendantSelect renderizar o operador mesmo fora da lista atribuível).
+function currentUserName() {
+  const u = currentUser();
+  return u ? (u.name || u.email || null) : null;
+}
 
 // Encadeamento "fechar conversa e protocolo juntos" (botão c do popup de vínculo) —
 // replica o forceResolveAndClose da aba Protocolos, sem depender do componente: resolve
@@ -49,6 +55,7 @@ async function resolveAndCloseAll(api, apiBase, conversationId, protocoloId) {
     if (defs.length) {
       const picked = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${{}} defaultAssignee=${currentUserId()}
+          defaultAssigneeName=${currentUserName()}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return { ok: false, error: 'Cancelado.' };
       fields = picked.fields || {};
@@ -213,6 +220,7 @@ export default function register(api) {
       const r = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${initialValues}
           defaultAssignee=${currentUserId()}
+          defaultAssigneeName=${currentUserName()}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!r) return null;                       // cancelado → aborta o fechar
       result = r;
