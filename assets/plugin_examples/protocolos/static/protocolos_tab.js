@@ -10,7 +10,9 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
-import { ResolveForm, LabeledField, isMultiDef } from '/plugins/protocolos/static/resolve_form.js';
+import { ResolveForm, LabeledField } from '/plugins/protocolos/static/resolve_form.js';
+// Semeadura dos campos do protocolo — módulo PURO (testes em proto_fields.test.js).
+import { seedProtocolValues, mergeSeed, isMultiDef } from '/plugins/protocolos/static/proto_fields.js';
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 import { useInfiniteScroll } from '/static/js/hooks/useInfiniteScroll.js';
 
@@ -578,6 +580,12 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   const getJson = useCallback((url) => api.http.get(url), [api]);
   const apiPost = useCallback((path, body) => api.http.post(path, body), [api]);
 
+  // Promise do carregamento de metadados em voo. O `openDetail` a aguarda antes de
+  // montar o modal — sem ela o detalhe podia abrir com `cols = []` e o form nascia
+  // vazio (inclusive o obrigatório "Atendente"). Nenhuma requisição extra: é a MESMA
+  // promise já disparada no mount. Ver plano 88 · B0.
+  const metaPromiseRef = useRef(null);
+
   // Metadados da aba (field-defs, atributos de contato, canais) — NÃO dependem dos
   // filtros; carregam uma vez (e a cada troca de apiBase), separados da lista paginada.
   const loadMeta = useCallback(async () => {
@@ -603,7 +611,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     setChannels(((ch && ch.ok && ch.data) || []).map((c) => ({ value: c.id, label: c.name || c.id })));
   }, [apiBase, getJson]);
   // Sem permissão de VER → não dispara os GETs (evita uma rajada de 403 no load).
-  useEffect(() => { if (canView) loadMeta(); }, [loadMeta, canView]);
+  // Guarda a promise p/ o openDetail poder esperá-la (`null` quando não dispara → o
+  // `await null` do openDetail resolve na hora, sem ramo especial).
+  useEffect(() => { if (canView) metaPromiseRef.current = loadMeta(); }, [loadMeta, canView]);
 
   // Popover ⚙ fecha ao clicar fora (mesmo padrão do OptionListSelect).
   useEffect(() => {
@@ -942,6 +952,13 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   const detailIdRef = useRef(null);
 
   const openDetail = useCallback(async (atid, warn = false) => {
+    // Espera as definições de campo antes de montar o modal — o form é semeado no mount
+    // e, sem elas, nasceria vazio (deep-link `?detail=`, F5, "Resolver e ir ao
+    // protocolo"). É a mesma forma do popup de resolver, que nunca falha (extends.js).
+    // try/catch OBRIGATÓRIO: loadMeta não trata erro, e uma rejeição abortaria a
+    // abertura do detalhe — pior que o bug. Falhou? Abre assim mesmo; o efeito de seed
+    // do DetailModal recupera quando (e se) as defs chegarem.
+    try { await metaPromiseRef.current; } catch (_) { /* segue sem os metadados */ }
     const r = await getJson(`${apiBase}/protocolos/${atid}`);
     if (r && r.ok) {
       setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este protocolo.' : '');
@@ -1537,21 +1554,20 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
   const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
   const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
-  const [vals, setVals] = useState(() => {
-    const init = {};
-    for (const d of protoDefs) {
-      // Atendente: mantém o assignee salvo quando existir. Só usa o usuário conectado
-      // como sugestão inicial quando o protocolo ainda não tem atendente gravado.
-      let cur = d.type === 'atendente'
-        ? (hasSavedAssignee ? at.assignee_user_id : (!readOnly ? defaultAssignee : at.assignee_user_id))
-        : (at.fields || {})[d.key];
-      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
-      else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
-        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
-      else init[d.key] = (cur == null ? '' : String(cur));
-    }
-    return init;
-  });
+  // Atendente: mantém o assignee salvo quando existir; só usa o usuário conectado como
+  // sugestão inicial quando o protocolo ainda não tem atendente gravado (ver proto_fields.js).
+  const [vals, setVals] = useState(() => seedProtocolValues(protoDefs, at, { defaultAssignee, readOnly }));
+
+  // Rede de segurança da corrida (plano 88 · C0): se `protoDefs` chegar DEPOIS do mount
+  // (o await do openDetail caiu no catch, config de campos editada noutra aba, um call
+  // site novo que não passe pelo openDetail), completa o estado. `mergeSeed` só preenche
+  // chave AUSENTE — não apaga o que o operador digitou nem ressuscita campo limpo de
+  // propósito, e devolve a mesma referência quando não há nada a somar (sem re-render).
+  useEffect(() => {
+    setVals((v) => mergeSeed(v, seedProtocolValues(protoDefs, at, { defaultAssignee, readOnly })));
+    // `data` (e não `at`) na dependência: `at` é derivado dela e ganharia identidade
+    // nova a cada render no caso degenerado `data.protocolo == null`.
+  }, [protoDefs, data, defaultAssignee, readOnly]);
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
@@ -1665,7 +1681,7 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
             </div>
             ${showAssigneeSeedNotice ? html`
               <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
-                Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?
+                Este protocolo ainda não tinha atendente — preenchemos com o seu usuário. Troque se necessário.
               </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {

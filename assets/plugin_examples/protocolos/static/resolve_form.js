@@ -11,13 +11,16 @@ import htm from 'htm';
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 // Lista de atendentes atribuíveis (mesma de "Atribuir atendente") p/ o tipo "atendente".
 import { getAssignableAgents } from '/static/js/services/api.js';
+// Regra "o valor deste campo é uma lista?" — módulo puro, compartilhado com o seed.
+import { isMultiDef } from '/plugins/protocolos/static/proto_fields.js';
 
 const html = htm.bind(h);
 
 // Campo cujo VALOR é uma LISTA: "Caixa de seleção" (checkboxes) sempre, ou "Lista de
 // seleção" (select) com `multiple` ligado. Espelha logic._is_multi no backend.
-export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
-  || (d.type === 'select' && d.multiple)));
+// A regra mora no módulo PURO proto_fields.js (testável em `node --test`, sem preact);
+// aqui é só re-exportada para não quebrar quem já importa daqui.
+export { isMultiDef };
 
 // Cache module-level dos atendentes atribuíveis (lista pequena, reusada em vários campos).
 let _assignableUsers = null;
