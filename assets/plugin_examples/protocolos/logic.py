@@ -1109,6 +1109,9 @@ def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
             )
     except IntegrityError:
         return None, "Já existe um protocolo aberto para este contato."
+    # Reabrir o protocolo é o atendente RETOMANDO o atendimento: cancela a devolução
+    # automática à IA que estivesse pendente nas conversas deste protocolo.
+    clear_ai_holds_of_protocolo(atid)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -2690,7 +2693,12 @@ def on_inbound(ctx, payload: dict) -> None:
 
 def on_outbound(ctx, payload: dict) -> None:
     """``message.sent`` (operador/IA) → garante protocolo + ciclo de bootstrap,
-    mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma)."""
+    mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma).
+
+    Também encerra a posse temporária quando quem enviou foi um ATENDENTE: ele respondeu
+    dentro da janela, então fica com a conversa (a IA não reassume no vencimento). Isso
+    roda ANTES do gate ``auto_link``/``ignorar abertura`` — posse não depende deles."""
+    cancel_ai_hold_on_human_send(payload)
     try:
         if _skip_open_matches((payload or {}).get("text") or "", "sent"):
             return  # regra "ignorar abertura": mensagem enviada casou a regex
@@ -2725,11 +2733,15 @@ def on_conversation_deleted(ctx, payload: dict) -> None:
     Sem isto, deletar a conversa no core deixava o protocolo pendurado em ``aberto`` no
     Kanban para sempre (o ciclo ficava com ``ended_at`` NULL apontando para uma conversa
     que não existe mais). Fechamento QUIET: não envia avaliação nem valida obrigatórios —
-    não há como continuar um atendimento cuja conversa sumiu."""
+    não há como continuar um atendimento cuja conversa sumiu.
+
+    Também apaga um hold de posse temporária pendente — sem isso a varredura tentaria
+    devolver à IA uma conversa que não existe mais, a cada passada."""
     try:
         conv_id = (payload or {}).get("conversation_id") or (payload or {}).get("id")
         if not conv_id:
             return
+        clear_ai_hold(int(conv_id))
         ts = now()
         affected: set[int] = set()
         with make_plugin_db() as conn:
@@ -2975,15 +2987,63 @@ def auto_assign_conversation_on_close_enabled() -> bool:
 
 def resolve_keep_assignee_enabled() -> bool:
     """Plano 67 — "resolver sem desatribuir o atendente" ligado? Default OFF: o core
-    limpa o ``assignee_user_id`` ao fechar, como sempre fez."""
+    limpa o ``assignee_user_id`` ao fechar, como sempre fez.
+
+    Com a DEVOLUÇÃO temporizada ligada (``ai_takeover_delay_minutes`` > 0 +
+    ``reactivate_ai_on_close``), este toggle deixa de ser o caminho normal: o atendente
+    é mantido de qualquer jeito durante a janela (ver :func:`clear_assignee_on_close`) e
+    a IA reassume no vencimento. Ele continua valendo como "manter para SEMPRE" quando a
+    devolução está desligada."""
     return bool(config_repo.get(_general_key("resolve_keep_assignee"), False))
+
+
+def ai_takeover_delay_minutes() -> int:
+    """Minutos que o atendente fica com a conversa depois de resolver, antes de a IA
+    reassumir. Default 30. ``0`` = sem janela (a IA volta na hora que o protocolo é
+    finalizado, comportamento legado). Valor inválido cai no default; negativo vira 0."""
+    try:
+        m = int(config_repo.get(_general_key("ai_takeover_delay_minutes"), 30))
+    except (TypeError, ValueError):
+        return 30
+    return max(0, min(m, 10080))  # teto de 7 dias — evita hold eterno por digitação
+
+
+def ai_takeover_enabled() -> bool:
+    """A posse temporária está ativa? Exige a devolução à IA LIGADA e uma janela > 0.
+    Desligada, nada é armado e o fluxo é exatamente o de antes."""
+    return get_reactivate_ai_on_close_setting() and ai_takeover_delay_minutes() > 0
 
 
 def clear_assignee_on_close(ctx, value):
     """``filter.conversation.clear_assignee_on_close`` (plano 67) — o core pergunta se
-    deve limpar o atendente humano ao FECHAR a conversa. Ligado ⇒ ``False`` (mantém o
-    atendente vinculado); desligado ⇒ devolve o ``value`` recebido (não interfere)."""
-    return False if resolve_keep_assignee_enabled() else value
+    deve limpar o atendente humano ao FECHAR a conversa.
+
+    Devolve ``False`` (mantém o atendente vinculado) em dois casos:
+
+    * ``resolve_keep_assignee`` ligado — o toggle legado, "manter para sempre";
+    * posse temporária ativa (:func:`ai_takeover_enabled`) E a conversa tem um atendente
+      humano — ele segura a conversa durante a janela e a IA reassume no vencimento
+      (a varredura do lifecycle). Sem atendente não há o que manter: cai no ``value``
+      recebido e o hold é armado no modo ``muted`` (IA calada por ``ai_active=0``).
+
+    Nunca levanta: sem ``ctx`` (chamada direta dos testes) ou com a conversa ilegível,
+    responde só pelo toggle legado."""
+    if resolve_keep_assignee_enabled():
+        return False
+    if not ai_takeover_enabled():
+        return value
+    conv_id = (getattr(ctx, "extras", None) or {}).get("conversation_id")
+    if not conv_id:
+        return value
+    try:
+        conv = conversation_repo.get(int(conv_id))
+    except Exception as e:  # noqa: BLE001 — filtro nunca trava o fechamento
+        logger.debug("protocolos: clear_assignee_on_close não leu a conversa %s: %s",
+                     conv_id, e)
+        return value
+    if conv and conv.get("assignee_user_id") is not None:
+        return False  # dono humano segura a conversa durante a janela
+    return value
 
 
 def relink_prompt_enabled() -> bool:
@@ -3059,6 +3119,7 @@ def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
         "resolve_keep_assignee": resolve_keep_assignee_enabled(),
+        "ai_takeover_delay_minutes": ai_takeover_delay_minutes(),
         "reactivate_ai_on_close": get_reactivate_ai_on_close_setting(),
         "relink_prompt_enabled": relink_prompt_enabled(),
         "relink_window_minutes": relink_window_minutes(),
@@ -3079,6 +3140,14 @@ def set_general_config(cfg: dict) -> dict:
     if "reactivate_ai_on_close" in cfg:
         config_repo.set(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close",
                         bool(cfg.get("reactivate_ai_on_close")))
+    # Janela da posse temporária (minutos). Só grava quando presente; inválido cai no
+    # default 30 e negativo vira 0 (= devolver na hora, comportamento legado).
+    if "ai_takeover_delay_minutes" in cfg:
+        try:
+            d = int(cfg.get("ai_takeover_delay_minutes"))
+        except (TypeError, ValueError):
+            d = 30
+        config_repo.set(_general_key("ai_takeover_delay_minutes"), max(0, min(d, 10080)))
     # Chaves do plano 49: só grava quando presentes (payloads antigos não zeram o default).
     if "relink_prompt_enabled" in cfg:
         config_repo.set(_general_key("relink_prompt_enabled"),
@@ -3704,11 +3773,32 @@ def get_reactivate_ai_on_close_setting() -> bool:
     return bool(config_repo.get(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close", True))
 
 
+def _ai_master_gate(conv_id: int) -> bool:
+    """Interruptor GLOBAL (``auto_reply``) + IA do CANAL (``ai_enabled``) da conversa.
+
+    MESMA regra do webhook ``_channel_ai_enabled`` (que é closure e não é importável),
+    replicada aqui: global primeiro, depois canal. ``False`` também quando o runtime não
+    está cabeado (sem ``deps``) — nesses casos não há como religar a IA mesmo."""
+    from plugins.context import get_deps
+    deps = get_deps()
+    if not deps:
+        return False
+    if not deps.settings.get("auto_reply", True):
+        return False
+    from channels import ai_settings
+    return bool(ai_settings.value(_channel_for_conversation(conv_id), "ai_enabled", True))
+
+
 async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) -> None:
-    """Ao FINALIZAR o protocolo: religa a IA na conversa mais recente se o interruptor
-    GLOBAL (``auto_reply``) E a IA do CANAL (``ai_enabled``) estiverem ligados. Mantém a
-    tag ``transferido_atendente`` (é só rótulo visual desde o plano 37, não trava mais
-    a IA). Best-effort — nunca levanta (não pode quebrar a resposta do fechar).
+    """Ao FINALIZAR o protocolo: devolve a conversa à IA se o interruptor GLOBAL
+    (``auto_reply``) E a IA do CANAL (``ai_enabled``) estiverem ligados. Mantém a tag
+    ``transferido_atendente`` (é só rótulo visual desde o plano 37, não trava mais a IA).
+    Best-effort — nunca levanta (não pode quebrar a resposta do fechar).
+
+    Com a POSSE TEMPORÁRIA ativa (janela > 0) a devolução não é imediata: garante que há
+    um hold armado para a conversa (cobre finalizar sem ter resolvido agora) e sai — quem
+    devolve é a varredura de vencimento. Sem janela (``0``), comportamento legado: devolve
+    na hora.
 
     Reusa ``conversation_service.set_ai`` (limpa o assignee humano, revincula o agente
     de IA padrão do inbox e grava ``ai_active=1``) porque só gravar ``ai_active=1`` não
@@ -3720,20 +3810,20 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
         conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
         if not conv_id:
             return
-        channel_id = _channel_for_conversation(conv_id)
-        from plugins.context import get_deps
-        deps = get_deps()
-        if not deps:
-            return
-        # Gate global + canal — MESMA regra do webhook ``_channel_ai_enabled`` (que é
-        # closure e não é importável), replicada aqui: global primeiro, depois canal.
-        if not deps.settings.get("auto_reply", True):
-            return
-        from channels import ai_settings
-        if not ai_settings.value(channel_id, "ai_enabled", True):
+        if not _ai_master_gate(conv_id):
             return
         conv = conversation_repo.get(conv_id)
         if not conv:
+            return
+        if ai_takeover_enabled():
+            # Janela ativa: quem devolve é o vencimento. Arma se ainda não há hold (o
+            # caminho normal já armou no resolver; isto cobre finalizar isolado).
+            if get_ai_hold(conv_id) is None:
+                arm_ai_hold(conv, protocolo_id=(at or {}).get("id"), reason="finalizar")
+            return
+        from plugins.context import get_deps
+        deps = get_deps()
+        if not deps:
             return
         # Guard anti-ruído: só age se a IA está de fato desligada nesta conversa
         # (ai_active=0 OU humano no comando sem agente de IA) — evita card "ai_on"
@@ -3750,6 +3840,345 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
             deps, conv, 1, actor_name=None, clear_transfer_tag=False)
     except Exception as e:  # noqa: BLE001
         logger.warning("protocolos: reactivate_ai_after_close falhou: %s", e)
+
+
+# ── Posse temporária do atendente pós-fechamento ─────────────────────────────
+# "Quem resolveu fica com a conversa por N minutos, depois a IA reassume."
+#
+# O mecanismo é POSSE, não mordaça: o core já cala a IA quando a conversa tem dono
+# humano sem agente vinculado (``messaging_service._conversation_ai_active``), e o
+# fechar SEMPRE limpa o ``active_agent_key``. Então manter o atendente (via
+# ``clear_assignee_on_close``) já é o silêncio — de graça, por conversa e com o selo
+# honesto. Só falta devolver a conversa à IA quando o prazo vence: é o que a varredura
+# do lifecycle faz, lendo ``plugin_protocolos_ai_holds``.
+#
+# Conversa fechada SEM atendente (a própria IA/automação fechou) não tem dono a segurar:
+# aí o hold entra no modo ``muted`` e a conversa recebe ``ai_active=0`` durante a janela
+# (IA calada + selo "IA OFF"), voltando a 1 no vencimento.
+#
+# Qualquer ação HUMANA dentro da janela APAGA o hold: o atendente respondeu, reabriu pelo
+# painel ou religou a IA na mão — em todos os casos o automático sai de cena.
+
+_HOLDS_TABLE = "plugin_protocolos_ai_holds"
+
+
+def get_ai_hold(conversation_id: int) -> dict | None:
+    """Hold pendente da conversa (ou ``None``). Best-effort: erro ⇒ ``None``."""
+    try:
+        with make_plugin_db() as conn:
+            row = conn.execute(
+                text(f"SELECT conversation_id, hold_until, mode, owner_user_id, "
+                     f"protocolo_id, reason, set_at FROM {_HOLDS_TABLE} "
+                     f"WHERE conversation_id = :cv"),
+                {"cv": int(conversation_id)}).mappings().first()
+        return dict(row) if row else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: get_ai_hold falhou conv=%s: %s", conversation_id, e)
+        return None
+
+
+def _write_ai_hold(conversation_id: int, *, hold_until: float, mode: str,
+                   owner_user_id: int | None, protocolo_id: int | None,
+                   reason: str) -> None:
+    """Upsert do hold (uma linha por conversa). Best-effort — uma falha aqui só
+    significa que a IA volta no prazo antigo (fail-open, nunca quebra o fechamento)."""
+    ts = now()
+    try:
+        with make_plugin_db() as conn:
+            conn.execute(
+                text(f"INSERT INTO {_HOLDS_TABLE} (conversation_id, hold_until, mode, "
+                     f"owner_user_id, protocolo_id, reason, set_at) "
+                     f"VALUES (:cv, :until, :mode, :owner, :proto, :reason, :ts) "
+                     f"ON CONFLICT (conversation_id) DO UPDATE SET "
+                     f"hold_until = EXCLUDED.hold_until, mode = EXCLUDED.mode, "
+                     f"owner_user_id = EXCLUDED.owner_user_id, "
+                     f"protocolo_id = COALESCE(EXCLUDED.protocolo_id, {_HOLDS_TABLE}.protocolo_id), "
+                     f"reason = EXCLUDED.reason, set_at = EXCLUDED.set_at"),
+                {"cv": int(conversation_id), "until": float(hold_until), "mode": mode,
+                 "owner": owner_user_id, "proto": protocolo_id,
+                 "reason": reason or "", "ts": ts})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: não consegui armar a posse temporária conv=%s: %s",
+                       conversation_id, e)
+
+
+def clear_ai_hold(conversation_id: int) -> bool:
+    """Apaga o hold da conversa. ``True`` quando havia um (para o caller decidir se
+    precisa religar a IA no modo ``muted``)."""
+    try:
+        with make_plugin_db() as conn:
+            res = conn.execute(
+                text(f"DELETE FROM {_HOLDS_TABLE} WHERE conversation_id = :cv"),
+                {"cv": int(conversation_id)})
+        return bool(res.rowcount)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: clear_ai_hold falhou conv=%s: %s", conversation_id, e)
+        return False
+
+
+def clear_ai_holds_of_protocolo(protocolo_id: int) -> None:
+    """Apaga os holds das conversas de um protocolo (reabrir/religar protocolo = o
+    atendente está retomando o atendimento). Religa a IA das que estavam ``muted``."""
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text(f"SELECT conversation_id, mode FROM {_HOLDS_TABLE} "
+                     f"WHERE protocolo_id = :pid"),
+                {"pid": int(protocolo_id)}).mappings().all()
+            if not rows:
+                return
+            conn.execute(text(f"DELETE FROM {_HOLDS_TABLE} WHERE protocolo_id = :pid"),
+                         {"pid": int(protocolo_id)})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: clear_ai_holds_of_protocolo falhou pid=%s: %s",
+                     protocolo_id, e)
+        return
+    for r in rows:
+        if r["mode"] == "muted":
+            _set_conversation_ai_active(int(r["conversation_id"]), 1)
+
+
+def list_expired_ai_holds(now_ts: float, limit: int = 200) -> list[dict]:
+    """Holds cujo prazo VENCEU (``hold_until <= now``), mais antigos primeiro.
+    Alimenta a varredura do lifecycle. Best-effort: erro ⇒ lista vazia."""
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text(f"SELECT conversation_id, hold_until, mode, owner_user_id, "
+                     f"protocolo_id FROM {_HOLDS_TABLE} WHERE hold_until <= :now "
+                     f"ORDER BY hold_until LIMIT :lim"),
+                {"now": float(now_ts), "lim": int(limit)}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: list_expired_ai_holds falhou: %s", e)
+        return []
+
+
+def _set_conversation_ai_active(conversation_id: int, ai_active: int) -> None:
+    """Liga/desliga a IA da conversa no CORE + broadcast do selo (modo ``muted``).
+
+    Usa a primitiva low-level ``conversation_repo.set_ai_active`` de propósito: sem mexer
+    no assignee, sem card de sistema e — importante — o broadcast abaixo é WS puro (não o
+    bus ``emit``), então não realimenta :func:`on_conversation_ai_toggled`."""
+    try:
+        conv = conversation_repo.set_ai_active(int(conversation_id), int(ai_active))
+        if not conv:
+            return
+        broadcast("conversation_ai_toggled", {
+            "conversation_id": conv["id"], "contact_id": conv.get("contact_id"),
+            "ai_active": int(ai_active), "ts": now()})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: set_ai_active(%s) falhou conv=%s: %s",
+                     ai_active, conversation_id, e)
+
+
+def arm_ai_hold(conv: dict, *, protocolo_id: int | None = None,
+                reason: str = "resolver") -> dict | None:
+    """Arma a posse temporária para uma conversa recém-fechada.
+
+    Com atendente (o filtro ``clear_assignee_on_close`` já o preservou) ⇒ modo ``owner``:
+    nada é escrito na conversa, o core já cala a IA sozinho. Sem atendente ⇒ modo
+    ``muted``: grava ``ai_active=0`` (IA calada + selo "IA OFF" durante a janela).
+
+    Devolve o hold gravado (ou ``None`` quando a feature está desligada)."""
+    if not conv or not ai_takeover_enabled():
+        return None
+    conv_id = int(conv["id"])
+    owner = conv.get("assignee_user_id")
+    mode = "owner" if owner is not None else "muted"
+    until = now() + ai_takeover_delay_minutes() * 60.0
+    if protocolo_id is None:
+        protocolo_id = _protocolo_id_of_conversation(conv_id)
+    _write_ai_hold(conv_id, hold_until=until, mode=mode,
+                   owner_user_id=int(owner) if owner is not None else None,
+                   protocolo_id=protocolo_id, reason=reason)
+    if mode == "muted" and conv.get("ai_active"):
+        _set_conversation_ai_active(conv_id, 0)
+    logger.info("protocolos: posse temporária armada conv=%s modo=%s até %.0f",
+                conv_id, mode, until)
+    return get_ai_hold(conv_id)
+
+
+def _protocolo_id_of_conversation(conversation_id: int) -> int | None:
+    """Protocolo do ciclo mais recente da conversa (para limpar o hold ao reabrir o
+    protocolo). ``None`` quando a conversa não está vinculada."""
+    try:
+        with make_plugin_db() as conn:
+            row = conn.execute(
+                text("SELECT protocolo_id FROM plugin_protocolos_atendimentos "
+                     "WHERE conversation_id = :cv ORDER BY id DESC LIMIT 1"),
+                {"cv": int(conversation_id)}).mappings().first()
+        return int(row["protocolo_id"]) if row and row["protocolo_id"] is not None else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: _protocolo_id_of_conversation falhou: %s", e)
+        return None
+
+
+def cancel_ai_hold(conversation_id: int, *, restore_ai: bool = True,
+                   why: str = "") -> bool:
+    """Encerra a posse temporária ANTES do vencimento porque um humano agiu.
+
+    A conversa NÃO é devolvida à IA: quem agiu fica com ela. A exceção é o modo
+    ``muted`` (fechada sem dono) — lá não há atendente a preservar, então religar a IA
+    (``restore_ai``) mantém o comportamento de sempre. ``True`` quando havia hold."""
+    hold = get_ai_hold(conversation_id)
+    if hold is None:
+        return False
+    clear_ai_hold(conversation_id)
+    if restore_ai and hold.get("mode") == "muted":
+        _set_conversation_ai_active(int(conversation_id), 1)
+    logger.info("protocolos: posse temporária encerrada conv=%s (%s)",
+                conversation_id, why or "humano agiu")
+    return True
+
+
+def on_conversation_status(ctx, payload: dict) -> None:
+    """``conversation.status_changed`` → arma a posse ao FECHAR, cancela ao reabrir.
+
+    O payload do core já traz ``assignee_user_id``/``ai_active``, então armar não relê a
+    conversa. Só a reabertura MANUAL (painel) passa por aqui — a automática (cliente
+    escreveu) não emite este evento, e é justamente o que queremos: o prazo continua
+    correndo com o atendente segurando a conversa reaberta."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        status = payload.get("status")
+        if status == "closed":
+            if not ai_takeover_enabled():
+                return
+            arm_ai_hold({"id": conv_id,
+                         "assignee_user_id": payload.get("assignee_user_id"),
+                         "ai_active": payload.get("ai_active")},
+                        reason="resolver")
+        elif status == "open":
+            cancel_ai_hold(int(conv_id), why="reaberta no painel")
+    except Exception as e:  # noqa: BLE001 — handler nunca quebra o pipeline
+        logger.debug("protocolos.on_conversation_status falhou: %s", e)
+
+
+def on_conversation_ai_toggled(ctx, payload: dict) -> None:
+    """``conversation.ai_toggled`` → o operador devolveu a IA na mão durante a janela.
+
+    Só reage a religar (``ai_active`` verdadeiro): a IA já está no comando, o hold não
+    tem mais o que fazer. Desligar a IA não mexe na janela. Não há realimentação: o
+    espelho do modo ``muted`` usa broadcast WS puro, não o bus."""
+    try:
+        payload = payload or {}
+        if not payload.get("ai_active"):
+            return
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if conv_id:
+            # restore_ai=False: a IA já foi religada por quem emitiu o evento.
+            cancel_ai_hold(int(conv_id), restore_ai=False, why="IA religada no painel")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_ai_toggled falhou: %s", e)
+
+
+def on_conversation_assigned(ctx, payload: dict) -> None:
+    """``conversation.assigned`` → alguém mexeu na posse durante a janela.
+
+    Passou para um AGENTE de IA (``active_agent_key``) ⇒ o hold perdeu a razão de ser.
+    Passou para outro humano ⇒ atualiza o dono e mantém o prazo (a conversa continua
+    com gente, só que outra)."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        hold = get_ai_hold(int(conv_id))
+        if hold is None:
+            return
+        if payload.get("active_agent_key"):
+            cancel_ai_hold(int(conv_id), restore_ai=False, why="IA assumiu a conversa")
+            return
+        owner = payload.get("assignee_user_id")
+        if owner is not None and owner != hold.get("owner_user_id"):
+            _write_ai_hold(int(conv_id), hold_until=float(hold["hold_until"]),
+                           mode="owner", owner_user_id=int(owner),
+                           protocolo_id=hold.get("protocolo_id"),
+                           reason=hold.get("reason") or "")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned falhou: %s", e)
+
+
+# ``message.sent`` de HUMANO (o envio da IA usa source="ai" e não pode se auto-liberar).
+_HUMAN_SEND_SOURCES = frozenset({"operator", "template"})
+
+
+def cancel_ai_hold_on_human_send(payload: dict) -> None:
+    """Chamado de ``on_outbound``: o ATENDENTE respondeu dentro da janela ⇒ ele fica
+    com a conversa e a devolução automática é cancelada.
+
+    O payload de ``message.sent`` não traz ``conversation_id``, então resolvemos pelo
+    telefone (aberta primeiro; o envio do operador já reabriu a conversa nesse ponto).
+    Não passa pelo ``_resolve_target`` de propósito: aquele é gated por ``auto_link``,
+    que não tem nada a ver com posse.
+
+    LIMITAÇÃO CONHECIDA (herdada do payload): a resolução é CHANNEL-BLIND. Num install
+    multicanal com o MESMO número em dois canais, responder num canal pode encerrar a
+    janela do outro. Corrigir exigiria o core mandar ``channel_id``/``conversation_id``
+    no evento. O erro é a favor do humano (a IA deixa de reassumir), não contra."""
+    try:
+        payload = payload or {}
+        if str(payload.get("source") or "") not in _HUMAN_SEND_SOURCES:
+            return
+        phone = payload.get("phone")
+        if not phone:
+            return
+        contact = contact_repo.get_by_phone(phone)
+        if not contact:
+            return
+        conv = (conversation_repo.get_open_for_contact(contact["id"])
+                or conversation_repo.get_latest_for_contact(contact["id"]))
+        if conv:
+            cancel_ai_hold(int(conv["id"]), why="atendente respondeu")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.cancel_ai_hold_on_human_send falhou: %s", e)
+
+
+async def expire_ai_holds_once() -> int:
+    """Uma passada da varredura: devolve à IA as conversas cujo prazo venceu.
+
+    Reusa ``conversation_service.set_ai`` (limpa o dono humano, revincula o agente padrão
+    do inbox, grava ``ai_active=1`` e emite o card "🤖 SISTEMA reativou a IA.") — a mesma
+    porta que o finalizar-protocolo sempre usou. Gates global/canal desligados ⇒ a linha é
+    apagada sem religar (a IA está desligada de propósito). Devolve quantas foram
+    devolvidas. Nunca levanta."""
+    import asyncio
+
+    rows = await asyncio.to_thread(list_expired_ai_holds, now())
+    if not rows:
+        return 0
+    from plugins.context import get_deps
+    deps = get_deps()
+    if not deps:
+        # Runtime não cabeado (boot degradado): não dá para devolver nada AGORA, e
+        # apagar a linha perderia a intenção. Deixa para a próxima passada.
+        logger.debug("protocolos: varredura sem deps — %d hold(s) adiado(s)", len(rows))
+        return 0
+    released = 0
+    for row in rows:
+        conv_id = int(row["conversation_id"])
+        try:
+            conv = await asyncio.to_thread(conversation_repo.get, conv_id)
+            if not conv:
+                await asyncio.to_thread(clear_ai_hold, conv_id)
+                continue
+            if not await asyncio.to_thread(_ai_master_gate, conv_id):
+                await asyncio.to_thread(clear_ai_hold, conv_id)
+                continue
+            from app.services import conversation_service
+            # actor_name=None ⇒ card "🤖 SISTEMA reativou a IA." (ação automática).
+            await conversation_service.set_ai(
+                deps, conv, 1, actor_name=None, clear_transfer_tag=False)
+            await asyncio.to_thread(clear_ai_hold, conv_id)
+            released += 1
+        except Exception as e:  # noqa: BLE001 — uma conversa ruim não para a varredura
+            logger.warning("protocolos: falha ao devolver a conversa %s à IA: %s",
+                           conv_id, e)
+    return released
 
 
 # ── Enforcement no backend (filter.conversation.before_status) ────────────────

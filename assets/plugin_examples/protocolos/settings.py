@@ -42,11 +42,12 @@ class Settings(BaseModel):
     )
     reactivate_ai_on_close: bool = Field(
         default=True,
-        title="Religar a IA ao finalizar o protocolo",
+        title="Devolver a conversa à IA depois de resolver",
         description=(
-            "Ao FINALIZAR um protocolo, se o interruptor global da IA e a IA do canal "
-            "estiverem ligados, religar a IA na conversa (mantendo a tag de "
-            "transferência) — o cliente volta a ser atendido pela IA sem depender de o "
-            "atendente lembrar de religá-la. Desligado, o fechamento não mexe na IA."
+            "Depois que o atendimento é resolvido, devolver a conversa à IA (se o "
+            "interruptor global e a IA do canal estiverem ligados). O tempo de espera "
+            "fica na aba Geral do plugin: durante ele o atendente que resolveu continua "
+            "com a conversa e a IA fica calada; com o tempo em 0 a IA reassume assim que "
+            "o protocolo é finalizado. Desligado, o fechamento não mexe na IA."
         ),
     )
