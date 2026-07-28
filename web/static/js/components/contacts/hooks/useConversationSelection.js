@@ -54,6 +54,14 @@ export function useConversationSelection({
   const [openPanel, setOpenPanel] = useState(null);
 
   const hasLoadedDetail = useRef(false);
+  // plano 85 A1 — token de sequência do carregamento do DETALHE, espelhando o
+  // `fetchSeqRef` que a LISTA ganhou no plano 62 F3. Só a carga mais recente pode
+  // gravar `contactData`: uma resposta que chega depois de a seleção ter mudado
+  // (clique rápido A→B, rede lenta, resposta fora de ordem) é DESCARTADA, em vez
+  // de sobrescrever a thread aberta com a conversa anterior. Sem AbortController
+  // de propósito (P1): o GET do atendimento marca a conversa como lida e agenda
+  // recibos — abortar perderia esse efeito colateral na conversa recém-aberta.
+  const detailSeqRef = useRef(0);
   const openInfoAfterSelect = useRef(false);
   const pendingWsMessages = useRef({});
   const selectedRef = useRef(null);
@@ -200,11 +208,13 @@ export function useConversationSelection({
     // abrir o atendimento de outro canal do mesmo número (multicanal).
     const newConvChannel = newConvChannelRef.current;
     newConvChannelRef.current = null;
+    const token = ++detailSeqRef.current;   // plano 85 A1
     const loader = convId != null
       ? getConversationMessages(convId, isPageVisible).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
       : getContact(selected, isPageVisible, newConvChannel);
     loader.then(res => {
+      if (token !== detailSeqRef.current) return;  // resposta obsoleta — descarta
       if (res.ok) {
         const data = res.data;
         if (data.channel_id) setSelectedChannelId(data.channel_id);
@@ -253,11 +263,16 @@ export function useConversationSelection({
     const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
     pendingWsMessages.current[bufKey] = [];
     const isPageVisible = pageVisibleRef.current;
+    // plano 85 A1 — mesmo token da carga de seleção: este reload substitui a thread
+    // inteira, então ele invalida uma carga anterior em voo (ambas são da MESMA
+    // thread) e é invalidado por qualquer troca de conversa que aconteça no meio.
+    const token = ++detailSeqRef.current;
     const loader = convId != null
       ? getConversationMessages(convId, isPageVisible).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
       : getContact(sel, isPageVisible, null);
     loader.then(res => {
+      if (token !== detailSeqRef.current) return;  // resposta obsoleta — descarta
       if (!res.ok) return;
       const data = res.data;
       if (data.channel_id) setSelectedChannelId(data.channel_id);
@@ -289,6 +304,12 @@ export function useConversationSelection({
     if (!sel && convId == null) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
+    // plano 85 A1 — CAPTURA o token (não incrementa): paginar para trás não invalida
+    // uma carga de seleção em voo, mas qualquer troca de conversa invalida esta
+    // página. Sem isso, a página anterior da conversa A era prependada na thread de
+    // B se o operador trocasse de conversa durante a rolagem (`loadingOlderRef` só
+    // protege contra `loadOlder` concorrente consigo mesmo).
+    const token = detailSeqRef.current;
     const loader = convId != null
       ? getConversationMessages(convId, false, { beforeId }).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
@@ -296,6 +317,7 @@ export function useConversationSelection({
     loader.then(res => {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
+      if (token !== detailSeqRef.current) return;  // trocou de conversa — descarta
       if (!res.ok) return;
       let older = res.data.messages || [];
       const newHasMore = !!res.data.has_more;
