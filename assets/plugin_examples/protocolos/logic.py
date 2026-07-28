@@ -708,12 +708,9 @@ def ensure_protocolo_for_contact(contact_id: int, phone: str = "", name: str = "
         pass  # perdeu a corrida → o vencedor já existe; re-seleciona abaixo
     at = _select_open_protocolo(contact_id)
     if created and at and announce_open:
+        # Só a nota PRIVADA (com o ID pesquisável). NÃO há card de sistema na abertura:
+        # a nota já anuncia o protocolo e o card era redundante no fio.
         _write_open_note(at, conversation_id)
-        # Card de sistema "Protocolo aberto" no fio da atendimento (igual ao de resolver
-        # atendimento). Só na CRIAÇÃO real (não em re-seleção do existente nem no backfill).
-        _emit_proto_notice("protocolo_opened", conversation_id=conversation_id,
-                           contact_id=at.get("contact_id"),
-                           phone=at.get("contact_phone") or None)
     return at
 
 
@@ -756,8 +753,9 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
 
 
 # ── Avisos de sistema no fio da atendimento (cards conversation_event) ───────────
-# Marca a ABERTURA e a FINALIZAÇÃO do protocolo como cards de sistema no chat —
-# mesmo visual dos avisos de resolver/reabrir ATENDIMENTO (plano 12). O plugin REGISTRA
+# Marca a FINALIZAÇÃO (e o re-vínculo) do protocolo como cards de sistema no chat —
+# mesmo visual dos avisos de resolver/reabrir ATENDIMENTO (plano 12). A ABERTURA NÃO
+# gera card: a nota privada com o ID (``_write_open_note``) já a anuncia. O plugin REGISTRA
 # seu próprio grupo + tipos no registry do core (``server.system_notices``) via
 # ``plugins.context.register_notice*`` — SEM dar patch no core. Gate por config
 # namespaceada do plugin (``plugin.protocolos.system_notice_lifecycle``, default ON).
@@ -765,10 +763,6 @@ def _write_open_note(at: dict, conversation_id: int | None) -> None:
 
 _NOTICE_GROUP = "protocolo_lifecycle"
 _NOTICE_CONFIG_KEY = f"plugin.{PLUGIN_ID}.system_notice_lifecycle"
-
-
-def _f_protocolo_opened(actor=None, **_) -> str:
-    return f"📂 {actor} abriu o protocolo." if actor else "📂 Protocolo aberto."
 
 
 def _f_protocolo_closed(actor=None, **_) -> str:
@@ -802,14 +796,13 @@ def _f_atend_status_reopened_auto_agent(**_) -> str:
 
 
 def register_system_notices() -> None:
-    """Registra (idempotente) o grupo + os 2 tipos de aviso do protocolo no core, e
+    """Registra (idempotente) o grupo + os tipos de aviso do protocolo no core, e
     sobrescreve os avisos de STATUS do core para a redação "atendimento".
     Best-effort: falha (ex.: ``server`` ausente nos testes) nunca quebra o startup."""
     try:
         from plugins.context import register_notice_group, register_notice
-        register_notice_group(_NOTICE_GROUP, "Protocolo (abrir/finalizar)",
+        register_notice_group(_NOTICE_GROUP, "Protocolo (finalizar/vincular)",
                               config_key=_NOTICE_CONFIG_KEY, default=True)
-        register_notice("protocolo_opened", _NOTICE_GROUP, _f_protocolo_opened)
         register_notice("protocolo_closed", _NOTICE_GROUP, _f_protocolo_closed)
         register_notice("protocolo_relinked", _NOTICE_GROUP, _f_protocolo_relinked)
         # Reusa o grupo "status" do core (mantém o mesmo toggle system_notice_status).
@@ -2712,7 +2705,7 @@ def on_startup(ctx, payload: dict) -> None:
     """``app.startup`` → backfills one-time idempotentes + registro dos atributos de
     atendimento no core + registro dos avisos de sistema do protocolo. Boot nunca quebra
     por causa daqui (tudo defensivo)."""
-    register_system_notices()  # grupo + tipos de aviso (abrir/finalizar protocolo)
+    register_system_notices()  # grupo + tipos de aviso (finalizar/vincular protocolo)
     try:
         _maybe_backfill()  # blob `fields` legado → tabelas normalizadas
     except Exception as e:  # noqa: BLE001
