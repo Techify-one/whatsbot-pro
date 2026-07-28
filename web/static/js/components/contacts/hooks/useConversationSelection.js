@@ -22,6 +22,23 @@ import { shapeConvData } from '../../../services/conversationRows.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
 
 /**
+ * Chave canônica da thread aberta (plano 85 A2/A4) — a MESMA fórmula do `rowKeyFor`
+ * da sidebar, para que o carimbo gravado em `contactData` possa ser comparado com a
+ * seleção corrente no render do container. Preferir o atendimento ao telefone é o que
+ * mantém a chave ESTÁVEL num deep-link `/conversations/:id` (que abre com `selected`
+ * nulo e adota o telefone da resposta depois) — senão a chave mudaria no meio e o
+ * painel piscaria "Carregando..." sem necessidade.
+ *
+ * @param {string|null} phone
+ * @param {number|null} convId
+ * @returns {string|null} `conv:<id>` | `phone:<n>` | null (nada selecionado)
+ */
+export function threadKeyOf(phone, convId) {
+  if (convId != null) return `conv:${convId}`;
+  return phone ? `phone:${phone}` : null;
+}
+
+/**
  * @param {Object} opts
  * @param {Record<string, any>[]} opts.contacts
  * @param {boolean} opts.loading
@@ -53,7 +70,12 @@ export function useConversationSelection({
   // null. Single state so opening one closes the other (no overlapping drawers).
   const [openPanel, setOpenPanel] = useState(null);
 
-  const hasLoadedDetail = useRef(false);
+  // plano 85 A2 — QUAL thread está carregada em `contactData` (era `hasLoadedDetail`,
+  // um booleano one-shot da MONTAGEM: ele ligava o "Carregando..." só na primeira
+  // conversa da sessão, então a partir da segunda o operador olhava a thread anterior
+  // durante toda a carga sem nenhuma indicação visual). Guarda a chave de `threadKeyOf`
+  // e o carregamento é ligado sempre que a thread pedida ≠ a thread carregada.
+  const loadedThreadKeyRef = useRef(null);
   // plano 85 A1 — token de sequência do carregamento do DETALHE, espelhando o
   // `fetchSeqRef` que a LISTA ganhou no plano 62 F3. Só a carga mais recente pode
   // gravar `contactData`: uma resposta que chega depois de a seleção ter mudado
@@ -178,14 +200,23 @@ export function useConversationSelection({
   // per-conversation endpoint (scoped to one channel); fall back to the legacy
   // per-contact endpoint for rows without a conversation.
   useEffect(() => {
-    if (!selected && selectedConvId == null) { setContactData(null); return; }
+    if (!selected && selectedConvId == null) {
+      setContactData(null);
+      loadedThreadKeyRef.current = null;
+      setLoadingDetail(false);
+      return;
+    }
     if (openInfoAfterSelect.current) {
       openInfoAfterSelect.current = false;
       setOpenPanel('contact');
     } else {
       setOpenPanel(null);
     }
-    if (!hasLoadedDetail.current) setLoadingDetail(true);
+    // plano 85 A2 — carregamento por CONVERSA: liga sempre que a thread pedida não é a
+    // que já está em `contactData`. Um refetch da MESMA thread (ex.: o segundo passe do
+    // deep-link, que só adota o telefone da resposta) roda em silêncio, sem piscar.
+    const threadKey = threadKeyOf(selected, selectedConvId);
+    if (loadedThreadKeyRef.current !== threadKey) setLoadingDetail(true);
     // Preserve any messages already buffered for this thread (arrived before selection)
     // but reset the accumulator for new messages arriving during fetch
     const bufKey = selected || (selectedConvId != null ? `conv:${selectedConvId}` : '');
@@ -239,8 +270,15 @@ export function useConversationSelection({
         });
         pendingWsMessages.current[bufKey] = [];
         setContactData(data);
+        loadedThreadKeyRef.current = threadKey;
       }
-      hasLoadedDetail.current = true;
+      setLoadingDetail(false);
+    }).catch(() => {
+      // plano 85 A2 — `httpClient.request` não engole rejeição (rede caiu, 502 num
+      // redeploy): sem este catch a promise ficava não-tratada e `setLoadingDetail(false)`
+      // nunca rodava — a tela travava em "Carregando..." para sempre. A mensagem de erro
+      // visível + "Tentar de novo" entram na A3.
+      if (token !== detailSeqRef.current) return;
       setLoadingDetail(false);
     });
   }, [selected, selectedConvId]);
