@@ -3,7 +3,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks'
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
-import { ContactList, typingKey, rowKeyFor } from './ContactList.js';
+import { ContactList, typingKey, rowKeyFor, operatorTypingFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
@@ -280,7 +280,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   } = picker;
 
   // ── Real-time WS events (sidebar + open thread patches) ─────────────
-  const { typingState, aiRespondingState, convAttrPatch } = useConversationWsEvents({
+  const { typingState, aiRespondingState, operatorTypingState, convAttrPatch } = useConversationWsEvents({
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
     contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, conversationCreated,
@@ -378,6 +378,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
           aiRespondingState=${aiRespondingState}
+          operatorTypingState=${operatorTypingState}
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
@@ -440,6 +441,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
                 aiResponding=${selected && !!aiRespondingState[typingKey({ channelId: selectedChannelId, phone: selected })]}
+                operatorTyping=${selected ? operatorTypingFor(operatorTypingState, { conversation_id: selectedConvId, channel_id: selectedChannelId, phone: selected }) : null}
                 globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}

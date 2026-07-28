@@ -40,6 +40,16 @@ const SelectManyIcon = () => html`
     <path d="M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z"/>
   </svg>`;
 
+// Três pontinhos pulsando — a assinatura visual de "digitando" (Chatwoot/WhatsApp).
+// O atraso escalonado é inline porque o valor não existe como classe do Tailwind.
+const TypingDots = () => html`
+  <span class="flex items-center gap-[3px] shrink-0">
+    ${[0, 150, 300].map(d => html`
+      <span key=${d} class="inline-block w-[5px] h-[5px] rounded-full bg-wa-secondary animate-bounce"
+            style=${`animation-delay:${d}ms`}></span>`)}
+  </span>
+`;
+
 // ── Contact Detail (WhatsApp Web chat panel) ─────────────────────
 //
 // Thin container (Plano 23 · D3): composes the message-list render + the
@@ -50,7 +60,7 @@ const SelectManyIcon = () => html`
 // stay here; everything composer-related lives in the hooks/components.
 
 export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact,
-  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
+  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, operatorTyping = null, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -566,6 +576,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             })
         }
       </div>
+
+      <!-- Balão flutuante "Fulano está digitando" (multi-operador, estilo Chatwoot).
+           Só aparece com OUTRO atendente digitando nesta conversa — o estado já vem
+           sem o próprio usuário logado. Container de altura zero + posição absoluta:
+           flutua sobre o fim da conversa sem empurrar a rolagem nem o compositor. -->
+      ${operatorTyping ? html`
+        <div class="relative h-0 z-10 pointer-events-none">
+          <div class="absolute bottom-[8px] left-1/2 -translate-x-1/2 max-w-[70%] flex items-center gap-2
+                      bg-wa-panel border border-wa-border rounded-full shadow-md px-3 py-[6px]">
+            <span class="text-[13px] text-wa-secondary truncate">
+              <span class="text-wa-text font-medium">${operatorTyping.name}</span>${' está digitando'}
+            </span>
+            <${TypingDots} />
+          </div>
+        </div>` : null}
 
       <!-- Barra de ação em lote (plano 51 · 04 F1): só existe em selectionMode. -->
       ${actions.selectionMode ? html`

@@ -254,6 +254,37 @@ async def _emit_channel_event(deps, bus_event: str, payload: dict) -> None:
         logger.debug("channel event %s failed: %s", bus_event, e)
 
 
+def audit_snapshot(row: dict | None, creds: dict | None = None) -> dict:
+    """Estado do canal seguro para a TRILHA DE AUDITORIA (before/after).
+
+    Carrega o que o operador de fato editou — nome, ligado/desligado, arquivado e
+    o ``config`` inteiro (onde moram os overrides de IA por canal, plano 21) — e
+    NUNCA valor de credencial: só a LISTA de chaves preenchidas. O mascaramento do
+    ``audit_repo`` é por nome de chave e não cobriria uma credencial de nome
+    inocente (``proxy_url``, ``page_id``), então a decisão é aqui: valor de
+    credencial não entra na trilha, ponto.
+    """
+    if not row:
+        return {}
+    cfg = row.get("config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:  # noqa: BLE001 — config malformada vai crua pro diff
+            pass
+    out = {
+        "id": row.get("id"),
+        "provider": row.get("provider"),
+        "display_name": row.get("display_name"),
+        "enabled": bool(row.get("enabled")),
+        "archived": bool(row.get("archived")),
+        "config": cfg,
+    }
+    if creds is not None:
+        out["credential_keys"] = sorted(k for k, v in (creds or {}).items() if v)
+    return out
+
+
 # ── Read paths ──────────────────────────────────────────────────────────────────
 
 async def list_channels(deps, archived: bool = False) -> list[dict]:
@@ -507,7 +538,22 @@ async def _session_action(deps, row: dict, action: str):
     method = getattr(inst, action, None)
     if inst is None or method is None:
         return "unavailable"
-    return await asyncio.to_thread(method)
+    result = await asyncio.to_thread(method)
+    # Conectar/desconectar muda o ESTADO do canal (um logout derruba o número) —
+    # vai para a trilha com quem mandou. Sentinelas (not_gowa/unavailable) saem
+    # antes daqui: só a ação que de fato rodou é auditada.
+    await _emit_channel_event(deps, "channel.session_action", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "action": action,
+        "ok": bool((result or {}).get("ok")) if isinstance(result, dict) else None,
+        "ts": time.time(),
+        "_audit_after": {
+            "action": action,
+            "result": result if isinstance(result, dict) else str(result),
+        },
+    })
+    return result
 
 
 async def reconnect(deps, row: dict):
@@ -537,8 +583,17 @@ async def set_members(deps, row: dict, user_ids: list[int]) -> dict:
     inbox = await asyncio.to_thread(
         inbox_repo.get_or_create_for_channel, channel_id,
         name=row.get("display_name") or channel_id)
+    previous = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
     members = await asyncio.to_thread(
         inbox_member_repo.set_members, inbox["id"], user_ids)
+    await _emit_channel_event(deps, "channel.members_changed", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "inbox_id": inbox["id"],
+        "ts": time.time(),
+        "_audit_before": {"member_ids": sorted(previous or [])},
+        "_audit_after": {"member_ids": sorted(members or [])},
+    })
     return {"inbox_id": inbox["id"], "member_ids": members}
 
 
@@ -579,6 +634,12 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     # Register the live channel now so status/QR/send work without a restart.
     register_live(deps, cid, provider, row)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
+    await _emit_channel_event(deps, "channel.created", {
+        "channel_id": cid,
+        "provider": provider,
+        "ts": time.time(),
+        "_audit_after": audit_snapshot(row, stored),
+    })
     return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
@@ -586,10 +647,16 @@ async def update(deps, row: dict, body: dict) -> dict:
     """Apply a channel update (display_name / enabled / config / credentials).
 
     Keeps the inbox name in sync with ``display_name``, and on a config edit drops
-    the per-channel caches and emits the minimal ``channel.updated`` event (Q6).
+    the per-channel caches. Emite ``channel.updated`` (Q6) no fim, para QUALQUER
+    campo editado — não só ``config``, como era antes: a trilha de auditoria
+    precisa registrar também a troca de nome, o liga/desliga e a troca de
+    credencial (``_audit_before``/``_audit_after`` carregam o snapshot seguro).
     """
     channel_id = row["id"]
     provider = row.get("provider")
+    # Snapshot ANTES de qualquer escrita — vira o "antes" do diff na Auditoria.
+    before_creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    before_snapshot = audit_snapshot(row, before_creds)
     # Account-identity dedup on EDIT (plano 32 F4): a credential edit could make this
     # channel collide with another (bypass of the create-guard). Resolve the EFFECTIVE
     # credentials (stored overlaid with the non-placeholder submitted values) and
@@ -620,18 +687,15 @@ async def update(deps, row: dict, body: dict) -> dict:
                     inbox_repo.update, inbox["id"],
                     name=fields["display_name"] or channel_id)
     # A config edit may change the GOWA JID-type filter / per-channel AI settings —
-    # invalidate the caches and emit the minimal channel.updated domain event (Q6).
+    # invalidate the caches (o evento sai no fim, cobrindo TODAS as chaves editadas).
     if "config" in body:
         _invalidate_channel_caches(channel_id)
-        await _emit_channel_event(deps, "channel.updated", {
-            "channel_id": channel_id,
-            "keys_changed": ["config"],
-            "ts": time.time(),
-        })
     # Credentials: a non-empty value replaces; the masked placeholder (••••) is ignored.
+    creds_changed: list[str] = []
     for key, value in (body.get("credentials") or {}).items():
         if value and not str(value).startswith("••••"):
             await asyncio.to_thread(channel_credential_repo.set, channel_id, str(key), str(value))
+            creds_changed.append(str(key))
     # Persist the (already dedup-guarded) credential identity so the row + index
     # reflect the edit (plano 32 F4).
     if submitted_creds:
@@ -640,6 +704,23 @@ async def update(deps, row: dict, body: dict) -> dict:
             await asyncio.to_thread(_persist_identity, provider, channel_id, identity)
             row = await asyncio.to_thread(channel_repo.get, channel_id)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    # ``channel.updated`` (Q6) — antes valia SÓ para edição de ``config``; agora sai
+    # para qualquer campo editado (nome, ligado/desligado, config, credenciais), que
+    # é o que a trilha de auditoria precisa registrar. ``keys_changed`` continua
+    # sendo o contrato do payload; ``credential_keys_changed`` lista só os NOMES.
+    keys_changed = sorted(fields.keys())
+    if creds_changed:
+        keys_changed.append("credentials")
+    if keys_changed:
+        await _emit_channel_event(deps, "channel.updated", {
+            "channel_id": channel_id,
+            "provider": provider,
+            "keys_changed": keys_changed,
+            "credential_keys_changed": sorted(creds_changed),
+            "ts": time.time(),
+            "_audit_before": before_snapshot,
+            "_audit_after": audit_snapshot(row, stored),
+        })
     return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
@@ -652,6 +733,11 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
     keyed on this channel_id are dropped so routing stops pointing at a dead inbox.
     """
     registry = getattr(deps, "channel_registry", None)
+    # Snapshot ANTES de remover — a linha da Auditoria é a única memória do canal
+    # depois de um purge.
+    doomed = await asyncio.to_thread(channel_repo.get, channel_id)
+    doomed_creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    before_snapshot = audit_snapshot(doomed, doomed_creds)
     # Best-effort: log the GOWA device out so the WhatsApp number is freed.
     inst = registry.get(channel_id) if registry is not None else None
     if inst is not None and getattr(inst, "_client", None) is not None:
@@ -675,6 +761,14 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
                 pass
         _invalidate_channel_caches(channel_id)
         logger.info("Canal %s removido (purge).", channel_id)
+        await _emit_channel_event(deps, "channel.deleted", {
+            "channel_id": channel_id,
+            "provider": (doomed or {}).get("provider"),
+            "purged": True,
+            "ts": time.time(),
+            "_audit_before": before_snapshot,
+            "_audit_after": {"purged": True},
+        })
         return {"deleted": channel_id, "purged": True}
 
     await asyncio.to_thread(channel_repo.archive, channel_id)
@@ -685,6 +779,14 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
             pass
     _invalidate_channel_caches(channel_id)
     logger.info("Canal %s arquivado (soft-delete).", channel_id)
+    await _emit_channel_event(deps, "channel.deleted", {
+        "channel_id": channel_id,
+        "provider": (doomed or {}).get("provider"),
+        "purged": False,
+        "ts": time.time(),
+        "_audit_before": before_snapshot,
+        "_audit_after": {"archived": True},
+    })
     return {"deleted": channel_id, "archived": True}
 
 
@@ -692,4 +794,10 @@ async def restore(deps, channel_id: str) -> dict:
     """Undo a soft-delete: unarchive (stays disabled until re-enabled)."""
     row = await asyncio.to_thread(channel_repo.restore, channel_id)
     creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    await _emit_channel_event(deps, "channel.restored", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "ts": time.time(),
+        "_audit_after": audit_snapshot(row, creds),
+    })
     return serialize(row, creds, _public_cred_keys(deps, row.get("provider")))

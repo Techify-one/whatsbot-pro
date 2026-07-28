@@ -68,10 +68,13 @@ export function useConversationWsEvents(opts) {
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
   const [aiRespondingState, setAiRespondingState] = useState({});  // { 'channel::phone': true } — IA processando
+  // Outro ATENDENTE digitando (multi-operador): { 'conv:id'|'channel::phone': {userId, name} }.
+  const [operatorTypingState, setOperatorTypingState] = useState({});
   const [convAttrPatch, setConvAttrPatch] = useState(null);
 
   const typingTimers = useRef({});
   const aiTypingTimers = useRef({});
+  const operatorTypingTimers = useRef({});
   const convListRefetchTimer = useRef(null);   // debounce for membership-change refetch
   const listRefetchTimer = useRef(null);       // debounce/coalesce for new-conversation refetch
   const openReadSyncTimer = useRef(null);      // debounce: sync backend read of the OPEN conversa (nota privada)
@@ -396,7 +399,43 @@ export function useConversationWsEvents(opts) {
       durationOverride: data.duration,
     });
   }, []);
-  useWebSocket({ onConversationChanged, onAgentTransferAlert, onWsConnect });
+  // "Fulano está digitando…" de OUTRO atendente (multi-operador). O backend reemite
+  // como `operator_typing` o mesmo sinal de presença que o compositor já manda ao
+  // cliente, carimbado com quem digita — nada é persistido. Ignoramos o PRÓPRIO
+  // usuário (duas abas do mesmo login não podem acusar a si mesmas) e casamos a
+  // linha pela mesma chave da presença do cliente (conversa, ou canal::telefone).
+  const onOperatorTyping = useCallback((data) => {
+    if (!data || !data.phone) return;
+    const uid = currentUserIdRef.current;
+    if (uid != null && data.user_id === uid) return;
+    const key = typingKey({
+      conversationId: data.conversation_id,
+      channelId: data.channel_id,
+      phone: data.phone,
+    });
+    clearTimeout(operatorTypingTimers.current[key]);
+    if (!data.active) {
+      setOperatorTypingState(prev => {
+        if (!(key in prev)) return prev;
+        const n = { ...prev }; delete n[key]; return n;
+      });
+      return;
+    }
+    const who = { userId: data.user_id, name: data.user_name || 'Atendente' };
+    setOperatorTypingState(prev => {
+      const cur = prev[key];
+      if (cur && cur.userId === who.userId && cur.name === who.name) return prev;
+      return { ...prev, [key]: who };
+    });
+    // Auto-limpeza defensiva: o 'stop' pode nunca chegar (aba fechada, queda de
+    // rede). O compositor reemite 'start' a cada 10s enquanto há digitação, então
+    // esta janela só expira quando o outro atendente realmente parou.
+    operatorTypingTimers.current[key] = setTimeout(() => {
+      setOperatorTypingState(prev => { const n = { ...prev }; delete n[key]; return n; });
+    }, 15000);
+  }, []);
+
+  useWebSocket({ onConversationChanged, onAgentTransferAlert, onOperatorTyping, onWsConnect });
 
   // Handle chat presence events (typing/recording indicators). Atendimento-cêntrico:
   // a presença pertence a Um atendimento (o canal GOWA que reportou). Casamos por
@@ -804,5 +843,5 @@ export function useConversationWsEvents(opts) {
     // in-place unread increment alongside the DB-truth upsert would cause.
   }, [newMessage]);
 
-  return { typingState, aiRespondingState, convAttrPatch };
+  return { typingState, aiRespondingState, operatorTypingState, convAttrPatch };
 }

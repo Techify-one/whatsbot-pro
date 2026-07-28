@@ -185,9 +185,64 @@ CHANNEL_PROVIDERS = [<ClassName>Channel]
 - **Sempre** implemente `contact_type()` retornando um tipo coerente com o canal (`"whatsapp"` para providers de WhatsApp, `"telegram"`, ou um tipo próprio). É o que marca cada contato criado pelo canal (`contacts.contact_type`) e alimenta o filtro por tipo. Sem override, os contatos herdam `"outros"`.
 - Modo escuro: se gerar `static/<id>.js`, use classes `wa-*`/`.wa-field` (ver regra em CLAUDE.md).
 
+### routes.py — RBAC + auditoria (OBRIGATÓRIO se gerar rotas)
+
+Um provider de canal usa a permissão **do core** (`channel.manage`), não uma chave
+`plugin.<id>.*`: as rotas dele configuram um canal, e quem governa canal é a mesma
+permissão da tela Canais. E, por serem sobre um canal, as ações são auditadas **no
+canal** — assim um filtro por canal na tela `/audit` devolve a história inteira
+(criado/editado pelo core + webhook assinado/repontado pelo plugin).
+
+```python
+from plugins.context import core_permission
+
+PLUGIN_ID = "<id>"
+
+# Import defensivo: o plugin roda por .zip e pode cair num core sem o seam.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota."""
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
+@router.post("/set-webhook", dependencies=[core_permission("channel.manage")])
+async def set_webhook(body: dict):
+    channel_id = str(body.get("channel_id") or "")
+    ...  # a ação
+    _audit("webhook.set", resource_type="channel", resource_id=channel_id,
+           after={"webhook_url": url, "registered": True})
+    return {"ok": True}
+```
+
+**Regras**:
+- **TODA rota de operador leva `dependencies=[core_permission("channel.manage")]`** —
+  gate **rota a rota**, nunca o router inteiro. Sem isso qualquer usuário logado
+  alcança `/set-webhook`/`/subscribe` por `curl` e sequestra o webhook do provedor.
+- Rotas `/public/` (widget, sessão de visitante) ficam **abertas** — são auth-exempt
+  por design (`PLUGIN_PUBLIC_PATH_RE`) e autenticam o próprio visitante. Gatear quebra.
+  ⚠️ Nome com "public" **não** basta: `telegram /public-base` é rota de OPERADOR
+  (não casa o regex) e **é** gateada.
+- O webhook de entrada é servido pelo **core** (`/api/webhook/<provider>/{channel_id}`),
+  não por este router — não há o que gatear lá.
+- Audite o que **muda** algo (assinar Página, repontar callback, revelar segredo);
+  **não** audite `GET`/status/diagnóstico. **NUNCA** audite tráfego de conversa.
+- Segredo nunca entra no `before`/`after`: registre `{"token_definido": True}`.
+- Guia completo: `docs/PLUGINS_AUDITAVEIS.md`.
+
 ## Passo 4 — Instalar + verificar
 
 1. O plugin nasce `enabled=0`. Ative pela tela **Plugins** (ou `plugin_repo`), o que dispara restart.
 2. Confirme que registrou: `GET /api/channels/providers` deve trazer o descriptor do novo provider.
 3. Abra a tela **Canais → Adicionar canal**: o provider aparece no picker e o form renderiza os campos do descriptor. Crie um canal e confirme que o dedup (plano 32) barra a mesma conta 2×.
+3b. **RBAC**: com um usuário SEM `channel.manage`, cada rota de operador do plugin deve devolver **403** (e as `/public/`, se houver, continuar 200). Confira que a ação auditada aparece em `/audit` filtrando pelo **canal**.
 4. **NÃO** edite nada em `channels/`, `app/services/channel_service.py`, `server/routes/channels.py` nem no frontend `web/` — o core é fechado; o provider se autodescreve.

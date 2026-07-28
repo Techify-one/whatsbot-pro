@@ -13,6 +13,10 @@ import { ConversationFilterBar } from './ConversationFilterBar.js';
 // Selo do canal — compartilhado com o cabeçalho do chat (mesma aparência nos dois).
 import { ChannelChip } from './ChannelChip.js';
 import { Slot } from '../../plugins/Slot.js';
+// Rascunho do compositor (services/drafts.js): a linha mostra "Rascunho: …" no
+// lugar da última mensagem enquanto houver texto não enviado naquela conversa.
+import { getDraft } from '../../services/drafts.js';
+import { useDrafts } from '../../hooks/useDrafts.js';
 
 const html = htm.bind(h);
 
@@ -69,6 +73,31 @@ export function rowKeyFor(c) {
 export function typingKey({ conversationId = null, channelId = null, phone = null } = {}) {
   if (conversationId != null) return `conv:${conversationId}`;
   return `${channelId || 'default'}::${phone}`;
+}
+
+// Multi-operador: outro ATENDENTE digitando nesta linha (WS `operator_typing`),
+// ou null. O estado já vem sem o próprio usuário logado — aqui é só o casamento
+// da linha, pela MESMA chave da presença do cliente.
+export function operatorTypingFor(state, c) {
+  if (!state) return null;
+  return state[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] || null;
+}
+
+// "● Teste está digitando…" — para o operador não responder por cima do colega.
+// Aparência PEDIDA pelo usuário: a MESMA do indicador "IA respondendo…" logo
+// abaixo (bolinha pulsando + texto em `wa-teal`), para os três indicadores da
+// linha lerem como a mesma família. Ressalva conhecida: sobre `--wa-selected` no
+// tema escuro o teal mede 2,3:1 (ver themeContrast.js) e a conversa aberta é
+// justamente a que costuma ter um colega digitando — o nome fica em `semibold`
+// para não sumir de vez. Mesma escolha já feita no "IA respondendo…".
+function OperatorTypingLine({ who }) {
+  return html`
+    <span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5"
+          title=${`${who.name} está respondendo esta conversa agora`}>
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse shrink-0"></span>
+      <span class="truncate"><span class="font-semibold">${who.name}</span>${' está digitando...'}</span>
+    </span>
+  `;
 }
 
 function normalizePhone(input) {
@@ -176,13 +205,29 @@ function RowTags({ tags, globalTags, expanded, onToggle }) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
   loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
+  // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
+  // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
+  // chave do rascunho É o rowKeyFor (a conversa é a dona do texto); truncado no
+  // mesmo tamanho do preview da última mensagem.
+  //
+  // A conversa ABERTA fica de fora: com o chat na tela o operador já vê o que
+  // escreveu no compositor, e trocar o preview a cada tecla era ruído. O
+  // "Rascunho:" aparece quando ele SAI da conversa deixando texto para trás.
+  useDrafts(selected);
+  const rowDrafts = {};
+  for (const c of (contacts || [])) {
+    const key = rowKeyFor(c);
+    if (key === selected) continue;
+    const text = getDraft(key);
+    if (text) rowDrafts[key] = text.substring(0, 80);
+  }
   // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
   // há próxima página. plano 62 F6: os DOIS modos paginam (conversa-first e busca), então
   // o gatilho é só `hasMore`. Usa o mesmo primitivo reutilizável `useScrollSentinel` das
@@ -691,11 +736,17 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
                             ${typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
+                        : operatorTypingFor(operatorTypingState, c)
+                        ? html`<${OperatorTypingLine} who=${operatorTypingFor(operatorTypingState, c)} />`
                         : c.match_snippet
                           ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                               ${highlightParts(c.match_snippet, search).map(p =>
                                 p.hit ? html`<span class="font-semibold text-wa-text">${p.s}</span>` : p.s
                               )}
+                            </span>`
+                          : rowDrafts[rowKeyFor(c)]
+                          ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
+                              <span class="text-wa-draft font-medium">Rascunho:</span>${' ' + rowDrafts[rowKeyFor(c)]}
                             </span>`
                           : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                             ${c.last_message_role === 'private_note' ? html`<${LockIcon} />` : ''}${c.last_message_role === 'assistant' ? (() => {

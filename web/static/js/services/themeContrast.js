@@ -110,6 +110,13 @@ export const CONTRAST_RULES = [
   // mais o acento precisa reconferir aquele par à mão (não é token wa-*).
   { fg: 'teal', bg: 'bg', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 3 } },
   { fg: 'teal', bg: 'panel', kind: 'acento', metric: 'contrast', min: { light: 3, dark: 3 } },
+  // Rótulo "Rascunho:" da linha da conversa. É TEXTO pequeno (piso 4,5), e o par
+  // que aperta é sobre --wa-selected: a conversa ABERTA é justamente a que costuma
+  // ter rascunho, e no tema escuro aquela linha é verde. Foi o que reprovou o
+  // acento teal (2,3:1) e motivou o token próprio.
+  { fg: 'draft', bg: 'bg', kind: 'texto', metric: 'contrast', min: { light: 4.5, dark: 4.5 } },
+  { fg: 'draft', bg: 'selected', kind: 'texto', metric: 'contrast', min: { light: 4.5, dark: 4.5 } },
+  { fg: 'draft', bg: 'hover', kind: 'texto', metric: 'contrast', min: { light: 4.5, dark: 4.5 } },
 
   // ── Separação de superfície (ΔL*) ──────────────────────────────────
   // Elevação: o painel tem que ler como "acima" do fundo — é o que faz a barra

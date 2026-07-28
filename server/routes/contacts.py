@@ -2160,6 +2160,23 @@ def register_routes(app, deps):
         # plano 37 (C2): honra channel_id quando o painel inicia conversa nova sem
         # conversation_id ainda — senão o presence cairia no 'default'.
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        # Colaboração entre atendentes (multi-operador): o MESMO sinal que vai ao
+        # cliente avisa os outros painéis logados — "Fulano está digitando…" na linha
+        # da conversa, para dois atendentes não responderem por cima um do outro.
+        # Efêmero: só WebSocket, nada persistido. Emitido ANTES da ida ao provedor
+        # (canal offline/sem capability de presence não pode calar o aviso interno).
+        # Sem identidade de usuário (instalação aberta, sem login) não emite: o
+        # painel não teria como filtrar o próprio autor e o operador veria a si mesmo.
+        _u = current_user(request)
+        if _u and _u.get("id") is not None:
+            await ws_manager.broadcast("operator_typing", {
+                "phone": phone,
+                "channel_id": channel_id,
+                "conversation_id": body.get("conversation_id"),
+                "user_id": _u.get("id"),
+                "user_name": _u.get("name") or _u.get("email") or "Atendente",
+                "active": action == "start",
+            })
         await asyncio.to_thread(outbound.send_presence, channel_id, phone, action)
         return _ok({"status": "ok"})
 

@@ -41,6 +41,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+PLUGIN_ID = "website"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é importável por .zip e pode cair num core anterior
+# ao seam — sem o helper ele continua funcionando, só não registra.
+#
+# NOTA de escopo: as rotas ``/public/*`` (mensagem do visitante, identify, typing)
+# NÃO são auditadas — é tráfego de cliente final, de alto volume, e o histórico de
+# ``messages`` já é o registro dele. A configuração do canal website (token do
+# widget, domínios, cores) é editada pelo core via ``PUT /api/channels/{id}``, que
+# já grava ``channel.update``. Sobra daqui a revelação do segredo HMAC.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, channel_id: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota.
+
+    Plugin de CANAL: grava como ``channel:<channel_id>`` (não ``plugin:website``)
+    para cair no MESMO recurso dos eventos de canal do core.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, resource_type="channel",
+                    resource_id=channel_id, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
 _HISTORY_LIMIT = 50
 
 
@@ -332,6 +363,10 @@ async def reveal_hmac(channel_id: str = ""):
         return {"ok": False, "error": "channel_id é obrigatório"}
     token = await asyncio.to_thread(
         channel_credential_repo.get, channel_id, "hmac_token")
+    # Exceção deliberada à regra "GET não audita": esta rota ENTREGA um segredo em
+    # claro. Quem viu o segredo do canal é justamente o que a trilha precisa
+    # guardar — o valor, claro, nunca entra na linha.
+    _audit("hmac.reveal", channel_id, after={"revelado": bool(token)})
     return {"ok": True, "data": {"hmac_token": token or ""}}
 
 

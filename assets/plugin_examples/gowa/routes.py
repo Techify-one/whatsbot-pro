@@ -23,6 +23,27 @@ from plugins.context import core_permission
 
 router = APIRouter()
 
+PLUGIN_ID = "gowa"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é bundled/importável por .zip e pode cair num core
+# anterior ao seam — sem o helper ele continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota."""
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
 _CFG = "plugin.gowa."
 _MASK = "••••••••"
 HTTP_TIMEOUT = 20.0
@@ -107,9 +128,22 @@ async def get_alert_settings(request: Request, tz: str = ""):
     return {"ok": True, "data": data}
 
 
+def _alert_audit_view() -> dict:
+    """Config do alerta SEM o token em claro — só se ele está definido."""
+    return {
+        "enabled": bool(_get("disconnect_alert_enabled", False)),
+        "chat_id": str(_get("disconnect_alert_chat_id", "") or ""),
+        "interval_min": _get("disconnect_alert_interval_min", None),
+        "timezone": str(_get("disconnect_alert_timezone", "") or ""),
+        "bot_token_definido": bool(_get("disconnect_alert_bot_token", "")),
+    }
+
+
 @router.put("/alert-settings", dependencies=[core_permission("channel.manage")])
 async def put_alert_settings(payload: dict = Body(...)):
     """Salva a configuração do alerta. Campos ausentes não são tocados."""
+    before = await asyncio.to_thread(_alert_audit_view)
+
     def _save():
         updates: dict = {}
         if "enabled" in payload:
@@ -135,6 +169,8 @@ async def put_alert_settings(payload: dict = Body(...)):
         if updates:
             config_repo.set_many(updates)
     await asyncio.to_thread(_save)
+    _audit("alerta.config", before=before,
+           after=await asyncio.to_thread(_alert_audit_view))
     return {"ok": True}
 
 

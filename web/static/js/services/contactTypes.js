@@ -42,14 +42,15 @@ const TOKEN_HEX = {
  * @type {Record<string, { label: string, color: string, neutral?: boolean, phone?: boolean }>}
  */
 export const CONTACT_TYPE_META = {
-  whatsapp: { label: 'WhatsApp', color: '#25d366', phone: true },
-  telegram: { label: 'Telegram', color: '#2aabee' },
-  facebook: { label: 'Facebook', color: '#0866ff' },
-  outros:   { label: 'Outros',   color: '#6b7280', neutral: true },
+  whatsapp:  { label: 'WhatsApp',  color: '#25d366', phone: true },
+  telegram:  { label: 'Telegram',  color: '#2aabee' },
+  facebook:  { label: 'Facebook',  color: '#0866ff' },
+  instagram: { label: 'Instagram', color: '#e1306c' },
+  outros:    { label: 'Outros',    color: '#6b7280', neutral: true },
 };
 
 /** Ordem canônica dos tipos conhecidos (base curada, para dropdowns/filtros). */
-export const CONTACT_TYPE_ORDER = ['whatsapp', 'telegram', 'facebook', 'outros'];
+export const CONTACT_TYPE_ORDER = ['whatsapp', 'telegram', 'facebook', 'instagram', 'outros'];
 
 /**
  * Ordem completa dos tipos: a base curada + os tipos DESCOBERTOS do catálogo que

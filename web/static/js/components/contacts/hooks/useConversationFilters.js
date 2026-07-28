@@ -22,6 +22,8 @@ import {
 import {
   buildCountParams, buildListParams, isServerExpressible, isListServerExpressible,
 } from '../../../services/conversationFilterSpec.js';
+import { draftKeyFor, getDraftAt } from '../../../services/drafts.js';
+import { useDrafts } from '../../../hooks/useDrafts.js';
 
 // Persists which saved conversation-filter preset is applied, so it survives a
 // page reload (per device). Stores the preset id; re-applied once the presets load.
@@ -178,6 +180,28 @@ export function useConversationFilters({ contacts, search = '', selected, select
   // Com busca ativa a aba de atribuição também não corta (buscar é procurar em tudo,
   // não só no que está atribuído a mim). As abas seguem visíveis com os contadores
   // do resultado bruto — clicar numa delas não muda a lista enquanto a busca durar.
+  // Rascunho conta como atividade: a conversa que o operador deixou escrita sobe
+  // na lista. A conversa ABERTA é a exceção — enquanto ele digita ali, a linha
+  // dela não pula de lugar (nem mostra "Rascunho:"); ao sair, `openKey` muda e
+  // este memo recalcula. Em serverMode reordena só o que já está carregado — o
+  // rascunho é local, o servidor não sabe dele (a conversa recém-aberta está na
+  // 1ª página de qualquer forma).
+  const openKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  const draftsVersion = useDrafts(openKey);
+  // A conversa aberta usa o valor CONGELADO na abertura, não o rascunho ao vivo:
+  // digitar não a faz subir no meio da digitação, e reabrir uma que já tinha
+  // subido não a faz despencar de volta. Ela volta a acompanhar o rascunho ao ser
+  // fechada. (Escrita de ref em render, como o `viewSpecRef` do plano 72.)
+  const frozenOpenRef = useRef({ key: null, ts: 0 });
+  if (frozenOpenRef.current.key !== openKey) {
+    frozenOpenRef.current = { key: openKey, ts: openKey ? getDraftAt(openKey) / 1000 : 0 };
+  }
+  const draftTsFor = useCallback((c) => {
+    const key = draftKeyFor({ conversationId: c.conversation_id, phone: c.phone });
+    if (!key) return 0;
+    if (key === openKey) return frozenOpenRef.current.ts;
+    return getDraftAt(key) / 1000;   // o mapa guarda ms; as rows falam em segundos
+  }, [openKey, draftsVersion]);
   const displayedContacts = useMemo(
     () => sortContactsBy(
       // plano 69 F3: em serverMode (e na busca) o servidor/caminho de busca já cortou a
@@ -185,8 +209,8 @@ export function useConversationFilters({ contacts, search = '', selected, select
       (searching || serverMode)
         ? statusTagFiltered
         : statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)),
-      sortBy),
-    [statusTagFiltered, assignmentTab, currentUserId, sortBy, searching, serverMode],
+      sortBy, draftTsFor),
+    [statusTagFiltered, assignmentTab, currentUserId, sortBy, searching, serverMode, draftTsFor],
   );
   useEffect(() => { displayedRef.current = displayedContacts; }, [displayedContacts]);
 

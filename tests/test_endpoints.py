@@ -6000,6 +6000,34 @@ finally:
 check("chat_presence broadcast -> conversation_id None p/ contato sem conversa",
       (_captured_pres[-1] if _captured_pres else {}).get("conversation_id") is None)
 
+# "Fulano está digitando…" entre ATENDENTES: a rota de presença do operador reemite
+# o mesmo sinal como `operator_typing`, carimbado com quem digita, para os outros
+# painéis logados. Efêmero (só WS) e escopado pela conversa — mesma chave que o
+# indicador do cliente usa na linha da sidebar.
+_captured_op = []
+async def _capture_op(event, data):
+    if event == "operator_typing":
+        _captured_op.append(data)
+    return await _orig_bcast(event, data)
+_deps_pres.ws_manager.broadcast = _capture_op
+try:
+    r = client.post("/api/contacts/5511999990001/presence",
+                    json={"action": "start", "conversation_id": _cid})
+    r_stop = client.post("/api/contacts/5511999990001/presence",
+                         json={"action": "stop", "conversation_id": _cid})
+finally:
+    _deps_pres.ws_manager.broadcast = _orig_bcast
+check("POST /presence (start) -> 200", r.status_code == 200)
+_op = _captured_op[0] if _captured_op else {}
+check("operator_typing emitido no start", _op.get("active") is True)
+check("operator_typing -> conversation_id da conversa", _op.get("conversation_id") == _cid)
+check("operator_typing -> phone do contato", _op.get("phone") == "5511999990001")
+check("operator_typing -> identifica o atendente logado",
+      _op.get("user_id") is not None and bool(_op.get("user_name")))
+check("POST /presence (stop) -> 200", r_stop.status_code == 200)
+check("operator_typing -> active False no stop",
+      len(_captured_op) == 2 and _captured_op[1].get("active") is False)
+
 # ═══════════════════════════════════════════════════════════════════
 #  Summary
 # ═══════════════════════════════════════════════════════════════════

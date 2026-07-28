@@ -29,6 +29,7 @@ import httpx
 from fastapi import APIRouter, Request
 
 from db.repositories import channel_credential_repo, channel_repo, config_repo
+from plugins.context import core_permission
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,33 @@ SUBSCRIBED_FIELDS = (
 )
 
 router = APIRouter()
+
+PLUGIN_ID = "facebook_messenger"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ──────────────────────────
+# Import defensivo: o plugin é importável por .zip e pode cair num core anterior
+# ao seam — sem o helper ele continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, channel_id: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota.
+
+    Plugin de CANAL: grava como ``channel:<channel_id>`` (não ``plugin:<id>``)
+    para cair no MESMO recurso dos eventos de canal do core — um filtro por canal
+    devolve a história inteira dele.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, resource_type="channel",
+                    resource_id=channel_id, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
 
 
 def _creds(channel_id: str) -> dict:
@@ -104,7 +132,7 @@ def _list_channels() -> list[dict]:
     return out
 
 
-@router.get("/info")
+@router.get("/info", dependencies=[core_permission("channel.manage")])
 async def info():
     """Metadados do provider para a tela de configuração."""
     return {"ok": True, "data": {
@@ -120,7 +148,7 @@ async def info():
     }}
 
 
-@router.get("/channels")
+@router.get("/channels", dependencies=[core_permission("channel.manage")])
 async def list_channels():
     channels = await asyncio.to_thread(_list_channels)
     return {"ok": True, "data": {"channels": channels}}
@@ -143,13 +171,16 @@ def _subscribe(channel_id: str) -> tuple[bool, str]:
         return False, str(e)[:200]
 
 
-@router.post("/subscribe")
+@router.post("/subscribe", dependencies=[core_permission("channel.manage")])
 async def subscribe(body: dict):
     """Assina o app nos campos de webhook da Página (obrigatório uma vez)."""
     channel_id = (body.get("channel_id") or "").strip()
     if not channel_id:
         return {"ok": False, "error": "channel_id é obrigatório"}
     ok, err = await asyncio.to_thread(_subscribe, channel_id)
+    if ok:
+        _audit("pagina.subscribe", channel_id,
+               after={"fields": SUBSCRIBED_FIELDS.split(",")})
     return {"ok": ok, "error": err or None,
             "data": {"fields": SUBSCRIBED_FIELDS.split(",")} if ok else None}
 
@@ -295,7 +326,7 @@ def _host_is_public(host: str) -> bool:
         and not h.endswith(".local") and not h.startswith(("10.", "192.168.", "172."))
 
 
-@router.post("/autoconfigure")
+@router.post("/autoconfigure", dependencies=[core_permission("channel.manage")])
 async def autoconfigure(body: dict, request: Request):
     """Chamado pelo core ao CRIAR um canal Messenger — registra tudo sozinho.
 
@@ -333,6 +364,11 @@ async def autoconfigure(body: dict, request: Request):
     if not sub_ok:
         logger.warning("facebook_messenger: subscribed_apps falhou (%s): %s",
                        channel_id, sub_err)
+    # Registro automático no create: grava o callback do APP + assina a Página —
+    # e SOBRESCREVE a callback_url de qualquer outro sistema no mesmo app.
+    _audit("webhook.autoconfigure", channel_id,
+           after={"mode": "webhook", "registered": True, "url": webhook_url,
+                  "page_subscribed": sub_ok})
     return {"ok": True, "data": {
         "mode": "webhook", "registered": True, "webhook_url": webhook_url,
         "page_subscribed": sub_ok, "reason": "" if sub_ok else sub_err,
@@ -394,7 +430,7 @@ def _webhook_status(channel_id: str, expected_url: str = "") -> dict:
     return result
 
 
-@router.get("/webhook-status")
+@router.get("/webhook-status", dependencies=[core_permission("channel.manage")])
 async def webhook_status(channel_id: str = "", expected_url: str = ""):
     """Saúde do webhook: Página assinada + o callback do app aponta pra cá?"""
     if not channel_id:
@@ -403,7 +439,7 @@ async def webhook_status(channel_id: str = "", expected_url: str = ""):
     return {"ok": True, "data": data}
 
 
-@router.post("/set-webhook")
+@router.post("/set-webhook", dependencies=[core_permission("channel.manage")])
 async def set_webhook(body: dict):
     """Aponta o callback do webhook (nível do app, ``object=page``) para ``url`` e
     reassina a Página. Mesma mecânica do ``/autoconfigure``, mas com a URL vinda do
@@ -421,4 +457,9 @@ async def set_webhook(body: dict):
     data["page_subscribed"] = sub_ok
     if not sub_ok and not data.get("reason"):
         data["reason"] = sub_err
+    # Um app tem UMA callback_url por objeto: apontar aqui SOBRESCREVE a URL de
+    # qualquer outro sistema que use o mesmo app. Fica na trilha com quem mandou.
+    _audit("webhook.set", channel_id,
+           after={"url": url, "page_subscribed": sub_ok,
+                  "match": data.get("match")})
     return {"ok": True, "data": data}
